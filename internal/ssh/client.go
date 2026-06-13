@@ -35,8 +35,28 @@ func Dial(ctx context.Context, addr string, cfg *xssh.ClientConfig, useSudo bool
 // Close shuts down the SFTP subsystem and the underlying connection.
 func (c *Client) Close() error { c.sftp.Close(); return c.conn.Close() }
 
-// Run executes cmd, feeding stdin, and returns stdout/stderr/exit code.
+// Run executes cmd, feeding stdin, and returns stdout/stderr/exit code. When the
+// connection is to a non-root account (useSudo), the command is run as root via
+// sudo so privileged provisioning steps work without a root SSH login.
 func (c *Client) Run(ctx context.Context, cmd string, stdin []byte) (Result, error) {
+	return c.exec(ctx, c.privileged(cmd), stdin)
+}
+
+// privileged wraps cmd to run as root via sudo when connected as a non-root
+// account; for a root connection it returns cmd unchanged. The original command
+// is single-quoted and handed to `sh -c`, so its environment prefixes, pipes and
+// redirections are preserved and the outer shell performs no expansion.
+func (c *Client) privileged(cmd string) string {
+	if !c.useSudo {
+		return cmd
+	}
+	return "sudo -n -- /bin/sh -c " + shQuote(cmd)
+}
+
+// exec runs cmd verbatim over a new SSH session, with no sudo wrapping. WriteFile
+// uses it directly so the temp file is created as the connecting (SFTP) user,
+// while the privileged install carries its own sudo (see installCmd).
+func (c *Client) exec(ctx context.Context, cmd string, stdin []byte) (Result, error) {
 	sess, err := c.conn.NewSession()
 	if err != nil {
 		return Result{}, err
@@ -60,8 +80,10 @@ func (c *Client) Run(ctx context.Context, cmd string, stdin []byte) (Result, err
 // WriteFile writes content with ownership/mode via an unpredictable temp file
 // and a privileged `install` (which copies + sets owner/group/mode in one step).
 func (c *Client) WriteFile(ctx context.Context, f FileSpec) error {
-	// Unpredictable temp path (avoids /tmp symlink/predictable-name races).
-	mk, err := c.Run(ctx, "mktemp", nil)
+	// Unpredictable temp path (avoids /tmp symlink/predictable-name races). Uses
+	// exec (not Run) so the temp file is owned by the connecting user and the
+	// subsequent SFTP upload can write to it.
+	mk, err := c.exec(ctx, "mktemp", nil)
 	if err != nil {
 		return err
 	}
@@ -82,8 +104,9 @@ func (c *Client) WriteFile(ctx context.Context, f FileSpec) error {
 		return fmt.Errorf("flush temp %s: %w", tmp, err)
 	}
 
+	// installCmd carries its own sudo when needed, so run it raw via exec.
 	cmd, _ := installCmd(f, tmp, c.useSudo)
-	if r, err := c.Run(ctx, cmd, nil); err != nil {
+	if r, err := c.exec(ctx, cmd, nil); err != nil {
 		return err
 	} else if r.ExitCode != 0 {
 		return fmt.Errorf("install %s failed: %s", f.Path, r.Stderr)

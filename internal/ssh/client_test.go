@@ -57,3 +57,27 @@ func TestShQuoteEscapesSingleQuotes(t *testing.T) {
 		t.Errorf("shQuote(%q) = %q, want %q", "a'b", got, want)
 	}
 }
+
+func TestPrivilegedWrapsOnlyForNonRoot(t *testing.T) {
+	// Root connection: command passes through untouched.
+	root := &Client{useSudo: false}
+	if got := root.privileged("apt-get update"); got != "apt-get update" {
+		t.Errorf("root privileged() = %q, want unchanged", got)
+	}
+
+	// Non-root connection: command is wrapped to run as root via `sudo sh -c`,
+	// single-quoted so env prefixes/redirections survive without outer expansion.
+	nonRoot := &Client{useSudo: true}
+	got := nonRoot.privileged("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx")
+	for _, want := range []string{"sudo -n -- /bin/sh -c ", "'DEBIAN_FRONTEND=noninteractive apt-get install -y nginx'"} {
+		if !contains(got, want) {
+			t.Errorf("non-root privileged() missing %q in %q", want, got)
+		}
+	}
+
+	// Embedded single quotes are escaped so the wrapper stays a valid single
+	// argument (e.g. accounts' `sudo -u deploy sh -c '...'`).
+	if q := nonRoot.privileged("sh -c 'echo hi'"); !contains(q, `'\''`) {
+		t.Errorf("embedded single quotes not escaped: %q", q)
+	}
+}
