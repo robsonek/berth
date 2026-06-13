@@ -117,7 +117,7 @@ func TestTLSApplyUsesWebrootAndIssuesCert(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: "No certificates found.\n"})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y certbot", bssh.Result{})
-	certonly := "certbot certonly --webroot -w /var/www/berth-acme/app.example.com -d app.example.com --agree-tos -m ops@example.com --non-interactive"
+	certonly := "certbot certonly --webroot -w /var/www/berth-acme/app.example.com -d app.example.com --agree-tos -m 'ops@example.com' --non-interactive"
 	f.On(certonly, bssh.Result{ExitCode: 0})
 	f.On("nginx -t", bssh.Result{ExitCode: 0})
 	f.On("systemctl reload nginx", bssh.Result{})
@@ -152,7 +152,7 @@ func TestTLSApplyHonorsStagingFlag(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: "No certificates found.\n"})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y certbot", bssh.Result{})
-	certonly := "certbot certonly --webroot -w /var/www/berth-acme/app.example.com -d app.example.com --agree-tos -m ops@example.com --non-interactive --staging"
+	certonly := "certbot certonly --webroot -w /var/www/berth-acme/app.example.com -d app.example.com --agree-tos -m 'ops@example.com' --non-interactive --staging"
 	f.On(certonly, bssh.Result{ExitCode: 0})
 	f.On("nginx -t", bssh.Result{ExitCode: 0})
 	f.On("systemctl reload nginx", bssh.Result{})

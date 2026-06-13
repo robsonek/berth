@@ -89,7 +89,7 @@ func (tls) issue(ctx context.Context, rc provision.RunCtx, s *config.Server, sit
 
 	certonly := fmt.Sprintf(
 		"certbot certonly --webroot -w %s -d %s --agree-tos -m %s --non-interactive",
-		acmeWebroot(site.Domain), site.Domain, site.SSLEmail)
+		acmeWebroot(site.Domain), site.Domain, shQuote(site.SSLEmail))
 	if rc.SSLStaging {
 		certonly += " --staging"
 	}

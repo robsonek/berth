@@ -12,6 +12,7 @@ var (
 	reHostname = regexp.MustCompile(`^(?i)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
 	reSQLIdent = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
 	rePHPVer   = regexp.MustCompile(`^\d+\.\d+$`)
+	reEmail    = regexp.MustCompile(`^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$`)
 )
 
 var allowedPHPVersions = map[string]bool{"8.2": true, "8.3": true, "8.4": true, "8.5": true}
@@ -61,8 +62,13 @@ func (st *Site) validate() error {
 	if st.Repository != "" && !validGitURL(st.Repository) {
 		return fmt.Errorf("repository %q must be an SSH git URL (scp-like or ssh://); HTTPS is out of v1 scope", st.Repository)
 	}
-	if st.SSL && st.SSLEmail == "" {
-		return fmt.Errorf("ssl_email is required when ssl is true")
+	if st.SSL {
+		if st.SSLEmail == "" {
+			return fmt.Errorf("ssl_email is required when ssl is true")
+		}
+		if !reEmail.MatchString(st.SSLEmail) {
+			return fmt.Errorf("ssl_email %q is not a valid email address", st.SSLEmail)
+		}
 	}
 	return nil
 }

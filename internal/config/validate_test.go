@@ -27,8 +27,12 @@ func TestValidateRejects(t *testing.T) {
 		"relative path":   func(s *Server) { s.Sites[0].DeployPath = "deploy/x" },
 		"shell meta path": func(s *Server) { s.Sites[0].DeployPath = "/home/$(whoami)" },
 		"ssl no email":    func(s *Server) { s.Sites[0].SSL = true },
-		"bad port":        func(s *Server) { s.SSH.Port = 0 },
-		"no sites":        func(s *Server) { s.Sites = nil },
+		"ssl bad email": func(s *Server) {
+			s.Sites[0].SSL = true
+			s.Sites[0].SSLEmail = "x@y.com; reboot"
+		},
+		"bad port": func(s *Server) { s.SSH.Port = 0 },
+		"no sites": func(s *Server) { s.Sites = nil },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
