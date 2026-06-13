@@ -69,7 +69,7 @@ func runProvision(cmd *cobra.Command, serverPath string, f *provisionFlags) erro
 	if err != nil {
 		return err
 	}
-	var r ui.Renderer = ui.NewPlainRenderer(cmd.OutOrStdout()) // Plan 3 swaps in bubbletea on a TTY
+	r := ui.New(cmd.OutOrStdout(), ui.IsTTY(os.Stdout) && !f.verbose && !f.noTTY)
 	return r.Render(events)
 }
 
