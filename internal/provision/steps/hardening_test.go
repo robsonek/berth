@@ -44,7 +44,7 @@ func TestHardeningApplyAllowsBeforeEnableAndGatesBeforeSshd(t *testing.T) {
 	f.On("ufw allow 2222/tcp", bssh.Result{})
 	f.On("ufw allow 80,443/tcp", bssh.Result{})
 	f.On("ufw --force enable", bssh.Result{})
-	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban", bssh.Result{})
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
 	f.On("systemctl reload ssh", bssh.Result{})
 
 	if err := Hardening().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -98,7 +98,7 @@ func TestHardeningApplyAbortsWhenGateFails(t *testing.T) {
 	f.On("ufw allow 2222/tcp", bssh.Result{})
 	f.On("ufw allow 80,443/tcp", bssh.Result{})
 	f.On("ufw --force enable", bssh.Result{})
-	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban", bssh.Result{})
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
 
 	err := Hardening().Apply(context.Background(), provision.RunCtx{}, s, f)
 	if err == nil {

@@ -88,6 +88,15 @@ func (hardening) Check(ctx context.Context, rc provision.RunCtx, _ *config.Serve
 }
 
 func (h hardening) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) error {
+	// Install the firewall and intrusion-prevention packages first: a minimal
+	// Debian install ships neither ufw nor fail2ban, so the ufw commands below
+	// would otherwise fail with "ufw: not found".
+	if res, err := r.Run(ctx, "DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", nil); err != nil {
+		return err
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("install ufw/fail2ban: %s", res.Stderr)
+	}
+
 	// Firewall: allow the actual SSH port plus 80/443 BEFORE enabling ufw, so
 	// enabling the firewall can never cut off the current connection (§6.2).
 	for _, cmd := range []string{
@@ -100,13 +109,6 @@ func (h hardening) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serv
 		} else if res.ExitCode != 0 {
 			return fmt.Errorf("hardening %q: %s", cmd, res.Stderr)
 		}
-	}
-
-	// Intrusion prevention.
-	if res, err := r.Run(ctx, "DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban", nil); err != nil {
-		return err
-	} else if res.ExitCode != 0 {
-		return fmt.Errorf("install fail2ban: %s", res.Stderr)
 	}
 
 	// Anti-lockout gate: only after confirming a FRESH berth session with sudo
