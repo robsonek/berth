@@ -1,10 +1,13 @@
 package cmd
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/robsonek/berth/internal/config"
+	"github.com/robsonek/berth/internal/provision/steps"
+	"github.com/robsonek/berth/internal/secret"
 )
 
 func writeValidConfig(t *testing.T) string {
@@ -25,18 +28,29 @@ sites:
 	return p
 }
 
-func TestProvisionLoadsConfigAndRunsEmptyPipeline(t *testing.T) {
+// TestProvisionLoadsConfigAndAssemblesPipeline verifies the offline portion of
+// `berth provision`: config load + pipeline assembly. The live ssh dial in
+// runProvision can no longer run without a reachable host, so this asserts the
+// pre-dial wiring directly rather than executing the cobra command.
+func TestProvisionLoadsConfigAndAssemblesPipeline(t *testing.T) {
 	cfgPath := writeValidConfig(t)
-	root := newRootCmd()
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetArgs([]string{"provision", cfgPath})
-	if err := root.Execute(); err != nil {
-		t.Fatalf("provision error = %v", err)
+	srv, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load error = %v", err)
 	}
-	// Empty pipeline (no steps registered yet in Plan 1) → succeeds with no FAIL.
-	if bytes.Contains(out.Bytes(), []byte("FAIL")) {
-		t.Errorf("unexpected failure in output: %q", out.String())
+	pipeline := steps.Pipeline(srv, secret.NewRedactor(), false)
+	if len(pipeline) == 0 {
+		t.Fatal("expected a non-empty pipeline")
+	}
+	// The sample config enables valkey, so the valkey step must be present.
+	var hasValkey bool
+	for _, s := range pipeline {
+		if s.Name() == "valkey" {
+			hasValkey = true
+		}
+	}
+	if !hasValkey {
+		t.Error("expected valkey step for a config with valkey: true")
 	}
 }
 

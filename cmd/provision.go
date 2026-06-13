@@ -1,10 +1,19 @@
 package cmd
 
 import (
+	"bufio"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
 	"github.com/spf13/cobra"
 
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
+	"github.com/robsonek/berth/internal/provision/steps"
+	"github.com/robsonek/berth/internal/secret"
+	bssh "github.com/robsonek/berth/internal/ssh"
 	"github.com/robsonek/berth/internal/ui"
 )
 
@@ -38,24 +47,55 @@ func newProvisionCmd() *cobra.Command {
 	return c
 }
 
-// steps returns the ordered pipeline. Empty in Plan 1; Plan 2 fills it.
-func steps(_ *config.Server) []provision.Step { return nil }
-
 func runProvision(cmd *cobra.Command, serverPath string, f *provisionFlags) error {
 	srv, err := config.Load(serverPath)
 	if err != nil {
 		return err
 	}
-	// Plan 1 ships no real ssh connection; the engine runs against a config-only
-	// pipeline. Plan 2 introduces the live ssh.Runner and the connection model.
-	eng := provision.New(steps(srv)...)
-	events, err := eng.Run(cmd.Context(), srv, nil, provision.Options{
-		DryRun: f.dryRun,
-		Only:   f.only,
+	red := secret.NewRedactor()
+	client, err := bssh.Connect(cmd.Context(), srv, bssh.HostKeyPolicy{
+		Pinned: srv.SSH.Fingerprint, KnownHosts: defaultKnownHosts(),
+		AllowTOFU: ui.IsTTY(os.Stdin), ConfirmTOFU: confirmFingerprint(cmd),
 	})
 	if err != nil {
 		return err
 	}
-	r := ui.NewPlainRenderer(cmd.OutOrStdout())
+	defer client.Close()
+
+	eng := provision.New(steps.Pipeline(srv, red, f.skipSSL)...)
+	events, err := eng.Run(cmd.Context(), srv, client, provision.Options{
+		DryRun: f.dryRun, Only: f.only, Force: f.force, SSLStaging: f.sslStaging,
+	})
+	if err != nil {
+		return err
+	}
+	var r ui.Renderer = ui.NewPlainRenderer(cmd.OutOrStdout()) // Plan 3 swaps in bubbletea on a TTY
 	return r.Render(events)
+}
+
+// defaultKnownHosts returns the conventional path to the user's known_hosts file.
+func defaultKnownHosts() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".ssh", "known_hosts")
+}
+
+// confirmFingerprint returns a TOFU confirmation callback that prints the host
+// key fingerprint and reads a y/N answer from stdin.
+func confirmFingerprint(cmd *cobra.Command) func(host, fingerprint string) bool {
+	return func(host, fingerprint string) bool {
+		out := cmd.OutOrStdout()
+		fmt.Fprintf(out, "The authenticity of host %q can't be established.\n", host)
+		fmt.Fprintf(out, "Key fingerprint is %s\n", fingerprint)
+		fmt.Fprint(out, "Are you sure you want to continue connecting (y/N)? ")
+		reader := bufio.NewReader(cmd.InOrStdin())
+		line, err := reader.ReadString('\n')
+		if err != nil && line == "" {
+			return false
+		}
+		answer := strings.ToLower(strings.TrimSpace(line))
+		return answer == "y" || answer == "yes"
+	}
 }
