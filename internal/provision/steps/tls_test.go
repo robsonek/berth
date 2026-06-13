@@ -172,10 +172,36 @@ func TestTLSApplyHonorsStagingFlag(t *testing.T) {
 	}
 }
 
+func TestDNSPointsAtHostHostnameHost(t *testing.T) {
+	// config.Host may be a hostname, not just an IP literal. The preflight must
+	// resolve both sides and compare their address sets, not string-match the
+	// domain's resolved IPs against the hostname.
+	withResolver(t, func(host string) ([]string, error) {
+		switch host {
+		case "app.example.com", "vps.example.net":
+			return []string{"203.0.113.10"}, nil
+		case "other.example.net":
+			return []string{"198.51.100.1"}, nil
+		}
+		return nil, nil
+	})
+	if !dnsPointsAtHost("app.example.com", "vps.example.net") {
+		t.Error("domain and hostname host resolving to the same IP must match")
+	}
+	if dnsPointsAtHost("app.example.com", "other.example.net") {
+		t.Error("domain and hostname host resolving to different IPs must not match")
+	}
+}
+
 func TestTLSApplySkipsOnDNSMismatch(t *testing.T) {
 	s := tlsServer()
 	// The domain resolves to a different IP than the server host.
-	withResolver(t, func(host string) ([]string, error) { return []string{"198.51.100.1"}, nil })
+	withResolver(t, func(host string) ([]string, error) {
+		if host == s.Sites[0].Domain {
+			return []string{"198.51.100.1"}, nil
+		}
+		return []string{s.Host}, nil
+	})
 	f := bssh.NewFakeRunner()
 	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: "No certificates found.\n"})
 	// install/certonly are NOT stubbed: a DNS mismatch must skip issuance.

@@ -195,18 +195,28 @@ func parseCertExpiry(out, domain string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// dnsPointsAtHost reports whether domain resolves to host (by exact address
-// match, or trivially when the domain literally equals the host).
+// dnsPointsAtHost reports whether domain resolves to the same address as host.
+// host may itself be an IP literal or a hostname (config.Host validates as
+// either), so both sides are resolved to their address sets and intersected.
+// It returns true trivially when the domain literally equals the host.
 func dnsPointsAtHost(domain, host string) bool {
 	if domain == host {
 		return true
 	}
-	addrs, err := resolveA(domain)
+	domainAddrs, err := resolveA(domain)
 	if err != nil {
 		return false
 	}
-	for _, a := range addrs {
-		if a == host {
+	hostAddrs, err := resolveA(host)
+	if err != nil {
+		return false
+	}
+	have := make(map[string]bool, len(hostAddrs))
+	for _, a := range hostAddrs {
+		have[a] = true
+	}
+	for _, a := range domainAddrs {
+		if have[a] {
 			return true
 		}
 	}
