@@ -8,40 +8,40 @@ import (
 )
 
 type SSH struct {
-	User        string `mapstructure:"user"`
-	Port        int    `mapstructure:"port"`
-	Key         string `mapstructure:"key"`
-	Fingerprint string `mapstructure:"fingerprint"`
+	User        string `mapstructure:"user" yaml:"user"`
+	Port        int    `mapstructure:"port" yaml:"port"`
+	Key         string `mapstructure:"key" yaml:"key"`
+	Fingerprint string `mapstructure:"fingerprint" yaml:"fingerprint"`
 }
 
 type PHP struct {
-	Version string `mapstructure:"version"`
-	Source  string `mapstructure:"source"` // auto | sury | debian
+	Version string `mapstructure:"version" yaml:"version"`
+	Source  string `mapstructure:"source" yaml:"source"` // auto | sury | debian
 }
 
 type Database struct {
-	Engine string `mapstructure:"engine"` // mariadb
-	Name   string `mapstructure:"name"`
-	User   string `mapstructure:"user"`
+	Engine string `mapstructure:"engine" yaml:"engine"` // mariadb
+	Name   string `mapstructure:"name" yaml:"name"`
+	User   string `mapstructure:"user" yaml:"user"`
 }
 
 type Site struct {
-	Domain     string `mapstructure:"domain"`
-	DeployPath string `mapstructure:"deploy_path"`
-	Repository string `mapstructure:"repository"`
-	SSL        bool   `mapstructure:"ssl"`
-	SSLEmail   string `mapstructure:"ssl_email"`
+	Domain     string `mapstructure:"domain" yaml:"domain"`
+	DeployPath string `mapstructure:"deploy_path" yaml:"deploy_path"`
+	Repository string `mapstructure:"repository" yaml:"repository"`
+	SSL        bool   `mapstructure:"ssl" yaml:"ssl"`
+	SSLEmail   string `mapstructure:"ssl_email" yaml:"ssl_email"`
 }
 
 type Server struct {
-	Host      string   `mapstructure:"host"`
-	SSH       SSH      `mapstructure:"ssh"`
-	PHP       PHP      `mapstructure:"php"`
-	Database  Database `mapstructure:"database"`
-	Valkey    bool     `mapstructure:"valkey"`
-	Queue     bool     `mapstructure:"queue"`
-	Scheduler bool     `mapstructure:"scheduler"`
-	Sites     []Site   `mapstructure:"sites"`
+	Host      string   `mapstructure:"host" yaml:"host"`
+	SSH       SSH      `mapstructure:"ssh" yaml:"ssh"`
+	PHP       PHP      `mapstructure:"php" yaml:"php"`
+	Database  Database `mapstructure:"database" yaml:"database"`
+	Valkey    bool     `mapstructure:"valkey" yaml:"valkey"`
+	Queue     bool     `mapstructure:"queue" yaml:"queue"`
+	Scheduler bool     `mapstructure:"scheduler" yaml:"scheduler"`
+	Sites     []Site   `mapstructure:"sites" yaml:"sites"`
 }
 
 // Load reads a YAML config file, applies defaults, and validates it.
