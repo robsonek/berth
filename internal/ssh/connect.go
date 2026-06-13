@@ -60,17 +60,40 @@ func authMethods(keyPath string) ([]xssh.AuthMethod, error) {
 			methods = append(methods, xssh.PublicKeysCallback(agent.NewClient(conn).Signers))
 		}
 	}
-	if keyPath != "" {
-		if b, err := os.ReadFile(expandHome(keyPath)); err == nil {
-			signer, perr := xssh.ParsePrivateKey(b)
-			if perr != nil {
-				return nil, fmt.Errorf("parse ssh key %s: %w (for passphrase-protected keys, use ssh-agent)", keyPath, perr)
-			}
-			methods = append(methods, xssh.PublicKeys(signer))
-		}
+	m, err := keyFileAuth(keyPath, len(methods) > 0)
+	if err != nil {
+		return nil, err
+	}
+	if m != nil {
+		methods = append(methods, m)
 	}
 	if len(methods) == 0 {
 		return nil, fmt.Errorf("no SSH auth available: set ssh.key to a readable key or load one into ssh-agent")
 	}
 	return methods, nil
+}
+
+// keyFileAuth loads a private key file as a public-key auth method. A missing or
+// unreadable file is non-fatal (returns nil, nil) since ssh-agent may cover it.
+// A parse failure (notably a passphrase-protected key) is fatal ONLY when no
+// other auth method is available (haveOther is false); when the agent already
+// supplies a signer, the protected key file is skipped so the agent can
+// authenticate — matching the documented "load passphrase keys into the agent"
+// contract.
+func keyFileAuth(keyPath string, haveOther bool) (xssh.AuthMethod, error) {
+	if keyPath == "" {
+		return nil, nil
+	}
+	b, err := os.ReadFile(expandHome(keyPath))
+	if err != nil {
+		return nil, nil
+	}
+	signer, perr := xssh.ParsePrivateKey(b)
+	if perr != nil {
+		if haveOther {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("parse ssh key %s: %w (for passphrase-protected keys, use ssh-agent)", keyPath, perr)
+	}
+	return xssh.PublicKeys(signer), nil
 }
