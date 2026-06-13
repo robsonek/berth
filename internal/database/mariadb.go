@@ -1,0 +1,48 @@
+package database
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/robsonek/berth/internal/provision"
+	bssh "github.com/robsonek/berth/internal/ssh"
+)
+
+func init() { Register(MariaDB{}) }
+
+type MariaDB struct{}
+
+func (MariaDB) Name() string { return "mariadb" }
+
+// InstallSteps returns steps that install and enable the server. Implemented as
+// a thin step in Task 9's registry; kept here so the engine owns its packages.
+func (MariaDB) InstallSteps() []provision.Step { return nil } // wired via steps.MariaDBInstall
+
+// runSQL pipes a statement to the local socket as root (unix_socket auth on Debian).
+func runSQL(ctx context.Context, r bssh.Runner, sql string) error {
+	res, err := r.Run(ctx, "mysql --protocol=socket", []byte(sql))
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("mysql: %s", res.Stderr)
+	}
+	return nil
+}
+
+func (MariaDB) EnsureDatabase(ctx context.Context, r bssh.Runner, name string) error {
+	// name is a validated SQL identifier (config.Validate); safe to interpolate as an identifier.
+	return runSQL(ctx, r, fmt.Sprintf(
+		"CREATE DATABASE IF NOT EXISTS `%s` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;", name))
+}
+
+func (MariaDB) EnsureUser(ctx context.Context, r bssh.Runner, user, password, database string) error {
+	// user/database are validated identifiers; password is a value bound in SQL via stdin.
+	sql := fmt.Sprintf(
+		"CREATE USER IF NOT EXISTS '%[1]s'@'localhost' IDENTIFIED BY '%[3]s';\n"+
+			"ALTER USER '%[1]s'@'localhost' IDENTIFIED BY '%[3]s';\n"+
+			"GRANT ALL PRIVILEGES ON `%[2]s`.* TO '%[1]s'@'localhost';\n"+
+			"FLUSH PRIVILEGES;",
+		user, database, password)
+	return runSQL(ctx, r, sql)
+}
