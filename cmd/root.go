@@ -2,6 +2,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -18,7 +19,12 @@ func newRootCmd() *cobra.Command {
 		Version:       version.Version,
 	}
 	root.SetVersionTemplate(version.String() + "\n")
+	root.AddCommand(newInitCmd(), newProvisionCmd(), newSiteCmd())
 	return root
+}
+
+func errNotImplemented(what string) error {
+	return errors.New(what + " is not implemented yet")
 }
 
 // Execute runs the root command and exits non-zero on error.
