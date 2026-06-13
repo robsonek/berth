@@ -41,6 +41,16 @@ func clientConfig(user string, auth []xssh.AuthMethod, policy HostKeyPolicy) *xs
 	}
 }
 
+// ClientConfig is the exported form of clientConfig; callers that need to dial a
+// specific account directly (e.g. the hardening anti-lockout gate, which must
+// connect as berth without the Connect auto-detect/root fallback) use it.
+func ClientConfig(user string, auth []xssh.AuthMethod, policy HostKeyPolicy) *xssh.ClientConfig {
+	return clientConfig(user, auth, policy)
+}
+
+// AuthMethods is the exported form of authMethods (ssh-agent then key file).
+func AuthMethods(keyPath string) ([]xssh.AuthMethod, error) { return authMethods(keyPath) }
+
 // authMethods prefers ssh-agent (SSH_AUTH_SOCK), then the configured key file.
 // Passphrase-protected keys are supported by loading them into the agent.
 func authMethods(keyPath string) ([]xssh.AuthMethod, error) {
