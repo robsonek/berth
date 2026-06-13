@@ -1,6 +1,6 @@
 deploy ALL=(root) NOPASSWD: /usr/bin/systemctl reload php{{ .PHPVersion }}-fpm
 deploy ALL=(root) NOPASSWD: /usr/bin/supervisorctl reread
 deploy ALL=(root) NOPASSWD: /usr/bin/supervisorctl update
-deploy ALL=(root) NOPASSWD: /usr/bin/supervisorctl start {{ .ProgramName }}:*
-deploy ALL=(root) NOPASSWD: /usr/bin/supervisorctl stop {{ .ProgramName }}:*
-deploy ALL=(root) NOPASSWD: /usr/bin/supervisorctl restart {{ .ProgramName }}:*
+deploy ALL=(root) NOPASSWD: /usr/bin/supervisorctl start {{ .ProgramName }}\:*
+deploy ALL=(root) NOPASSWD: /usr/bin/supervisorctl stop {{ .ProgramName }}\:*
+deploy ALL=(root) NOPASSWD: /usr/bin/supervisorctl restart {{ .ProgramName }}\:*
