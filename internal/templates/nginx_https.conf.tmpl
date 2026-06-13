@@ -1,0 +1,41 @@
+server {
+    listen 80;
+    server_name {{ .Domain }};
+
+    location /.well-known/acme-challenge/ {
+        root {{ .ACMEWebroot }};
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name {{ .Domain }};
+    root {{ .DeployPath }}/current/public;
+    index index.php;
+
+    ssl_certificate /etc/letsencrypt/live/{{ .Domain }}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{{ .Domain }}/privkey.pem;
+
+    location /.well-known/acme-challenge/ {
+        root {{ .ACMEWebroot }};
+    }
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+        fastcgi_pass unix:/run/php/php{{ .PHPVersion }}-fpm.sock;
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+    }
+
+    location ~ /\.(?!well-known).* { deny all; }
+}

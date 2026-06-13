@@ -1,0 +1,2 @@
+# managed by berth
+* * * * * deploy [ -f /home/deploy/myapp/current/artisan ] && cd /home/deploy/myapp/current && php artisan schedule:run >/dev/null 2>&1

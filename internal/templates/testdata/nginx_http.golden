@@ -1,0 +1,24 @@
+# managed by berth
+server {
+    listen 80;
+    server_name app.example.com;
+    root /home/deploy/myapp/current/public;
+    index index.php;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/berth-acme/app.example.com;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+        fastcgi_pass unix:/run/php/php8.5-fpm.sock;
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+    }
+
+    location ~ /\.(?!well-known).* { deny all; }
+}

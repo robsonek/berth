@@ -1,0 +1,23 @@
+server {
+    listen 80;
+    server_name {{ .Domain }};
+    root {{ .DeployPath }}/current/public;
+    index index.php;
+
+    location /.well-known/acme-challenge/ {
+        root {{ .ACMEWebroot }};
+    }
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+        fastcgi_pass unix:/run/php/php{{ .PHPVersion }}-fpm.sock;
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+    }
+
+    location ~ /\.(?!well-known).* { deny all; }
+}

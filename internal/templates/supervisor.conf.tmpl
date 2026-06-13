@@ -1,0 +1,13 @@
+[program:{{ .ProgramName }}]
+process_name=%(program_name)s_%(process_num)02d
+command=php {{ .DeployPath }}/current/artisan queue:work --sleep=3 --tries=3 --max-time=3600
+directory={{ .DeployPath }}/current
+user=deploy
+numprocs=1
+autostart=false
+autorestart=true
+stopwaitsecs=3600
+redirect_stderr=true
+stdout_logfile=/var/log/supervisor/{{ .ProgramName }}.log
+stopasgroup=true
+killasgroup=true
