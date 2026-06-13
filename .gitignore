@@ -1,0 +1,18 @@
+# Binaries
+/berth
+/berth.exe
+/dist/
+
+# Go
+*.test
+*.out
+coverage.*
+
+# berth local state — never commit secrets
+.berth/
+*.secrets*
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
