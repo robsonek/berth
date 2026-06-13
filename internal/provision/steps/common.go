@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/robsonek/berth/internal/apt"
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
 
@@ -22,6 +23,11 @@ const managedMarker = "# managed by berth"
 func contentHash(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// aptInstall installs Debian packages non-interactively via the apt helper.
+func aptInstall(ctx context.Context, r bssh.Runner, pkgs ...string) error {
+	return apt.New(r).EnsurePackages(ctx, nil, pkgs...)
 }
 
 // pkgInstalled reports whether a Debian package is installed (dpkg -s exit 0).

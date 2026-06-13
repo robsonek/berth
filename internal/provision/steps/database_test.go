@@ -1,0 +1,153 @@
+package steps
+
+import (
+	"context"
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/robsonek/berth/internal/config"
+	"github.com/robsonek/berth/internal/provision"
+	"github.com/robsonek/berth/internal/secret"
+	bssh "github.com/robsonek/berth/internal/ssh"
+)
+
+func databaseServer() *config.Server {
+	return &config.Server{
+		Host:     "app.example.com",
+		Database: config.Database{Engine: "mariadb", Name: "myapp", User: "myapp"},
+		Sites: []config.Site{{
+			Domain:     "app.example.com",
+			DeployPath: "/home/deploy/myapp",
+			SSL:        true,
+		}},
+	}
+}
+
+// chdirTemp moves into a throwaway working directory so the local secrets cache
+// (.berth/) is created under a temp dir, not the repo.
+func chdirTemp(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+}
+
+func TestDatabaseRequiresBaseAndAppdirs(t *testing.T) {
+	got := Database(secret.NewRedactor()).Requires()
+	if len(got) != 2 || got[0] != "base" || got[1] != "appdirs" {
+		t.Fatalf("Requires() = %v, want [base appdirs]", got)
+	}
+}
+
+// envPath returns the absolute server-side shared/.env path for a server.
+func envPath(s *config.Server) string {
+	return s.Sites[0].DeployPath + "/shared/.env"
+}
+
+func TestDatabaseApplyGeneratesPersistsAndEnsures(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	red := secret.NewRedactor()
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
+	// No existing password: grep of shared/.env returns non-zero.
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
+	f.On("mysql --protocol=socket", bssh.Result{})
+
+	if err := Database(red).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	// shared/.env must have been written (owner deploy, mode 0600) and contain DB_PASSWORD.
+	var env *bssh.FileSpec
+	for i := range f.Writes() {
+		if f.Writes()[i].Path == envPath(s) {
+			env = &f.Writes()[i]
+		}
+	}
+	if env == nil {
+		t.Fatal("shared/.env was not written")
+	}
+	if env.Owner != "deploy" || env.Mode.Perm() != 0o600 {
+		t.Errorf("shared/.env owner/mode = %s/%v, want deploy/0600", env.Owner, env.Mode.Perm())
+	}
+	if !strings.Contains(string(env.Content), "DB_PASSWORD=") {
+		t.Error("shared/.env must contain DB_PASSWORD")
+	}
+
+	// The password must reach the SQL via stdin, never the command string.
+	var sawCreateDB, sawCreateUser bool
+	for _, c := range f.Calls() {
+		if strings.HasPrefix(c.Cmd, "mysql") {
+			if strings.Contains(string(c.Stdin), "CREATE DATABASE IF NOT EXISTS") {
+				sawCreateDB = true
+			}
+			if strings.Contains(string(c.Stdin), "CREATE USER") {
+				sawCreateUser = true
+			}
+		}
+	}
+	if !sawCreateDB {
+		t.Error("expected EnsureDatabase to run CREATE DATABASE via stdin")
+	}
+	if !sawCreateUser {
+		t.Error("expected EnsureUser to run CREATE USER via stdin")
+	}
+
+	// The cache must hold the generated password (for reuse on re-run).
+	cache, err := secret.LoadCache(s.Host)
+	if err != nil {
+		t.Fatalf("LoadCache: %v", err)
+	}
+	if cache["DB_PASSWORD"] == "" {
+		t.Error("cache missing DB_PASSWORD")
+	}
+}
+
+func TestDatabaseApplyReusesExistingPasswordWithoutRotating(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	red := secret.NewRedactor()
+	f := bssh.NewFakeRunner()
+	const existing = "ReUsedPassword123"
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{Stdout: "DB_PASSWORD=" + existing + "\n"})
+	f.On("mysql --protocol=socket", bssh.Result{})
+
+	if err := Database(red).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	// The reused password (not a fresh one) must be used in the SQL.
+	var found bool
+	for _, c := range f.Calls() {
+		if strings.HasPrefix(c.Cmd, "mysql") && strings.Contains(string(c.Stdin), existing) {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected the existing password to be reused (no rotation)")
+	}
+}
+
+func TestDatabaseApplyRejectsTamperedPassword(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	red := secret.NewRedactor()
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
+	// A tampered env value containing a quote must be rejected (defence-in-depth).
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{Stdout: "DB_PASSWORD=bad'value\n"})
+
+	err := Database(red).Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil {
+		t.Fatal("expected rejection of a reused password outside the allowed charset")
+	}
+}
