@@ -11,9 +11,30 @@ for a separate deployer ([Deployer PHP](https://deployer.org)) to ship code.
 A *berth* is the prepared place where a vessel docks: berth readies the server,
 then the deployer brings the code alongside.
 
-> **Status: early development.** The full design is specified in
-> [`docs/design`](docs/design/2026-06-13-berth-design.md); implementation is in
-> progress.
+## Install
+
+Prebuilt binaries are published for Linux, macOS, and Windows (amd64/arm64) on
+the [Releases](https://github.com/robsonek/berth/releases) page. No runtime is
+required. Download the archive that matches your OS and architecture, extract
+the `berth` binary, and put it on your `PATH`.
+
+```bash
+# example (Linux amd64) — replace VERSION with the release you downloaded
+tar -xzf berth_VERSION_linux_amd64.tar.gz
+chmod +x berth && sudo mv berth /usr/local/bin/
+berth --version
+```
+
+On Windows, download the `.zip` archive for your architecture, extract
+`berth.exe`, and add its location to your `PATH`.
+
+## Usage
+
+```bash
+berth init                            # interactive wizard → servers/<name>.yml
+berth provision servers/<name>.yml    # provision the server (idempotent)
+berth provision servers/<name>.yml --dry-run   # preview changes only
+```
 
 ## Highlights
 
@@ -32,11 +53,11 @@ config. `berth provision <server>` then connects over SSH and brings the host to
 the desired state through an ordered pipeline of idempotent steps. Re-running is
 always safe; `--dry-run` shows what would change.
 
-## Roadmap
+## Beyond v1
 
-v1 targets `berth init` and `berth provision` (one server and its first site,
+v1 covers `berth init` and `berth provision` (one server and its first site,
 MariaDB). MySQL 8 / PostgreSQL engines, multi-site (`berth site:add`), and
-package-manager distribution come later. See the
+package-manager distribution are planned for later releases. See the
 [design specification](docs/design/2026-06-13-berth-design.md) for the full
 scope.
 
