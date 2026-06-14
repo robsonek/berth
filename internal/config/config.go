@@ -19,10 +19,15 @@ type PHP struct {
 	Source  string `mapstructure:"source" yaml:"source"` // auto | sury | debian
 }
 
+type Nginx struct {
+	Source string `mapstructure:"source" yaml:"source"` // debian | nginx (nginx.org mainline)
+}
+
 type Database struct {
 	Engine string `mapstructure:"engine" yaml:"engine"` // mariadb
 	Name   string `mapstructure:"name" yaml:"name"`
 	User   string `mapstructure:"user" yaml:"user"`
+	Source string `mapstructure:"source" yaml:"source"` // debian | mariadb (mariadb.org)
 }
 
 type Site struct {
@@ -37,6 +42,7 @@ type Server struct {
 	Host      string   `mapstructure:"host" yaml:"host"`
 	SSH       SSH      `mapstructure:"ssh" yaml:"ssh"`
 	PHP       PHP      `mapstructure:"php" yaml:"php"`
+	Nginx     Nginx    `mapstructure:"nginx" yaml:"nginx"`
 	Database  Database `mapstructure:"database" yaml:"database"`
 	Valkey    bool     `mapstructure:"valkey" yaml:"valkey"`
 	Queue     bool     `mapstructure:"queue" yaml:"queue"`
@@ -52,6 +58,8 @@ func Load(path string) (*Server, error) {
 	v.SetDefault("ssh.port", 22)
 	v.SetDefault("ssh.user", "root")
 	v.SetDefault("php.source", "auto")
+	v.SetDefault("nginx.source", "debian")
+	v.SetDefault("database.source", "debian")
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("read config %s: %w", path, err)

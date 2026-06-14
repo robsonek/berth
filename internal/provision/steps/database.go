@@ -6,12 +6,17 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/robsonek/berth/internal/apt"
 	"github.com/robsonek/berth/internal/config"
 	dbpkg "github.com/robsonek/berth/internal/database"
 	"github.com/robsonek/berth/internal/provision"
 	"github.com/robsonek/berth/internal/secret"
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
+
+// mariadbOrgSourceList is the apt source file the mariadb.org repo is written to;
+// its presence is how Check knows the configured upstream source is in effect.
+const mariadbOrgSourceList = "/etc/apt/sources.list.d/mariadb-org.list"
 
 // dbPasswordKey is the .env / cache key under which the database password lives.
 const dbPasswordKey = "DB_PASSWORD"
@@ -48,18 +53,32 @@ func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	if installed && envExists {
-		return provision.CheckResult{Satisfied: true, Reason: "mariadb-server installed and credential persisted"}, nil
+	// When mariadb.org is the configured source, its repo must be registered; this
+	// makes a source switch (debian -> mariadb) re-trigger Apply.
+	sourceOK := true
+	if s.Database.Source == "mariadb" {
+		sourceOK, err = fileExists(ctx, r, mariadbOrgSourceList)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+	}
+	if installed && envExists && sourceOK {
+		return provision.CheckResult{Satisfied: true, Reason: "mariadb-server installed (" + s.Database.Source + ") and credential persisted"}, nil
 	}
 	return provision.CheckResult{
 		Satisfied: false,
-		Reason:    "database server or credential not yet provisioned",
-		Changes:   []string{"install mariadb-server", "persist DB credential to shared/.env", "ensure database and user"},
+		Reason:    "database server, credential, or configured source not yet provisioned",
+		Changes:   []string{"install mariadb-server (" + s.Database.Source + ")", "persist DB credential to shared/.env", "ensure database and user"},
 		Sensitive: true,
 	}, nil
 }
 
 func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) error {
+	if s.Database.Source == "mariadb" {
+		if err := apt.New(r).EnsureRepo(ctx, apt.MariaDBOrg()); err != nil {
+			return fmt.Errorf("add mariadb.org repo: %w", err)
+		}
+	}
 	if err := aptInstall(ctx, r, "mariadb-server"); err != nil {
 		return fmt.Errorf("install mariadb-server: %w", err)
 	}

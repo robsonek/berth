@@ -7,7 +7,8 @@ func base() *Server {
 		Host:     "203.0.113.10",
 		SSH:      SSH{User: "root", Port: 22},
 		PHP:      PHP{Version: "8.5", Source: "auto"},
-		Database: Database{Engine: "mariadb", Name: "myapp", User: "myapp"},
+		Nginx:    Nginx{Source: "debian"},
+		Database: Database{Engine: "mariadb", Name: "myapp", User: "myapp", Source: "debian"},
 		Sites:    []Site{{Domain: "app.example.com", DeployPath: "/home/deploy/myapp"}},
 	}
 }
@@ -20,13 +21,15 @@ func TestValidateOK(t *testing.T) {
 
 func TestValidateRejects(t *testing.T) {
 	cases := map[string]func(*Server){
-		"bad php version": func(s *Server) { s.PHP.Version = "9.9" },
-		"bad php source":  func(s *Server) { s.PHP.Source = "ppa" },
-		"bad db name":     func(s *Server) { s.Database.Name = "my-app; DROP" },
-		"bad engine":      func(s *Server) { s.Database.Engine = "oracle" },
-		"relative path":   func(s *Server) { s.Sites[0].DeployPath = "deploy/x" },
-		"shell meta path": func(s *Server) { s.Sites[0].DeployPath = "/home/$(whoami)" },
-		"ssl no email":    func(s *Server) { s.Sites[0].SSL = true },
+		"bad php version":  func(s *Server) { s.PHP.Version = "9.9" },
+		"bad php source":   func(s *Server) { s.PHP.Source = "ppa" },
+		"bad db name":      func(s *Server) { s.Database.Name = "my-app; DROP" },
+		"bad engine":       func(s *Server) { s.Database.Engine = "oracle" },
+		"bad nginx source": func(s *Server) { s.Nginx.Source = "openresty" },
+		"bad db source":    func(s *Server) { s.Database.Source = "percona" },
+		"relative path":    func(s *Server) { s.Sites[0].DeployPath = "deploy/x" },
+		"shell meta path":  func(s *Server) { s.Sites[0].DeployPath = "/home/$(whoami)" },
+		"ssl no email":     func(s *Server) { s.Sites[0].SSL = true },
 		"ssl bad email": func(s *Server) {
 			s.Sites[0].SSL = true
 			s.Sites[0].SSLEmail = "x@y.com; reboot"

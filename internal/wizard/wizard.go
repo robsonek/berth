@@ -133,7 +133,8 @@ func (a Answers) ToServer() *config.Server {
 		Host:     a.Host,
 		SSH:      config.SSH{User: "root", Port: a.Port, Key: a.Key},
 		PHP:      config.PHP{Version: a.PHPVersion, Source: a.PHPSource},
-		Database: config.Database{Engine: "mariadb", Name: a.DBName, User: a.DBUser},
+		Nginx:    config.Nginx{Source: "debian"},
+		Database: config.Database{Engine: "mariadb", Name: a.DBName, User: a.DBUser, Source: "debian"},
 		Valkey:   a.Valkey, Queue: a.Queue, Scheduler: a.Scheduler,
 		Sites: []config.Site{{
 			Domain: a.Domain, DeployPath: a.DeployPath, Repository: a.Repository,

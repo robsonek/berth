@@ -137,6 +137,57 @@ func TestDatabaseApplyReusesExistingPasswordWithoutRotating(t *testing.T) {
 	}
 }
 
+func TestDatabaseCheckSourceMariaDBRequiresRepo(t *testing.T) {
+	s := databaseServer()
+	s.Database.Source = "mariadb"
+	f := bssh.NewFakeRunner()
+	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	// mariadb.org repo not yet registered -> not satisfied.
+	f.On("test -e "+shQuote(mariadbOrgSourceList), bssh.Result{ExitCode: 1})
+	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("source=mariadb must be unsatisfied until the mariadb.org repo is registered")
+	}
+}
+
+func TestDatabaseApplySourceMariaDBAddsRepo(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	s.Database.Source = "mariadb"
+	f := bssh.NewFakeRunner()
+	f.On("curl -fsSL https://mariadb.org/mariadb_release_signing_key.asc | gpg --dearmor --yes -o /usr/share/keyrings/mariadb-org.gpg", bssh.Result{})
+	f.On("gpg --show-keys --with-colons /usr/share/keyrings/mariadb-org.gpg", bssh.Result{Stdout: "fpr:::::::::177F4010FE56CA3336300305F1656F24C74CD1D8:\n"})
+	f.On("apt-get update", bssh.Result{})
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
+	f.On("mysql --protocol=socket", bssh.Result{})
+
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	var cmds []string
+	for _, c := range f.Calls() {
+		cmds = append(cmds, c.Cmd)
+	}
+	if !strings.Contains(strings.Join(cmds, "\n"), "mariadb.org/mariadb_release_signing_key.asc") {
+		t.Errorf("source=mariadb must fetch the mariadb.org signing key; calls:\n%s", strings.Join(cmds, "\n"))
+	}
+	var sourceListWritten bool
+	for _, w := range f.Writes() {
+		if w.Path == mariadbOrgSourceList {
+			sourceListWritten = true
+		}
+	}
+	if !sourceListWritten {
+		t.Error("expected the mariadb-org apt source list to be written")
+	}
+}
+
 func TestDatabaseApplyRejectsTamperedPassword(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
