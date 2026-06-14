@@ -45,7 +45,7 @@ func checkGoldenRender(t *testing.T, render func(string, any) ([]byte, error), n
 
 type nginxData struct {
 	Domain, DeployPath, ACMEWebroot, Socket, CertPath, KeyPath string
-	HTTP3, QUICReuseport                                       bool
+	HTTP3, QUICReuseport, HSTS                                 bool
 }
 
 const testSocket = "/run/php/berth-app_example_com.sock"
@@ -56,6 +56,7 @@ func nginxGoldenData() nginxData {
 		ACMEWebroot: "/var/www/berth-acme/app.example.com", Socket: testSocket,
 		CertPath: "/etc/letsencrypt/live/app.example.com/fullchain.pem",
 		KeyPath:  "/etc/letsencrypt/live/app.example.com/privkey.pem",
+		HSTS:     true,
 	}
 }
 
@@ -72,6 +73,14 @@ func TestRenderNginxHTTPSHTTP3Golden(t *testing.T) {
 	d.HTTP3 = true
 	d.QUICReuseport = true
 	checkGolden(t, "nginx_https.conf.tmpl", "nginx_https_http3.golden", d)
+}
+
+func TestRenderNginxHTTPSNoHSTSGolden(t *testing.T) {
+	// HSTS:false is a direct template-field override (template isolation), not a
+	// selfsigned scenario — the test-local nginxData has no cert-mode concept.
+	d := nginxGoldenData()
+	d.HSTS = false
+	checkGolden(t, "nginx_https.conf.tmpl", "nginx_https_nohsts.golden", d)
 }
 
 func TestRenderPHPOpcacheGolden(t *testing.T) {

@@ -265,6 +265,66 @@ func TestNginxHTTPSRedirectListensIPv6(t *testing.T) {
 	}
 }
 
+func TestNginxHTTPSHSTSForRealCert(t *testing.T) {
+	s := siteServer()
+	s.Sites[0].SSL = true // CertMode() defaults to letsencrypt -> real cert -> HSTS on
+	got, err := renderNginxHTTPS(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), `add_header Strict-Transport-Security "max-age=31536000" always;`) {
+		t.Errorf("a real-cert HTTPS vhost must send HSTS;\n%s", got)
+	}
+}
+
+func TestNginxHTTPSNoHSTSForSelfSigned(t *testing.T) {
+	s := siteServer()
+	s.Sites[0].SSL = true
+	s.Sites[0].SSLMode = "selfsigned" // self-signed must NOT pin browsers via HSTS
+	got, err := renderNginxHTTPS(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(got), "Strict-Transport-Security") {
+		t.Errorf("a self-signed HTTPS vhost must NOT send HSTS;\n%s", got)
+	}
+}
+
+func TestNginxHTTPSHasTLSTuning(t *testing.T) {
+	s := siteServer()
+	s.Sites[0].SSL = true
+	got, err := renderNginxHTTPS(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "ssl_protocols TLSv1.2 TLSv1.3;") {
+		t.Errorf("HTTPS vhost must pin modern TLS protocols;\n%s", got)
+	}
+	if !strings.Contains(string(got), "ssl_session_tickets off;") {
+		t.Errorf("HTTPS vhost must disable TLS session tickets;\n%s", got)
+	}
+}
+
+func TestSiteHTTPSRenderMatchesTLSSwap(t *testing.T) {
+	// site's cert-aware HTTPS render and the tls step's swap share renderNginxHTTPS,
+	// so they must be byte-identical or `site` re-runs detect endless drift.
+	s := siteServer()
+	s.Sites[0].SSL = true
+	withCert := bssh.NewFakeRunner()
+	withCert.On("test -e "+shQuote(certFullchainPath(s.Sites[0])), bssh.Result{ExitCode: 0})
+	siteRender, err := renderSiteNginx(context.Background(), withCert, s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	swapRender, err := renderNginxHTTPS(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(siteRender) != string(swapRender) {
+		t.Errorf("site cert-aware HTTPS render must equal tls swap render (byte-identical)")
+	}
+}
+
 // stubManagedSiteFiles makes every managed site file read back as up-to-date so
 // the Check's content-hash comparison is satisfied.
 func stubManagedSiteFiles(t *testing.T, s *config.Server, f *bssh.FakeRunner) {

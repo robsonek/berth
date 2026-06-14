@@ -119,10 +119,11 @@ func renderSiteNginx(ctx context.Context, r bssh.Runner, s *config.Server, site 
 // the site's own PHP-FPM socket so each domain proxies to its own pool/user;
 // CertPath/KeyPath point at the site's TLS material (LE or self-signed). HTTP3
 // adds the QUIC listeners + Alt-Svc; QUICReuseport marks the one site that owns
-// the `reuseport` flag on the shared :443 QUIC socket.
+// the `reuseport` flag on the shared :443 QUIC socket. HSTS is set only for
+// real (non-self-signed) certificates to avoid bricking a domain in browsers.
 type nginxData struct {
 	Domain, DeployPath, ACMEWebroot, Socket, CertPath, KeyPath string
-	HTTP3, QUICReuseport                                       bool
+	HTTP3, QUICReuseport, HSTS                                 bool
 }
 
 func nginxRenderData(s *config.Server, site config.Site) nginxData {
@@ -132,6 +133,10 @@ func nginxRenderData(s *config.Server, site config.Site) nginxData {
 		CertPath: certFullchainPath(site), KeyPath: certKeyPath(site),
 		HTTP3:         site.HTTP3,
 		QUICReuseport: site.HTTP3 && quicReuseportOwner(s) == site.Domain,
+		// HSTS is derived purely from static config (SSL + cert mode), never cert
+		// presence, so site re-render and tls swap stay byte-identical. Self-signed
+		// is excluded: pinning a browser to an untrusted cert would brick the site.
+		HSTS: site.SSL && site.CertMode() != "selfsigned",
 	}
 }
 
