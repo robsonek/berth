@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
@@ -71,11 +72,20 @@ func managedSiteFiles(ctx context.Context, r bssh.Runner, s *config.Server) ([]s
 			return nil, err
 		}
 		files = append(files, siteFile{path: fpmPoolPath(s.PHP.Version, site.Domain), content: pool})
-		prog, err := renderSupervisorProgram("berth-"+poolName(site.Domain), queueCommand(s, site), queueNumprocs(site), s.SiteUser(site), site.DeployPath)
-		if err != nil {
-			return nil, err
+		if s.QueueEnabled(site) {
+			worker, err := renderSupervisorProgram(programName(site.Domain), queueCommand(s, site), queueNumprocs(site), s.SiteUser(site), site.DeployPath)
+			if err != nil {
+				return nil, err
+			}
+			files = append(files, siteFile{path: supervisorProgramPath(site.Domain), content: worker})
 		}
-		files = append(files, siteFile{path: supervisorProgramPath(site.Domain), content: prog})
+		for _, d := range site.Daemons {
+			body, err := renderSupervisorProgram(daemonProgramName(site.Domain, d.Name), d.Command, daemonNumprocs(d), s.SiteUser(site), site.DeployPath)
+			if err != nil {
+				return nil, err
+			}
+			files = append(files, siteFile{path: daemonProgramPath(site.Domain, d.Name), content: body})
+		}
 		if s.SchedulerEnabled(site) {
 			cron, err := renderCron(s, site)
 			if err != nil {
@@ -84,6 +94,19 @@ func managedSiteFiles(ctx context.Context, r bssh.Runner, s *config.Server) ([]s
 			files = append(files, siteFile{path: cronPath(site.Domain), content: cron})
 		} else {
 			files = append(files, siteFile{path: cronPath(site.Domain), remove: true})
+		}
+	}
+	// Global orphan drift-removal: any berth-*.conf program file no site desires
+	// is flagged for removal. Global glob (never per-pool) because pool names can
+	// be prefixes of one another, so a per-site glob could match a sibling's file.
+	desired := desiredProgramPaths(s)
+	progs, err := listSupervisorPrograms(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range progs {
+		if !desired[p] {
+			files = append(files, siteFile{path: p, remove: true})
 		}
 	}
 	lr, err := renderLogrotate()
@@ -263,6 +286,33 @@ func daemonProgramPath(domain, name string) string {
 	return "/etc/supervisor/conf.d/" + daemonProgramName(domain, name) + ".conf"
 }
 
+// desiredProgramPaths is the set of supervisor program file paths every site
+// desires (worker iff QueueEnabled, plus each daemon) across the WHOLE server.
+func desiredProgramPaths(s *config.Server) map[string]bool {
+	desired := map[string]bool{}
+	for _, site := range s.Sites {
+		for _, name := range s.SiteProgramNames(site) {
+			desired["/etc/supervisor/conf.d/"+name+".conf"] = true
+		}
+	}
+	return desired
+}
+
+// listSupervisorPrograms lists berth's supervisor program files on the host.
+func listSupervisorPrograms(ctx context.Context, r bssh.Runner) ([]string, error) {
+	res, err := r.Run(ctx, "ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", nil)
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, line := range strings.Split(strings.TrimSpace(res.Stdout), "\n") {
+		if p := strings.TrimSpace(line); p != "" {
+			paths = append(paths, p)
+		}
+	}
+	return paths, nil
+}
+
 func renderCron(s *config.Server, site config.Site) ([]byte, error) {
 	return templates.Render("scheduler.cron.tmpl", struct {
 		DeployPath, User string
@@ -393,17 +443,32 @@ func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 		return fmt.Errorf("reload %s: %s", fpmService(s), res.Stderr)
 	}
 
-	// 4) Per-site dormant Supervisor worker + 5) guarded scheduler cron.
+	// 4) Per-site Supervisor worker (iff queue enabled) + daemons, then
+	//    5) guarded scheduler cron.
 	for _, site := range s.Sites {
-		prog, err := renderSupervisorProgram("berth-"+poolName(site.Domain), queueCommand(s, site), queueNumprocs(site), s.SiteUser(site), site.DeployPath)
-		if err != nil {
-			return fmt.Errorf("render supervisor program for %s: %w", site.Domain, err)
+		if s.QueueEnabled(site) {
+			worker, err := renderSupervisorProgram(programName(site.Domain), queueCommand(s, site), queueNumprocs(site), s.SiteUser(site), site.DeployPath)
+			if err != nil {
+				return fmt.Errorf("render supervisor worker for %s: %w", site.Domain, err)
+			}
+			if err := r.WriteFile(ctx, bssh.FileSpec{
+				Path: supervisorProgramPath(site.Domain), Content: worker,
+				Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
+			}); err != nil {
+				return fmt.Errorf("write supervisor worker for %s: %w", site.Domain, err)
+			}
 		}
-		if err := r.WriteFile(ctx, bssh.FileSpec{
-			Path: supervisorProgramPath(site.Domain), Content: prog,
-			Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
-		}); err != nil {
-			return fmt.Errorf("write supervisor program for %s: %w", site.Domain, err)
+		for _, d := range site.Daemons {
+			body, err := renderSupervisorProgram(daemonProgramName(site.Domain, d.Name), d.Command, daemonNumprocs(d), s.SiteUser(site), site.DeployPath)
+			if err != nil {
+				return fmt.Errorf("render daemon %s for %s: %w", d.Name, site.Domain, err)
+			}
+			if err := r.WriteFile(ctx, bssh.FileSpec{
+				Path: daemonProgramPath(site.Domain, d.Name), Content: body,
+				Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
+			}); err != nil {
+				return fmt.Errorf("write daemon %s for %s: %w", d.Name, site.Domain, err)
+			}
 		}
 		if s.SchedulerEnabled(site) {
 			cron, err := renderCron(s, site)
@@ -427,6 +492,32 @@ func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 					return err
 				} else if res.ExitCode != 0 {
 					return fmt.Errorf("remove scheduler cron for %s: %s", site.Domain, res.Stderr)
+				}
+			}
+		}
+	}
+
+	// Global orphan removal: rm berth-managed supervisor program files no site
+	// desires (never a foreign/unmanaged file).
+	{
+		desired := desiredProgramPaths(s)
+		progs, err := listSupervisorPrograms(ctx, r)
+		if err != nil {
+			return err
+		}
+		for _, p := range progs {
+			if desired[p] {
+				continue
+			}
+			present, err := managedFilePresent(ctx, r, p)
+			if err != nil {
+				return err
+			}
+			if present {
+				if res, err := r.Run(ctx, "rm -f "+shQuote(p), nil); err != nil {
+					return err
+				} else if res.ExitCode != 0 {
+					return fmt.Errorf("remove orphan supervisor program %s: %s", p, res.Stderr)
 				}
 			}
 		}
