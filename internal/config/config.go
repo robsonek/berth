@@ -4,8 +4,10 @@ package config
 import (
 	"fmt"
 	"hash/fnv"
+	"reflect"
 	"strings"
 
+	mapstructure "github.com/go-viper/mapstructure/v2"
 	"github.com/spf13/viper"
 )
 
@@ -50,6 +52,29 @@ type SiteDatabase struct {
 	User string `mapstructure:"user" yaml:"user"`
 }
 
+// QueueConfig tunes a site's queue worker. nil => the server-default worker
+// (when Server.Queue) or none. Driver "" / "work" => queue:work; "horizon" =>
+// `artisan horizon` (Horizon manages its own workers; queue:work-only knobs are
+// rejected by validation and numprocs is forced to 1).
+type QueueConfig struct {
+	Driver     string `mapstructure:"driver" yaml:"driver,omitempty"`
+	Processes  int    `mapstructure:"processes" yaml:"processes,omitempty"`
+	Connection string `mapstructure:"connection" yaml:"connection,omitempty"`
+	Queue      string `mapstructure:"queue" yaml:"queue,omitempty"`
+	Sleep      int    `mapstructure:"sleep" yaml:"sleep,omitempty"`
+	Tries      int    `mapstructure:"tries" yaml:"tries,omitempty"`
+	Timeout    int    `mapstructure:"timeout" yaml:"timeout,omitempty"`
+	MaxMemory  int    `mapstructure:"max_memory" yaml:"max_memory,omitempty"`
+}
+
+// Daemon is an arbitrary long-running Supervisor program (Horizon/Reverb/custom).
+// Command is the FULL command, run from <deploy_path>/current.
+type Daemon struct {
+	Name      string `mapstructure:"name" yaml:"name"`
+	Command   string `mapstructure:"command" yaml:"command"`
+	Processes int    `mapstructure:"processes" yaml:"processes,omitempty"`
+}
+
 type Site struct {
 	Domain     string       `mapstructure:"domain" yaml:"domain"`
 	DeployPath string       `mapstructure:"deploy_path" yaml:"deploy_path"`
@@ -61,6 +86,8 @@ type Site struct {
 	HTTP3      bool         `mapstructure:"http3" yaml:"http3"` // HTTP/3 (QUIC); requires ssl + nginx.source: nginx
 	Database   SiteDatabase `mapstructure:"database" yaml:"database"`
 	Scheduler  *bool        `mapstructure:"scheduler" yaml:"scheduler,omitempty"` // per-site override; nil = inherit server default
+	Queue      *QueueConfig `mapstructure:"queue" yaml:"queue,omitempty"`
+	Daemons    []Daemon     `mapstructure:"daemons" yaml:"daemons,omitempty"`
 }
 
 // CertMode returns the certificate mode for a site, defaulting to "letsencrypt".
@@ -93,6 +120,42 @@ func (s *Server) SchedulerEnabled(site Site) bool {
 		return *site.Scheduler
 	}
 	return s.Scheduler
+}
+
+// PoolName derives the FPM pool / supervisor program slug from a domain
+// (filesystem-safe: dots -> underscores). Single source of truth shared by the
+// steps package and validation so program names never diverge.
+func PoolName(domain string) string { return strings.ReplaceAll(domain, ".", "_") }
+
+// QueueEnabled reports whether a site gets a queue worker: an explicit per-site
+// queue block, OR the server-wide Server.Queue default. site.Queue works
+// independently of Server.Queue.
+func (s *Server) QueueEnabled(site Site) bool { return site.Queue != nil || s.Queue }
+
+// NeedsSupervisor reports whether the supervisor step must run: any site has a
+// queue worker or any daemons.
+func (s *Server) NeedsSupervisor() bool {
+	for _, site := range s.Sites {
+		if s.QueueEnabled(site) || len(site.Daemons) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// SiteProgramNames returns the Supervisor program names a site owns, worker
+// first: "berth-<pool>" iff QueueEnabled, then "berth-<pool>-<name>" per daemon.
+// THE single source of truth for program naming.
+func (s *Server) SiteProgramNames(site Site) []string {
+	pool := PoolName(site.Domain)
+	var names []string
+	if s.QueueEnabled(site) {
+		names = append(names, "berth-"+pool)
+	}
+	for _, d := range site.Daemons {
+		names = append(names, "berth-"+pool+"-"+d.Name)
+	}
+	return names
 }
 
 // SiteDBName / SiteDBUser return the per-site database name and user, inheriting
@@ -163,11 +226,28 @@ func Load(path string) (*Server, error) {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
 	var s Server
-	if err := v.Unmarshal(&s); err != nil {
+	if err := v.Unmarshal(&s, viper.DecodeHook(mapstructure.ComposeDecodeHookFunc(
+		mapstructure.StringToTimeDurationHookFunc(),
+		mapstructure.StringToSliceHookFunc(","),
+		stringToQueueConfigHook,
+	))); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	if err := s.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config %s: %w", path, err)
 	}
 	return &s, nil
+}
+
+// stringToQueueConfigHook lets a bare string (e.g. `queue: horizon`) decode into
+// a QueueConfig{Driver: <string>}. It fires only for string sources whose target
+// is QueueConfig or *QueueConfig; map sources (`queue: {…}`) fall through.
+func stringToQueueConfigHook(f reflect.Type, t reflect.Type, data interface{}) (interface{}, error) {
+	if f.Kind() != reflect.String {
+		return data, nil
+	}
+	if t == reflect.TypeOf(QueueConfig{}) || t == reflect.TypeOf(&QueueConfig{}) {
+		return map[string]interface{}{"driver": data}, nil
+	}
+	return data, nil
 }
