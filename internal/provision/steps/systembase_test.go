@@ -45,6 +45,22 @@ func TestSystemBaseCheckUnsatisfiedWhenMissing(t *testing.T) {
 	}
 }
 
+func TestBasePackagesIncludeDeployerTools(t *testing.T) {
+	// The deployer clones over git and uploads built assets over rsync; both must
+	// be provisioned because a minimal Debian 13 ships neither.
+	for _, want := range []string{"git", "rsync"} {
+		found := false
+		for _, p := range basePackages {
+			if p == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("basePackages must include %q (required by the deployer)", want)
+		}
+	}
+}
+
 func TestSystemBaseApplyInstallsAndConfigures(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(basePackages, " "), bssh.Result{})
