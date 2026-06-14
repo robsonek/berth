@@ -3,6 +3,8 @@ server {
     listen 80;
     server_name app.example.com;
 
+    server_tokens off;
+
     location /.well-known/acme-challenge/ {
         root /var/www/berth-acme/app.example.com;
     }
@@ -20,6 +22,10 @@ server {
     root /home/deploy/myapp/current/public;
     index index.php;
 
+    server_tokens off;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+
     ssl_certificate /etc/letsencrypt/live/app.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/app.example.com/privkey.pem;
 
@@ -31,11 +37,17 @@ server {
         try_files $uri $uri/ /index.php?$query_string;
     }
 
+    location = /favicon.ico { access_log off; log_not_found off; }
+    location = /robots.txt  { access_log off; log_not_found off; }
+
+    error_page 404 /index.php;
+
     location ~ \.php$ {
         fastcgi_pass unix:/run/php/berth-app_example_com.sock;
         fastcgi_split_path_info ^(.+\.php)(/.+)$;
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+        fastcgi_hide_header X-Powered-By;
     }
 
     location ~ /\.(?!well-known).* { deny all; }
