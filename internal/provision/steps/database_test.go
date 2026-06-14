@@ -15,7 +15,7 @@ import (
 func databaseServer() *config.Server {
 	return &config.Server{
 		Host:     "app.example.com",
-		Database: config.Database{Engine: "mariadb", Name: "myapp", User: "myapp"},
+		Database: config.Database{Engine: "mariadb", Name: "myapp", User: "myapp", Source: "debian"},
 		Sites: []config.Site{{
 			Domain:     "app.example.com",
 			DeployPath: "/home/deploy/myapp",
@@ -144,7 +144,7 @@ func TestDatabaseCheckSourceMariaDBRequiresRepo(t *testing.T) {
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
 	// mariadb.org repo not yet registered -> not satisfied.
-	f.On("test -e "+shQuote(mariadbOrgSourceList), bssh.Result{ExitCode: 1})
+	f.On("test -e "+shQuote("/etc/apt/sources.list.d/mariadb-org.list"), bssh.Result{ExitCode: 1})
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -179,12 +179,54 @@ func TestDatabaseApplySourceMariaDBAddsRepo(t *testing.T) {
 	}
 	var sourceListWritten bool
 	for _, w := range f.Writes() {
-		if w.Path == mariadbOrgSourceList {
+		if w.Path == "/etc/apt/sources.list.d/mariadb-org.list" {
 			sourceListWritten = true
 		}
 	}
 	if !sourceListWritten {
 		t.Error("expected the mariadb-org apt source list to be written")
+	}
+}
+
+func TestDatabaseApplyPostgresFromPGDG(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	s.Database.Engine = "postgres"
+	s.Database.Source = "pgdg"
+	f := bssh.NewFakeRunner()
+	f.On("curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor --yes -o /usr/share/keyrings/pgdg.gpg", bssh.Result{})
+	f.On("gpg --show-keys --with-colons /usr/share/keyrings/pgdg.gpg", bssh.Result{Stdout: "fpr:::::::::B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8:\n"})
+	f.On("apt-get update", bssh.Result{})
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql", bssh.Result{})
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
+	f.On("sudo -u postgres psql -v ON_ERROR_STOP=1", bssh.Result{})
+
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	var cmds []string
+	for _, c := range f.Calls() {
+		cmds = append(cmds, c.Cmd)
+	}
+	if !strings.Contains(strings.Join(cmds, "\n"), "postgresql.org/media/keys/ACCC4CF8.asc") {
+		t.Errorf("source=pgdg must fetch the PGDG signing key; calls:\n%s", strings.Join(cmds, "\n"))
+	}
+	var pgdgListWritten bool
+	var envBody string
+	for _, w := range f.Writes() {
+		if w.Path == "/etc/apt/sources.list.d/pgdg.list" {
+			pgdgListWritten = true
+		}
+		if w.Path == envPath(s) {
+			envBody = string(w.Content)
+		}
+	}
+	if !pgdgListWritten {
+		t.Error("expected the pgdg apt source list to be written")
+	}
+	if !strings.Contains(envBody, "DB_CONNECTION=pgsql") || !strings.Contains(envBody, "DB_PORT=5432") {
+		t.Errorf("shared/.env must use the pgsql driver on port 5432; got:\n%s", envBody)
 	}
 }
 

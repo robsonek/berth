@@ -14,9 +14,11 @@ import (
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
 
-// mariadbOrgSourceList is the apt source file the mariadb.org repo is written to;
-// its presence is how Check knows the configured upstream source is in effect.
-const mariadbOrgSourceList = "/etc/apt/sources.list.d/mariadb-org.list"
+// upstreamSourceList is the apt source file an engine's producer repo is written
+// to; its presence is how Check knows the configured upstream source is in effect.
+func upstreamSourceList(repo apt.Repo) string {
+	return "/etc/apt/sources.list.d/" + repo.Name + ".list"
+}
 
 // dbPasswordKey is the .env / cache key under which the database password lives.
 const dbPasswordKey = "DB_PASSWORD"
@@ -43,7 +45,11 @@ func (database) Name() string       { return "database" }
 func (database) Requires() []string { return []string{"base", "appdirs"} }
 
 func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
-	installed, err := pkgInstalled(ctx, r, "mariadb-server")
+	eng, err := dbpkg.Get(s.Database.Engine)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	installed, err := pkgInstalled(ctx, r, eng.ServerPackage())
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
@@ -53,38 +59,42 @@ func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	// When mariadb.org is the configured source, its repo must be registered; this
-	// makes a source switch (debian -> mariadb) re-trigger Apply.
+	// When an upstream source is configured, the engine's producer repo must be
+	// registered; this makes a source switch (debian -> upstream) re-trigger Apply.
 	sourceOK := true
-	if s.Database.Source == "mariadb" {
-		sourceOK, err = fileExists(ctx, r, mariadbOrgSourceList)
-		if err != nil {
-			return provision.CheckResult{}, err
+	if s.Database.Source != "debian" {
+		if repo, ok := eng.UpstreamRepo(); ok {
+			sourceOK, err = fileExists(ctx, r, upstreamSourceList(repo))
+			if err != nil {
+				return provision.CheckResult{}, err
+			}
 		}
 	}
 	if installed && envExists && sourceOK {
-		return provision.CheckResult{Satisfied: true, Reason: "mariadb-server installed (" + s.Database.Source + ") and credential persisted"}, nil
+		return provision.CheckResult{Satisfied: true, Reason: eng.ServerPackage() + " installed (" + s.Database.Source + ") and credential persisted"}, nil
 	}
 	return provision.CheckResult{
 		Satisfied: false,
 		Reason:    "database server, credential, or configured source not yet provisioned",
-		Changes:   []string{"install mariadb-server (" + s.Database.Source + ")", "persist DB credential to shared/.env", "ensure database and user"},
+		Changes:   []string{"install " + eng.ServerPackage() + " (" + s.Database.Source + ")", "persist DB credential to shared/.env", "ensure database and user"},
 		Sensitive: true,
 	}, nil
 }
 
 func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) error {
-	if s.Database.Source == "mariadb" {
-		if err := apt.New(r).EnsureRepo(ctx, apt.MariaDBOrg()); err != nil {
-			return fmt.Errorf("add mariadb.org repo: %w", err)
-		}
-	}
-	if err := aptInstall(ctx, r, "mariadb-server"); err != nil {
-		return fmt.Errorf("install mariadb-server: %w", err)
-	}
 	eng, err := dbpkg.Get(s.Database.Engine)
 	if err != nil {
 		return err
+	}
+	if s.Database.Source != "debian" {
+		if repo, ok := eng.UpstreamRepo(); ok {
+			if err := apt.New(r).EnsureRepo(ctx, repo); err != nil {
+				return fmt.Errorf("add %s repo: %w", repo.Name, err)
+			}
+		}
+	}
+	if err := aptInstall(ctx, r, eng.ServerPackage()); err != nil {
+		return fmt.Errorf("install %s: %w", eng.ServerPackage(), err)
 	}
 	// Reuse an existing password from shared/.env or the local cache; otherwise
 	// generate. Re-runs must not rotate the secret.
@@ -95,7 +105,8 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	d.redactor.Add(pw) // mask in all output
 	// Persist FIRST (atomic), so a crash before EnsureUser still leaves a
 	// recoverable secret on the host and in the local cache.
-	if err := d.seedSharedEnv(ctx, s, r, pw); err != nil {
+	driver, port := eng.EnvConnection()
+	if err := d.seedSharedEnv(ctx, s, r, pw, driver, port); err != nil {
 		return err
 	}
 	if err := eng.EnsureDatabase(ctx, r, s.Database.Name); err != nil {
@@ -146,14 +157,14 @@ func (d database) resolvePassword(ctx context.Context, s *config.Server, r bssh.
 
 // seedSharedEnv renders shared/.env and writes it atomically (owner deploy, mode
 // 0600), then caches the secret locally for reuse on re-run.
-func (d database) seedSharedEnv(ctx context.Context, s *config.Server, r bssh.Runner, pw string) error {
+func (d database) seedSharedEnv(ctx context.Context, s *config.Server, r bssh.Runner, pw, driver, port string) error {
 	kv := map[string]string{
 		"APP_ENV":       "production",
 		"APP_DEBUG":     "false",
 		"APP_URL":       appURL(s.Sites[0]),
-		"DB_CONNECTION": "mysql",
+		"DB_CONNECTION": driver,
 		"DB_HOST":       "127.0.0.1",
-		"DB_PORT":       "3306",
+		"DB_PORT":       port,
 		"DB_DATABASE":   s.Database.Name,
 		"DB_USERNAME":   s.Database.User,
 		dbPasswordKey:   pw,

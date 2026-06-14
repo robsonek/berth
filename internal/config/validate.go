@@ -18,7 +18,10 @@ var (
 var allowedPHPVersions = map[string]bool{"8.2": true, "8.3": true, "8.4": true, "8.5": true}
 var allowedPHPSources = map[string]bool{"auto": true, "sury": true, "debian": true}
 var allowedNginxSources = map[string]bool{"debian": true, "nginx": true}
-var allowedDBSources = map[string]bool{"debian": true, "mariadb": true}
+
+// dbEngineUpstreamSource maps each supported database engine to the non-"debian"
+// value its database.source may take (its trusted producer repo).
+var dbEngineUpstreamSource = map[string]string{"mariadb": "mariadb", "postgres": "pgdg"}
 
 // Validate checks every field that reaches a shell, SQL statement, or path.
 func (s *Server) Validate() error {
@@ -37,11 +40,12 @@ func (s *Server) Validate() error {
 	if !allowedNginxSources[s.Nginx.Source] {
 		return fmt.Errorf("nginx.source %q must be debian or nginx", s.Nginx.Source)
 	}
-	if s.Database.Engine != "mariadb" {
-		return fmt.Errorf("database.engine %q unsupported (v1 supports mariadb)", s.Database.Engine)
+	upstream, engineOK := dbEngineUpstreamSource[s.Database.Engine]
+	if !engineOK {
+		return fmt.Errorf("database.engine %q unsupported (supported: mariadb, postgres)", s.Database.Engine)
 	}
-	if !allowedDBSources[s.Database.Source] {
-		return fmt.Errorf("database.source %q must be debian or mariadb", s.Database.Source)
+	if s.Database.Source != "debian" && s.Database.Source != upstream {
+		return fmt.Errorf("database.source %q invalid for engine %q (use debian or %s)", s.Database.Source, s.Database.Engine, upstream)
 	}
 	if !reSQLIdent.MatchString(s.Database.Name) {
 		return fmt.Errorf("database.name %q is not a valid SQL identifier", s.Database.Name)

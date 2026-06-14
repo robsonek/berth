@@ -19,6 +19,21 @@ func TestValidateOK(t *testing.T) {
 	}
 }
 
+func TestValidatePostgresEngine(t *testing.T) {
+	// postgres + pgdg upstream is valid.
+	s := base()
+	s.Database.Engine = "postgres"
+	s.Database.Source = "pgdg"
+	if err := s.Validate(); err != nil {
+		t.Errorf("postgres + pgdg should be valid; got %v", err)
+	}
+	// postgres + debian is valid too.
+	s.Database.Source = "debian"
+	if err := s.Validate(); err != nil {
+		t.Errorf("postgres + debian should be valid; got %v", err)
+	}
+}
+
 func TestValidateRejects(t *testing.T) {
 	cases := map[string]func(*Server){
 		"bad php version":  func(s *Server) { s.PHP.Version = "9.9" },
@@ -27,9 +42,13 @@ func TestValidateRejects(t *testing.T) {
 		"bad engine":       func(s *Server) { s.Database.Engine = "oracle" },
 		"bad nginx source": func(s *Server) { s.Nginx.Source = "openresty" },
 		"bad db source":    func(s *Server) { s.Database.Source = "percona" },
-		"relative path":    func(s *Server) { s.Sites[0].DeployPath = "deploy/x" },
-		"shell meta path":  func(s *Server) { s.Sites[0].DeployPath = "/home/$(whoami)" },
-		"ssl no email":     func(s *Server) { s.Sites[0].SSL = true },
+		"pg with mariadb source": func(s *Server) {
+			s.Database.Engine = "postgres"
+			s.Database.Source = "mariadb" // wrong upstream for postgres
+		},
+		"relative path":   func(s *Server) { s.Sites[0].DeployPath = "deploy/x" },
+		"shell meta path": func(s *Server) { s.Sites[0].DeployPath = "/home/$(whoami)" },
+		"ssl no email":    func(s *Server) { s.Sites[0].SSL = true },
 		"ssl bad email": func(s *Server) {
 			s.Sites[0].SSL = true
 			s.Sites[0].SSLEmail = "x@y.com; reboot"

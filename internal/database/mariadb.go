@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/robsonek/berth/internal/provision"
+	"github.com/robsonek/berth/internal/apt"
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
 
@@ -14,9 +14,14 @@ type MariaDB struct{}
 
 func (MariaDB) Name() string { return "mariadb" }
 
-// InstallSteps returns steps that install and enable the server. Implemented as
-// a thin step in Task 9's registry; kept here so the engine owns its packages.
-func (MariaDB) InstallSteps() []provision.Step { return nil } // wired via steps.MariaDBInstall
+// ServerPackage is the Debian/mariadb.org server package.
+func (MariaDB) ServerPackage() string { return "mariadb-server" }
+
+// UpstreamRepo is mariadb.org's 11.8 LTS repository.
+func (MariaDB) UpstreamRepo() (apt.Repo, bool) { return apt.MariaDBOrg(), true }
+
+// EnvConnection is Laravel's MySQL-protocol driver and default port.
+func (MariaDB) EnvConnection() (driver, port string) { return "mysql", "3306" }
 
 // runSQL pipes a statement to the local socket as root (unix_socket auth on Debian).
 func runSQL(ctx context.Context, r bssh.Runner, sql string) error {

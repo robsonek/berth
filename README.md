@@ -67,18 +67,22 @@ php:
 nginx:
   source: nginx       # debian | nginx         (nginx.org mainline)
 database:
-  engine: mariadb
-  source: mariadb     # debian | mariadb        (mariadb.org 11.8 LTS)
+  engine: mariadb     # mariadb | postgres
+  source: mariadb     # mariadb engine: debian | mariadb (mariadb.org 11.8 LTS)
+                      # postgres engine: debian | pgdg   (apt.postgresql.org / PGDG)
 ```
 
-Each defaults to `debian`. An upstream source aborts the run if the fetched key
-does not match the pinned fingerprint.
+Each defaults to `debian`. `database.source` accepts `debian` or the chosen
+engine's producer repo (`mariadb` for MariaDB, `pgdg` for PostgreSQL). An
+upstream source aborts the run if the fetched key does not match the pinned
+fingerprint.
 
 ## Beyond v1
 
-v1 covers `berth init` and `berth provision` (one server and its first site,
-MariaDB). MySQL 8 / PostgreSQL engines, multi-site (`berth site:add`), and
-package-manager distribution are planned for later releases. See the
+v1 covers `berth init` and `berth provision` (one server and its first site),
+with **MariaDB or PostgreSQL** as the database engine. Multi-site
+(`berth site:add`) and package-manager distribution are planned for later
+releases. See the
 [design specification](docs/design/2026-06-13-berth-design.md) for the full
 scope.
 

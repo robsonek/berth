@@ -47,6 +47,20 @@ func NginxOrg() Repo {
 	}
 }
 
+// PostgresPGDG returns the official PostgreSQL Global Development Group (PGDG)
+// repository for Debian 13, used by the database step when database.source is
+// "pgdg". Fingerprint is the full 40-hex PGDG signing key.
+func PostgresPGDG() Repo {
+	return Repo{
+		Name:        "pgdg",
+		URI:         "https://apt.postgresql.org/pub/repos/apt/",
+		Suite:       "trixie-pgdg",
+		Components:  []string{"main"},
+		KeyURL:      "https://www.postgresql.org/media/keys/ACCC4CF8.asc",
+		Fingerprint: "B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8",
+	}
+}
+
 // MariaDBOrg returns the official mariadb.org 11.8 LTS repository for Debian 13,
 // used by the database step when database.source is "mariadb". Fingerprint is the
 // full 40-hex MariaDB release signing key.
