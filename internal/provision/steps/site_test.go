@@ -450,3 +450,73 @@ func stubFPMApply(s *config.Server, f *bssh.FakeRunner) {
 	f.On("systemctl reload "+fpmService(s), bssh.Result{})
 	f.On("logrotate -d "+shQuote(logrotatePath), bssh.Result{})
 }
+
+// replayWritesAsReads seeds dst with `cat '<path>'` stubs for every file written
+// during an Apply phase, last-write-wins: a Go map dedupes by path, so a later
+// overwrite (e.g. the tls step swapping the vhost to the 443 block) wins. This
+// models a real host where the files an earlier step wrote are what a later
+// Check reads back via `cat`.
+func replayWritesAsReads(dst *bssh.FakeRunner, writes []bssh.FileSpec) {
+	latest := map[string][]byte{}
+	for _, w := range writes {
+		latest[w.Path] = w.Content
+	}
+	for path, content := range latest {
+		dst.On("cat "+shQuote(path), bssh.Result{Stdout: string(content), ExitCode: 0})
+	}
+}
+
+// TestSiteCheckSatisfiedAfterTLSSwap proves the cross-step contract end to end:
+// after `site` writes the HTTP block (no cert yet) and `tls` issues a self-signed
+// cert + swaps the vhost to the 443 block, a subsequent `site.Check` is satisfied
+// with no further write — so the engine never re-applies `site` and never reverts
+// TLS back to HTTP. Self-signed avoids any DNS/certbot dependency.
+func TestSiteCheckSatisfiedAfterTLSSwap(t *testing.T) {
+	s := siteServer()
+	s.Sites[0].SSL = true
+	s.Sites[0].SSLMode = "selfsigned"
+	site := s.Sites[0]
+	ctx := context.Background()
+
+	// --- Apply phase: site.Apply then tls.Apply over one runner; cert absent. ---
+	fApply := bssh.NewFakeRunner()
+	fApply.On("test -e "+shQuote(certFullchainPath(site)), bssh.Result{ExitCode: 1}) // no cert yet
+	// site.Apply commands:
+	fApply.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	fApply.On("nginx -t", bssh.Result{ExitCode: 0})
+	fApply.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, fApply)
+	// tls.Apply (self-signed) commands:
+	fApply.On("DEBIAN_FRONTEND=noninteractive apt-get install -y openssl", bssh.Result{})
+	fApply.On("install -d -m 0755 "+shQuote(certDir(site)), bssh.Result{})
+	openssl := fmt.Sprintf("openssl req -x509 -newkey rsa:2048 -nodes -days 825 -keyout %s -out %s -subj %s -addext %s",
+		shQuote(certKeyPath(site)), shQuote(certFullchainPath(site)),
+		shQuote("/CN="+site.Domain), shQuote("subjectAltName=DNS:"+site.Domain))
+	fApply.On(openssl, bssh.Result{})
+	fApply.On("chmod 600 "+shQuote(certKeyPath(site)), bssh.Result{})
+
+	if err := Site().Apply(ctx, provision.RunCtx{}, s, fApply); err != nil {
+		t.Fatalf("site.Apply: %v", err)
+	}
+	if err := TLS().Apply(ctx, provision.RunCtx{}, s, fApply); err != nil {
+		t.Fatalf("tls.Apply: %v", err)
+	}
+
+	// --- Check phase: fresh runner seeded from what Apply wrote; cert now present. ---
+	fCheck := bssh.NewFakeRunner()
+	replayWritesAsReads(fCheck, fApply.Writes())
+	fCheck.On("test -e "+shQuote(certFullchainPath(site)), bssh.Result{ExitCode: 0})
+	fCheck.On("nginx -t", bssh.Result{ExitCode: 0})
+	fCheck.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
+
+	cr, err := Site().Check(ctx, provision.RunCtx{}, s, fCheck)
+	if err != nil {
+		t.Fatalf("site.Check after tls swap: %v", err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("site.Check must be satisfied after the tls swap (no drift); got %+v", cr)
+	}
+	if n := len(fCheck.Writes()); n != 0 {
+		t.Errorf("site.Check must be side-effect-free; got %d writes", n)
+	}
+}
