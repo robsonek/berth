@@ -37,24 +37,71 @@ type siteFile struct {
 
 // managedSiteFiles returns every config file the site step owns, in render order.
 // Both Check (content-hash drift) and Apply (WriteFile) use this list so they
-// stay in lock-step.
-func managedSiteFiles(s *config.Server) []siteFile {
+// stay in lock-step. The nginx block is cert-aware (HTTPS once a certificate is
+// installed) so a re-run does not revert the TLS step's 443 block back to HTTP.
+func managedSiteFiles(ctx context.Context, r bssh.Runner, s *config.Server) ([]siteFile, error) {
 	var files []siteFile
 	for _, site := range s.Sites {
-		http, _ := renderNginxHTTP(s, site)
-		files = append(files, siteFile{nginxAvailablePath(site.Domain), http})
-		pool, _ := renderFPMPool(s, site)
+		conf, err := renderSiteNginx(ctx, r, s, site)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, siteFile{nginxAvailablePath(site.Domain), conf})
+		pool, err := renderFPMPool(s, site)
+		if err != nil {
+			return nil, err
+		}
 		files = append(files, siteFile{fpmPoolPath(s.PHP.Version, site.Domain), pool})
 	}
-	prog, _ := renderSupervisor(s)
+	prog, err := renderSupervisor(s)
+	if err != nil {
+		return nil, err
+	}
 	files = append(files, siteFile{supervisorProgramPath(s), prog})
-	cron, _ := renderCron(s)
+	cron, err := renderCron(s)
+	if err != nil {
+		return nil, err
+	}
 	files = append(files, siteFile{cronPath(s), cron})
-	return files
+	return files, nil
+}
+
+// certInstalled reports whether a Let's Encrypt certificate file is present for
+// the domain (used to decide whether the nginx block should be HTTPS yet).
+func certInstalled(ctx context.Context, r bssh.Runner, domain string) (bool, error) {
+	return fileExists(ctx, r, "/etc/letsencrypt/live/"+domain+"/fullchain.pem")
+}
+
+// renderSiteNginx renders the HTTPS (443) server block when the site uses SSL and
+// a certificate is already installed, otherwise the HTTP-only block — so the ACME
+// webroot challenge can complete on the first issuance, and subsequent runs keep
+// the HTTPS block in place rather than reverting it.
+func renderSiteNginx(ctx context.Context, r bssh.Runner, s *config.Server, site config.Site) ([]byte, error) {
+	if site.SSL {
+		has, err := certInstalled(ctx, r, site.Domain)
+		if err != nil {
+			return nil, err
+		}
+		if has {
+			return renderNginxHTTPS(s, site)
+		}
+	}
+	return renderNginxHTTP(s, site)
 }
 
 func renderNginxHTTP(s *config.Server, site config.Site) ([]byte, error) {
 	return templates.Render("nginx_http.conf.tmpl", struct {
+		Domain, DeployPath, ACMEWebroot, PHPVersion string
+	}{
+		Domain: site.Domain, DeployPath: site.DeployPath,
+		ACMEWebroot: acmeWebroot(site.Domain), PHPVersion: s.PHP.Version,
+	})
+}
+
+// renderNginxHTTPS renders the 443 server block (HTTP redirect + TLS); shared by
+// the site step (idempotent re-render) and the tls step (first issuance).
+func renderNginxHTTPS(s *config.Server, site config.Site) ([]byte, error) {
+	return templates.Render("nginx_https.conf.tmpl", struct {
 		Domain, DeployPath, ACMEWebroot, PHPVersion string
 	}{
 		Domain: site.Domain, DeployPath: site.DeployPath,
@@ -103,7 +150,11 @@ func (site) Name() string       { return "site" }
 func (site) Requires() []string { return []string{"php", "nginx", "appdirs", "database"} }
 
 func (st site) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
-	for _, mf := range managedSiteFiles(s) {
+	mfs, err := managedSiteFiles(ctx, r, s)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	for _, mf := range mfs {
 		state, err := checkManagedFile(ctx, r, mf.path, mf.content)
 		if err != nil {
 			return provision.CheckResult{}, err
@@ -146,14 +197,15 @@ func (site) changes() []string {
 }
 
 func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) error {
-	// 1) Write each site's nginx server block and enable it.
+	// 1) Write each site's nginx server block (cert-aware: HTTPS once a cert
+	//    exists, HTTP-only before first issuance) and enable it.
 	for _, site := range s.Sites {
-		http, err := renderNginxHTTP(s, site)
+		conf, err := renderSiteNginx(ctx, r, s, site)
 		if err != nil {
 			return fmt.Errorf("render nginx config for %s: %w", site.Domain, err)
 		}
 		if err := r.WriteFile(ctx, bssh.FileSpec{
-			Path: nginxAvailablePath(site.Domain), Content: http,
+			Path: nginxAvailablePath(site.Domain), Content: conf,
 			Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
 		}); err != nil {
 			return fmt.Errorf("write nginx config for %s: %w", site.Domain, err)

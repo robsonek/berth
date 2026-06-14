@@ -10,7 +10,6 @@ import (
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
 	bssh "github.com/robsonek/berth/internal/ssh"
-	"github.com/robsonek/berth/internal/templates"
 )
 
 // certRenewWindow is the lead time before expiry within which a certificate is
@@ -99,13 +98,9 @@ func (tls) issue(ctx context.Context, rc provision.RunCtx, s *config.Server, sit
 		return fmt.Errorf("certbot certonly for %s: %s", site.Domain, res.Stderr)
 	}
 
-	// Swap nginx to the HTTPS (443) server block at the same site path.
-	https, err := templates.Render("nginx_https.conf.tmpl", struct {
-		Domain, DeployPath, ACMEWebroot, PHPVersion string
-	}{
-		Domain: site.Domain, DeployPath: site.DeployPath,
-		ACMEWebroot: acmeWebroot(site.Domain), PHPVersion: s.PHP.Version,
-	})
+	// Swap nginx to the HTTPS (443) server block at the same site path (shared
+	// renderer with the site step so a re-run sees no drift).
+	https, err := renderNginxHTTPS(s, site)
 	if err != nil {
 		return fmt.Errorf("render https config for %s: %w", site.Domain, err)
 	}

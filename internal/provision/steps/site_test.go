@@ -154,11 +154,45 @@ func TestSiteCheckUnsatisfiedWhenNginxInvalid(t *testing.T) {
 	}
 }
 
+func TestSiteNginxIsCertAware(t *testing.T) {
+	s := siteServer()
+	s.Sites[0].SSL = true
+	certPath := "/etc/letsencrypt/live/" + s.Sites[0].Domain + "/fullchain.pem"
+
+	// No certificate yet: the nginx block must be HTTP-only so the ACME webroot
+	// challenge can complete (never reference a cert that does not exist).
+	noCert := bssh.NewFakeRunner()
+	noCert.On("test -e "+shQuote(certPath), bssh.Result{ExitCode: 1})
+	mfs, err := managedSiteFiles(context.Background(), noCert, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := string(mfs[0].content); !strings.Contains(c, "listen 80;") || strings.Contains(c, "listen 443") {
+		t.Errorf("without a cert, expected HTTP-only block; got:\n%s", c)
+	}
+
+	// Certificate present: the nginx block must be the HTTPS (443) one, so a
+	// re-run does not revert the TLS step's 443 block back to HTTP.
+	withCert := bssh.NewFakeRunner()
+	withCert.On("test -e "+shQuote(certPath), bssh.Result{ExitCode: 0})
+	mfs, err = managedSiteFiles(context.Background(), withCert, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := string(mfs[0].content); !strings.Contains(c, "listen 443") {
+		t.Errorf("with a cert, expected the HTTPS 443 block; got:\n%s", c)
+	}
+}
+
 // stubManagedSiteFiles makes every managed site file read back as up-to-date so
 // the Check's content-hash comparison is satisfied.
 func stubManagedSiteFiles(t *testing.T, s *config.Server, f *bssh.FakeRunner) {
 	t.Helper()
-	for _, mf := range managedSiteFiles(s) {
+	mfs, err := managedSiteFiles(context.Background(), f, s)
+	if err != nil {
+		t.Fatalf("managedSiteFiles: %v", err)
+	}
+	for _, mf := range mfs {
 		f.On("cat "+shQuote(mf.path), bssh.Result{Stdout: string(mf.content)})
 	}
 }
