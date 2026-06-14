@@ -38,4 +38,18 @@ func TestPreflightApplyRunsAptUpdate(t *testing.T) {
 	if cmds[0] != "sudo -n true" || cmds[1] != "sudo DEBIAN_FRONTEND=noninteractive apt-get update -y" {
 		t.Errorf("unexpected command sequence: %v", cmds)
 	}
+	// The dpkg-lock-wait config must be written before the apt-get update so a
+	// boot-time apt-daily run cannot make the install steps fail on the lock.
+	var wroteLockCfg bool
+	for _, w := range f.Writes() {
+		if w.Path == aptLockTimeoutPath {
+			wroteLockCfg = true
+			if string(w.Content) != aptLockTimeoutBody {
+				t.Errorf("lock-timeout config body = %q, want %q", w.Content, aptLockTimeoutBody)
+			}
+		}
+	}
+	if !wroteLockCfg {
+		t.Errorf("expected %s to be written", aptLockTimeoutPath)
+	}
 }
