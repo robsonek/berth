@@ -174,3 +174,65 @@ func TestHardeningCheckUnsatisfiedWhenUfwInactive(t *testing.T) {
 		t.Error("expected unsatisfied when ufw is inactive")
 	}
 }
+
+func TestHardeningApplyOpensUDP443WhenHTTP3(t *testing.T) {
+	stubGate(t, nil, nil)
+	s := hardeningServer()
+	s.Sites = []config.Site{{Domain: "a.example.com", HTTP3: true}}
+	f := bssh.NewFakeRunner()
+	f.On("ufw allow 2222/tcp", bssh.Result{})
+	f.On("ufw allow 80,443/tcp", bssh.Result{})
+	f.On("ufw allow 443/udp", bssh.Result{})
+	f.On("ufw --force enable", bssh.Result{})
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
+	f.On("systemctl reload ssh", bssh.Result{})
+
+	if err := Hardening().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var sawUDP bool
+	for _, c := range f.Calls() {
+		if c.Cmd == "ufw allow 443/udp" {
+			sawUDP = true
+		}
+	}
+	if !sawUDP {
+		t.Error("expected `ufw allow 443/udp` when a site enables http3")
+	}
+}
+
+func TestHardeningCheckRequiresUDP443WhenHTTP3(t *testing.T) {
+	s := hardeningServer()
+	s.Sites = []config.Site{{Domain: "a.example.com", HTTP3: true}}
+	f := bssh.NewFakeRunner()
+	// ufw active with 80,443/tcp but NOT 443/udp -> an http3 site is not satisfied.
+	f.On("ufw status", bssh.Result{Stdout: "Status: active\n80,443/tcp ALLOW Anywhere\n", ExitCode: 0})
+	f.On("systemctl is-active fail2ban", bssh.Result{ExitCode: 0})
+	f.On("systemctl is-enabled fail2ban", bssh.Result{ExitCode: 0})
+	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{Stdout: sshdDropInBody, ExitCode: 0})
+	cr, err := Hardening().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied: an http3 site needs 443/udp open")
+	}
+	// A decoy UDP rule whose port merely ends in 443 must NOT count as 443/udp.
+	f.On("ufw status", bssh.Result{Stdout: "Status: active\n80,443/tcp ALLOW Anywhere\n10443/udp ALLOW Anywhere\n", ExitCode: 0})
+	cr, err = Hardening().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied: 10443/udp must not be mistaken for 443/udp")
+	}
+	// Once 443/udp is also allowed, it is satisfied.
+	f.On("ufw status", bssh.Result{Stdout: "Status: active\n80,443/tcp ALLOW Anywhere\n443/udp ALLOW Anywhere\n", ExitCode: 0})
+	cr, err = Hardening().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("expected satisfied once 443/udp is open; got %+v", cr)
+	}
+}

@@ -43,7 +43,10 @@ func checkGoldenRender(t *testing.T, render func(string, any) ([]byte, error), n
 	}
 }
 
-type nginxData struct{ Domain, DeployPath, ACMEWebroot, Socket, CertPath, KeyPath string }
+type nginxData struct {
+	Domain, DeployPath, ACMEWebroot, Socket, CertPath, KeyPath string
+	HTTP3, QUICReuseport                                       bool
+}
 
 const testSocket = "/run/php/berth-app_example_com.sock"
 
@@ -62,6 +65,13 @@ func TestRenderNginxHTTPGolden(t *testing.T) {
 
 func TestRenderNginxHTTPSGolden(t *testing.T) {
 	checkGolden(t, "nginx_https.conf.tmpl", "nginx_https.golden", nginxGoldenData())
+}
+
+func TestRenderNginxHTTPSHTTP3Golden(t *testing.T) {
+	d := nginxGoldenData()
+	d.HTTP3 = true
+	d.QUICReuseport = true
+	checkGolden(t, "nginx_https.conf.tmpl", "nginx_https_http3.golden", d)
 }
 
 func TestRenderFPMPoolGolden(t *testing.T) {

@@ -1,11 +1,12 @@
+# managed by berth
 server {
     listen 80;
-    server_name {{ .Domain }};
+    server_name app.example.com;
 
     server_tokens off;
 
     location /.well-known/acme-challenge/ {
-        root {{ .ACMEWebroot }};
+        root /var/www/berth-acme/app.example.com;
     }
 
     location / {
@@ -16,30 +17,24 @@ server {
 server {
     listen 443 ssl;
     listen [::]:443 ssl;
-{{- if .HTTP3 }}
-    listen 443 quic{{ if .QUICReuseport }} reuseport{{ end }};
-    listen [::]:443 quic{{ if .QUICReuseport }} reuseport{{ end }};
-{{- end }}
+    listen 443 quic reuseport;
+    listen [::]:443 quic reuseport;
     http2 on;
-{{- if .HTTP3 }}
     http3 on;
-{{- end }}
-    server_name {{ .Domain }};
-    root {{ .DeployPath }}/current/public;
+    server_name app.example.com;
+    root /home/deploy/myapp/current/public;
     index index.php;
 
     server_tokens off;
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
-{{- if .HTTP3 }}
     add_header Alt-Svc 'h3=":443"; ma=86400' always;
-{{- end }}
 
-    ssl_certificate {{ .CertPath }};
-    ssl_certificate_key {{ .KeyPath }};
+    ssl_certificate /etc/letsencrypt/live/app.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/app.example.com/privkey.pem;
 
     location /.well-known/acme-challenge/ {
-        root {{ .ACMEWebroot }};
+        root /var/www/berth-acme/app.example.com;
     }
 
     location / {
@@ -52,7 +47,7 @@ server {
     error_page 404 /index.php;
 
     location ~ \.php$ {
-        fastcgi_pass unix:{{ .Socket }};
+        fastcgi_pass unix:/run/php/berth-app_example_com.sock;
         fastcgi_split_path_info ^(.+\.php)(/.+)$;
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;

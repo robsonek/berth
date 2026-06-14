@@ -99,6 +99,16 @@ func (s *Server) Validate() error {
 		if reservedOSUsers[osUser] {
 			return fmt.Errorf("site %d (%s): os user %q is reserved by the system; set sites[].user to a non-reserved name", i, site.Domain, osUser)
 		}
+		// HTTP/3 (QUIC) is always over TLS and needs an nginx built with the v3
+		// module — berth only knows the nginx.org mainline package ships it.
+		if site.HTTP3 {
+			if !site.SSL {
+				return fmt.Errorf("site %d (%s): http3 requires ssl: true (QUIC is always over TLS)", i, site.Domain)
+			}
+			if s.Nginx.Source != "nginx" {
+				return fmt.Errorf("site %d (%s): http3 requires nginx.source: nginx (only that source ships the HTTP/3 module)", i, site.Domain)
+			}
+		}
 		// Isolation requires a distinct domain, OS user, DB name, DB user and path.
 		if err := dup(seenDomain, site.Domain, "domain"); err != nil {
 			return err

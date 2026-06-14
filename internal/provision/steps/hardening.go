@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/robsonek/berth/internal/config"
@@ -14,6 +15,11 @@ const (
 	sshdDropInPath = "/etc/ssh/sshd_config.d/berth.conf"
 	sshdDropInBody = managedMarker + "\nPermitRootLogin no\nPasswordAuthentication no\n"
 )
+
+// re443udp matches a `443/udp` ufw rule on a port boundary so unrelated UDP rules
+// whose port merely ends in 443 (e.g. 10443/udp, 8443/udp) do not false-positive
+// the QUIC firewall check.
+var re443udp = regexp.MustCompile(`(^|[^0-9])443/udp`)
 
 // verifyBerthAccess is the anti-lockout gate (design §6.2). It opens a brand-new
 // SSH session as the berth account and confirms key auth + passwordless sudo
@@ -49,13 +55,15 @@ func Hardening() provision.Step { return hardening{} }
 func (hardening) Name() string       { return "hardening" }
 func (hardening) Requires() []string { return []string{"accounts"} }
 
-func (hardening) Check(ctx context.Context, rc provision.RunCtx, _ *config.Server, r bssh.Runner) (provision.CheckResult, error) {
+func (hardening) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
 	// ufw must be active.
 	status, err := r.Run(ctx, "ufw status", nil)
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
 	ufwActive := status.ExitCode == 0 && strings.Contains(status.Stdout, "Status: active")
+	// HTTP/3 sites also need UDP/443 (QUIC) opened in the firewall.
+	udpOK := !anySiteHTTP3(s) || re443udp.MatchString(status.Stdout)
 
 	// fail2ban must be installed and running.
 	f2bUp, err := serviceUp(ctx, r, "fail2ban")
@@ -73,7 +81,7 @@ func (hardening) Check(ctx context.Context, rc provision.RunCtx, _ *config.Serve
 		return provision.CheckResult{}, err
 	}
 
-	if ufwActive && f2bUp && sshdOK {
+	if ufwActive && f2bUp && sshdOK && udpOK {
 		return provision.CheckResult{Satisfied: true, Reason: "firewall, fail2ban and sshd hardening in place"}, nil
 	}
 	return provision.CheckResult{
@@ -99,11 +107,15 @@ func (h hardening) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serv
 
 	// Firewall: allow the actual SSH port plus 80/443 BEFORE enabling ufw, so
 	// enabling the firewall can never cut off the current connection (§6.2).
-	for _, cmd := range []string{
+	cmds := []string{
 		fmt.Sprintf("ufw allow %d/tcp", s.SSH.Port),
 		"ufw allow 80,443/tcp",
-		"ufw --force enable",
-	} {
+	}
+	if anySiteHTTP3(s) {
+		cmds = append(cmds, "ufw allow 443/udp") // QUIC (HTTP/3)
+	}
+	cmds = append(cmds, "ufw --force enable")
+	for _, cmd := range cmds {
 		if res, err := r.Run(ctx, cmd, nil); err != nil {
 			return err
 		} else if res.ExitCode != 0 {

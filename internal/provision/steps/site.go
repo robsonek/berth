@@ -117,25 +117,53 @@ func renderSiteNginx(ctx context.Context, r bssh.Runner, s *config.Server, site 
 
 // nginxData is the render input for both nginx server-block templates. Socket is
 // the site's own PHP-FPM socket so each domain proxies to its own pool/user;
-// CertPath/KeyPath point at the site's TLS material (LE or self-signed).
-type nginxData struct{ Domain, DeployPath, ACMEWebroot, Socket, CertPath, KeyPath string }
+// CertPath/KeyPath point at the site's TLS material (LE or self-signed). HTTP3
+// adds the QUIC listeners + Alt-Svc; QUICReuseport marks the one site that owns
+// the `reuseport` flag on the shared :443 QUIC socket.
+type nginxData struct {
+	Domain, DeployPath, ACMEWebroot, Socket, CertPath, KeyPath string
+	HTTP3, QUICReuseport                                       bool
+}
 
-func nginxRenderData(site config.Site) nginxData {
+func nginxRenderData(s *config.Server, site config.Site) nginxData {
 	return nginxData{
 		Domain: site.Domain, DeployPath: site.DeployPath,
 		ACMEWebroot: acmeWebroot(site.Domain), Socket: fpmSocket(site.Domain),
 		CertPath: certFullchainPath(site), KeyPath: certKeyPath(site),
+		HTTP3:         site.HTTP3,
+		QUICReuseport: site.HTTP3 && quicReuseportOwner(s) == site.Domain,
 	}
 }
 
-func renderNginxHTTP(_ *config.Server, site config.Site) ([]byte, error) {
-	return templates.Render("nginx_http.conf.tmpl", nginxRenderData(site))
+// quicReuseportOwner returns the HTTP/3 site domain that owns the `reuseport`
+// flag on the shared :443 QUIC socket. nginx permits `reuseport` only once per
+// address:port and must see it on the FIRST `listen` it parses for that socket.
+// berth enables vhosts via `include /etc/nginx/sites-enabled/*;`, a wildcard
+// nginx expands in LEXICOGRAPHIC order — so the owner must be the alphabetically
+// smallest HTTP/3 domain (the block nginx parses first), independent of the order
+// the sites appear in the config. Empty when none enable HTTP/3.
+func quicReuseportOwner(s *config.Server) string {
+	owner := ""
+	for _, site := range s.Sites {
+		if site.HTTP3 && (owner == "" || site.Domain < owner) {
+			owner = site.Domain
+		}
+	}
+	return owner
+}
+
+// anySiteHTTP3 reports whether any site enables HTTP/3, so the firewall must also
+// open UDP/443 for QUIC.
+func anySiteHTTP3(s *config.Server) bool { return quicReuseportOwner(s) != "" }
+
+func renderNginxHTTP(s *config.Server, site config.Site) ([]byte, error) {
+	return templates.Render("nginx_http.conf.tmpl", nginxRenderData(s, site))
 }
 
 // renderNginxHTTPS renders the 443 server block (HTTP redirect + TLS); shared by
 // the site step (idempotent re-render) and the tls step (first issuance).
-func renderNginxHTTPS(_ *config.Server, site config.Site) ([]byte, error) {
-	return templates.Render("nginx_https.conf.tmpl", nginxRenderData(site))
+func renderNginxHTTPS(s *config.Server, site config.Site) ([]byte, error) {
+	return templates.Render("nginx_https.conf.tmpl", nginxRenderData(s, site))
 }
 
 func renderFPMPool(s *config.Server, site config.Site) ([]byte, error) {
