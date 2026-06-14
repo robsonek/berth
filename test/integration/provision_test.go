@@ -101,6 +101,33 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	if !skipSSL && anySiteSelfSigned(srv) {
 		assertSelfSignedCert(ctx, t, client, srv)
 	}
+
+	// berth's defining contract: an immediate second run must change nothing
+	// (every step satisfied), except preflight which re-runs apt by design.
+	assertSecondRunIdempotent(ctx, t, eng, srv, client)
+}
+
+// assertSecondRunIdempotent runs the pipeline a SECOND time over the same
+// connection and asserts berth's defining contract: every step is already
+// satisfied. The SOLE exception is `preflight`, the only AlwaysRun step (it
+// re-runs `apt-get update` every run by design). Any other EventApplied, or any
+// EventFailed, on the second run is an idempotency regression and fails the test.
+func assertSecondRunIdempotent(ctx context.Context, t *testing.T, eng *provision.Engine, srv *config.Server, client *bssh.Client) {
+	t.Helper()
+	events, err := eng.Run(ctx, srv, client, provision.Options{SSLStaging: os.Getenv("BERTH_TEST_SSL_STAGING") == "true"})
+	if err != nil {
+		t.Fatalf("second run pre-flight: %v", err)
+	}
+	for ev := range events {
+		switch ev.Kind {
+		case provision.EventFailed:
+			t.Fatalf("second run: step %q failed: %v", ev.Step, ev.Err)
+		case provision.EventApplied:
+			if ev.Step != "preflight" {
+				t.Errorf("second run: step %q re-applied — berth is not idempotent (only preflight may re-apply)", ev.Step)
+			}
+		}
+	}
 }
 
 // anySiteSSL reports whether any configured site enables TLS.
