@@ -5,9 +5,50 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
+
+// aptLockSleep is the pause between apt-lock retries; a package var so tests can
+// stub it to return immediately.
+var aptLockSleep = func() { time.Sleep(5 * time.Second) }
+
+// aptLockMaxAttempts bounds the wait for a concurrent apt holder to release
+// (5s × 120 ≈ 10 min, matching berth's DPkg::Lock::Timeout philosophy).
+const aptLockMaxAttempts = 120
+
+// isAptLockBusy reports whether an apt failure is transient lock contention
+// (another process holds the dpkg/lists lock) rather than a real error.
+// DPkg::Lock::Timeout makes apt wait for the dpkg/archives locks, but NOT for
+// apt-get update's separate lists lock, so a freshly-booted box's
+// unattended-upgrades can still fail an update instantly; we wait it out.
+func isAptLockBusy(stderr string) bool {
+	s := strings.ToLower(stderr)
+	return strings.Contains(s, "could not get lock") ||
+		strings.Contains(s, "unable to lock") ||
+		strings.Contains(s, "is held by process")
+}
+
+// runAptWaitingForLock runs an apt command, retrying only while it fails purely
+// because another process holds an apt lock. Any other non-zero exit is a real
+// error surfaced immediately.
+func (m *Manager) runAptWaitingForLock(ctx context.Context, cmd, what string) error {
+	for attempt := 1; ; attempt++ {
+		res, err := m.r.Run(ctx, cmd, nil)
+		if err != nil {
+			return err
+		}
+		if res.ExitCode == 0 {
+			return nil
+		}
+		if isAptLockBusy(res.Stderr) && attempt < aptLockMaxAttempts {
+			aptLockSleep()
+			continue
+		}
+		return fmt.Errorf("%s: %s", what, res.Stderr)
+	}
+}
 
 // Repo describes a pinned third-party apt repository.
 type Repo struct {
@@ -106,12 +147,7 @@ func (m *Manager) EnsureRepo(ctx context.Context, repo Repo) error {
 	}); err != nil {
 		return fmt.Errorf("write source: %w", err)
 	}
-	if res, err := m.r.Run(ctx, "apt-get update", nil); err != nil {
-		return err
-	} else if res.ExitCode != 0 {
-		return fmt.Errorf("apt-get update after adding %s: %s", repo.Name, res.Stderr)
-	}
-	return nil
+	return m.runAptWaitingForLock(ctx, "apt-get update", "apt-get update after adding "+repo.Name)
 }
 
 // EnsurePackages installs packages non-interactively from the stock repos (or
@@ -120,12 +156,5 @@ func (m *Manager) EnsureRepo(ctx context.Context, repo Repo) error {
 // package does not hang on a prompt. A non-zero apt exit is surfaced as an error.
 func (m *Manager) EnsurePackages(ctx context.Context, _ *Repo, pkgs ...string) error {
 	cmd := "DEBIAN_FRONTEND=noninteractive apt-get install -y " + strings.Join(pkgs, " ")
-	res, err := m.r.Run(ctx, cmd, nil)
-	if err != nil {
-		return err
-	}
-	if res.ExitCode != 0 {
-		return fmt.Errorf("apt-get install %s: %s", strings.Join(pkgs, " "), res.Stderr)
-	}
-	return nil
+	return m.runAptWaitingForLock(ctx, cmd, "apt-get install "+strings.Join(pkgs, " "))
 }
