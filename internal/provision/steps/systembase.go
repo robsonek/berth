@@ -11,7 +11,9 @@ import (
 )
 
 // basePackages are the foundational packages every berth-managed server needs.
-var basePackages = []string{"curl", "git", "unzip", "ca-certificates", "gnupg", "unattended-upgrades"}
+// git and rsync are required by the deployer: Deployer PHP clones the repo over
+// git and uploads built assets over rsync, and a minimal Debian 13 ships neither.
+var basePackages = []string{"curl", "git", "rsync", "unzip", "ca-certificates", "gnupg", "unattended-upgrades"}
 
 type systembase struct{}
 
