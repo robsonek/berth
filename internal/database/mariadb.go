@@ -17,7 +17,7 @@ func (MariaDB) Name() string { return "mariadb" }
 // ServerPackage is the Debian/mariadb.org server package.
 func (MariaDB) ServerPackage() string { return "mariadb-server" }
 
-// UpstreamRepo is mariadb.org's 11.8 LTS repository.
+// UpstreamRepo is mariadb.org's 12.3 LTS repository.
 func (MariaDB) UpstreamRepo() (apt.Repo, bool) { return apt.MariaDBOrg(), true }
 
 // EnvConnection is Laravel's MySQL-protocol driver and default port.

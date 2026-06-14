@@ -102,13 +102,14 @@ func PostgresPGDG() Repo {
 	}
 }
 
-// MariaDBOrg returns the official mariadb.org 11.8 LTS repository for Debian 13,
+// MariaDBOrg returns the official mariadb.org 12.3 LTS repository for Debian 13,
 // used by the database step when database.source is "mariadb". Fingerprint is the
-// full 40-hex MariaDB release signing key.
+// full 40-hex MariaDB release signing key (the 12.3 repo is signed by the same
+// key as 11.8; mariadb.org's key bundle also carries a newer key for rotation).
 func MariaDBOrg() Repo {
 	return Repo{
 		Name:        "mariadb-org",
-		URI:         "https://deb.mariadb.org/11.8/debian/",
+		URI:         "https://deb.mariadb.org/12.3/debian/",
 		Suite:       "trixie",
 		Components:  []string{"main"},
 		KeyURL:      "https://mariadb.org/mariadb_release_signing_key.asc",
