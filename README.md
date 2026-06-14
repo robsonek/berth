@@ -4,9 +4,9 @@
 
 **berth** is a command-line tool that provisions a freshly installed Debian 13
 (Trixie) VPS into a production-ready web server for Laravel applications. It
-connects over SSH and applies an idempotent pipeline (nginx, PHP 8.5-FPM,
-MariaDB, Redis, Supervisor, firewall, TLS, hardening), leaving the server ready
-for a separate deployer ([Deployer PHP](https://deployer.org)) to ship code.
+connects over SSH and applies an idempotent pipeline (nginx, PHP-FPM, MariaDB,
+Valkey, Supervisor, firewall, TLS, hardening), leaving the server ready for a
+separate deployer ([Deployer PHP](https://deployer.org)) to ship code.
 
 A *berth* is the prepared place where a vessel docks: berth readies the server,
 then the deployer brings the code alongside.
@@ -52,6 +52,27 @@ berth provision servers/<name>.yml --dry-run   # preview changes only
 config. `berth provision <server>` then connects over SSH and brings the host to
 the desired state through an ordered pipeline of idempotent steps. Re-running is
 always safe; `--dry-run` shows what would change.
+
+## Package sources
+
+By default every component is installed from Debian 13's own repositories. Where
+a newer version is wanted, a per-component `source` selects a trusted upstream
+apt repository whose signing-key fingerprint is pinned in berth and scoped with
+`signed-by`:
+
+```yaml
+php:
+  version: "8.5"
+  source: sury        # auto | sury | debian   (Debian ships 8.4; Surý provides 8.5)
+nginx:
+  source: nginx       # debian | nginx         (nginx.org mainline)
+database:
+  engine: mariadb
+  source: mariadb     # debian | mariadb        (mariadb.org 11.8 LTS)
+```
+
+Each defaults to `debian`. An upstream source aborts the run if the fetched key
+does not match the pinned fingerprint.
 
 ## Beyond v1
 
