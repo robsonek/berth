@@ -43,31 +43,33 @@ func checkGoldenRender(t *testing.T, render func(string, any) ([]byte, error), n
 	}
 }
 
-type nginxData struct{ Domain, DeployPath, ACMEWebroot, PHPVersion string }
+type nginxData struct{ Domain, DeployPath, ACMEWebroot, Socket string }
+
+const testSocket = "/run/php/berth-app_example_com.sock"
 
 func TestRenderNginxHTTPGolden(t *testing.T) {
 	checkGolden(t, "nginx_http.conf.tmpl", "nginx_http.golden", nginxData{
 		Domain: "app.example.com", DeployPath: "/home/deploy/myapp",
-		ACMEWebroot: "/var/www/berth-acme/app.example.com", PHPVersion: "8.5",
+		ACMEWebroot: "/var/www/berth-acme/app.example.com", Socket: testSocket,
 	})
 }
 
 func TestRenderNginxHTTPSGolden(t *testing.T) {
 	checkGolden(t, "nginx_https.conf.tmpl", "nginx_https.golden", nginxData{
 		Domain: "app.example.com", DeployPath: "/home/deploy/myapp",
-		ACMEWebroot: "/var/www/berth-acme/app.example.com", PHPVersion: "8.5",
+		ACMEWebroot: "/var/www/berth-acme/app.example.com", Socket: testSocket,
 	})
 }
 
 func TestRenderFPMPoolGolden(t *testing.T) {
-	checkGoldenINI(t, "fpm_pool.conf.tmpl", "fpm_pool.golden", struct{ PoolName, PHPVersion string }{
-		PoolName: "myapp", PHPVersion: "8.5",
+	checkGoldenINI(t, "fpm_pool.conf.tmpl", "fpm_pool.golden", struct{ PoolName, User, Socket, DeployPath string }{
+		PoolName: "app_example_com", User: "webuser", Socket: testSocket, DeployPath: "/home/deploy/myapp",
 	})
 }
 
 func TestRenderSupervisorGolden(t *testing.T) {
-	checkGolden(t, "supervisor.conf.tmpl", "supervisor.golden", struct{ ProgramName, DeployPath string }{
-		ProgramName: "myapp-worker", DeployPath: "/home/deploy/myapp",
+	checkGolden(t, "supervisor.conf.tmpl", "supervisor.golden", struct{ ProgramName, DeployPath, User string }{
+		ProgramName: "berth-app_example_com", DeployPath: "/home/deploy/myapp", User: "webuser",
 	})
 }
 
@@ -78,13 +80,13 @@ func TestRenderEnvGolden(t *testing.T) {
 }
 
 func TestRenderSudoersDeployGolden(t *testing.T) {
-	checkGolden(t, "sudoers_deploy.tmpl", "sudoers_deploy.golden", struct{ PHPVersion, ProgramName string }{
-		PHPVersion: "8.5", ProgramName: "myapp-worker",
+	checkGolden(t, "sudoers_deploy.tmpl", "sudoers_deploy.golden", struct{ User, PHPVersion, ProgramName string }{
+		User: "webuser", PHPVersion: "8.5", ProgramName: "berth-app_example_com",
 	})
 }
 
 func TestRenderSchedulerCronGolden(t *testing.T) {
-	checkGolden(t, "scheduler.cron.tmpl", "scheduler.cron.golden", struct{ DeployPath string }{
-		DeployPath: "/home/deploy/myapp",
+	checkGolden(t, "scheduler.cron.tmpl", "scheduler.cron.golden", struct{ DeployPath, User string }{
+		DeployPath: "/home/deploy/myapp", User: "webuser",
 	})
 }

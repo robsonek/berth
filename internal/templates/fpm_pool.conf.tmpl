@@ -1,8 +1,8 @@
 [{{ .PoolName }}]
-user = deploy
-group = deploy
+user = {{ .User }}
+group = {{ .User }}
 
-listen = /run/php/php{{ .PHPVersion }}-fpm.sock
+listen = {{ .Socket }}
 listen.owner = www-data
 listen.group = www-data
 listen.mode = 0660
@@ -13,5 +13,6 @@ pm.start_servers = 2
 pm.min_spare_servers = 1
 pm.max_spare_servers = 4
 
+php_admin_value[open_basedir] = {{ .DeployPath }}/current:{{ .DeployPath }}/shared:/tmp
 php_admin_value[error_log] = /var/log/php/{{ .PoolName }}-fpm.error.log
 php_admin_flag[log_errors] = on

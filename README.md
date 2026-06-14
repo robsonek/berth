@@ -77,12 +77,40 @@ engine's producer repo (`mariadb` for MariaDB, `pgdg` for PostgreSQL). An
 upstream source aborts the run if the fetched key does not match the pinned
 fingerprint.
 
+## Multiple sites (isolated per domain)
+
+List several `sites:` to host multiple domains on one server. Each site runs
+under its **own dedicated OS user**, so a compromise of one site cannot read
+another's files (its `deploy_path` is owned by that user, traversable only by
+nginx; its PHP-FPM pool, queue worker and cron all run as that user), and each
+site gets **its own database + user**:
+
+```yaml
+database:
+  engine: postgres        # server-wide engine + source
+  source: pgdg
+sites:
+  - domain: app-one.example.com
+    deploy_path: /var/www/app-one
+    user: app_one          # optional; derived from the domain when omitted
+    database: { name: app_one, user: app_one }
+    ssl: true
+    ssl_email: admin@example.com
+  - domain: app-two.example.com
+    deploy_path: /var/www/app-two
+    database: { name: app_two, user: app_two }
+    ssl: true
+    ssl_email: admin@example.com
+```
+
+A single-site config may keep the legacy top-level `database: { name, user }`
+and the shared `deploy` user; with multiple sites each site needs its own
+`database` block, and the OS users must be distinct.
+
 ## Beyond v1
 
-v1 covers `berth init` and `berth provision` (one server and its first site),
-with **MariaDB or PostgreSQL** as the database engine. Multi-site
-(`berth site:add`) and package-manager distribution are planned for later
-releases. See the
+`berth site:add` (incremental add) and package-manager distribution are planned
+for later releases. See the
 [design specification](docs/design/2026-06-13-berth-design.md) for the full
 scope.
 

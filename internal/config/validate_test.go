@@ -34,6 +34,46 @@ func TestValidatePostgresEngine(t *testing.T) {
 	}
 }
 
+func multiSite() *Server {
+	return &Server{
+		Host: "203.0.113.10", SSH: SSH{User: "root", Port: 22},
+		PHP: PHP{Version: "8.5", Source: "auto"}, Nginx: Nginx{Source: "debian"},
+		Database: Database{Engine: "mariadb", Source: "debian"},
+		Sites: []Site{
+			{Domain: "one.example.com", DeployPath: "/var/www/one", Database: SiteDatabase{Name: "one_db", User: "one_user"}},
+			{Domain: "two.example.com", DeployPath: "/var/www/two", Database: SiteDatabase{Name: "two_db", User: "two_user"}},
+		},
+	}
+}
+
+func TestValidateMultiSite(t *testing.T) {
+	// Two sites, each with its own database — valid, and they resolve to
+	// distinct, derived OS users.
+	s := multiSite()
+	if err := s.Validate(); err != nil {
+		t.Fatalf("valid multi-site rejected: %v", err)
+	}
+	if u0, u1 := s.SiteUser(s.Sites[0]), s.SiteUser(s.Sites[1]); u0 == u1 || u0 == "deploy" {
+		t.Errorf("multi-site users must be distinct & derived; got %q, %q", u0, u1)
+	}
+
+	// Two sites both relying on the legacy top-level database -> ambiguous -> error.
+	bad := multiSite()
+	bad.Sites[0].Database = SiteDatabase{}
+	bad.Sites[1].Database = SiteDatabase{}
+	bad.Database.Name, bad.Database.User = "shared", "shared"
+	if err := bad.Validate(); err == nil {
+		t.Error("expected error when multiple sites have no database block")
+	}
+
+	// Two sites sharing a database user -> rejected (isolation).
+	dupUser := multiSite()
+	dupUser.Sites[1].Database.User = "one_user"
+	if err := dupUser.Validate(); err == nil {
+		t.Error("expected error when two sites share a database user")
+	}
+}
+
 func TestValidateRejects(t *testing.T) {
 	cases := map[string]func(*Server){
 		"bad php version":  func(s *Server) { s.PHP.Version = "9.9" },

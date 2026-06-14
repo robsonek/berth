@@ -11,22 +11,36 @@ import (
 	"github.com/robsonek/berth/internal/templates"
 )
 
-// poolName derives the FPM pool / cron app name from a site domain (filesystem
-// safe: dots become underscores).
+// poolName derives the FPM pool / app slug from a site domain (filesystem safe:
+// dots become underscores).
 func poolName(domain string) string {
 	return strings.ReplaceAll(domain, ".", "_")
 }
+
+// programName is the Supervisor program name for a site's queue worker.
+func programName(domain string) string { return "berth-" + poolName(domain) }
+
+// fpmSocket is the per-site PHP-FPM unix socket (one per site so sites do not
+// share a socket and each runs under its own user).
+func fpmSocket(domain string) string { return "/run/php/berth-" + poolName(domain) + ".sock" }
 
 func nginxAvailablePath(domain string) string { return "/etc/nginx/sites-available/" + domain }
 func nginxEnabledPath(domain string) string   { return "/etc/nginx/sites-enabled/" + domain }
 func fpmPoolPath(phpVersion, domain string) string {
 	return fmt.Sprintf("/etc/php/%s/fpm/pool.d/%s.conf", phpVersion, poolName(domain))
 }
-func supervisorProgramPath(s *config.Server) string {
-	return "/etc/supervisor/conf.d/" + programName(s) + ".conf"
+func supervisorProgramPath(domain string) string {
+	return "/etc/supervisor/conf.d/" + programName(domain) + ".conf"
 }
-func cronPath(s *config.Server) string {
-	return "/etc/cron.d/berth-" + poolName(s.Sites[0].Domain)
+func cronPath(domain string) string { return "/etc/cron.d/berth-" + poolName(domain) }
+
+// fpmService is the systemd unit for the configured PHP-FPM version.
+func fpmService(s *config.Server) string { return "php" + s.PHP.Version + "-fpm" }
+
+// defaultFPMPoolPath is the distro's default pool; berth disables it so its own
+// per-site pools own their sockets rather than colliding with the stock www pool.
+func defaultFPMPoolPath(s *config.Server) string {
+	return fmt.Sprintf("/etc/php/%s/fpm/pool.d/www.conf", s.PHP.Version)
 }
 
 // siteFile pairs a desired managed file's path with its rendered content.
@@ -35,10 +49,10 @@ type siteFile struct {
 	content []byte
 }
 
-// managedSiteFiles returns every config file the site step owns, in render order.
-// Both Check (content-hash drift) and Apply (WriteFile) use this list so they
-// stay in lock-step. The nginx block is cert-aware (HTTPS once a certificate is
-// installed) so a re-run does not revert the TLS step's 443 block back to HTTP.
+// managedSiteFiles returns every config file the site step owns for every site,
+// in render order. Both Check (content-hash drift) and Apply (WriteFile) use
+// this list so they stay in lock-step. The nginx block is cert-aware (HTTPS once
+// a certificate is installed) so a re-run does not revert the TLS 443 block.
 func managedSiteFiles(ctx context.Context, r bssh.Runner, s *config.Server) ([]siteFile, error) {
 	var files []siteFile
 	for _, site := range s.Sites {
@@ -52,17 +66,17 @@ func managedSiteFiles(ctx context.Context, r bssh.Runner, s *config.Server) ([]s
 			return nil, err
 		}
 		files = append(files, siteFile{fpmPoolPath(s.PHP.Version, site.Domain), pool})
+		prog, err := renderSupervisor(s, site)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, siteFile{supervisorProgramPath(site.Domain), prog})
+		cron, err := renderCron(s, site)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, siteFile{cronPath(site.Domain), cron})
 	}
-	prog, err := renderSupervisor(s)
-	if err != nil {
-		return nil, err
-	}
-	files = append(files, siteFile{supervisorProgramPath(s), prog})
-	cron, err := renderCron(s)
-	if err != nil {
-		return nil, err
-	}
-	files = append(files, siteFile{cronPath(s), cron})
 	return files, nil
 }
 
@@ -89,61 +103,56 @@ func renderSiteNginx(ctx context.Context, r bssh.Runner, s *config.Server, site 
 	return renderNginxHTTP(s, site)
 }
 
-func renderNginxHTTP(s *config.Server, site config.Site) ([]byte, error) {
-	return templates.Render("nginx_http.conf.tmpl", struct {
-		Domain, DeployPath, ACMEWebroot, PHPVersion string
-	}{
+// nginxData is the render input for both nginx server-block templates. Socket is
+// the site's own PHP-FPM socket so each domain proxies to its own pool/user.
+type nginxData struct{ Domain, DeployPath, ACMEWebroot, Socket string }
+
+func nginxRenderData(site config.Site) nginxData {
+	return nginxData{
 		Domain: site.Domain, DeployPath: site.DeployPath,
-		ACMEWebroot: acmeWebroot(site.Domain), PHPVersion: s.PHP.Version,
-	})
+		ACMEWebroot: acmeWebroot(site.Domain), Socket: fpmSocket(site.Domain),
+	}
+}
+
+func renderNginxHTTP(_ *config.Server, site config.Site) ([]byte, error) {
+	return templates.Render("nginx_http.conf.tmpl", nginxRenderData(site))
 }
 
 // renderNginxHTTPS renders the 443 server block (HTTP redirect + TLS); shared by
 // the site step (idempotent re-render) and the tls step (first issuance).
-func renderNginxHTTPS(s *config.Server, site config.Site) ([]byte, error) {
-	return templates.Render("nginx_https.conf.tmpl", struct {
-		Domain, DeployPath, ACMEWebroot, PHPVersion string
-	}{
-		Domain: site.Domain, DeployPath: site.DeployPath,
-		ACMEWebroot: acmeWebroot(site.Domain), PHPVersion: s.PHP.Version,
-	})
+func renderNginxHTTPS(_ *config.Server, site config.Site) ([]byte, error) {
+	return templates.Render("nginx_https.conf.tmpl", nginxRenderData(site))
 }
 
 func renderFPMPool(s *config.Server, site config.Site) ([]byte, error) {
 	// PHP-FPM pool files are INI; their parser rejects '#' comment lines, so the
-	// managed marker must use ';' (RenderINI).
+	// managed marker must use ';' (RenderINI). The pool runs as the site user and
+	// listens on the site's own socket (isolation).
 	return templates.RenderINI("fpm_pool.conf.tmpl", struct {
-		PoolName, PHPVersion string
-	}{PoolName: poolName(site.Domain), PHPVersion: s.PHP.Version})
+		PoolName, User, Socket, DeployPath string
+	}{
+		PoolName: poolName(site.Domain), User: s.SiteUser(site),
+		Socket: fpmSocket(site.Domain), DeployPath: site.DeployPath,
+	})
 }
 
-// fpmService is the systemd unit for the configured PHP-FPM version.
-func fpmService(s *config.Server) string { return "php" + s.PHP.Version + "-fpm" }
-
-// defaultFPMPoolPath is the distro's default pool; berth disables it so its own
-// pool (running as deploy) owns the FPM socket rather than colliding with the
-// stock www pool (which runs as www-data on the same socket).
-func defaultFPMPoolPath(s *config.Server) string {
-	return fmt.Sprintf("/etc/php/%s/fpm/pool.d/www.conf", s.PHP.Version)
-}
-
-func renderSupervisor(s *config.Server) ([]byte, error) {
+func renderSupervisor(s *config.Server, site config.Site) ([]byte, error) {
 	return templates.Render("supervisor.conf.tmpl", struct {
-		ProgramName, DeployPath string
-	}{ProgramName: programName(s), DeployPath: s.Sites[0].DeployPath})
+		ProgramName, DeployPath, User string
+	}{ProgramName: programName(site.Domain), DeployPath: site.DeployPath, User: s.SiteUser(site)})
 }
 
-func renderCron(s *config.Server) ([]byte, error) {
+func renderCron(s *config.Server, site config.Site) ([]byte, error) {
 	return templates.Render("scheduler.cron.tmpl", struct {
-		DeployPath string
-	}{DeployPath: s.Sites[0].DeployPath})
+		DeployPath, User string
+	}{DeployPath: site.DeployPath, User: s.SiteUser(site)})
 }
 
 type site struct{}
 
-// Site renders and installs the per-site web server block (validated before any
-// reload), the FPM pool, the dormant Supervisor worker, and the guarded
-// scheduler cron (design §6.4).
+// Site renders and installs, per site, the web server block (validated before any
+// reload), the FPM pool (own user + socket), the dormant Supervisor worker, and
+// the guarded scheduler cron (design §6.4).
 func Site() provision.Step { return site{} }
 
 func (site) Name() string       { return "site" }
@@ -167,21 +176,15 @@ func (st site) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 			return provision.CheckResult{Satisfied: false, Reason: mf.path + " not up to date", Changes: st.changes()}, nil
 		}
 	}
-	// The active nginx configuration must validate.
-	res, err := r.Run(ctx, "nginx -t", nil)
-	if err != nil {
+	// The active nginx and PHP-FPM configurations must validate.
+	if res, err := r.Run(ctx, "nginx -t", nil); err != nil {
 		return provision.CheckResult{}, err
-	}
-	if res.ExitCode != 0 {
+	} else if res.ExitCode != 0 {
 		return provision.CheckResult{Satisfied: false, Reason: "nginx -t fails", Changes: st.changes()}, nil
 	}
-	// The active PHP-FPM configuration must validate too (catches a stock www
-	// pool reappearing on the FPM socket, or a malformed pool).
-	fpm, err := r.Run(ctx, "php-fpm"+s.PHP.Version+" -t", nil)
-	if err != nil {
+	if res, err := r.Run(ctx, "php-fpm"+s.PHP.Version+" -t", nil); err != nil {
 		return provision.CheckResult{}, err
-	}
-	if fpm.ExitCode != 0 {
+	} else if res.ExitCode != 0 {
 		return provision.CheckResult{Satisfied: false, Reason: "php-fpm -t fails", Changes: st.changes()}, nil
 	}
 	return provision.CheckResult{Satisfied: true, Reason: "site config in place; nginx and php-fpm valid"}, nil
@@ -189,16 +192,15 @@ func (st site) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 
 func (site) changes() []string {
 	return []string{
-		"write nginx server block + enable it",
-		"write FPM pool",
-		"install dormant supervisor worker",
-		"install scheduler cron",
+		"write per-site nginx server block + enable it",
+		"write per-site FPM pool (own user + socket)",
+		"install per-site dormant supervisor worker",
+		"install per-site scheduler cron",
 	}
 }
 
 func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) error {
-	// 1) Write each site's nginx server block (cert-aware: HTTPS once a cert
-	//    exists, HTTP-only before first issuance) and enable it.
+	// 1) Per-site nginx server block (cert-aware) + enable.
 	for _, site := range s.Sites {
 		conf, err := renderSiteNginx(ctx, r, s, site)
 		if err != nil {
@@ -218,8 +220,7 @@ func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 		}
 	}
 
-	// 2) Validate the whole nginx configuration BEFORE reloading. Abort on failure
-	//    so a broken config never reaches a live reload.
+	// 2) Validate the whole nginx configuration BEFORE reloading.
 	if res, err := r.Run(ctx, "nginx -t", nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
@@ -231,8 +232,8 @@ func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 		return fmt.Errorf("reload nginx: %s", res.Stderr)
 	}
 
-	// 3) FPM pool(s). Berth's pool runs as the deploy user and owns the FPM
-	//    socket, so the stock www pool (www-data, same socket) is disabled first.
+	// 3) Per-site FPM pools (each its own user + socket). Disable the stock www
+	//    pool first so it cannot answer on a shared socket.
 	disableWWW := fmt.Sprintf("test -f %[1]s && mv -f %[1]s %[1]s.disabled || true", shQuote(defaultFPMPoolPath(s)))
 	if _, err := r.Run(ctx, disableWWW, nil); err != nil {
 		return err
@@ -249,8 +250,6 @@ func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 			return fmt.Errorf("write FPM pool for %s: %w", site.Domain, err)
 		}
 	}
-	// Validate the FPM config BEFORE reloading (mirrors the nginx -t gate), then
-	// reload so the new pool actually takes effect and any error surfaces now.
 	if res, err := r.Run(ctx, "php-fpm"+s.PHP.Version+" -t", nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
@@ -262,28 +261,28 @@ func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 		return fmt.Errorf("reload %s: %s", fpmService(s), res.Stderr)
 	}
 
-	// 4) Dormant Supervisor worker (autostart=false; started post-deploy).
-	prog, err := renderSupervisor(s)
-	if err != nil {
-		return fmt.Errorf("render supervisor program: %w", err)
-	}
-	if err := r.WriteFile(ctx, bssh.FileSpec{
-		Path: supervisorProgramPath(s), Content: prog,
-		Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
-	}); err != nil {
-		return fmt.Errorf("write supervisor program: %w", err)
-	}
-
-	// 5) Guarded scheduler cron (no-op until an app is deployed).
-	cron, err := renderCron(s)
-	if err != nil {
-		return fmt.Errorf("render scheduler cron: %w", err)
-	}
-	if err := r.WriteFile(ctx, bssh.FileSpec{
-		Path: cronPath(s), Content: cron,
-		Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
-	}); err != nil {
-		return fmt.Errorf("write scheduler cron: %w", err)
+	// 4) Per-site dormant Supervisor worker + 5) guarded scheduler cron.
+	for _, site := range s.Sites {
+		prog, err := renderSupervisor(s, site)
+		if err != nil {
+			return fmt.Errorf("render supervisor program for %s: %w", site.Domain, err)
+		}
+		if err := r.WriteFile(ctx, bssh.FileSpec{
+			Path: supervisorProgramPath(site.Domain), Content: prog,
+			Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
+		}); err != nil {
+			return fmt.Errorf("write supervisor program for %s: %w", site.Domain, err)
+		}
+		cron, err := renderCron(s, site)
+		if err != nil {
+			return fmt.Errorf("render scheduler cron for %s: %w", site.Domain, err)
+		}
+		if err := r.WriteFile(ctx, bssh.FileSpec{
+			Path: cronPath(site.Domain), Content: cron,
+			Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
+		}); err != nil {
+			return fmt.Errorf("write scheduler cron for %s: %w", site.Domain, err)
+		}
 	}
 	return nil
 }

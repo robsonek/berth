@@ -1,7 +1,7 @@
 # managed by berth
-deploy ALL=(root) NOPASSWD: /usr/bin/systemctl reload php8.5-fpm
-deploy ALL=(root) NOPASSWD: /usr/bin/supervisorctl reread
-deploy ALL=(root) NOPASSWD: /usr/bin/supervisorctl update
-deploy ALL=(root) NOPASSWD: /usr/bin/supervisorctl start myapp-worker\:*
-deploy ALL=(root) NOPASSWD: /usr/bin/supervisorctl stop myapp-worker\:*
-deploy ALL=(root) NOPASSWD: /usr/bin/supervisorctl restart myapp-worker\:*
+webuser ALL=(root) NOPASSWD: /usr/bin/systemctl reload php8.5-fpm
+webuser ALL=(root) NOPASSWD: /usr/bin/supervisorctl reread
+webuser ALL=(root) NOPASSWD: /usr/bin/supervisorctl update
+webuser ALL=(root) NOPASSWD: /usr/bin/supervisorctl start berth-app_example_com\:*
+webuser ALL=(root) NOPASSWD: /usr/bin/supervisorctl stop berth-app_example_com\:*
+webuser ALL=(root) NOPASSWD: /usr/bin/supervisorctl restart berth-app_example_com\:*

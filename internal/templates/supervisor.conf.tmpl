@@ -2,7 +2,7 @@
 process_name=%(program_name)s_%(process_num)02d
 command=php {{ .DeployPath }}/current/artisan queue:work --sleep=3 --tries=3 --max-time=3600
 directory={{ .DeployPath }}/current
-user=deploy
+user={{ .User }}
 numprocs=1
 autostart=false
 autorestart=true

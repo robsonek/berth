@@ -9,10 +9,11 @@ import (
 )
 
 var (
-	reHostname = regexp.MustCompile(`^(?i)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
-	reSQLIdent = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
-	rePHPVer   = regexp.MustCompile(`^\d+\.\d+$`)
-	reEmail    = regexp.MustCompile(`^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$`)
+	reHostname  = regexp.MustCompile(`^(?i)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
+	reSQLIdent  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
+	rePHPVer    = regexp.MustCompile(`^\d+\.\d+$`)
+	reEmail     = regexp.MustCompile(`^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$`)
+	reLinuxUser = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 )
 
 var allowedPHPVersions = map[string]bool{"8.2": true, "8.3": true, "8.4": true, "8.5": true}
@@ -47,19 +48,61 @@ func (s *Server) Validate() error {
 	if s.Database.Source != "debian" && s.Database.Source != upstream {
 		return fmt.Errorf("database.source %q invalid for engine %q (use debian or %s)", s.Database.Source, s.Database.Engine, upstream)
 	}
-	if !reSQLIdent.MatchString(s.Database.Name) {
-		return fmt.Errorf("database.name %q is not a valid SQL identifier", s.Database.Name)
-	}
-	if !reSQLIdent.MatchString(s.Database.User) {
-		return fmt.Errorf("database.user %q is not a valid SQL identifier", s.Database.User)
-	}
 	if len(s.Sites) == 0 {
 		return fmt.Errorf("at least one site is required")
 	}
+	seenDomain, seenUser, seenDBName, seenDBUser, seenPath := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
+	dup := func(seen map[string]bool, key, what string) error {
+		if seen[key] {
+			return fmt.Errorf("two sites share the same %s %q; each site must be distinct for isolation", what, key)
+		}
+		seen[key] = true
+		return nil
+	}
+	inheritLegacyDB := 0
 	for i := range s.Sites {
-		if err := s.Sites[i].validate(); err != nil {
+		site := s.Sites[i]
+		if err := site.validate(); err != nil {
 			return fmt.Errorf("site %d: %w", i, err)
 		}
+		// Per-site database identity (its own block, or the inherited legacy
+		// top-level database.name/user for a lone site).
+		if site.Database.Name == "" && site.Database.User == "" {
+			inheritLegacyDB++
+		}
+		dbName, dbUser := s.SiteDBName(site), s.SiteDBUser(site)
+		if !reSQLIdent.MatchString(dbName) {
+			return fmt.Errorf("site %d (%s): database name %q is not a valid SQL identifier", i, site.Domain, dbName)
+		}
+		if !reSQLIdent.MatchString(dbUser) {
+			return fmt.Errorf("site %d (%s): database user %q is not a valid SQL identifier", i, site.Domain, dbUser)
+		}
+		// The per-site OS user (explicit or derived) must be a valid Linux name.
+		osUser := s.SiteUser(site)
+		if !reLinuxUser.MatchString(osUser) {
+			return fmt.Errorf("site %d (%s): os user %q is not a valid Linux username", i, site.Domain, osUser)
+		}
+		// Isolation requires a distinct domain, OS user, DB name, DB user and path.
+		if err := dup(seenDomain, site.Domain, "domain"); err != nil {
+			return err
+		}
+		if err := dup(seenUser, osUser, "os user"); err != nil {
+			return err
+		}
+		if err := dup(seenDBName, dbName, "database name"); err != nil {
+			return err
+		}
+		if err := dup(seenDBUser, dbUser, "database user"); err != nil {
+			return err
+		}
+		if err := dup(seenPath, site.DeployPath, "deploy_path"); err != nil {
+			return err
+		}
+	}
+	// The legacy top-level database.name/user can back exactly one site; with
+	// several inheriting sites it is ambiguous — each needs its own database block.
+	if inheritLegacyDB > 1 {
+		return fmt.Errorf("%d sites have no database block; give each site its own database: {name, user} (top-level database.name/user is single-site legacy)", inheritLegacyDB)
 	}
 	return nil
 }

@@ -20,15 +20,15 @@ func upstreamSourceList(repo apt.Repo) string {
 	return "/etc/apt/sources.list.d/" + repo.Name + ".list"
 }
 
-// dbPasswordKey is the .env / cache key under which the database password lives.
+// dbPasswordKey is the .env key under which the database password lives.
 const dbPasswordKey = "DB_PASSWORD"
 
 // dbPasswordLen is the length of a freshly generated database password.
 const dbPasswordLen = 32
 
 // reDBPassword is the alphanumeric charset secret.Generate uses. A password
-// reused from the host's shared/.env (or the local cache) is re-validated against
-// it before interpolation into SQL — defence-in-depth against a tampered env
+// reused from a host shared/.env (or the local cache) is re-validated against it
+// before interpolation into SQL — defence-in-depth against a tampered env
 // injecting quotes/metacharacters (design §7).
 var reDBPassword = regexp.MustCompile(`^[A-Za-z0-9]+$`)
 
@@ -36,13 +36,18 @@ type database struct {
 	redactor *secret.Redactor
 }
 
-// Database installs the database server, persists the credential, and ensures the
-// application database and user. It takes the redactor so the generated password
-// is masked in any logged output.
+// Database installs the database server once, then for each site persists the
+// credential to that site's shared/.env and ensures the site's database + user.
+// It takes the redactor so generated passwords are masked in any logged output.
 func Database(red *secret.Redactor) provision.Step { return database{redactor: red} }
 
 func (database) Name() string       { return "database" }
 func (database) Requires() []string { return []string{"base", "appdirs"} }
+
+// sharedEnvPath is the server-side path of a site's shared .env.
+func sharedEnvPath(site config.Site) string {
+	return site.DeployPath + "/shared/.env"
+}
 
 func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
 	eng, err := dbpkg.Get(s.Database.Engine)
@@ -50,12 +55,6 @@ func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Serve
 		return provision.CheckResult{}, err
 	}
 	installed, err := pkgInstalled(ctx, r, eng.ServerPackage())
-	if err != nil {
-		return provision.CheckResult{}, err
-	}
-	// The shared/.env carrying the credential must exist for the database to be
-	// considered provisioned; its content is sensitive so it is not hashed here.
-	envExists, err := fileExists(ctx, r, sharedEnvPath(s))
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
@@ -70,15 +69,37 @@ func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Serve
 			}
 		}
 	}
-	if installed && envExists && sourceOK {
-		return provision.CheckResult{Satisfied: true, Reason: eng.ServerPackage() + " installed (" + s.Database.Source + ") and credential persisted"}, nil
+	// Each site's shared/.env (carrying its credential) must exist.
+	for _, site := range s.Sites {
+		envExists, err := fileExists(ctx, r, sharedEnvPath(site))
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if !envExists {
+			return provision.CheckResult{
+				Satisfied: false,
+				Reason:    "credential for " + site.Domain + " not yet persisted",
+				Changes:   d.changes(eng),
+				Sensitive: true,
+			}, nil
+		}
+	}
+	if installed && sourceOK {
+		return provision.CheckResult{Satisfied: true, Reason: eng.ServerPackage() + " installed (" + s.Database.Source + "); per-site credentials persisted"}, nil
 	}
 	return provision.CheckResult{
 		Satisfied: false,
-		Reason:    "database server, credential, or configured source not yet provisioned",
-		Changes:   []string{"install " + eng.ServerPackage() + " (" + s.Database.Source + ")", "persist DB credential to shared/.env", "ensure database and user"},
+		Reason:    "database server or configured source not yet provisioned",
+		Changes:   d.changes(eng),
 		Sensitive: true,
 	}, nil
+}
+
+func (database) changes(eng dbpkg.Engine) []string {
+	return []string{
+		"install " + eng.ServerPackage(),
+		"per site: persist DB credential to shared/.env, ensure database + user",
+	}
 }
 
 func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) error {
@@ -86,6 +107,7 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	if err != nil {
 		return err
 	}
+	// Install the server once (optionally from its producer repo).
 	if s.Database.Source != "debian" {
 		if repo, ok := eng.UpstreamRepo(); ok {
 			if err := apt.New(r).EnsureRepo(ctx, repo); err != nil {
@@ -96,36 +118,46 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	if err := aptInstall(ctx, r, eng.ServerPackage()); err != nil {
 		return fmt.Errorf("install %s: %w", eng.ServerPackage(), err)
 	}
-	// Reuse an existing password from shared/.env or the local cache; otherwise
-	// generate. Re-runs must not rotate the secret.
-	pw, err := d.resolvePassword(ctx, s, r)
-	if err != nil {
-		return err
-	}
-	d.redactor.Add(pw) // mask in all output
-	// Persist FIRST (atomic), so a crash before EnsureUser still leaves a
-	// recoverable secret on the host and in the local cache.
+
 	driver, port := eng.EnvConnection()
-	if err := d.seedSharedEnv(ctx, s, r, pw, driver, port); err != nil {
-		return err
+	// Accumulate per-site secrets and write the local cache once at the end so
+	// sites do not clobber each other's cached passwords.
+	cache, _ := secret.LoadCache(s.Host)
+	if cache == nil {
+		cache = map[string]string{}
 	}
-	if err := eng.EnsureDatabase(ctx, r, s.Database.Name); err != nil {
-		return err
+	for _, site := range s.Sites {
+		dbName, dbUser := s.SiteDBName(site), s.SiteDBUser(site)
+		pw, err := d.resolvePassword(ctx, r, site, dbUser, cache)
+		if err != nil {
+			return err
+		}
+		d.redactor.Add(pw)
+		// Persist FIRST (atomic), so a crash before EnsureUser still leaves a
+		// recoverable secret on the host.
+		if err := d.seedSharedEnv(ctx, r, s, site, dbName, dbUser, pw, driver, port); err != nil {
+			return err
+		}
+		if err := eng.EnsureDatabase(ctx, r, dbName); err != nil {
+			return err
+		}
+		if err := eng.EnsureUser(ctx, r, dbUser, pw, dbName); err != nil {
+			return err
+		}
+		cache[dbUser] = pw
 	}
-	return eng.EnsureUser(ctx, r, s.Database.User, pw, s.Database.Name)
+	if err := secret.SaveCache(s.Host, cache); err != nil {
+		return fmt.Errorf("cache database secrets: %w", err)
+	}
+	return nil
 }
 
-// sharedEnvPath is the server-side path of the application's shared .env.
-func sharedEnvPath(s *config.Server) string {
-	return s.Sites[0].DeployPath + "/shared/.env"
-}
-
-// resolvePassword returns the database password, preferring an existing one (host
-// shared/.env, then the local cache) and only generating a new one when none
-// exists. A reused password is re-validated against the allowed charset.
-func (d database) resolvePassword(ctx context.Context, s *config.Server, r bssh.Runner) (string, error) {
-	// 1) Existing value on the host.
-	res, err := r.Run(ctx, "grep -m1 '^"+dbPasswordKey+"=' "+shQuote(sharedEnvPath(s)), nil)
+// resolvePassword returns a site's database password, preferring an existing one
+// (the site's host shared/.env, then the local cache keyed by DB user) and only
+// generating a new one when none exists. A reused password is re-validated.
+func (d database) resolvePassword(ctx context.Context, r bssh.Runner, site config.Site, dbUser string, cache map[string]string) (string, error) {
+	env := sharedEnvPath(site)
+	res, err := r.Run(ctx, "grep -m1 '^"+dbPasswordKey+"=' "+shQuote(env), nil)
 	if err != nil {
 		return "", err
 	}
@@ -133,21 +165,17 @@ func (d database) resolvePassword(ctx context.Context, s *config.Server, r bssh.
 		pw := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(res.Stdout), dbPasswordKey+"="))
 		if pw != "" {
 			if !reDBPassword.MatchString(pw) {
-				return "", fmt.Errorf("reused %s from %s is outside the allowed charset; refusing to use it", dbPasswordKey, sharedEnvPath(s))
+				return "", fmt.Errorf("reused %s from %s is outside the allowed charset; refusing to use it", dbPasswordKey, env)
 			}
 			return pw, nil
 		}
 	}
-	// 2) Local cache (used to reuse, not rotate).
-	if cache, err := secret.LoadCache(s.Host); err == nil {
-		if pw := cache[dbPasswordKey]; pw != "" {
-			if !reDBPassword.MatchString(pw) {
-				return "", fmt.Errorf("cached %s is outside the allowed charset; refusing to use it", dbPasswordKey)
-			}
-			return pw, nil
+	if pw := cache[dbUser]; pw != "" {
+		if !reDBPassword.MatchString(pw) {
+			return "", fmt.Errorf("cached password for %s is outside the allowed charset; refusing to use it", dbUser)
 		}
+		return pw, nil
 	}
-	// 3) Generate a fresh one.
 	pw, err := secret.Generate(dbPasswordLen)
 	if err != nil {
 		return "", fmt.Errorf("generate database password: %w", err)
@@ -155,31 +183,28 @@ func (d database) resolvePassword(ctx context.Context, s *config.Server, r bssh.
 	return pw, nil
 }
 
-// seedSharedEnv renders shared/.env and writes it atomically (owner deploy, mode
-// 0600), then caches the secret locally for reuse on re-run.
-func (d database) seedSharedEnv(ctx context.Context, s *config.Server, r bssh.Runner, pw, driver, port string) error {
+// seedSharedEnv renders a site's shared/.env and writes it atomically, owned by
+// that site's OS user (mode 0600) so other site users cannot read it.
+func (d database) seedSharedEnv(ctx context.Context, r bssh.Runner, s *config.Server, site config.Site, dbName, dbUser, pw, driver, port string) error {
+	user := s.SiteUser(site)
 	kv := map[string]string{
 		"APP_ENV":       "production",
 		"APP_DEBUG":     "false",
-		"APP_URL":       appURL(s.Sites[0]),
+		"APP_URL":       appURL(site),
 		"DB_CONNECTION": driver,
 		"DB_HOST":       "127.0.0.1",
 		"DB_PORT":       port,
-		"DB_DATABASE":   s.Database.Name,
-		"DB_USERNAME":   s.Database.User,
+		"DB_DATABASE":   dbName,
+		"DB_USERNAME":   dbUser,
 		dbPasswordKey:   pw,
 		"REDIS_HOST":    "127.0.0.1",
 		"REDIS_PORT":    "6379",
 	}
-	body := secret.EnvFile(kv)
 	if err := r.WriteFile(ctx, bssh.FileSpec{
-		Path: sharedEnvPath(s), Content: body,
-		Owner: "deploy", Group: "deploy", Mode: 0o600, Sudo: true,
+		Path: sharedEnvPath(site), Content: secret.EnvFile(kv),
+		Owner: user, Group: user, Mode: 0o600, Sudo: true,
 	}); err != nil {
-		return fmt.Errorf("write %s: %w", sharedEnvPath(s), err)
-	}
-	if err := secret.SaveCache(s.Host, map[string]string{dbPasswordKey: pw}); err != nil {
-		return fmt.Errorf("cache database secret: %w", err)
+		return fmt.Errorf("write %s: %w", sharedEnvPath(site), err)
 	}
 	return nil
 }

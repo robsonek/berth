@@ -106,8 +106,8 @@ func TestDatabaseApplyGeneratesPersistsAndEnsures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadCache: %v", err)
 	}
-	if cache["DB_PASSWORD"] == "" {
-		t.Error("cache missing DB_PASSWORD")
+	if cache[s.SiteDBUser(s.Sites[0])] == "" {
+		t.Error("cache missing the site's database password (keyed by DB user)")
 	}
 }
 
