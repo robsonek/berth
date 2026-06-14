@@ -3,6 +3,7 @@ package secret
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"math/big"
 	"strings"
 )
@@ -22,6 +23,16 @@ func Generate(n int) (string, error) {
 		b[i] = alphabet[idx.Int64()]
 	}
 	return string(b), nil
+}
+
+// AppKey returns a Laravel APP_KEY: "base64:" followed by 32 cryptographically
+// random bytes, base64-encoded — the format Laravel's AES-256-CBC cipher expects.
+func AppKey() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return "base64:" + base64.StdEncoding.EncodeToString(b), nil
 }
 
 // Redactor masks registered secret values in arbitrary strings.

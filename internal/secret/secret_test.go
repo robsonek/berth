@@ -1,6 +1,7 @@
 package secret
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -23,6 +24,26 @@ func TestGenerateUnique(t *testing.T) {
 	b, _ := Generate(24)
 	if a == b {
 		t.Error("two generated passwords should differ")
+	}
+}
+
+func TestAppKey(t *testing.T) {
+	k, err := AppKey()
+	if err != nil {
+		t.Fatalf("AppKey() error = %v", err)
+	}
+	if !strings.HasPrefix(k, "base64:") {
+		t.Fatalf("APP_KEY %q must carry the base64: prefix", k)
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(k, "base64:"))
+	if err != nil {
+		t.Fatalf("APP_KEY payload is not valid base64: %v", err)
+	}
+	if len(raw) != 32 {
+		t.Errorf("APP_KEY decodes to %d bytes, want 32 (AES-256)", len(raw))
+	}
+	if k2, _ := AppKey(); k == k2 {
+		t.Error("AppKey() must be random per call")
 	}
 }
 
