@@ -186,6 +186,15 @@ func (h hardening) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serv
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("fail2ban-client -t failed, refusing to reload: %s", res.Stderr)
 	}
+	// Guarantee fail2ban is enabled+active before reloading: a stopped service
+	// cannot be reloaded, and an active-but-not-enabled one never converges
+	// (Check requires both). enable --now makes both true; reload then applies
+	// the freshly written jail.
+	if res, err := r.Run(ctx, "systemctl enable --now fail2ban", nil); err != nil {
+		return err
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("enable fail2ban: %s", res.Stderr)
+	}
 	if res, err := r.Run(ctx, "systemctl reload fail2ban", nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
