@@ -243,6 +243,28 @@ func TestQUICReuseportOwner(t *testing.T) {
 	}
 }
 
+func TestNginxHTTPListensIPv6(t *testing.T) {
+	s := siteServer()
+	got, err := renderNginxHTTP(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "listen [::]:80;") {
+		t.Errorf("nginx HTTP block must listen on IPv6 :80;\n%s", got)
+	}
+}
+
+func TestNginxHTTPSRedirectListensIPv6(t *testing.T) {
+	s := siteServer()
+	got, err := renderNginxHTTPS(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "listen [::]:80;") {
+		t.Errorf("nginx HTTPS redirect block must listen on IPv6 :80;\n%s", got)
+	}
+}
+
 // stubManagedSiteFiles makes every managed site file read back as up-to-date so
 // the Check's content-hash comparison is satisfied.
 func stubManagedSiteFiles(t *testing.T, s *config.Server, f *bssh.FakeRunner) {
