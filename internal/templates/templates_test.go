@@ -107,3 +107,7 @@ func TestRenderSchedulerCronGolden(t *testing.T) {
 		DeployPath: "/home/deploy/myapp", User: "webuser",
 	})
 }
+
+func TestRenderAptAutoUpgradesGolden(t *testing.T) {
+	checkGolden(t, "apt_auto_upgrades.conf.tmpl", "apt_auto_upgrades.golden", nil)
+}
