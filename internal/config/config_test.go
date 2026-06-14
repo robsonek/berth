@@ -41,3 +41,13 @@ func TestLoadFail2banDefaults(t *testing.T) {
 		t.Errorf("fail2ban defaults not applied: %+v", s.Fail2ban)
 	}
 }
+
+func TestLoadSchedulerDefaultsOn(t *testing.T) {
+	s, err := Load("testdata/defaults.yml")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !s.Scheduler {
+		t.Error("scheduler should default to true when the key is absent")
+	}
+}

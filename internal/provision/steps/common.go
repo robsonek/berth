@@ -116,6 +116,20 @@ func managedFileSatisfied(state managedFileState, path string, force bool) (sati
 	}
 }
 
+// managedFilePresent reports whether a berth-managed file currently exists at
+// path. Used for drift-removal: an absent or unmanaged (non-berth) file is left
+// untouched, so disabling a feature never clobbers a foreign file.
+func managedFilePresent(ctx context.Context, r bssh.Runner, path string) (bool, error) {
+	res, err := r.Run(ctx, "cat "+shQuote(path), nil)
+	if err != nil {
+		return false, err
+	}
+	if res.ExitCode != 0 {
+		return false, nil // absent
+	}
+	return hasManagedMarker(res.Stdout), nil
+}
+
 // shQuote single-quotes s for safe shell use (mirrors the ssh package helper,
 // kept local so steps can build remote command strings without exporting it).
 func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }

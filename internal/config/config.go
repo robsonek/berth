@@ -60,6 +60,7 @@ type Site struct {
 	SSLEmail   string       `mapstructure:"ssl_email" yaml:"ssl_email"`
 	HTTP3      bool         `mapstructure:"http3" yaml:"http3"` // HTTP/3 (QUIC); requires ssl + nginx.source: nginx
 	Database   SiteDatabase `mapstructure:"database" yaml:"database"`
+	Scheduler  *bool        `mapstructure:"scheduler" yaml:"scheduler,omitempty"` // per-site override; nil = inherit server default
 }
 
 // CertMode returns the certificate mode for a site, defaulting to "letsencrypt".
@@ -82,6 +83,16 @@ func (s *Server) SiteUser(site Site) string {
 		return "deploy"
 	}
 	return DerivedSiteUser(site.Domain)
+}
+
+// SchedulerEnabled reports whether the Laravel scheduler cron should be installed
+// for a site: an explicit per-site sites[].scheduler wins; otherwise the
+// server-level scheduler default (true by default) applies.
+func (s *Server) SchedulerEnabled(site Site) bool {
+	if site.Scheduler != nil {
+		return *site.Scheduler
+	}
+	return s.Scheduler
 }
 
 // SiteDBName / SiteDBUser return the per-site database name and user, inheriting
@@ -146,6 +157,7 @@ func Load(path string) (*Server, error) {
 	v.SetDefault("fail2ban.bantime", "1h")
 	v.SetDefault("fail2ban.findtime", "10m")
 	v.SetDefault("fail2ban.maxretry", 5)
+	v.SetDefault("scheduler", true)
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("read config %s: %w", path, err)

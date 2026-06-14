@@ -159,6 +159,26 @@ func TestValidateRejects(t *testing.T) {
 	}
 }
 
+func TestSchedulerEnabled(t *testing.T) {
+	s := base()
+	s.Scheduler = true
+	site := s.Sites[0]
+	if !s.SchedulerEnabled(site) {
+		t.Error("server default true, no per-site override -> enabled")
+	}
+	off := false
+	site.Scheduler = &off
+	if s.SchedulerEnabled(site) {
+		t.Error("per-site false must override the server default")
+	}
+	on := true
+	site.Scheduler = &on
+	s.Scheduler = false
+	if !s.SchedulerEnabled(site) {
+		t.Error("per-site true must override server default false")
+	}
+}
+
 func TestGitHost(t *testing.T) {
 	for in, want := range map[string]string{
 		"git@github.com:owner/repo.git":        "github.com",

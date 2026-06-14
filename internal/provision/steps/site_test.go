@@ -13,8 +13,9 @@ import (
 
 func siteServer() *config.Server {
 	return &config.Server{
-		Host: "app.example.com",
-		PHP:  config.PHP{Version: "8.4", Source: "auto"},
+		Host:      "app.example.com",
+		PHP:       config.PHP{Version: "8.4", Source: "auto"},
+		Scheduler: true,
 		Sites: []config.Site{{
 			Domain:     "app.example.com",
 			DeployPath: "/home/deploy/myapp",
@@ -371,6 +372,59 @@ func TestSiteCheckUnsatisfiedWhenLogrotateMissing(t *testing.T) {
 	}
 	if cr.Satisfied {
 		t.Error("expected unsatisfied when the global logrotate fragment is absent")
+	}
+}
+
+func TestSiteApplyRemovesCronWhenSchedulerDisabled(t *testing.T) {
+	s := siteServer()
+	off := false
+	s.Sites[0].Scheduler = &off
+	cp := cronPath(s.Sites[0].Domain)
+
+	f := bssh.NewFakeRunner()
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+	// A berth-managed cron currently exists -> Apply must remove it.
+	f.On("cat "+shQuote(cp), bssh.Result{Stdout: managedMarker + "\n* * * * * deploy ...\n", ExitCode: 0})
+	f.On("rm -f "+shQuote(cp), bssh.Result{})
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var rmSeen bool
+	for _, c := range f.Calls() {
+		if c.Cmd == "rm -f "+shQuote(cp) {
+			rmSeen = true
+		}
+	}
+	if !rmSeen {
+		t.Error("expected the disabled scheduler cron to be removed")
+	}
+	for _, w := range f.Writes() {
+		if w.Path == cp {
+			t.Error("must not write a cron when the scheduler is disabled")
+		}
+	}
+}
+
+func TestSiteCheckUnsatisfiedWhenDisabledCronLingers(t *testing.T) {
+	s := siteServer()
+	off := false
+	s.Sites[0].Scheduler = &off
+	f := bssh.NewFakeRunner()
+	stubManagedSiteFiles(t, s, f)
+	// Override: a berth-managed cron still exists at the path that should be empty.
+	cp := cronPath(s.Sites[0].Domain)
+	f.On("cat "+shQuote(cp), bssh.Result{Stdout: managedMarker + "\n* * * * * deploy ...\n", ExitCode: 0})
+
+	cr, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied: a disabled scheduler's cron still lingers")
 	}
 }
 

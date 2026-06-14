@@ -49,10 +49,13 @@ func defaultFPMPoolPath(s *config.Server) string {
 	return fmt.Sprintf("/etc/php/%s/fpm/pool.d/www.conf", s.PHP.Version)
 }
 
-// siteFile pairs a desired managed file's path with its rendered content.
+// siteFile pairs a desired managed file's path with its rendered content. When
+// remove is true the file must be ABSENT (a disabled feature): Check flags a
+// lingering berth-managed file as drift and Apply rm -f's it.
 type siteFile struct {
 	path    string
 	content []byte
+	remove  bool
 }
 
 // managedSiteFiles returns every config file the site step owns for every site,
@@ -66,22 +69,26 @@ func managedSiteFiles(ctx context.Context, r bssh.Runner, s *config.Server) ([]s
 		if err != nil {
 			return nil, err
 		}
-		files = append(files, siteFile{nginxAvailablePath(site.Domain), conf})
+		files = append(files, siteFile{path: nginxAvailablePath(site.Domain), content: conf})
 		pool, err := renderFPMPool(s, site)
 		if err != nil {
 			return nil, err
 		}
-		files = append(files, siteFile{fpmPoolPath(s.PHP.Version, site.Domain), pool})
+		files = append(files, siteFile{path: fpmPoolPath(s.PHP.Version, site.Domain), content: pool})
 		prog, err := renderSupervisor(s, site)
 		if err != nil {
 			return nil, err
 		}
-		files = append(files, siteFile{supervisorProgramPath(site.Domain), prog})
-		cron, err := renderCron(s, site)
-		if err != nil {
-			return nil, err
+		files = append(files, siteFile{path: supervisorProgramPath(site.Domain), content: prog})
+		if s.SchedulerEnabled(site) {
+			cron, err := renderCron(s, site)
+			if err != nil {
+				return nil, err
+			}
+			files = append(files, siteFile{path: cronPath(site.Domain), content: cron})
+		} else {
+			files = append(files, siteFile{path: cronPath(site.Domain), remove: true})
 		}
-		files = append(files, siteFile{cronPath(site.Domain), cron})
 	}
 	lr, err := renderLogrotate()
 	if err != nil {
@@ -222,6 +229,16 @@ func (st site) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 		return provision.CheckResult{}, err
 	}
 	for _, mf := range mfs {
+		if mf.remove {
+			present, err := managedFilePresent(ctx, r, mf.path)
+			if err != nil {
+				return provision.CheckResult{}, err
+			}
+			if present {
+				return provision.CheckResult{Satisfied: false, Reason: mf.path + " should be removed (feature disabled)", Changes: st.changes()}, nil
+			}
+			continue
+		}
 		state, err := checkManagedFile(ctx, r, mf.path, mf.content)
 		if err != nil {
 			return provision.CheckResult{}, err
@@ -253,7 +270,7 @@ func (site) changes() []string {
 		"write per-site nginx server block + enable it",
 		"write per-site FPM pool (own user + socket)",
 		"install per-site dormant supervisor worker",
-		"install per-site scheduler cron",
+		"reconcile per-site scheduler cron (install or remove)",
 	}
 }
 
@@ -331,15 +348,30 @@ func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 		}); err != nil {
 			return fmt.Errorf("write supervisor program for %s: %w", site.Domain, err)
 		}
-		cron, err := renderCron(s, site)
-		if err != nil {
-			return fmt.Errorf("render scheduler cron for %s: %w", site.Domain, err)
-		}
-		if err := r.WriteFile(ctx, bssh.FileSpec{
-			Path: cronPath(site.Domain), Content: cron,
-			Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
-		}); err != nil {
-			return fmt.Errorf("write scheduler cron for %s: %w", site.Domain, err)
+		if s.SchedulerEnabled(site) {
+			cron, err := renderCron(s, site)
+			if err != nil {
+				return fmt.Errorf("render scheduler cron for %s: %w", site.Domain, err)
+			}
+			if err := r.WriteFile(ctx, bssh.FileSpec{
+				Path: cronPath(site.Domain), Content: cron,
+				Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
+			}); err != nil {
+				return fmt.Errorf("write scheduler cron for %s: %w", site.Domain, err)
+			}
+		} else {
+			// Scheduler disabled: drift-remove a berth-managed cron (never a foreign file).
+			present, err := managedFilePresent(ctx, r, cronPath(site.Domain))
+			if err != nil {
+				return err
+			}
+			if present {
+				if res, err := r.Run(ctx, "rm -f "+shQuote(cronPath(site.Domain)), nil); err != nil {
+					return err
+				} else if res.ExitCode != 0 {
+					return fmt.Errorf("remove scheduler cron for %s: %s", site.Domain, res.Stderr)
+				}
+			}
 		}
 	}
 
