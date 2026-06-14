@@ -36,12 +36,35 @@ func TestSystemBaseCheckSatisfiedWhenAllInstalled(t *testing.T) {
 	}
 }
 
+func TestSystemBaseCheckAbortsOnUnmanagedAutoUpgrades(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	for _, pkg := range basePackages {
+		f.On("dpkg -s "+pkg, bssh.Result{ExitCode: 0})
+	}
+	f.On("dpkg -s git", bssh.Result{ExitCode: 1}) // a base package is missing
+	// An unmanaged 20auto-upgrades already exists (no berth marker).
+	f.On("cat "+shQuote(autoUpgradesPath), bssh.Result{Stdout: "APT::Periodic::Unattended-Upgrade \"1\";\n", ExitCode: 0})
+	// Without --force: must abort (drift policy) EVEN THOUGH a package is missing.
+	if _, err := SystemBase().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f); err == nil {
+		t.Error("expected abort on an unmanaged 20auto-upgrades even when a base package is missing")
+	}
+	// With --force: reconciles instead (no error, unsatisfied).
+	cr, err := SystemBase().Check(context.Background(), provision.RunCtx{Force: true}, &config.Server{}, f)
+	if err != nil {
+		t.Fatalf("with --force expected no error; got %v", err)
+	}
+	if cr.Satisfied {
+		t.Error("with --force on an unmanaged file, expected unsatisfied (will reconcile)")
+	}
+}
+
 func TestSystemBaseCheckUnsatisfiedWhenMissing(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	for _, pkg := range basePackages {
 		f.On("dpkg -s "+pkg, bssh.Result{ExitCode: 0})
 	}
-	f.On("dpkg -s git", bssh.Result{ExitCode: 1}) // git missing
+	f.On("dpkg -s git", bssh.Result{ExitCode: 1})                    // git missing
+	f.On("cat "+shQuote(autoUpgradesPath), bssh.Result{ExitCode: 1}) // file absent (cat now runs even when a package is missing)
 	cr, err := SystemBase().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
 	if err != nil {
 		t.Fatal(err)

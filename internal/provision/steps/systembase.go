@@ -46,15 +46,9 @@ func (systembase) Check(ctx context.Context, rc provision.RunCtx, _ *config.Serv
 			missing = append(missing, pkg)
 		}
 	}
-	changes := []string{"timedatectl set-timezone UTC", "enable unattended-upgrades", "write 20auto-upgrades periodic config"}
-	if len(missing) > 0 {
-		return provision.CheckResult{
-			Satisfied: false,
-			Reason:    "missing base packages",
-			Changes:   append([]string{"install: " + fmt.Sprint(missing)}, changes...),
-		}, nil
-	}
-	// unattended-upgrades only does anything if the APT Periodic config is present.
+	// Evaluate the auto-upgrades managed file UNCONDITIONALLY: an unmanaged
+	// pre-existing file must abort (unless --force) regardless of package state,
+	// per the drift policy. (cat is read-only, so Check stays side-effect-free.)
 	want, err := renderAutoUpgrades()
 	if err != nil {
 		return provision.CheckResult{}, err
@@ -63,11 +57,19 @@ func (systembase) Check(ctx context.Context, rc provision.RunCtx, _ *config.Serv
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	ok, err := managedFileSatisfied(state, autoUpgradesPath, rc.Force)
+	fileOK, err := managedFileSatisfied(state, autoUpgradesPath, rc.Force)
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	if !ok {
+	changes := []string{"timedatectl set-timezone UTC", "enable unattended-upgrades", "write 20auto-upgrades periodic config"}
+	if len(missing) > 0 {
+		return provision.CheckResult{
+			Satisfied: false,
+			Reason:    "missing base packages",
+			Changes:   append([]string{"install: " + fmt.Sprint(missing)}, changes...),
+		}, nil
+	}
+	if !fileOK {
 		return provision.CheckResult{Satisfied: false, Reason: "auto-upgrades periodic config not up to date", Changes: changes}, nil
 	}
 	return provision.CheckResult{Satisfied: true, Reason: "base packages installed; auto-upgrades enabled"}, nil
