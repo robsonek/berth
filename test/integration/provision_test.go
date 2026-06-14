@@ -8,6 +8,7 @@ package integration
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -90,11 +91,11 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	assertExitZero(ctx, t, client, "nginx -t", "sudo nginx -t")
 	assertExitZero(ctx, t, client, "mariadb socket",
 		`sudo mysql --protocol=socket -e 'SELECT 1'`)
-	assertHTTPServes(t, "http://"+net.JoinHostPort(srv.Host, "80")+"/")
+	assertHTTPServes(t, "http://"+net.JoinHostPort(srv.Host, "80")+"/", false)
 
 	// When TLS was actually provisioned, the site must answer over HTTPS too.
 	if !skipSSL && anySiteSSL(srv) {
-		assertHTTPServes(t, "https://"+srv.Host+"/")
+		assertHTTPServes(t, "https://"+srv.Host+"/", anySiteSelfSigned(srv))
 	}
 
 	// Self-signed certs are asserted directly on disk (no public CA to validate).
@@ -104,7 +105,7 @@ func TestProvisionFreshDebian13(t *testing.T) {
 
 	// berth's defining contract: an immediate second run must change nothing
 	// (every step satisfied), except preflight which re-runs apt by design.
-	assertSecondRunIdempotent(ctx, t, eng, srv, client)
+	assertSecondRunIdempotent(t, eng, srv, client)
 }
 
 // assertSecondRunIdempotent runs the pipeline a SECOND time over the same
@@ -112,8 +113,12 @@ func TestProvisionFreshDebian13(t *testing.T) {
 // satisfied. The SOLE exception is `preflight`, the only AlwaysRun step (it
 // re-runs `apt-get update` every run by design). Any other EventApplied, or any
 // EventFailed, on the second run is an idempotency regression and fails the test.
-func assertSecondRunIdempotent(ctx context.Context, t *testing.T, eng *provision.Engine, srv *config.Server, client *bssh.Client) {
+func assertSecondRunIdempotent(t *testing.T, eng *provision.Engine, srv *config.Server, client *bssh.Client) {
 	t.Helper()
+	// Fresh deadline: the shared test context may be nearly exhausted by a slow
+	// first provision; the second run is read-only Checks + preflight apt and is fast.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
 	events, err := eng.Run(ctx, srv, client, provision.Options{SSLStaging: os.Getenv("BERTH_TEST_SSL_STAGING") == "true"})
 	if err != nil {
 		t.Fatalf("second run pre-flight: %v", err)
@@ -210,12 +215,17 @@ func assertExitZero(ctx context.Context, t *testing.T, c *bssh.Client, label, cm
 // unexpected server error. A 502 (Bad Gateway) is accepted: nginx is up and
 // correctly proxying to PHP-FPM, but no app is deployed yet ("Primary script
 // unknown"). Any other 5xx signals a real nginx/PHP-FPM regression and fails.
-func assertHTTPServes(t *testing.T, url string) {
+// insecureTLS skips certificate verification, required when probing a
+// self-signed (intentionally untrusted) HTTPS vhost.
+func assertHTTPServes(t *testing.T, url string, insecureTLS bool) {
 	t.Helper()
 	cl := &http.Client{
 		Timeout: 10 * time.Second,
 		// Do not follow redirects: an HTTP probe should see the 301 to HTTPS.
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	if insecureTLS {
+		cl.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 	}
 	resp, err := cl.Get(url)
 	if err != nil {
