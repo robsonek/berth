@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
@@ -181,6 +182,11 @@ func (a accounts) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serv
 }
 
 // ensureUser creates the account (idempotent) and locks its home to 0700.
+// A pre-existing account may be a reserved system user whose home is not
+// /home/<user> (e.g. Debian's stock "sync" with home /bin); berth's whole
+// layout (authorized_keys, deploy keys, appdirs) assumes /home/<user>, so we
+// refuse such a collision with an actionable error instead of blindly operating
+// on a path that may not exist.
 func ensureUser(ctx context.Context, r bssh.Runner, user string) error {
 	ok, err := userExists(ctx, r, user)
 	if err != nil {
@@ -195,13 +201,38 @@ func ensureUser(ctx context.Context, r bssh.Runner, user string) error {
 			return fmt.Errorf("create user %s: %s", user, res.Stderr)
 		}
 	}
-	// Private home so one site user cannot traverse into another's home.
-	if res, err := r.Run(ctx, fmt.Sprintf("chmod 700 /home/%s", user), nil); err != nil {
+	home, err := userHome(ctx, r, user)
+	if err != nil {
+		return err
+	}
+	if want := "/home/" + user; home != want {
+		return fmt.Errorf("user %s already exists with home %q, not %q — it is likely a reserved system account; choose a different sites[].user", user, home, want)
+	}
+	// Private, present home (idempotent: create if missing, own it, lock to
+	// 0700) so one site user cannot traverse into another's home.
+	if res, err := r.Run(ctx, fmt.Sprintf("install -d -o %s -g %s -m 700 %s", user, user, shQuote("/home/"+user)), nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
-		return fmt.Errorf("chmod home for %s: %s", user, res.Stderr)
+		return fmt.Errorf("lock home for %s: %s", user, res.Stderr)
 	}
 	return nil
+}
+
+// userHome returns the account's home directory from its passwd entry
+// (field 6 of name:x:uid:gid:gecos:home:shell).
+func userHome(ctx context.Context, r bssh.Runner, user string) (string, error) {
+	res, err := r.Run(ctx, "getent passwd "+user, nil)
+	if err != nil {
+		return "", err
+	}
+	if res.ExitCode != 0 {
+		return "", fmt.Errorf("getent passwd %s: exit %d", user, res.ExitCode)
+	}
+	fields := strings.Split(strings.TrimSpace(res.Stdout), ":")
+	if len(fields) < 7 {
+		return "", fmt.Errorf("unexpected passwd entry for %s: %q", user, res.Stdout)
+	}
+	return fields[5], nil
 }
 
 // writeValidatedSudoers writes a sudoers drop-in (mode 0440) and validates it.

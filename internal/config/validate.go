@@ -20,6 +20,20 @@ var allowedPHPVersions = map[string]bool{"8.2": true, "8.3": true, "8.4": true, 
 var allowedPHPSources = map[string]bool{"auto": true, "sury": true, "debian": true}
 var allowedNginxSources = map[string]bool{"debian": true, "nginx": true}
 
+// reservedOSUsers are names berth refuses for a site OS user: stock Debian
+// system accounts (whose homes are not /home/<user> and which own privileged
+// resources) plus berth's own provisioning account. Using one would collide
+// with an existing account and break berth's per-user home layout.
+var reservedOSUsers = map[string]bool{
+	"root": true, "daemon": true, "bin": true, "sys": true, "sync": true,
+	"games": true, "man": true, "lp": true, "mail": true, "news": true,
+	"uucp": true, "proxy": true, "www-data": true, "backup": true,
+	"list": true, "irc": true, "gnats": true, "nobody": true, "_apt": true,
+	"messagebus": true, "sshd": true,
+	"systemd-network": true, "systemd-resolve": true, "systemd-timesync": true,
+	"berth": true,
+}
+
 // dbEngineUpstreamSource maps each supported database engine to the non-"debian"
 // value its database.source may take (its trusted producer repo).
 var dbEngineUpstreamSource = map[string]string{"mariadb": "mariadb", "postgres": "pgdg"}
@@ -81,6 +95,9 @@ func (s *Server) Validate() error {
 		osUser := s.SiteUser(site)
 		if !reLinuxUser.MatchString(osUser) {
 			return fmt.Errorf("site %d (%s): os user %q is not a valid Linux username", i, site.Domain, osUser)
+		}
+		if reservedOSUsers[osUser] {
+			return fmt.Errorf("site %d (%s): os user %q is reserved by the system; set sites[].user to a non-reserved name", i, site.Domain, osUser)
 		}
 		// Isolation requires a distinct domain, OS user, DB name, DB user and path.
 		if err := dup(seenDomain, site.Domain, "domain"); err != nil {

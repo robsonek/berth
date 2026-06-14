@@ -50,7 +50,8 @@ func stubAccountExists(f *bssh.FakeRunner, user string, want []byte) {
 func stubAccountCreate(f *bssh.FakeRunner, user string) {
 	f.On("id "+user, bssh.Result{ExitCode: 1})
 	f.On("useradd -m -s /bin/bash "+user, bssh.Result{})
-	f.On(fmt.Sprintf("chmod 700 /home/%s", user), bssh.Result{})
+	f.On("getent passwd "+user, bssh.Result{Stdout: fmt.Sprintf("%s:x:1000:1000::/home/%s:/bin/bash\n", user, user)})
+	f.On(fmt.Sprintf("install -d -o %s -g %s -m 700 ", user, user)+shQuote(fmt.Sprintf("/home/%s", user)), bssh.Result{})
 	f.On("visudo -cf "+shQuote(sudoersPath(user)), bssh.Result{ExitCode: 0})
 	f.On(fmt.Sprintf("install -d -o %s -g %s -m 700 ", user, user)+shQuote(fmt.Sprintf("/home/%s/.ssh", user)), bssh.Result{})
 }
@@ -100,7 +101,7 @@ func TestAccountsApplyCreatesUsersAndWritesSudoers(t *testing.T) {
 	}
 
 	joined := strings.Join(callCmds(f), "\n")
-	for _, want := range []string{"useradd -m -s /bin/bash berth", "useradd -m -s /bin/bash deploy", "chmod 700 /home/deploy"} {
+	for _, want := range []string{"useradd -m -s /bin/bash berth", "useradd -m -s /bin/bash deploy", "getent passwd deploy", "install -d -o deploy -g deploy -m 700 " + shQuote("/home/deploy")} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing %q in calls:\n%s", want, joined)
 		}
@@ -200,6 +201,33 @@ func TestAccountsApplySkipsDeployKeyWithoutRepository(t *testing.T) {
 		if strings.Contains(c.Cmd, "ssh-keygen") || strings.Contains(c.Cmd, "ssh-keyscan") {
 			t.Errorf("unexpected deploy-key command without repository: %q", c.Cmd)
 		}
+	}
+}
+
+func TestEnsureUserCreatesAndLocksHome(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("id app", bssh.Result{ExitCode: 1})
+	f.On("useradd -m -s /bin/bash app", bssh.Result{})
+	f.On("getent passwd app", bssh.Result{Stdout: "app:x:1002:1002::/home/app:/bin/bash\n"})
+	f.On("install -d -o app -g app -m 700 "+shQuote("/home/app"), bssh.Result{})
+	if err := ensureUser(context.Background(), f, "app"); err != nil {
+		t.Fatalf("ensureUser() error = %v", err)
+	}
+}
+
+// A pre-existing account whose home is not /home/<user> (e.g. Debian's stock
+// "sync" with home /bin) must be refused with an actionable error rather than a
+// blind chmod of a path that does not exist.
+func TestEnsureUserRejectsForeignHome(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("id sync", bssh.Result{ExitCode: 0})
+	f.On("getent passwd sync", bssh.Result{Stdout: "sync:x:4:65534:sync:/bin:/bin/sync\n"})
+	err := ensureUser(context.Background(), f, "sync")
+	if err == nil {
+		t.Fatal("expected error for a user whose home is not /home/sync")
+	}
+	if !strings.Contains(err.Error(), "reserved system account") {
+		t.Errorf("error should explain the reserved-account collision; got %v", err)
 	}
 }
 
