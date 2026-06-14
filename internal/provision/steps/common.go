@@ -13,10 +13,20 @@ import (
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
 
-// managedMarker is the first line berth writes into every config file it owns
-// (templates.Render prepends it). Its presence distinguishes a berth-managed
-// file from a pre-existing, unmanaged one (drift policy, §6.5).
-const managedMarker = "# managed by berth"
+// managedMarker / managedMarkerINI are the first line berth writes into every
+// config file it owns (templates.Render / RenderINI prepend one of them). Their
+// presence distinguishes a berth-managed file from a pre-existing, unmanaged one
+// (drift policy, §6.5). Two variants exist because '#' starts a comment in most
+// configs but PHP-FPM's INI parser only accepts ';'.
+const (
+	managedMarker    = "# managed by berth"
+	managedMarkerINI = "; managed by berth"
+)
+
+// hasManagedMarker reports whether content begins with either marker variant.
+func hasManagedMarker(content string) bool {
+	return strings.HasPrefix(content, managedMarker) || strings.HasPrefix(content, managedMarkerINI)
+}
 
 // contentHash returns the hex SHA-256 of b; used to detect out-of-band drift in
 // a managed file (a Check compares the live file's hash against the desired one).
@@ -80,7 +90,7 @@ func checkManagedFile(ctx context.Context, r bssh.Runner, path string, desired [
 	if res.ExitCode != 0 {
 		return fileAbsent, nil
 	}
-	if !strings.HasPrefix(res.Stdout, managedMarker) {
+	if !hasManagedMarker(res.Stdout) {
 		return fileUnmanaged, nil
 	}
 	if contentHash([]byte(res.Stdout)) == contentHash(desired) {

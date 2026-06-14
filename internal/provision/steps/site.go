@@ -63,9 +63,21 @@ func renderNginxHTTP(s *config.Server, site config.Site) ([]byte, error) {
 }
 
 func renderFPMPool(s *config.Server, site config.Site) ([]byte, error) {
-	return templates.Render("fpm_pool.conf.tmpl", struct {
+	// PHP-FPM pool files are INI; their parser rejects '#' comment lines, so the
+	// managed marker must use ';' (RenderINI).
+	return templates.RenderINI("fpm_pool.conf.tmpl", struct {
 		PoolName, PHPVersion string
 	}{PoolName: poolName(site.Domain), PHPVersion: s.PHP.Version})
+}
+
+// fpmService is the systemd unit for the configured PHP-FPM version.
+func fpmService(s *config.Server) string { return "php" + s.PHP.Version + "-fpm" }
+
+// defaultFPMPoolPath is the distro's default pool; berth disables it so its own
+// pool (running as deploy) owns the FPM socket rather than colliding with the
+// stock www pool (which runs as www-data on the same socket).
+func defaultFPMPoolPath(s *config.Server) string {
+	return fmt.Sprintf("/etc/php/%s/fpm/pool.d/www.conf", s.PHP.Version)
 }
 
 func renderSupervisor(s *config.Server) ([]byte, error) {
@@ -112,7 +124,16 @@ func (st site) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 	if res.ExitCode != 0 {
 		return provision.CheckResult{Satisfied: false, Reason: "nginx -t fails", Changes: st.changes()}, nil
 	}
-	return provision.CheckResult{Satisfied: true, Reason: "site config in place and nginx valid"}, nil
+	// The active PHP-FPM configuration must validate too (catches a stock www
+	// pool reappearing on the FPM socket, or a malformed pool).
+	fpm, err := r.Run(ctx, "php-fpm"+s.PHP.Version+" -t", nil)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	if fpm.ExitCode != 0 {
+		return provision.CheckResult{Satisfied: false, Reason: "php-fpm -t fails", Changes: st.changes()}, nil
+	}
+	return provision.CheckResult{Satisfied: true, Reason: "site config in place; nginx and php-fpm valid"}, nil
 }
 
 func (site) changes() []string {
@@ -158,7 +179,12 @@ func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 		return fmt.Errorf("reload nginx: %s", res.Stderr)
 	}
 
-	// 3) FPM pool(s).
+	// 3) FPM pool(s). Berth's pool runs as the deploy user and owns the FPM
+	//    socket, so the stock www pool (www-data, same socket) is disabled first.
+	disableWWW := fmt.Sprintf("test -f %[1]s && mv -f %[1]s %[1]s.disabled || true", shQuote(defaultFPMPoolPath(s)))
+	if _, err := r.Run(ctx, disableWWW, nil); err != nil {
+		return err
+	}
 	for _, site := range s.Sites {
 		pool, err := renderFPMPool(s, site)
 		if err != nil {
@@ -170,6 +196,18 @@ func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 		}); err != nil {
 			return fmt.Errorf("write FPM pool for %s: %w", site.Domain, err)
 		}
+	}
+	// Validate the FPM config BEFORE reloading (mirrors the nginx -t gate), then
+	// reload so the new pool actually takes effect and any error surfaces now.
+	if res, err := r.Run(ctx, "php-fpm"+s.PHP.Version+" -t", nil); err != nil {
+		return err
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("php-fpm%s -t failed, refusing to reload: %s", s.PHP.Version, res.Stderr)
+	}
+	if res, err := r.Run(ctx, "systemctl reload "+fpmService(s), nil); err != nil {
+		return err
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("reload %s: %s", fpmService(s), res.Stderr)
 	}
 
 	// 4) Dormant Supervisor worker (autostart=false; started post-deploy).

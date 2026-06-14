@@ -1,4 +1,4 @@
-# managed by berth
+; managed by berth
 [myapp]
 user = deploy
 group = deploy

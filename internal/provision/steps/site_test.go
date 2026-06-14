@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -40,6 +41,7 @@ func TestSiteApplyValidatesNginxBeforeReload(t *testing.T) {
 	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
 	f.On("nginx -t", bssh.Result{ExitCode: 0})
 	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
 
 	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -87,6 +89,7 @@ func TestSiteApplyWritesManagedFiles(t *testing.T) {
 	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
 	f.On("nginx -t", bssh.Result{ExitCode: 0})
 	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
 
 	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -125,6 +128,7 @@ func TestSiteCheckSatisfiedWhenFilesManagedAndNginxValid(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	stubManagedSiteFiles(t, s, f)
 	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
 
 	cr, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
@@ -157,4 +161,12 @@ func stubManagedSiteFiles(t *testing.T, s *config.Server, f *bssh.FakeRunner) {
 	for _, mf := range managedSiteFiles(s) {
 		f.On("cat "+shQuote(mf.path), bssh.Result{Stdout: string(mf.content)})
 	}
+}
+
+// stubFPMApply stubs the FPM commands the Apply path runs after writing the pool:
+// disabling the stock www pool, validating, and reloading php-fpm.
+func stubFPMApply(s *config.Server, f *bssh.FakeRunner) {
+	f.On(fmt.Sprintf("test -f %[1]s && mv -f %[1]s %[1]s.disabled || true", shQuote(defaultFPMPoolPath(s))), bssh.Result{})
+	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload "+fpmService(s), bssh.Result{})
 }

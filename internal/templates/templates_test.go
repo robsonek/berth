@@ -13,9 +13,20 @@ var update = flag.Bool("update", false, "update golden files")
 // file under testdata/, refreshing the golden when -update is passed.
 func checkGolden(t *testing.T, name, golden string, data any) {
 	t.Helper()
-	got, err := Render(name, data)
+	checkGoldenRender(t, Render, name, golden, data)
+}
+
+// checkGoldenINI compares a template rendered with the INI (semicolon) marker.
+func checkGoldenINI(t *testing.T, name, golden string, data any) {
+	t.Helper()
+	checkGoldenRender(t, RenderINI, name, golden, data)
+}
+
+func checkGoldenRender(t *testing.T, render func(string, any) ([]byte, error), name, golden string, data any) {
+	t.Helper()
+	got, err := render(name, data)
 	if err != nil {
-		t.Fatalf("Render(%q) error = %v", name, err)
+		t.Fatalf("render(%q) error = %v", name, err)
 	}
 	path := filepath.Join("testdata", golden)
 	if *update {
@@ -49,7 +60,7 @@ func TestRenderNginxHTTPSGolden(t *testing.T) {
 }
 
 func TestRenderFPMPoolGolden(t *testing.T) {
-	checkGolden(t, "fpm_pool.conf.tmpl", "fpm_pool.golden", struct{ PoolName, PHPVersion string }{
+	checkGoldenINI(t, "fpm_pool.conf.tmpl", "fpm_pool.golden", struct{ PoolName, PHPVersion string }{
 		PoolName: "myapp", PHPVersion: "8.5",
 	})
 }
