@@ -127,6 +127,8 @@ func TestNginxCheckSourceNginxRequiresRepo(t *testing.T) {
 	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
 	stubDefaultsAbsent(f)
+	// Worker user already reconciled to www-data (so only the repo gates this test).
+	f.On("grep -qE '^[[:space:]]*user[[:space:]]+www-data;' "+nginxConfPath, bssh.Result{ExitCode: 0})
 	// nginx.org repo not yet registered -> not satisfied even though nginx runs.
 	f.On("test -e "+shQuote(nginxOrgSourceList), bssh.Result{ExitCode: 1})
 	cr, err := Nginx().Check(context.Background(), provision.RunCtx{}, s, f)
@@ -155,6 +157,7 @@ func TestNginxApplySourceNginxAddsRepoAndBridge(t *testing.T) {
 	f.On("apt-get update", bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx", bssh.Result{})
 	f.On("install -d /etc/nginx/sites-available /etc/nginx/sites-enabled", bssh.Result{})
+	f.On("sed -ri 's|^[[:space:]]*user[[:space:]]+[^;]*;|user  www-data;|' "+nginxConfPath, bssh.Result{})
 	f.On("systemctl enable --now nginx", bssh.Result{})
 	stubNginxApplyTail(f)
 	if err := Nginx().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -167,6 +170,9 @@ func TestNginxApplySourceNginxAddsRepoAndBridge(t *testing.T) {
 	joined := strings.Join(cmds, "\n")
 	if !strings.Contains(joined, "nginx.org/keys/nginx_signing.key") {
 		t.Errorf("source=nginx must fetch the nginx.org signing key; calls:\n%s", joined)
+	}
+	if !strings.Contains(joined, "user  www-data;") {
+		t.Errorf("source=nginx must reconcile the worker user to www-data; calls:\n%s", joined)
 	}
 	// The conf.d bridge must be written so the site step's server blocks load.
 	var bridgeWritten, sourceListWritten bool
