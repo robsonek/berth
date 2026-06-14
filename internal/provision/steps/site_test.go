@@ -325,6 +325,55 @@ func TestSiteHTTPSRenderMatchesTLSSwap(t *testing.T) {
 	}
 }
 
+func TestSiteApplyWritesLogrotate(t *testing.T) {
+	s := siteServer()
+	f := bssh.NewFakeRunner()
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var lr *bssh.FileSpec
+	for i := range f.Writes() {
+		if f.Writes()[i].Path == logrotatePath {
+			lr = &f.Writes()[i]
+		}
+	}
+	if lr == nil {
+		t.Fatal("logrotate fragment was not written")
+	}
+	if !strings.Contains(string(lr.Content), "managed by berth") || !strings.Contains(string(lr.Content), "copytruncate") {
+		t.Errorf("logrotate fragment must carry the marker and use copytruncate;\n%s", lr.Content)
+	}
+	var validated bool
+	for _, c := range f.Calls() {
+		if c.Cmd == "logrotate -d "+shQuote(logrotatePath) {
+			validated = true
+		}
+	}
+	if !validated {
+		t.Error("Apply must validate the logrotate fragment with `logrotate -d`")
+	}
+}
+
+func TestSiteCheckUnsatisfiedWhenLogrotateMissing(t *testing.T) {
+	s := siteServer()
+	f := bssh.NewFakeRunner()
+	stubManagedSiteFiles(t, s, f)
+	// Override: the global logrotate fragment is absent on the host.
+	f.On("cat "+shQuote(logrotatePath), bssh.Result{ExitCode: 1})
+	cr, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied when the global logrotate fragment is absent")
+	}
+}
+
 // stubManagedSiteFiles makes every managed site file read back as up-to-date so
 // the Check's content-hash comparison is satisfied.
 func stubManagedSiteFiles(t *testing.T, s *config.Server, f *bssh.FakeRunner) {
@@ -338,10 +387,12 @@ func stubManagedSiteFiles(t *testing.T, s *config.Server, f *bssh.FakeRunner) {
 	}
 }
 
-// stubFPMApply stubs the FPM commands the Apply path runs after writing the pool:
-// disabling the stock www pool, validating, and reloading php-fpm.
+// stubFPMApply stubs the commands the Apply path runs after writing the pool:
+// disabling the stock www pool, validating + reloading php-fpm, and validating
+// the global logrotate fragment.
 func stubFPMApply(s *config.Server, f *bssh.FakeRunner) {
 	f.On(fmt.Sprintf("test -f %[1]s && mv -f %[1]s %[1]s.disabled || true", shQuote(defaultFPMPoolPath(s))), bssh.Result{})
 	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
 	f.On("systemctl reload "+fpmService(s), bssh.Result{})
+	f.On("logrotate -d "+shQuote(logrotatePath), bssh.Result{})
 }

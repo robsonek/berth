@@ -127,3 +127,7 @@ func TestRenderFail2banJailGolden(t *testing.T) {
 		Maxretry, SSHPort int
 	}{Bantime: "1h", Findtime: "10m", Maxretry: 5, SSHPort: 22})
 }
+
+func TestRenderLogrotateGolden(t *testing.T) {
+	checkGolden(t, "logrotate.conf.tmpl", "logrotate.golden", nil)
+}

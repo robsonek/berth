@@ -34,6 +34,12 @@ func supervisorProgramPath(domain string) string {
 }
 func cronPath(domain string) string { return "/etc/cron.d/berth-" + poolName(domain) }
 
+// logrotatePath is the single global logrotate fragment covering every site's
+// FPM and supervisor logs via globs (rotation is host-global, not per-tenant).
+const logrotatePath = "/etc/logrotate.d/berth"
+
+func renderLogrotate() ([]byte, error) { return templates.Render("logrotate.conf.tmpl", nil) }
+
 // fpmService is the systemd unit for the configured PHP-FPM version.
 func fpmService(s *config.Server) string { return "php" + s.PHP.Version + "-fpm" }
 
@@ -77,6 +83,11 @@ func managedSiteFiles(ctx context.Context, r bssh.Runner, s *config.Server) ([]s
 		}
 		files = append(files, siteFile{cronPath(site.Domain), cron})
 	}
+	lr, err := renderLogrotate()
+	if err != nil {
+		return nil, err
+	}
+	files = append(files, siteFile{path: logrotatePath, content: lr})
 	return files, nil
 }
 
@@ -330,6 +341,22 @@ func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 		}); err != nil {
 			return fmt.Errorf("write scheduler cron for %s: %w", site.Domain, err)
 		}
+	}
+
+	// 6) Global logrotate fragment for FPM + supervisor logs (one file, globs).
+	lr, err := renderLogrotate()
+	if err != nil {
+		return err
+	}
+	if err := r.WriteFile(ctx, bssh.FileSpec{
+		Path: logrotatePath, Content: lr, Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
+	}); err != nil {
+		return fmt.Errorf("write %s: %w", logrotatePath, err)
+	}
+	if res, err := r.Run(ctx, "logrotate -d "+shQuote(logrotatePath), nil); err != nil {
+		return err
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("logrotate -d failed for %s: %s", logrotatePath, res.Stderr)
 	}
 	return nil
 }
