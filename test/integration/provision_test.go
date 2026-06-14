@@ -24,14 +24,16 @@ import (
 )
 
 // TestProvisionFreshDebian13 provisions a throwaway host described by
-// BERTH_TEST_SERVER (a servers/*.yml) and asserts the end state. TLS is skipped
-// (it needs real DNS), so the run goes through every phase except the ACME step.
+// BERTH_TEST_SERVER (a servers/*.yml) and asserts the end state. Self-signed TLS
+// runs by default (no DNS needed); Let's Encrypt is opt-in via
+// BERTH_TEST_SKIP_SSL=false (it needs real public DNS).
 //
 // End state asserted (design §9):
 //   - `systemctl is-active nginx php{ver}-fpm mariadb valkey-server` all "active"
 //   - `nginx -t` exits 0
 //   - `mysql --protocol=socket -e 'SELECT 1'` exits 0
 //   - HTTP GET / returns a response (502 is acceptable pre-deploy: no app yet)
+//   - self-signed cert present + valid beyond the renew window (when configured)
 func TestProvisionFreshDebian13(t *testing.T) {
 	cfgPath := os.Getenv("BERTH_TEST_SERVER")
 	if cfgPath == "" {
@@ -59,9 +61,11 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	}
 	defer client.Close()
 
-	// TLS is skipped by default (the ACME challenge needs real public DNS). Set
-	// BERTH_TEST_SKIP_SSL=false to also exercise TLS and assert HTTPS.
-	skipSSL := os.Getenv("BERTH_TEST_SKIP_SSL") != "false"
+	// Self-signed TLS needs no public DNS, so it runs by default. Let's Encrypt
+	// (HTTP-01/ACME) needs real DNS, so it is opt-in via BERTH_TEST_SKIP_SSL=false.
+	// BERTH_TEST_SKIP_SSL=true forces a hard skip even for self-signed.
+	sslEnv := os.Getenv("BERTH_TEST_SKIP_SSL")
+	skipSSL := sslEnv == "true" || (sslEnv == "" && !anySiteSelfSigned(srv))
 
 	// Run the full pipeline.
 	red := secret.NewRedactor()
@@ -92,12 +96,29 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	if !skipSSL && anySiteSSL(srv) {
 		assertHTTPServes(t, "https://"+srv.Host+"/")
 	}
+
+	// Self-signed certs are asserted directly on disk (no public CA to validate).
+	if !skipSSL && anySiteSelfSigned(srv) {
+		assertSelfSignedCert(ctx, t, client, srv)
+	}
 }
 
 // anySiteSSL reports whether any configured site enables TLS.
 func anySiteSSL(srv *config.Server) bool {
 	for _, site := range srv.Sites {
 		if site.SSL {
+			return true
+		}
+	}
+	return false
+}
+
+// anySiteSelfSigned reports whether any site uses a self-signed certificate
+// (CertMode "selfsigned"), which needs no DNS/ACME and so can be exercised in
+// the gate by default.
+func anySiteSelfSigned(srv *config.Server) bool {
+	for _, site := range srv.Sites {
+		if site.SSL && site.CertMode() == "selfsigned" {
 			return true
 		}
 	}
@@ -124,6 +145,25 @@ func assertServicesActive(ctx context.Context, t *testing.T, c *bssh.Client, srv
 			t.Errorf("service %s: is-active = %q (exit %d, stderr %q), want \"active\"",
 				unit, got, res.ExitCode, strings.TrimSpace(res.Stderr))
 		}
+	}
+}
+
+// assertSelfSignedCert verifies each self-signed site has a berth-managed
+// certificate under /etc/ssl/berth/<domain> (site.go certDir) that is valid
+// beyond the renewal window — the same condition the tls step's certValid uses,
+// so a re-run's tls.Check stays satisfied.
+func assertSelfSignedCert(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server) {
+	t.Helper()
+	const renewWindowSecs = 30 * 24 * 60 * 60 // mirror steps.certRenewWindow (30 days)
+	for _, site := range srv.Sites {
+		if !site.SSL || site.CertMode() != "selfsigned" {
+			continue
+		}
+		fullchain := "/etc/ssl/berth/" + site.Domain + "/fullchain.pem"
+		assertExitZero(ctx, t, c, "self-signed cert present "+site.Domain,
+			"test -e "+fullchain)
+		assertExitZero(ctx, t, c, "self-signed cert valid "+site.Domain,
+			fmt.Sprintf("openssl x509 -checkend %d -noout -in %s", renewWindowSecs, fullchain))
 	}
 }
 
