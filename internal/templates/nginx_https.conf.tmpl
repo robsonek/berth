@@ -19,8 +19,8 @@ server {
     root {{ .DeployPath }}/current/public;
     index index.php;
 
-    ssl_certificate /etc/letsencrypt/live/{{ .Domain }}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/{{ .Domain }}/privkey.pem;
+    ssl_certificate {{ .CertPath }};
+    ssl_certificate_key {{ .KeyPath }};
 
     location /.well-known/acme-challenge/ {
         root {{ .ACMEWebroot }};

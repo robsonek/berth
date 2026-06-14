@@ -46,8 +46,17 @@ type Site struct {
 	User       string       `mapstructure:"user" yaml:"user"` // OS user that owns/runs the site; derived when empty
 	Repository string       `mapstructure:"repository" yaml:"repository"`
 	SSL        bool         `mapstructure:"ssl" yaml:"ssl"`
+	SSLMode    string       `mapstructure:"ssl_mode" yaml:"ssl_mode"` // letsencrypt (default) | selfsigned
 	SSLEmail   string       `mapstructure:"ssl_email" yaml:"ssl_email"`
 	Database   SiteDatabase `mapstructure:"database" yaml:"database"`
+}
+
+// CertMode returns the certificate mode for a site, defaulting to "letsencrypt".
+func (st Site) CertMode() string {
+	if st.SSLMode == "" {
+		return "letsencrypt"
+	}
+	return st.SSLMode
 }
 
 // SiteUser returns the OS user that owns and runs a site. An explicit

@@ -43,22 +43,25 @@ func checkGoldenRender(t *testing.T, render func(string, any) ([]byte, error), n
 	}
 }
 
-type nginxData struct{ Domain, DeployPath, ACMEWebroot, Socket string }
+type nginxData struct{ Domain, DeployPath, ACMEWebroot, Socket, CertPath, KeyPath string }
 
 const testSocket = "/run/php/berth-app_example_com.sock"
 
-func TestRenderNginxHTTPGolden(t *testing.T) {
-	checkGolden(t, "nginx_http.conf.tmpl", "nginx_http.golden", nginxData{
+func nginxGoldenData() nginxData {
+	return nginxData{
 		Domain: "app.example.com", DeployPath: "/home/deploy/myapp",
 		ACMEWebroot: "/var/www/berth-acme/app.example.com", Socket: testSocket,
-	})
+		CertPath: "/etc/letsencrypt/live/app.example.com/fullchain.pem",
+		KeyPath:  "/etc/letsencrypt/live/app.example.com/privkey.pem",
+	}
+}
+
+func TestRenderNginxHTTPGolden(t *testing.T) {
+	checkGolden(t, "nginx_http.conf.tmpl", "nginx_http.golden", nginxGoldenData())
 }
 
 func TestRenderNginxHTTPSGolden(t *testing.T) {
-	checkGolden(t, "nginx_https.conf.tmpl", "nginx_https.golden", nginxData{
-		Domain: "app.example.com", DeployPath: "/home/deploy/myapp",
-		ACMEWebroot: "/var/www/berth-acme/app.example.com", Socket: testSocket,
-	})
+	checkGolden(t, "nginx_https.conf.tmpl", "nginx_https.golden", nginxGoldenData())
 }
 
 func TestRenderFPMPoolGolden(t *testing.T) {

@@ -117,9 +117,13 @@ func (st *Site) validate() error {
 	if st.Repository != "" && !validGitURL(st.Repository) {
 		return fmt.Errorf("repository %q must be an SSH git URL (scp-like or ssh://); HTTPS is out of v1 scope", st.Repository)
 	}
-	if st.SSL {
+	if st.SSLMode != "" && st.SSLMode != "letsencrypt" && st.SSLMode != "selfsigned" {
+		return fmt.Errorf("ssl_mode %q must be letsencrypt or selfsigned", st.SSLMode)
+	}
+	if st.SSL && st.CertMode() == "letsencrypt" {
+		// Let's Encrypt needs a contact email; self-signed does not.
 		if st.SSLEmail == "" {
-			return fmt.Errorf("ssl_email is required when ssl is true")
+			return fmt.Errorf("ssl_email is required when ssl is true with letsencrypt")
 		}
 		if !reEmail.MatchString(st.SSLEmail) {
 			return fmt.Errorf("ssl_email %q is not a valid email address", st.SSLEmail)

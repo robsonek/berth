@@ -80,10 +80,22 @@ func managedSiteFiles(ctx context.Context, r bssh.Runner, s *config.Server) ([]s
 	return files, nil
 }
 
-// certInstalled reports whether a Let's Encrypt certificate file is present for
-// the domain (used to decide whether the nginx block should be HTTPS yet).
-func certInstalled(ctx context.Context, r bssh.Runner, domain string) (bool, error) {
-	return fileExists(ctx, r, "/etc/letsencrypt/live/"+domain+"/fullchain.pem")
+// certDir is where a site's TLS certificate lives: Let's Encrypt's live dir, or
+// a berth-managed dir for self-signed certs.
+func certDir(site config.Site) string {
+	if site.CertMode() == "selfsigned" {
+		return "/etc/ssl/berth/" + site.Domain
+	}
+	return "/etc/letsencrypt/live/" + site.Domain
+}
+
+func certFullchainPath(site config.Site) string { return certDir(site) + "/fullchain.pem" }
+func certKeyPath(site config.Site) string       { return certDir(site) + "/privkey.pem" }
+
+// certInstalled reports whether the site's certificate file is present yet (used
+// to decide whether the nginx block should be HTTPS).
+func certInstalled(ctx context.Context, r bssh.Runner, site config.Site) (bool, error) {
+	return fileExists(ctx, r, certFullchainPath(site))
 }
 
 // renderSiteNginx renders the HTTPS (443) server block when the site uses SSL and
@@ -92,7 +104,7 @@ func certInstalled(ctx context.Context, r bssh.Runner, domain string) (bool, err
 // the HTTPS block in place rather than reverting it.
 func renderSiteNginx(ctx context.Context, r bssh.Runner, s *config.Server, site config.Site) ([]byte, error) {
 	if site.SSL {
-		has, err := certInstalled(ctx, r, site.Domain)
+		has, err := certInstalled(ctx, r, site)
 		if err != nil {
 			return nil, err
 		}
@@ -104,13 +116,15 @@ func renderSiteNginx(ctx context.Context, r bssh.Runner, s *config.Server, site 
 }
 
 // nginxData is the render input for both nginx server-block templates. Socket is
-// the site's own PHP-FPM socket so each domain proxies to its own pool/user.
-type nginxData struct{ Domain, DeployPath, ACMEWebroot, Socket string }
+// the site's own PHP-FPM socket so each domain proxies to its own pool/user;
+// CertPath/KeyPath point at the site's TLS material (LE or self-signed).
+type nginxData struct{ Domain, DeployPath, ACMEWebroot, Socket, CertPath, KeyPath string }
 
 func nginxRenderData(site config.Site) nginxData {
 	return nginxData{
 		Domain: site.Domain, DeployPath: site.DeployPath,
 		ACMEWebroot: acmeWebroot(site.Domain), Socket: fpmSocket(site.Domain),
+		CertPath: certFullchainPath(site), KeyPath: certKeyPath(site),
 	}
 }
 

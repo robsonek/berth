@@ -107,6 +107,10 @@ A single-site config may keep the legacy top-level `database: { name, user }`
 and the shared `deploy` user; with multiple sites each site needs its own
 `database` block, and the OS users must be distinct.
 
+Each TLS site uses Let's Encrypt by default; set `ssl_mode: selfsigned` on a site
+to generate a self-signed certificate instead (no public DNS or `ssl_email`
+needed — handy for staging or internal hosts).
+
 ## Beyond v1
 
 `berth site:add` (incremental add) and package-manager distribution are planned

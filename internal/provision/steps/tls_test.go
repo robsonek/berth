@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -212,5 +213,57 @@ func TestTLSApplySkipsOnDNSMismatch(t *testing.T) {
 		if strings.Contains(c.Cmd, "certonly") {
 			t.Error("certbot must not run when DNS does not point at the host")
 		}
+	}
+}
+
+func TestTLSSelfSignedIssuesWithoutCertbotOrDNS(t *testing.T) {
+	s := tlsServer()
+	s.Sites[0].SSLMode = "selfsigned"
+	site := s.Sites[0]
+	f := bssh.NewFakeRunner()
+	// No cert yet.
+	f.On("test -e "+shQuote(certFullchainPath(site)), bssh.Result{ExitCode: 1})
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y openssl", bssh.Result{})
+	f.On("install -d -m 0755 "+shQuote(certDir(site)), bssh.Result{})
+	openssl := fmt.Sprintf("openssl req -x509 -newkey rsa:2048 -nodes -days 825 -keyout %s -out %s -subj %s -addext %s",
+		shQuote(certKeyPath(site)), shQuote(certFullchainPath(site)), shQuote("/CN="+site.Domain), shQuote("subjectAltName=DNS:"+site.Domain))
+	f.On(openssl, bssh.Result{})
+	f.On("chmod 600 "+shQuote(certKeyPath(site)), bssh.Result{})
+	f.On("nginx -t", bssh.Result{})
+	f.On("systemctl reload nginx", bssh.Result{})
+
+	if err := TLS().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "certbot") || strings.Contains(c.Cmd, "certonly") {
+			t.Errorf("self-signed mode must not invoke certbot; got %q", c.Cmd)
+		}
+	}
+	// The 443 block must be written, pointing at the self-signed cert dir.
+	var wroteHTTPS bool
+	for _, w := range f.Writes() {
+		if w.Path == nginxAvailablePath(site.Domain) && strings.Contains(string(w.Content), certFullchainPath(site)) {
+			wroteHTTPS = true
+		}
+	}
+	if !wroteHTTPS {
+		t.Error("expected the 443 block to be written pointing at the self-signed cert")
+	}
+}
+
+func TestTLSSelfSignedCertValidUsesOpenssl(t *testing.T) {
+	s := tlsServer()
+	s.Sites[0].SSLMode = "selfsigned"
+	site := s.Sites[0]
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(certFullchainPath(site)), bssh.Result{ExitCode: 0})
+	f.On(fmt.Sprintf("openssl x509 -checkend %d -noout -in %s", int(certRenewWindow.Seconds()), shQuote(certFullchainPath(site))), bssh.Result{ExitCode: 0})
+	cr, err := TLS().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("self-signed cert valid beyond the window should be satisfied; got %+v", cr)
 	}
 }

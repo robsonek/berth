@@ -37,7 +37,7 @@ func (tls) Check(ctx context.Context, _ provision.RunCtx, s *config.Server, r bs
 		if !site.SSL {
 			continue
 		}
-		ok, err := certValid(ctx, r, site.Domain)
+		ok, err := certValid(ctx, r, site)
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
@@ -45,7 +45,7 @@ func (tls) Check(ctx context.Context, _ provision.RunCtx, s *config.Server, r bs
 			return provision.CheckResult{
 				Satisfied: false,
 				Reason:    "no valid certificate for " + site.Domain,
-				Changes:   []string{"obtain Let's Encrypt certificate for " + site.Domain, "install 443 server block"},
+				Changes:   []string{"issue " + site.CertMode() + " certificate for " + site.Domain, "install 443 server block"},
 			}, nil
 		}
 	}
@@ -58,14 +58,21 @@ func (st tls) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 			continue
 		}
 		// Idempotent: a present, non-near-expiry cert short-circuits.
-		ok, err := certValid(ctx, r, site.Domain)
+		ok, err := certValid(ctx, r, site)
 		if err != nil {
 			return err
 		}
 		if ok {
 			continue
 		}
-		// DNS preflight: the domain must resolve to this host or certbot will
+		if site.CertMode() == "selfsigned" {
+			// No DNS / ACME needed for a self-signed certificate.
+			if err := st.issueSelfSigned(ctx, s, site, r); err != nil {
+				return err
+			}
+			continue
+		}
+		// Let's Encrypt: the domain must resolve to this host or certbot will
 		// fail the ACME challenge. On mismatch, skip with a logged warning (the
 		// operator may be staging behind a proxy); do not abort the run.
 		if !dnsPointsAtHost(site.Domain, s.Host) {
@@ -97,9 +104,49 @@ func (tls) issue(ctx context.Context, rc provision.RunCtx, s *config.Server, sit
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("certbot certonly for %s: %s", site.Domain, res.Stderr)
 	}
+	if err := swapToHTTPS(ctx, r, s, site); err != nil {
+		return err
+	}
+	// Ensure automatic renewal is enabled.
+	if res, err := r.Run(ctx, "systemctl enable --now certbot.timer", nil); err != nil {
+		return err
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("enable certbot.timer: %s", res.Stderr)
+	}
+	return nil
+}
 
-	// Swap nginx to the HTTPS (443) server block at the same site path (shared
-	// renderer with the site step so a re-run sees no drift).
+// issueSelfSigned generates a self-signed certificate (no DNS / ACME) and swaps
+// nginx to the 443 block. Useful for staging or domains without public DNS.
+func (tls) issueSelfSigned(ctx context.Context, s *config.Server, site config.Site, r bssh.Runner) error {
+	if err := aptInstall(ctx, r, "openssl"); err != nil {
+		return fmt.Errorf("install openssl: %w", err)
+	}
+	dir := certDir(site)
+	if res, err := r.Run(ctx, "install -d -m 0755 "+shQuote(dir), nil); err != nil {
+		return err
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("create cert dir %s: %s", dir, res.Stderr)
+	}
+	gen := fmt.Sprintf("openssl req -x509 -newkey rsa:2048 -nodes -days 825 -keyout %s -out %s -subj %s -addext %s",
+		shQuote(certKeyPath(site)), shQuote(certFullchainPath(site)),
+		shQuote("/CN="+site.Domain), shQuote("subjectAltName=DNS:"+site.Domain))
+	if res, err := r.Run(ctx, gen, nil); err != nil {
+		return err
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("openssl self-signed for %s: %s", site.Domain, res.Stderr)
+	}
+	if res, err := r.Run(ctx, "chmod 600 "+shQuote(certKeyPath(site)), nil); err != nil {
+		return err
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("chmod key for %s: %s", site.Domain, res.Stderr)
+	}
+	return swapToHTTPS(ctx, r, s, site)
+}
+
+// swapToHTTPS writes a site's 443 server block (shared renderer with the site
+// step so a re-run sees no drift), validates, and reloads nginx.
+func swapToHTTPS(ctx context.Context, r bssh.Runner, s *config.Server, site config.Site) error {
 	https, err := renderNginxHTTPS(s, site)
 	if err != nil {
 		return fmt.Errorf("render https config for %s: %w", site.Domain, err)
@@ -110,8 +157,6 @@ func (tls) issue(ctx context.Context, rc provision.RunCtx, s *config.Server, sit
 	}); err != nil {
 		return fmt.Errorf("write https config for %s: %w", site.Domain, err)
 	}
-
-	// Validate BEFORE reloading.
 	if res, err := r.Run(ctx, "nginx -t", nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
@@ -122,19 +167,25 @@ func (tls) issue(ctx context.Context, rc provision.RunCtx, s *config.Server, sit
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("reload nginx: %s", res.Stderr)
 	}
-
-	// Ensure automatic renewal is enabled.
-	if res, err := r.Run(ctx, "systemctl enable --now certbot.timer", nil); err != nil {
-		return err
-	} else if res.ExitCode != 0 {
-		return fmt.Errorf("enable certbot.timer: %s", res.Stderr)
-	}
 	return nil
 }
 
-// certValid reports whether certbot holds a certificate for domain whose expiry
-// is beyond the renew window.
-func certValid(ctx context.Context, r bssh.Runner, domain string) (bool, error) {
+// certValid reports whether a site has a certificate valid beyond the renew
+// window. Let's Encrypt certs are read from `certbot certificates`; self-signed
+// certs are checked directly with `openssl x509 -checkend`.
+func certValid(ctx context.Context, r bssh.Runner, site config.Site) (bool, error) {
+	if site.CertMode() == "selfsigned" {
+		exists, err := fileExists(ctx, r, certFullchainPath(site))
+		if err != nil || !exists {
+			return false, err
+		}
+		secs := int(certRenewWindow.Seconds())
+		res, err := r.Run(ctx, fmt.Sprintf("openssl x509 -checkend %d -noout -in %s", secs, shQuote(certFullchainPath(site))), nil)
+		if err != nil {
+			return false, err
+		}
+		return res.ExitCode == 0, nil // exit 0 => valid beyond the window
+	}
 	res, err := r.Run(ctx, "certbot certificates", nil)
 	if err != nil {
 		return false, err
@@ -142,7 +193,7 @@ func certValid(ctx context.Context, r bssh.Runner, domain string) (bool, error) 
 	if res.ExitCode != 0 {
 		return false, nil // certbot not installed yet / no certs
 	}
-	expiry, ok := parseCertExpiry(res.Stdout, domain)
+	expiry, ok := parseCertExpiry(res.Stdout, site.Domain)
 	if !ok {
 		return false, nil
 	}
