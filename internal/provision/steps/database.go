@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/robsonek/berth/internal/apt"
@@ -131,7 +132,7 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	if cache == nil {
 		cache = map[string]string{}
 	}
-	for _, site := range s.Sites {
+	for i, site := range s.Sites {
 		dbName, dbUser := s.SiteDBName(site), s.SiteDBUser(site)
 		pw, err := d.resolvePassword(ctx, r, site, dbUser, cache)
 		if err != nil {
@@ -144,8 +145,9 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 		}
 		d.redactor.Add(appKey)
 		// Persist FIRST (atomic), so a crash before EnsureUser still leaves a
-		// recoverable secret on the host.
-		if err := d.seedSharedEnv(ctx, r, s, site, dbName, dbUser, pw, appKey, driver, port); err != nil {
+		// recoverable secret on the host. i is the site's per-site Redis logical
+		// DB index when Valkey is enabled.
+		if err := d.seedSharedEnv(ctx, r, s, site, i, dbName, dbUser, pw, appKey, driver, port); err != nil {
 			return err
 		}
 		if err := eng.EnsureDatabase(ctx, r, dbName); err != nil {
@@ -213,7 +215,7 @@ func (d database) resolveAppKey(ctx context.Context, r bssh.Runner, site config.
 
 // seedSharedEnv renders a site's shared/.env and writes it atomically, owned by
 // that site's OS user (mode 0600) so other site users cannot read it.
-func (d database) seedSharedEnv(ctx context.Context, r bssh.Runner, s *config.Server, site config.Site, dbName, dbUser, pw, appKey, driver, port string) error {
+func (d database) seedSharedEnv(ctx context.Context, r bssh.Runner, s *config.Server, site config.Site, siteIdx int, dbName, dbUser, pw, appKey, driver, port string) error {
 	user := s.SiteUser(site)
 	kv := map[string]string{
 		"APP_ENV":       "production",
@@ -228,6 +230,22 @@ func (d database) seedSharedEnv(ctx context.Context, r bssh.Runner, s *config.Se
 		dbPasswordKey:   pw,
 		"REDIS_HOST":    "127.0.0.1",
 		"REDIS_PORT":    "6379",
+	}
+	// When Valkey is provisioned, use it for cache, session and queue (Laravel
+	// otherwise falls back to the database driver). Each site gets its own Redis
+	// logical DB (siteIdx) and a key prefix so one tenant's cache:clear (FLUSHDB)
+	// cannot wipe another's data. Note: cache, session and queue share the site's
+	// DB, so that site's own `cache:clear` also clears its sessions/queue — an
+	// accepted single-tenant trade-off; cross-tenant isolation is preserved.
+	if s.Valkey {
+		db := strconv.Itoa(siteIdx)
+		kv["CACHE_STORE"] = "redis"
+		kv["SESSION_DRIVER"] = "redis"
+		kv["QUEUE_CONNECTION"] = "redis"
+		kv["REDIS_CLIENT"] = "phpredis"
+		kv["REDIS_PREFIX"] = poolName(site.Domain) + "_"
+		kv["REDIS_DB"] = db
+		kv["REDIS_CACHE_DB"] = db
 	}
 	if err := r.WriteFile(ctx, bssh.FileSpec{
 		Path: sharedEnvPath(site), Content: secret.EnvFile(kv),

@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func base() *Server {
 	return &Server{
@@ -31,6 +34,28 @@ func TestValidatePostgresEngine(t *testing.T) {
 	s.Database.Source = "debian"
 	if err := s.Validate(); err != nil {
 		t.Errorf("postgres + debian should be valid; got %v", err)
+	}
+}
+
+func TestValidateValkeySiteCap(t *testing.T) {
+	mk := func(n int) *Server {
+		s := base()
+		s.Valkey = true
+		s.Sites = nil
+		for i := 0; i < n; i++ {
+			s.Sites = append(s.Sites, Site{
+				Domain:     fmt.Sprintf("s%d.example.com", i),
+				DeployPath: fmt.Sprintf("/var/www/s%d", i),
+				Database:   SiteDatabase{Name: fmt.Sprintf("db%d", i), User: fmt.Sprintf("u%d", i)},
+			})
+		}
+		return s
+	}
+	if err := mk(17).Validate(); err == nil {
+		t.Error("expected error: valkey with 17 sites exceeds the 16 Redis logical DBs")
+	}
+	if err := mk(16).Validate(); err != nil {
+		t.Errorf("16 sites with valkey should pass the cap; got %v", err)
 	}
 }
 

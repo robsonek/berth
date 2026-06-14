@@ -74,6 +74,10 @@ func TestRenderNginxHTTPSHTTP3Golden(t *testing.T) {
 	checkGolden(t, "nginx_https.conf.tmpl", "nginx_https_http3.golden", d)
 }
 
+func TestRenderPHPOpcacheGolden(t *testing.T) {
+	checkGoldenINI(t, "php_opcache.ini.tmpl", "php_opcache.golden", nil)
+}
+
 func TestRenderFPMPoolGolden(t *testing.T) {
 	checkGoldenINI(t, "fpm_pool.conf.tmpl", "fpm_pool.golden", struct{ PoolName, User, Socket, DeployPath string }{
 		PoolName: "app_example_com", User: "webuser", Socket: testSocket, DeployPath: "/home/deploy/myapp",

@@ -8,9 +8,20 @@ import (
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
 	bssh "github.com/robsonek/berth/internal/ssh"
+	"github.com/robsonek/berth/internal/templates"
 )
 
 const debianStockPHP = "8.4" // Debian 13 (trixie) ships PHP 8.4
+
+// opcacheDropInPath is the FPM-only OPcache tuning drop-in. It is FPM-only on
+// purpose: the CLI SAPI keeps Debian's stock opcache.enable_cli=0, so long-lived
+// queue workers and repeated artisan runs never serve stale bytecode.
+func opcacheDropInPath(ver string) string {
+	return "/etc/php/" + ver + "/fpm/conf.d/99-berth-opcache.ini"
+}
+
+// renderOpcache renders the production OPcache settings (INI, ';' marker).
+func renderOpcache() ([]byte, error) { return templates.RenderINI("php_opcache.ini.tmpl", nil) }
 
 type php struct{}
 
@@ -36,15 +47,32 @@ func useSury(p config.PHP) (bool, error) {
 	}
 }
 
-func (php) Check(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
+func (php) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
+	changes := []string{"install php" + s.PHP.Version + " + extensions", "write production OPcache drop-in"}
 	res, err := r.Run(ctx, "dpkg -s php"+s.PHP.Version+"-fpm", nil)
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	if res.ExitCode == 0 {
-		return provision.CheckResult{Satisfied: true, Reason: "php" + s.PHP.Version + "-fpm installed"}, nil
+	if res.ExitCode != 0 {
+		return provision.CheckResult{Satisfied: false, Changes: changes}, nil
 	}
-	return provision.CheckResult{Satisfied: false, Changes: []string{"install php" + s.PHP.Version + " + extensions"}}, nil
+	// The production OPcache drop-in must be the berth-managed one and up to date.
+	want, err := renderOpcache()
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	state, err := checkManagedFile(ctx, r, opcacheDropInPath(s.PHP.Version), want)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	ok, err := managedFileSatisfied(state, opcacheDropInPath(s.PHP.Version), rc.Force)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	if ok {
+		return provision.CheckResult{Satisfied: true, Reason: "php" + s.PHP.Version + "-fpm installed; OPcache tuned for production"}, nil
+	}
+	return provision.CheckResult{Satisfied: false, Reason: "OPcache drop-in not up to date", Changes: changes}, nil
 }
 
 func (php) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) error {
@@ -63,5 +91,30 @@ func (php) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r bs
 	for _, ext := range []string{"fpm", "cli", "mbstring", "xml", "bcmath", "curl", "intl", "zip", "gd", "redis", "mysql"} {
 		pkgs = append(pkgs, fmt.Sprintf("php%s-%s", v, ext))
 	}
-	return m.EnsurePackages(ctx, nil, pkgs...)
+	if err := m.EnsurePackages(ctx, nil, pkgs...); err != nil {
+		return err
+	}
+	// Production OPcache tuning (FPM SAPI only). validate_timestamps=0 means new
+	// code is picked up only after an FPM reload — the deployer does that
+	// post-deploy via its narrow `sudo systemctl reload php<ver>-fpm` grant.
+	ini, err := renderOpcache()
+	if err != nil {
+		return err
+	}
+	if err := r.WriteFile(ctx, bssh.FileSpec{
+		Path: opcacheDropInPath(v), Content: ini, Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
+	}); err != nil {
+		return fmt.Errorf("write OPcache drop-in: %w", err)
+	}
+	if res, err := r.Run(ctx, "php-fpm"+v+" -t", nil); err != nil {
+		return err
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("php-fpm%s -t failed after writing OPcache drop-in: %s", v, res.Stderr)
+	}
+	if res, err := r.Run(ctx, "systemctl reload php"+v+"-fpm", nil); err != nil {
+		return err
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("reload php%s-fpm: %s", v, res.Stderr)
+	}
+	return nil
 }

@@ -115,6 +115,65 @@ func TestDatabaseApplyGeneratesPersistsAndEnsures(t *testing.T) {
 	}
 }
 
+func TestDatabaseApplySeedsRedisWhenValkey(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	s.Valkey = true
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
+	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
+	f.On("mysql --protocol=socket", bssh.Result{})
+
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var env *bssh.FileSpec
+	for i := range f.Writes() {
+		if f.Writes()[i].Path == envPath(s) {
+			env = &f.Writes()[i]
+		}
+	}
+	if env == nil {
+		t.Fatal("shared/.env was not written")
+	}
+	body := string(env.Content)
+	for _, want := range []string{
+		"CACHE_STORE=redis", "SESSION_DRIVER=redis", "QUEUE_CONNECTION=redis",
+		"REDIS_CLIENT=phpredis", "REDIS_DB=0", "REDIS_CACHE_DB=0", "REDIS_PREFIX=app_example_com_",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("with Valkey, shared/.env must contain %q; got:\n%s", want, body)
+		}
+	}
+}
+
+func TestDatabaseApplyKeepsDatabaseDriverWithoutValkey(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer() // Valkey defaults to false
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
+	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
+	f.On("mysql --protocol=socket", bssh.Result{})
+
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var env *bssh.FileSpec
+	for i := range f.Writes() {
+		if f.Writes()[i].Path == envPath(s) {
+			env = &f.Writes()[i]
+		}
+	}
+	if env == nil {
+		t.Fatal("shared/.env was not written")
+	}
+	if strings.Contains(string(env.Content), "CACHE_STORE=redis") {
+		t.Errorf("without Valkey, redis drivers must NOT be seeded; got:\n%s", env.Content)
+	}
+}
+
 func TestDatabaseApplyReusesExistingPasswordWithoutRotating(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
@@ -167,6 +226,24 @@ func TestDatabaseApplyReusesExistingAppKeyWithoutRotating(t *testing.T) {
 	}
 	if !strings.Contains(string(env.Content), "APP_KEY="+existingKey) {
 		t.Errorf("existing APP_KEY must be reused (no rotation); got:\n%s", env.Content)
+	}
+}
+
+func TestDatabaseCheckSatisfiedDoesNotReseedExistingEnv(t *testing.T) {
+	// Documents the first-provision-only wiring: once shared/.env exists the
+	// database step is satisfied, so flipping valkey: true on an already-provisioned
+	// host does NOT re-seed the Redis keys (operator removes/re-seeds .env by hand).
+	s := databaseServer()
+	s.Valkey = true
+	f := bssh.NewFakeRunner()
+	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})       // server installed
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // shared/.env already present
+	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("expected Satisfied (installed + .env exists); got %+v — existing env is intentionally not re-seeded", cr)
 	}
 }
 
