@@ -68,7 +68,7 @@ nginx:
   source: nginx       # debian | nginx         (nginx.org mainline)
 database:
   engine: mariadb     # mariadb | postgres
-  source: mariadb     # mariadb engine: debian | mariadb (mariadb.org 11.8 LTS)
+  source: mariadb     # mariadb engine: debian | mariadb (mariadb.org 12.3 LTS)
                       # postgres engine: debian | pgdg   (apt.postgresql.org / PGDG)
 ```
 
@@ -76,6 +76,38 @@ Each defaults to `debian`. `database.source` accepts `debian` or the chosen
 engine's producer repo (`mariadb` for MariaDB, `pgdg` for PostgreSQL). An
 upstream source aborts the run if the fetched key does not match the pinned
 fingerprint.
+
+## Performance
+
+berth tunes the host for production Laravel out of the box:
+
+- **OPcache** is configured for production (`opcache.validate_timestamps=0`, with
+  sized memory / interned-strings / accelerated-files). FPM SAPI only, so
+  long-running CLI workers never serve stale bytecode.
+- **Valkey** (when `valkey: true`) is wired as the cache, session and queue
+  backend in the seeded `.env`, each site isolated on its own Redis logical
+  database. Without Valkey the app keeps the database driver. This wiring is
+  written when berth first creates a site's `shared/.env`, so enable `valkey`
+  before the initial provision (flipping it on later does not rewrite an
+  existing `.env` — remove it or re-seed by hand).
+- **HTTP/3 (QUIC)** is available per site with `http3: true` (requires `ssl` and
+  `nginx.source: nginx`); berth also opens UDP/443.
+- nginx serves fingerprinted Vite assets under `/build/assets/` with a one-year
+  cache and gzip, and raises `client_max_body_size` for typical uploads.
+
+### Deploy hook (required with OPcache)
+
+Because `opcache.validate_timestamps=0`, new code is served only after PHP-FPM is
+reloaded. berth does not deploy code, so after your deployer swaps the release
+symlink it must reload FPM (and restart any running queue worker):
+
+```php
+// deploy.php (Deployer) — berth grants the site user exactly this reload, nothing more
+after('deploy:publish', function () {
+    run('sudo systemctl reload php{{php_version}}-fpm'); // clear OPcache -> serve new bytecode
+});
+// plus: php artisan queue:restart  (so a running worker picks up the new code)
+```
 
 ## Multiple sites (isolated per domain)
 

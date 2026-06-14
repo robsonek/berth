@@ -8,6 +8,7 @@ server {
     server_tokens off;
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
+    client_max_body_size 32m;
 
     location /.well-known/acme-challenge/ {
         root /var/www/berth-acme/app.example.com;
@@ -19,6 +20,18 @@ server {
 
     location = /favicon.ico { access_log off; log_not_found off; }
     location = /robots.txt  { access_log off; log_not_found off; }
+
+    # Fingerprinted Vite assets: cache for a year and gzip (static only — keeps
+    # compression off dynamic responses, avoiding BREACH; no add_header here so
+    # the inherited security headers are preserved).
+    location ^~ /build/assets/ {
+        access_log off;
+        expires 1y;
+        gzip on;
+        gzip_comp_level 5;
+        gzip_min_length 256;
+        gzip_types text/css text/javascript application/javascript application/json image/svg+xml;
+    }
 
     error_page 404 /index.php;
 

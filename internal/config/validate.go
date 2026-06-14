@@ -131,6 +131,11 @@ func (s *Server) Validate() error {
 	if inheritLegacyDB > 1 {
 		return fmt.Errorf("%d sites have no database block; give each site its own database: {name, user} (top-level database.name/user is single-site legacy)", inheritLegacyDB)
 	}
+	// With Valkey each site is isolated onto its own Redis logical DB (index 0..N);
+	// Redis ships 16 logical DBs, so per-site isolation caps at 16 sites.
+	if s.Valkey && len(s.Sites) > 16 {
+		return fmt.Errorf("valkey: true supports at most 16 sites (one Redis logical DB each); got %d — reduce sites or set valkey: false", len(s.Sites))
+	}
 	return nil
 }
 
