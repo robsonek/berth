@@ -184,6 +184,65 @@ func TestSiteNginxIsCertAware(t *testing.T) {
 	}
 }
 
+func TestSiteRenderHTTP3(t *testing.T) {
+	// Sites are listed REVERSE-alphabetically on purpose: nginx loads
+	// sites-enabled/* in lexicographic order, so reuseport must land on the
+	// alphabetically-first domain (a.example.com), NOT the config-first one (b).
+	s := &config.Server{
+		Host:  "b.example.com",
+		Nginx: config.Nginx{Source: "nginx"},
+		PHP:   config.PHP{Version: "8.4"},
+		Sites: []config.Site{
+			{Domain: "b.example.com", DeployPath: "/var/www/b", SSL: true, HTTP3: true}, // config-first, alphabetically last
+			{Domain: "a.example.com", DeployPath: "/var/www/a", SSL: true, HTTP3: true}, // config-last, alphabetically first
+		},
+	}
+	b, err := renderNginxHTTPS(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := renderNginxHTTPS(s, s.Sites[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	as, bs := string(a), string(b)
+	// nginx parses a.example.com first (sorted glob), so it must own reuseport.
+	if !strings.Contains(as, "listen 443 quic reuseport;") || !strings.Contains(as, "listen [::]:443 quic reuseport;") {
+		t.Errorf("the alphabetically-first http3 site must own reuseport:\n%s", as)
+	}
+	if !strings.Contains(as, "http3 on;") || !strings.Contains(as, `add_header Alt-Svc 'h3=":443"; ma=86400' always;`) {
+		t.Errorf("http3 site must enable http3 and advertise Alt-Svc:\n%s", as)
+	}
+	// b is config-first but alphabetically later -> plain quic, NO reuseport
+	// (a later `listen 443 quic reuseport;` would make nginx -t fail).
+	if !strings.Contains(bs, "listen 443 quic;") {
+		t.Errorf("the later (alphabetically) http3 site must use a plain quic listener:\n%s", bs)
+	}
+	if strings.Contains(bs, "reuseport") {
+		t.Errorf("only the alphabetically-first http3 site may use reuseport:\n%s", bs)
+	}
+}
+
+func TestQUICReuseportOwner(t *testing.T) {
+	// Reverse-alphabetical config order: the owner must still be the
+	// alphabetically-smallest HTTP/3 domain (the block nginx parses first).
+	s := &config.Server{Sites: []config.Site{
+		{Domain: "z.example.com", HTTP3: true},
+		{Domain: "x.example.com"}, // no http3
+		{Domain: "y.example.com", HTTP3: true},
+	}}
+	if got := quicReuseportOwner(s); got != "y.example.com" {
+		t.Errorf("quicReuseportOwner = %q, want y.example.com (alphabetically-smallest http3 domain)", got)
+	}
+	if !anySiteHTTP3(s) {
+		t.Error("anySiteHTTP3 should be true when a site enables http3")
+	}
+	none := &config.Server{Sites: []config.Site{{Domain: "x.example.com"}}}
+	if quicReuseportOwner(none) != "" || anySiteHTTP3(none) {
+		t.Error("no http3 site -> owner empty and anySiteHTTP3 false")
+	}
+}
+
 // stubManagedSiteFiles makes every managed site file read back as up-to-date so
 // the Check's content-hash comparison is satisfied.
 func stubManagedSiteFiles(t *testing.T, s *config.Server, f *bssh.FakeRunner) {

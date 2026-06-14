@@ -48,6 +48,7 @@ type Site struct {
 	SSL        bool         `mapstructure:"ssl" yaml:"ssl"`
 	SSLMode    string       `mapstructure:"ssl_mode" yaml:"ssl_mode"` // letsencrypt (default) | selfsigned
 	SSLEmail   string       `mapstructure:"ssl_email" yaml:"ssl_email"`
+	HTTP3      bool         `mapstructure:"http3" yaml:"http3"` // HTTP/3 (QUIC); requires ssl + nginx.source: nginx
 	Database   SiteDatabase `mapstructure:"database" yaml:"database"`
 }
 

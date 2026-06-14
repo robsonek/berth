@@ -34,6 +34,17 @@ func TestValidatePostgresEngine(t *testing.T) {
 	}
 }
 
+func TestValidateHTTP3OK(t *testing.T) {
+	s := base()
+	s.Nginx.Source = "nginx"
+	s.Sites[0].SSL = true
+	s.Sites[0].SSLEmail = "ops@example.com"
+	s.Sites[0].HTTP3 = true
+	if err := s.Validate(); err != nil {
+		t.Fatalf("valid http3 config rejected: %v", err)
+	}
+}
+
 func multiSite() *Server {
 	return &Server{
 		Host: "203.0.113.10", SSH: SSH{User: "root", Port: 22},
@@ -101,6 +112,13 @@ func TestValidateRejects(t *testing.T) {
 		"reserved os user sync":     func(s *Server) { s.Sites[0].User = "sync" },
 		"reserved os user www-data": func(s *Server) { s.Sites[0].User = "www-data" },
 		"reserved os user berth":    func(s *Server) { s.Sites[0].User = "berth" },
+		// HTTP/3 requires ssl AND the nginx.org source.
+		"http3 without ssl": func(s *Server) { s.Nginx.Source = "nginx"; s.Sites[0].HTTP3 = true },
+		"http3 with debian nginx": func(s *Server) {
+			s.Sites[0].SSL = true
+			s.Sites[0].SSLEmail = "ops@example.com"
+			s.Sites[0].HTTP3 = true
+		},
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
