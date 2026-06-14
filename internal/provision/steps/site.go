@@ -3,7 +3,6 @@ package steps
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
@@ -11,11 +10,8 @@ import (
 	"github.com/robsonek/berth/internal/templates"
 )
 
-// poolName derives the FPM pool / app slug from a site domain (filesystem safe:
-// dots become underscores).
-func poolName(domain string) string {
-	return strings.ReplaceAll(domain, ".", "_")
-}
+// poolName derives the FPM pool / supervisor program slug (dots -> underscores).
+func poolName(domain string) string { return config.PoolName(domain) }
 
 // programName is the Supervisor program name for a site's queue worker.
 func programName(domain string) string { return "berth-" + poolName(domain) }
@@ -75,7 +71,7 @@ func managedSiteFiles(ctx context.Context, r bssh.Runner, s *config.Server) ([]s
 			return nil, err
 		}
 		files = append(files, siteFile{path: fpmPoolPath(s.PHP.Version, site.Domain), content: pool})
-		prog, err := renderSupervisor(s, site)
+		prog, err := renderSupervisorProgram("berth-"+poolName(site.Domain), queueCommand(s, site), queueNumprocs(site), s.SiteUser(site), site.DeployPath)
 		if err != nil {
 			return nil, err
 		}
@@ -201,10 +197,70 @@ func renderFPMPool(s *config.Server, site config.Site) ([]byte, error) {
 	})
 }
 
-func renderSupervisor(s *config.Server, site config.Site) ([]byte, error) {
+// queueCommand builds the worker command line. The default (no queue block) is
+// byte-identical to berth's historical worker; tuning appends flags in a stable
+// order. Horizon replaces queue:work entirely.
+func queueCommand(s *config.Server, site config.Site) string {
+	base := "php " + site.DeployPath + "/current/artisan "
+	q := site.Queue
+	if q != nil && q.Driver == "horizon" {
+		return base + "horizon"
+	}
+	sleep, tries := 3, 3
+	cmd := base + "queue:work"
+	if q != nil {
+		if q.Connection != "" {
+			cmd += " " + q.Connection
+		}
+		if q.Queue != "" {
+			cmd += " --queue=" + q.Queue
+		}
+		if q.Sleep != 0 {
+			sleep = q.Sleep
+		}
+		if q.Tries != 0 {
+			tries = q.Tries
+		}
+	}
+	cmd += fmt.Sprintf(" --sleep=%d --tries=%d --max-time=3600", sleep, tries)
+	if q != nil {
+		if q.Timeout != 0 {
+			cmd += fmt.Sprintf(" --timeout=%d", q.Timeout)
+		}
+		if q.MaxMemory != 0 {
+			cmd += fmt.Sprintf(" --memory=%d", q.MaxMemory)
+		}
+	}
+	return cmd
+}
+
+// queueNumprocs is the worker process count (default 1; horizon forces 1).
+func queueNumprocs(site config.Site) int {
+	if q := site.Queue; q != nil && q.Driver != "horizon" && q.Processes > 0 {
+		return q.Processes
+	}
+	return 1
+}
+
+func daemonNumprocs(d config.Daemon) int {
+	if d.Processes > 0 {
+		return d.Processes
+	}
+	return 1
+}
+
+// renderSupervisorProgram renders one Supervisor program (worker or daemon).
+func renderSupervisorProgram(programName, command string, numprocs int, user, deployPath string) ([]byte, error) {
 	return templates.Render("supervisor.conf.tmpl", struct {
-		ProgramName, DeployPath, User string
-	}{ProgramName: programName(site.Domain), DeployPath: site.DeployPath, User: s.SiteUser(site)})
+		ProgramName, Command, DeployPath, User string
+		Numprocs                               int
+	}{ProgramName: programName, Command: command, DeployPath: deployPath, User: user, Numprocs: numprocs})
+}
+
+// daemonProgramName / daemonProgramPath name a site's daemon program file.
+func daemonProgramName(domain, name string) string { return programName(domain) + "-" + name }
+func daemonProgramPath(domain, name string) string {
+	return "/etc/supervisor/conf.d/" + daemonProgramName(domain, name) + ".conf"
 }
 
 func renderCron(s *config.Server, site config.Site) ([]byte, error) {
@@ -339,7 +395,7 @@ func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 
 	// 4) Per-site dormant Supervisor worker + 5) guarded scheduler cron.
 	for _, site := range s.Sites {
-		prog, err := renderSupervisor(s, site)
+		prog, err := renderSupervisorProgram("berth-"+poolName(site.Domain), queueCommand(s, site), queueNumprocs(site), s.SiteUser(site), site.DeployPath)
 		if err != nil {
 			return fmt.Errorf("render supervisor program for %s: %w", site.Domain, err)
 		}

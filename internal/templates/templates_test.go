@@ -94,8 +94,35 @@ func TestRenderFPMPoolGolden(t *testing.T) {
 }
 
 func TestRenderSupervisorGolden(t *testing.T) {
-	checkGolden(t, "supervisor.conf.tmpl", "supervisor.golden", struct{ ProgramName, DeployPath, User string }{
-		ProgramName: "berth-app_example_com", DeployPath: "/home/deploy/myapp", User: "webuser",
+	checkGolden(t, "supervisor.conf.tmpl", "supervisor.golden", struct {
+		ProgramName, Command, DeployPath, User string
+		Numprocs                               int
+	}{
+		ProgramName: "berth-app_example_com",
+		Command:     "php /home/deploy/myapp/current/artisan queue:work --sleep=3 --tries=3 --max-time=3600",
+		DeployPath:  "/home/deploy/myapp", User: "webuser", Numprocs: 1,
+	})
+}
+
+func TestRenderSupervisorHorizonGolden(t *testing.T) {
+	checkGolden(t, "supervisor.conf.tmpl", "supervisor_horizon.golden", struct {
+		ProgramName, Command, DeployPath, User string
+		Numprocs                               int
+	}{
+		ProgramName: "berth-app_example_com",
+		Command:     "php /home/deploy/myapp/current/artisan horizon",
+		DeployPath:  "/home/deploy/myapp", User: "webuser", Numprocs: 1,
+	})
+}
+
+func TestRenderSupervisorDaemonGolden(t *testing.T) {
+	checkGolden(t, "supervisor.conf.tmpl", "supervisor_daemon.golden", struct {
+		ProgramName, Command, DeployPath, User string
+		Numprocs                               int
+	}{
+		ProgramName: "berth-app_example_com-reverb",
+		Command:     "php /home/deploy/myapp/current/artisan reverb:start",
+		DeployPath:  "/home/deploy/myapp", User: "webuser", Numprocs: 2,
 	})
 }
 

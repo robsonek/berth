@@ -1,0 +1,14 @@
+# managed by berth
+[program:berth-app_example_com-reverb]
+process_name=%(program_name)s_%(process_num)02d
+command=php /home/deploy/myapp/current/artisan reverb:start
+directory=/home/deploy/myapp/current
+user=webuser
+numprocs=2
+autostart=false
+autorestart=true
+stopwaitsecs=3600
+redirect_stderr=true
+stdout_logfile=/var/log/supervisor/berth-app_example_com-reverb.log
+stopasgroup=true
+killasgroup=true

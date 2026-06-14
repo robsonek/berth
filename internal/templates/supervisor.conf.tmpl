@@ -1,9 +1,9 @@
 [program:{{ .ProgramName }}]
 process_name=%(program_name)s_%(process_num)02d
-command=php {{ .DeployPath }}/current/artisan queue:work --sleep=3 --tries=3 --max-time=3600
+command={{ .Command }}
 directory={{ .DeployPath }}/current
 user={{ .User }}
-numprocs=1
+numprocs={{ .Numprocs }}
 autostart=false
 autorestart=true
 stopwaitsecs=3600
