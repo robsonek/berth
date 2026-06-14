@@ -9,11 +9,12 @@ import (
 )
 
 var (
-	reHostname  = regexp.MustCompile(`^(?i)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
-	reSQLIdent  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
-	rePHPVer    = regexp.MustCompile(`^\d+\.\d+$`)
-	reEmail     = regexp.MustCompile(`^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$`)
-	reLinuxUser = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+	reHostname     = regexp.MustCompile(`^(?i)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
+	reSQLIdent     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
+	rePHPVer       = regexp.MustCompile(`^\d+\.\d+$`)
+	reEmail        = regexp.MustCompile(`^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$`)
+	reLinuxUser    = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+	reFail2banTime = regexp.MustCompile(`^[0-9]+[smhdw]?$`)
 )
 
 var allowedPHPVersions = map[string]bool{"8.2": true, "8.3": true, "8.4": true, "8.5": true}
@@ -54,6 +55,15 @@ func (s *Server) Validate() error {
 	}
 	if !allowedNginxSources[s.Nginx.Source] {
 		return fmt.Errorf("nginx.source %q must be debian or nginx", s.Nginx.Source)
+	}
+	if s.Fail2ban.Bantime != "" && !reFail2banTime.MatchString(s.Fail2ban.Bantime) {
+		return fmt.Errorf("fail2ban.bantime %q must be a number optionally suffixed s/m/h/d/w", s.Fail2ban.Bantime)
+	}
+	if s.Fail2ban.Findtime != "" && !reFail2banTime.MatchString(s.Fail2ban.Findtime) {
+		return fmt.Errorf("fail2ban.findtime %q must be a number optionally suffixed s/m/h/d/w", s.Fail2ban.Findtime)
+	}
+	if s.Fail2ban.Maxretry != 0 && (s.Fail2ban.Maxretry < 1 || s.Fail2ban.Maxretry > 100) {
+		return fmt.Errorf("fail2ban.maxretry %d out of range (1-100)", s.Fail2ban.Maxretry)
 	}
 	upstream, engineOK := dbEngineUpstreamSource[s.Database.Engine]
 	if !engineOK {

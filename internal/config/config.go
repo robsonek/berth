@@ -25,6 +25,16 @@ type Nginx struct {
 	Source string `mapstructure:"source" yaml:"source"` // debian | nginx (nginx.org mainline)
 }
 
+// Fail2ban holds the tunable knobs for berth's managed jail.local. bantime and
+// findtime are a number optionally suffixed s/m/h/d/w (e.g. "1h", "10m");
+// compound forms like "1h30m" are not supported. Zero/empty values mean
+// "use the default"; defaults are set in Load().
+type Fail2ban struct {
+	Bantime  string `mapstructure:"bantime" yaml:"bantime,omitempty"`
+	Findtime string `mapstructure:"findtime" yaml:"findtime,omitempty"`
+	Maxretry int    `mapstructure:"maxretry" yaml:"maxretry,omitempty"`
+}
+
 type Database struct {
 	Engine string `mapstructure:"engine" yaml:"engine"` // mariadb | postgres (server-wide)
 	Source string `mapstructure:"source" yaml:"source"` // debian | mariadb | pgdg
@@ -119,6 +129,7 @@ type Server struct {
 	Valkey    bool     `mapstructure:"valkey" yaml:"valkey"`
 	Queue     bool     `mapstructure:"queue" yaml:"queue"`
 	Scheduler bool     `mapstructure:"scheduler" yaml:"scheduler"`
+	Fail2ban  Fail2ban `mapstructure:"fail2ban" yaml:"fail2ban,omitempty"`
 	Sites     []Site   `mapstructure:"sites" yaml:"sites"`
 }
 
@@ -132,6 +143,9 @@ func Load(path string) (*Server, error) {
 	v.SetDefault("php.source", "auto")
 	v.SetDefault("nginx.source", "debian")
 	v.SetDefault("database.source", "debian")
+	v.SetDefault("fail2ban.bantime", "1h")
+	v.SetDefault("fail2ban.findtime", "10m")
+	v.SetDefault("fail2ban.maxretry", 5)
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("read config %s: %w", path, err)

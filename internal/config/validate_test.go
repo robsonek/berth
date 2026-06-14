@@ -144,6 +144,9 @@ func TestValidateRejects(t *testing.T) {
 			s.Sites[0].SSLEmail = "ops@example.com"
 			s.Sites[0].HTTP3 = true
 		},
+		"bad fail2ban bantime":           func(s *Server) { s.Fail2ban.Bantime = "5 minutes" },
+		"bad fail2ban maxretry":          func(s *Server) { s.Fail2ban.Maxretry = 9999 },
+		"bad fail2ban maxretry negative": func(s *Server) { s.Fail2ban.Maxretry = -1 },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

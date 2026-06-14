@@ -120,3 +120,10 @@ func TestRenderSchedulerCronGolden(t *testing.T) {
 func TestRenderAptAutoUpgradesGolden(t *testing.T) {
 	checkGolden(t, "apt_auto_upgrades.conf.tmpl", "apt_auto_upgrades.golden", nil)
 }
+
+func TestRenderFail2banJailGolden(t *testing.T) {
+	checkGolden(t, "fail2ban_jail.tmpl", "fail2ban_jail.golden", struct {
+		Bantime, Findtime string
+		Maxretry, SSHPort int
+	}{Bantime: "1h", Findtime: "10m", Maxretry: 5, SSHPort: 22})
+}
