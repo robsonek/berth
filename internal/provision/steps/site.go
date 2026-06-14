@@ -271,6 +271,7 @@ func (site) changes() []string {
 		"write per-site FPM pool (own user + socket)",
 		"install per-site dormant supervisor worker",
 		"reconcile per-site scheduler cron (install or remove)",
+		"write global logrotate fragment",
 	}
 }
 
