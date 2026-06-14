@@ -95,6 +95,12 @@ func TestValidateRejects(t *testing.T) {
 		},
 		"bad port": func(s *Server) { s.SSH.Port = 0 },
 		"no sites": func(s *Server) { s.Sites = nil },
+		// Reserved Debian system accounts must be refused as a site OS user:
+		// "sync" ships with home /bin, "www-data" owns the web stack, and
+		// "berth" is berth's own provisioning account.
+		"reserved os user sync":     func(s *Server) { s.Sites[0].User = "sync" },
+		"reserved os user www-data": func(s *Server) { s.Sites[0].User = "www-data" },
+		"reserved os user berth":    func(s *Server) { s.Sites[0].User = "berth" },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

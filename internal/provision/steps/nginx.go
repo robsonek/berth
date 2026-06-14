@@ -21,6 +21,13 @@ func (nginx) Requires() []string { return []string{"base"} }
 // presence is how Check knows the configured upstream source is in effect.
 const nginxOrgSourceList = "/etc/apt/sources.list.d/nginx-org.list"
 
+// nginxConfPath is nginx's main config. The nginx.org package ships it with
+// `user nginx;`, but berth's permission model (deploy_path group www-data, FPM
+// socket owned by www-data) assumes nginx workers run as www-data — as Debian's
+// package does. For the nginx.org source berth reconciles the worker user back
+// to www-data so nginx can traverse deploy_path and connect to the FPM socket.
+const nginxConfPath = "/etc/nginx/nginx.conf"
+
 // Stock catch-all server blocks berth disables so they cannot answer unmatched
 // :80 traffic: Debian ships sites-enabled/default, nginx.org ships
 // conf.d/default.conf.
@@ -38,11 +45,16 @@ func (nginx) Check(ctx context.Context, _ provision.RunCtx, s *config.Server, r 
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	// When nginx.org is the configured source, its repo must be registered; this
-	// makes a source switch (debian -> nginx) re-trigger Apply.
-	sourceOK := true
+	// When nginx.org is the configured source, its repo must be registered (so a
+	// source switch re-triggers Apply) and its worker user must be reconciled to
+	// www-data (so berth's www-data-based permission model holds).
+	sourceOK, userOK := true, true
 	if s.Nginx.Source == "nginx" {
 		sourceOK, err = fileExists(ctx, r, nginxOrgSourceList)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		userOK, err = nginxRunsAsWWWData(ctx, r)
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
@@ -52,14 +64,23 @@ func (nginx) Check(ctx context.Context, _ provision.RunCtx, s *config.Server, r 
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	if installed && up && sourceOK && defaultsDisabled {
-		return provision.CheckResult{Satisfied: true, Reason: "nginx installed and running from the " + s.Nginx.Source + " source; stock default sites disabled"}, nil
+	if installed && up && sourceOK && userOK && defaultsDisabled {
+		return provision.CheckResult{Satisfied: true, Reason: "nginx installed and running from the " + s.Nginx.Source + " source (worker user www-data); stock default sites disabled"}, nil
 	}
 	return provision.CheckResult{
 		Satisfied: false,
-		Reason:    "nginx not installed, not running, not from the configured source, or stock default site still enabled",
-		Changes:   []string{"install nginx (" + s.Nginx.Source + ")", "disable stock default site(s)", "systemctl enable --now nginx"},
+		Reason:    "nginx not installed, not running, not from the configured source, worker user not www-data, or stock default site still enabled",
+		Changes:   []string{"install nginx (" + s.Nginx.Source + ")", "run workers as www-data", "disable stock default site(s)", "systemctl enable --now nginx"},
 	}, nil
+}
+
+// nginxRunsAsWWWData reports whether nginx.conf sets the worker user to www-data.
+func nginxRunsAsWWWData(ctx context.Context, r bssh.Runner) (bool, error) {
+	res, err := r.Run(ctx, "grep -qE '^[[:space:]]*user[[:space:]]+www-data;' "+nginxConfPath, nil)
+	if err != nil {
+		return false, err
+	}
+	return res.ExitCode == 0, nil
 }
 
 // stockDefaultsDisabled reports whether neither stock catch-all server block is
@@ -89,6 +110,9 @@ func (nginx) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r 
 	}
 	if s.Nginx.Source == "nginx" {
 		if err := bridgeNginxSitesLayout(ctx, r); err != nil {
+			return err
+		}
+		if err := ensureNginxWorkerUser(ctx, r); err != nil {
 			return err
 		}
 	}
@@ -147,6 +171,21 @@ func bridgeNginxSitesLayout(ctx context.Context, r bssh.Runner) error {
 		Owner:   "root", Group: "root", Mode: 0o644, Sudo: true,
 	}); err != nil {
 		return fmt.Errorf("write nginx sites bridge: %w", err)
+	}
+	return nil
+}
+
+// ensureNginxWorkerUser rewrites nginx.conf's `user` directive to www-data
+// (idempotent). The nginx.org package defaults to `user nginx;`, which would
+// leave workers unable to traverse deploy_path (group www-data) or connect to
+// the FPM socket (owned by www-data). The subsequent nginx -t + reload applies
+// the new worker credentials.
+func ensureNginxWorkerUser(ctx context.Context, r bssh.Runner) error {
+	cmd := `sed -ri 's|^[[:space:]]*user[[:space:]]+[^;]*;|user  www-data;|' ` + nginxConfPath
+	if res, err := r.Run(ctx, cmd, nil); err != nil {
+		return err
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("set nginx worker user to www-data: %s", res.Stderr)
 	}
 	return nil
 }

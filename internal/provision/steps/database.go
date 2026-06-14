@@ -23,6 +23,11 @@ func upstreamSourceList(repo apt.Repo) string {
 // dbPasswordKey is the .env key under which the database password lives.
 const dbPasswordKey = "DB_PASSWORD"
 
+// appKeyKey is the .env key under which Laravel's application encryption key
+// lives. berth seeds one so a Laravel app boots after its first deploy without
+// manual intervention.
+const appKeyKey = "APP_KEY"
+
 // dbPasswordLen is the length of a freshly generated database password.
 const dbPasswordLen = 32
 
@@ -133,9 +138,14 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 			return err
 		}
 		d.redactor.Add(pw)
+		appKey, err := d.resolveAppKey(ctx, r, site)
+		if err != nil {
+			return err
+		}
+		d.redactor.Add(appKey)
 		// Persist FIRST (atomic), so a crash before EnsureUser still leaves a
 		// recoverable secret on the host.
-		if err := d.seedSharedEnv(ctx, r, s, site, dbName, dbUser, pw, driver, port); err != nil {
+		if err := d.seedSharedEnv(ctx, r, s, site, dbName, dbUser, pw, appKey, driver, port); err != nil {
 			return err
 		}
 		if err := eng.EnsureDatabase(ctx, r, dbName); err != nil {
@@ -183,14 +193,33 @@ func (d database) resolvePassword(ctx context.Context, r bssh.Runner, site confi
 	return pw, nil
 }
 
+// resolveAppKey returns a site's Laravel APP_KEY, preferring one already present
+// in the site's shared/.env (so an operator may pre-seed the real key for a data
+// restore and re-runs never rotate it, which would invalidate encrypted data)
+// and generating a fresh key only when none exists.
+func (d database) resolveAppKey(ctx context.Context, r bssh.Runner, site config.Site) (string, error) {
+	env := sharedEnvPath(site)
+	res, err := r.Run(ctx, "grep -m1 '^"+appKeyKey+"=' "+shQuote(env), nil)
+	if err != nil {
+		return "", err
+	}
+	if res.ExitCode == 0 {
+		if key := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(res.Stdout), appKeyKey+"=")); key != "" {
+			return key, nil
+		}
+	}
+	return secret.AppKey()
+}
+
 // seedSharedEnv renders a site's shared/.env and writes it atomically, owned by
 // that site's OS user (mode 0600) so other site users cannot read it.
-func (d database) seedSharedEnv(ctx context.Context, r bssh.Runner, s *config.Server, site config.Site, dbName, dbUser, pw, driver, port string) error {
+func (d database) seedSharedEnv(ctx context.Context, r bssh.Runner, s *config.Server, site config.Site, dbName, dbUser, pw, appKey, driver, port string) error {
 	user := s.SiteUser(site)
 	kv := map[string]string{
 		"APP_ENV":       "production",
 		"APP_DEBUG":     "false",
 		"APP_URL":       appURL(site),
+		appKeyKey:       appKey,
 		"DB_CONNECTION": driver,
 		"DB_HOST":       "127.0.0.1",
 		"DB_PORT":       port,

@@ -59,6 +59,7 @@ func TestDatabaseApplyGeneratesPersistsAndEnsures(t *testing.T) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	// No existing password: grep of shared/.env returns non-zero.
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
+	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
 	f.On("mysql --protocol=socket", bssh.Result{})
 
 	if err := Database(red).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -80,6 +81,9 @@ func TestDatabaseApplyGeneratesPersistsAndEnsures(t *testing.T) {
 	}
 	if !strings.Contains(string(env.Content), "DB_PASSWORD=") {
 		t.Error("shared/.env must contain DB_PASSWORD")
+	}
+	if !strings.Contains(string(env.Content), "APP_KEY=base64:") {
+		t.Error("shared/.env must contain a generated APP_KEY")
 	}
 
 	// The password must reach the SQL via stdin, never the command string.
@@ -119,6 +123,7 @@ func TestDatabaseApplyReusesExistingPasswordWithoutRotating(t *testing.T) {
 	const existing = "ReUsedPassword123"
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{Stdout: "DB_PASSWORD=" + existing + "\n"})
+	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
 	f.On("mysql --protocol=socket", bssh.Result{})
 
 	if err := Database(red).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -134,6 +139,34 @@ func TestDatabaseApplyReusesExistingPasswordWithoutRotating(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected the existing password to be reused (no rotation)")
+	}
+}
+
+func TestDatabaseApplyReusesExistingAppKeyWithoutRotating(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	const existingKey = "base64:AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIIIJJJJKKK="
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
+	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{Stdout: "APP_KEY=" + existingKey + "\n"})
+	f.On("mysql --protocol=socket", bssh.Result{})
+
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	var env *bssh.FileSpec
+	for i := range f.Writes() {
+		if f.Writes()[i].Path == envPath(s) {
+			env = &f.Writes()[i]
+		}
+	}
+	if env == nil {
+		t.Fatal("shared/.env was not written")
+	}
+	if !strings.Contains(string(env.Content), "APP_KEY="+existingKey) {
+		t.Errorf("existing APP_KEY must be reused (no rotation); got:\n%s", env.Content)
 	}
 }
 
@@ -164,6 +197,7 @@ func TestDatabaseApplySourceMariaDBAddsRepo(t *testing.T) {
 	f.On("apt-get update", bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
+	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
 	f.On("mysql --protocol=socket", bssh.Result{})
 
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -199,6 +233,7 @@ func TestDatabaseApplyPostgresFromPGDG(t *testing.T) {
 	f.On("apt-get update", bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql", bssh.Result{})
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
+	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
 	f.On("sudo -u postgres psql -v ON_ERROR_STOP=1", bssh.Result{})
 
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {

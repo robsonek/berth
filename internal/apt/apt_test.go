@@ -65,6 +65,50 @@ func TestUpstreamRepoDefinitions(t *testing.T) {
 	}
 }
 
+func TestIsAptLockBusy(t *testing.T) {
+	for _, s := range []string{
+		"E: Could not get lock /var/lib/apt/lists/lock. It is held by process 15055 (apt-get)",
+		"E: Unable to lock directory /var/lib/apt/lists/",
+		"E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 42",
+	} {
+		if !isAptLockBusy(s) {
+			t.Errorf("isAptLockBusy(%q) = false, want true", s)
+		}
+	}
+	if isAptLockBusy("E: Failed to fetch ... 404 Not Found") {
+		t.Error("a non-lock error must not be treated as lock contention")
+	}
+}
+
+func TestEnsureRepoRetriesOnAptLock(t *testing.T) {
+	prev := aptLockSleep
+	aptLockSleep = func() {}
+	defer func() { aptLockSleep = prev }()
+
+	f := bssh.NewFakeRunner()
+	f.On("curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor --yes -o /usr/share/keyrings/sury-php.gpg", bssh.Result{})
+	f.On("gpg --show-keys --with-colons /usr/share/keyrings/sury-php.gpg",
+		bssh.Result{Stdout: "fpr:::::::::" + Sury().Fingerprint + ":\n"})
+	// First update hits a concurrent unattended-upgrades holding the lists lock;
+	// the retry, once the holder releases, succeeds.
+	f.OnSeq("apt-get update",
+		bssh.Result{ExitCode: 100, Stderr: "E: Could not get lock /var/lib/apt/lists/lock. It is held by process 999 (apt-get)"},
+		bssh.Result{ExitCode: 0})
+
+	if err := New(f).EnsureRepo(context.Background(), Sury()); err != nil {
+		t.Fatalf("EnsureRepo should wait out apt-lock contention; got %v", err)
+	}
+	var updates int
+	for _, c := range f.Calls() {
+		if c.Cmd == "apt-get update" {
+			updates++
+		}
+	}
+	if updates < 2 {
+		t.Errorf("expected apt-get update to be retried past the lock; got %d call(s)", updates)
+	}
+}
+
 func TestEnsureRepoUsesKeyURLNotURISuffix(t *testing.T) {
 	// nginx.org's key lives at a path unrelated to URI+apt.gpg; EnsureRepo must
 	// fetch from repo.KeyURL. Stub the exact KeyURL-based download command.
