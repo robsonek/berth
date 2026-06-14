@@ -332,35 +332,35 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 4: Live verification on ovh.onee.pl (the real green for #30/#33)
+### Task 4: Live verification on smoke.example.com (the real green for #30/#33)
 
 **Files:** none (operational). The `integration`-tagged tests only compile+skip locally; this is their RED→GREEN.
 
 **Preconditions:**
-- The smoke config used as `BERTH_TEST_SERVER` (e.g. `servers/ovh.yml`, local-only/gitignored) must contain a site with `ssl: true` and `ssl_mode: selfsigned`, so #18-on-a-real-host (via #30) + #33 all exercise in one provision.
+- The smoke config used as `BERTH_TEST_SERVER` (e.g. `servers/smoke.yml`, local-only/gitignored) must contain a site with `ssl: true` and `ssl_mode: selfsigned`, so #18-on-a-real-host (via #30) + #33 all exercise in one provision.
 - The box must be a fresh, systemd Debian 13 (trixie) host.
 
 - [ ] **Step 1: Wipe + re-pin the host key**
 
-After wiping/reinstalling ovh.onee.pl, the ECDSA host key changes. Re-pin it: either update `ssh.fingerprint` in the smoke config, or refresh known_hosts:
+After wiping/reinstalling smoke.example.com, the ECDSA host key changes. Re-pin it: either update `ssh.fingerprint` in the smoke config, or refresh known_hosts:
 
-Run: `ssh-keygen -R ovh.onee.pl; ssh-keyscan -t ecdsa ovh.onee.pl >> ~/.ssh/known_hosts`
+Run: `ssh-keygen -R smoke.example.com; ssh-keyscan -t ecdsa smoke.example.com >> ~/.ssh/known_hosts`
 (Or set the new fingerprint under `ssh.fingerprint` in the config.)
 
 - [ ] **Step 2: First provision of the fresh box (requires --force)**
 
-A fresh OVH Debian image ships an unmanaged `/etc/apt/apt.conf.d/20auto-upgrades`, so the first `base` run aborts without `--force` (per CLAUDE.md / Tier 1 notes).
+A fresh cloud Debian image ships an unmanaged `/etc/apt/apt.conf.d/20auto-upgrades`, so the first `base` run aborts without `--force` (per CLAUDE.md / Tier 1 notes).
 
-Run: `./berth provision -c servers/ovh.yml --force`
+Run: `./berth provision -c servers/smoke.yml --force`
 (Build first if needed: `make build`.) Expected: full provision succeeds; the self-signed `tls` step issues a cert and swaps the vhost to 443.
 
 - [ ] **Step 3: Run the integration smoke test against the live host**
 
-Run: `BERTH_TEST_SERVER=servers/ovh.yml go test -tags integration -v ./test/integration/...`
+Run: `BERTH_TEST_SERVER=servers/smoke.yml go test -tags integration -v ./test/integration/...`
 Expected: PASS. Specifically:
 - end-state assertions pass (services active, nginx -t, DB, HTTP serves),
 - `assertSelfSignedCert` passes (`/etc/ssl/berth/<domain>/fullchain.pem` present + `openssl x509 -checkend` exit 0),
-- `https://ovh.onee.pl/` serves (502 acceptable pre-deploy),
+- `https://smoke.example.com/` serves (502 acceptable pre-deploy),
 - `assertSecondRunIdempotent` passes: the second run logs every step `satisfied` except `preflight` (which logs `applied`), and no step fails.
 
 - [ ] **Step 4: Sanity-confirm the no-revert invariant from the logs**
