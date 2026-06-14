@@ -38,7 +38,10 @@ func (e *Engine) Run(ctx context.Context, s *config.Server, r bssh.Runner, opt O
 	go func() {
 		defer close(ch)
 		for _, step := range e.steps {
-			if opt.Only != "" && step.Name() != opt.Only {
+			// With --only, run the target step plus any always-run steps (e.g.
+			// preflight) — they re-apply every run and are not gated, so they
+			// still execute ahead of the target.
+			if opt.Only != "" && step.Name() != opt.Only && !isAlwaysRun(step) {
 				continue
 			}
 			ch <- Event{Step: step.Name(), Kind: EventStarted}
@@ -97,7 +100,10 @@ func (e *Engine) checkDependencies(ctx context.Context, rc RunCtx, s *config.Ser
 					return err
 				}
 			}
-			if name != target { // the target itself need not be satisfied
+			// The target itself need not be satisfied, and an always-run step
+			// (preflight) is excluded from the gate: it reports Satisfied:false
+			// by design, so it is never a "missing" prerequisite.
+			if name != target && !isAlwaysRun(st) {
 				cr, err := st.Check(ctx, rc, s, r)
 				if err != nil {
 					return fmt.Errorf("%s: check: %w", name, err)

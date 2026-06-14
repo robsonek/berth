@@ -17,6 +17,11 @@ func Preflight() provision.Step { return preflight{} }
 func (preflight) Name() string       { return "preflight" }
 func (preflight) Requires() []string { return nil }
 
+// AlwaysRun marks preflight as a re-apply-every-run step (it refreshes apt and
+// re-checks the OS), so it reports Satisfied:false by design and the `--only`
+// dependency gate does not treat that as a missing prerequisite.
+func (preflight) AlwaysRun() bool { return true }
+
 func (preflight) Check(ctx context.Context, _ provision.RunCtx, _ *config.Server, r bssh.Runner) (provision.CheckResult, error) {
 	res, err := r.Run(ctx, ". /etc/os-release && echo $VERSION_CODENAME", nil)
 	if err != nil {

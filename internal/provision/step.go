@@ -29,3 +29,19 @@ type Step interface {
 	Check(ctx context.Context, rc RunCtx, s *config.Server, r bssh.Runner) (CheckResult, error)
 	Apply(ctx context.Context, rc RunCtx, s *config.Server, r bssh.Runner) error
 }
+
+// AlwaysRun is an optional Step trait. A step that implements it with AlwaysRun()
+// == true deliberately re-applies every run (e.g. preflight's `apt-get update`)
+// and reports Satisfied:false by design. Such a step is NOT a durable-state
+// prerequisite: the dependency gate for `--only` walks it for ordering but does
+// not treat its unsatisfied Check as a missing prerequisite, and an `--only` run
+// still executes it.
+type AlwaysRun interface {
+	AlwaysRun() bool
+}
+
+// isAlwaysRun reports whether s opts into the AlwaysRun trait.
+func isAlwaysRun(s Step) bool {
+	ar, ok := s.(AlwaysRun)
+	return ok && ar.AlwaysRun()
+}

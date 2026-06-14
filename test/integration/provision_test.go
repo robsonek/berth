@@ -59,10 +59,14 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	}
 	defer client.Close()
 
-	// Run the full pipeline with TLS skipped (no real DNS in CI).
+	// TLS is skipped by default (the ACME challenge needs real public DNS). Set
+	// BERTH_TEST_SKIP_SSL=false to also exercise TLS and assert HTTPS.
+	skipSSL := os.Getenv("BERTH_TEST_SKIP_SSL") != "false"
+
+	// Run the full pipeline.
 	red := secret.NewRedactor()
-	eng := provision.New(steps.Pipeline(srv, red, true /* skipSSL */)...)
-	events, err := eng.Run(ctx, srv, client, provision.Options{})
+	eng := provision.New(steps.Pipeline(srv, red, skipSSL)...)
+	events, err := eng.Run(ctx, srv, client, provision.Options{SSLStaging: os.Getenv("BERTH_TEST_SSL_STAGING") == "true"})
 	if err != nil {
 		t.Fatalf("pipeline pre-flight: %v", err)
 	}
@@ -82,7 +86,22 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	assertExitZero(ctx, t, client, "nginx -t", "sudo nginx -t")
 	assertExitZero(ctx, t, client, "mariadb socket",
 		`sudo mysql --protocol=socket -e 'SELECT 1'`)
-	assertHTTPResponds(t, srv.Host)
+	assertHTTPServes(t, "http://"+net.JoinHostPort(srv.Host, "80")+"/")
+
+	// When TLS was actually provisioned, the site must answer over HTTPS too.
+	if !skipSSL && anySiteSSL(srv) {
+		assertHTTPServes(t, "https://"+srv.Host+"/")
+	}
+}
+
+// anySiteSSL reports whether any configured site enables TLS.
+func anySiteSSL(srv *config.Server) bool {
+	for _, site := range srv.Sites {
+		if site.SSL {
+			return true
+		}
+	}
+	return false
 }
 
 // assertServicesActive fails unless every core service is reported "active".
@@ -120,18 +139,27 @@ func assertExitZero(ctx context.Context, t *testing.T, c *bssh.Client, label, cm
 	}
 }
 
-// assertHTTPResponds fails only if the server never answers an HTTP request.
-// A 502 (Bad Gateway) is acceptable: nginx is up but no app is deployed yet.
-func assertHTTPResponds(t *testing.T, host string) {
+// assertHTTPServes fails if the server never answers, or answers with an
+// unexpected server error. A 502 (Bad Gateway) is accepted: nginx is up and
+// correctly proxying to PHP-FPM, but no app is deployed yet ("Primary script
+// unknown"). Any other 5xx signals a real nginx/PHP-FPM regression and fails.
+func assertHTTPServes(t *testing.T, url string) {
 	t.Helper()
-	cl := &http.Client{Timeout: 10 * time.Second}
-	resp, err := cl.Get("http://" + net.JoinHostPort(host, "80") + "/")
+	cl := &http.Client{
+		Timeout: 10 * time.Second,
+		// Do not follow redirects: an HTTP probe should see the 301 to HTTPS.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	resp, err := cl.Get(url)
 	if err != nil {
-		t.Errorf("HTTP GET /: %v", err)
+		t.Errorf("GET %s: %v", url, err)
 		return
 	}
 	defer resp.Body.Close()
-	t.Logf("HTTP GET / -> %d (502 acceptable pre-deploy)", resp.StatusCode)
+	t.Logf("GET %s -> %d", url, resp.StatusCode)
+	if resp.StatusCode >= 500 && resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("GET %s -> %d, want < 500 or the pre-deploy 502", url, resp.StatusCode)
+	}
 }
 
 // knownHostsPath returns ~/.ssh/known_hosts, or "" if the home dir is unknown.

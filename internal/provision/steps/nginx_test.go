@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -16,17 +17,34 @@ func TestNginxRequiresBase(t *testing.T) {
 	}
 }
 
+// stubDefaultsAbsent makes both stock catch-all sites read back as absent, so
+// Check's "defaults disabled" probe is satisfied.
+func stubDefaultsAbsent(f *bssh.FakeRunner) {
+	f.On("test -e "+shQuote(debianDefaultSite), bssh.Result{ExitCode: 1})
+	f.On("test -e "+shQuote(nginxOrgDefaultConf), bssh.Result{ExitCode: 1})
+}
+
+// stubNginxApplyTail stubs the tail of Apply: disabling the stock defaults and
+// the validate+reload that follows.
+func stubNginxApplyTail(f *bssh.FakeRunner) {
+	f.On("rm -f "+shQuote(debianDefaultSite), bssh.Result{})
+	f.On(fmt.Sprintf("test -f %[1]s && mv -f %[1]s %[1]s.disabled || true", shQuote(nginxOrgDefaultConf)), bssh.Result{})
+	f.On("nginx -t", bssh.Result{})
+	f.On("systemctl reload nginx", bssh.Result{})
+}
+
 func TestNginxCheckSatisfiedWhenInstalledAndUp(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("dpkg -s nginx", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
+	stubDefaultsAbsent(f)
 	cr, err := Nginx().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !cr.Satisfied {
-		t.Errorf("expected satisfied when nginx installed and running; got %+v", cr)
+		t.Errorf("expected satisfied when nginx installed, running, defaults disabled; got %+v", cr)
 	}
 }
 
@@ -35,6 +53,7 @@ func TestNginxCheckUnsatisfiedWhenNotInstalled(t *testing.T) {
 	f.On("dpkg -s nginx", bssh.Result{ExitCode: 1})
 	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
+	stubDefaultsAbsent(f)
 	cr, err := Nginx().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
 	if err != nil {
 		t.Fatal(err)
@@ -49,6 +68,7 @@ func TestNginxCheckUnsatisfiedWhenNotRunning(t *testing.T) {
 	f.On("dpkg -s nginx", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 3}) // inactive
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
+	stubDefaultsAbsent(f)
 	cr, err := Nginx().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
 	if err != nil {
 		t.Fatal(err)
@@ -58,12 +78,55 @@ func TestNginxCheckUnsatisfiedWhenNotRunning(t *testing.T) {
 	}
 }
 
+func TestNginxCheckUnsatisfiedWhenDefaultSiteEnabled(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("dpkg -s nginx", bssh.Result{ExitCode: 0})
+	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
+	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
+	// The Debian default catch-all is still enabled.
+	f.On("test -e "+shQuote(debianDefaultSite), bssh.Result{ExitCode: 0})
+	f.On("test -e "+shQuote(nginxOrgDefaultConf), bssh.Result{ExitCode: 1})
+	cr, err := Nginx().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied while the stock default site is still enabled")
+	}
+}
+
+func TestNginxApplyDisablesStockDefaults(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx", bssh.Result{})
+	f.On("systemctl enable --now nginx", bssh.Result{})
+	stubNginxApplyTail(f)
+	if err := Nginx().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var sawRm, sawRename bool
+	for _, c := range f.Calls() {
+		if c.Cmd == "rm -f "+shQuote(debianDefaultSite) {
+			sawRm = true
+		}
+		if strings.Contains(c.Cmd, "mv -f "+shQuote(nginxOrgDefaultConf)) {
+			sawRename = true
+		}
+	}
+	if !sawRm {
+		t.Error("Apply must remove the Debian default-site symlink")
+	}
+	if !sawRename {
+		t.Error("Apply must rename nginx.org's conf.d/default.conf")
+	}
+}
+
 func TestNginxCheckSourceNginxRequiresRepo(t *testing.T) {
 	s := &config.Server{Nginx: config.Nginx{Source: "nginx"}}
 	f := bssh.NewFakeRunner()
 	f.On("dpkg -s nginx", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
+	stubDefaultsAbsent(f)
 	// nginx.org repo not yet registered -> not satisfied even though nginx runs.
 	f.On("test -e "+shQuote(nginxOrgSourceList), bssh.Result{ExitCode: 1})
 	cr, err := Nginx().Check(context.Background(), provision.RunCtx{}, s, f)
@@ -93,6 +156,7 @@ func TestNginxApplySourceNginxAddsRepoAndBridge(t *testing.T) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx", bssh.Result{})
 	f.On("install -d /etc/nginx/sites-available /etc/nginx/sites-enabled", bssh.Result{})
 	f.On("systemctl enable --now nginx", bssh.Result{})
+	stubNginxApplyTail(f)
 	if err := Nginx().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
@@ -126,6 +190,7 @@ func TestNginxApplyInstallsAndEnables(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx", bssh.Result{})
 	f.On("systemctl enable --now nginx", bssh.Result{})
+	stubNginxApplyTail(f)
 	if err := Nginx().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}

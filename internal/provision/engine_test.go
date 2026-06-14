@@ -16,10 +16,12 @@ type stepStub struct {
 	satisfied bool
 	applyErr  error
 	applied   *bool
+	alwaysRun bool
 }
 
 func (s *stepStub) Name() string       { return s.name }
 func (s *stepStub) Requires() []string { return s.requires }
+func (s *stepStub) AlwaysRun() bool    { return s.alwaysRun }
 func (s *stepStub) Check(context.Context, RunCtx, *config.Server, bssh.Runner) (CheckResult, error) {
 	return CheckResult{Satisfied: s.satisfied, Reason: "stub", Changes: []string{"do x"}}, nil
 }
@@ -112,6 +114,27 @@ func TestEngineOnlyRefusesUnmetTransitiveDependency(t *testing.T) {
 	_, err := eng.Run(context.Background(), &config.Server{}, bssh.NewFakeRunner(), Options{Only: "c"})
 	if err == nil {
 		t.Fatal("expected refusal: c depends transitively on unsatisfied a")
+	}
+}
+
+func TestEngineOnlyAllowsAlwaysRunPrereqAndRunsIt(t *testing.T) {
+	preApplied, targetApplied := false, false
+	eng := New(
+		&stepStub{name: "pre", satisfied: false, alwaysRun: true, applied: &preApplied},
+		&stepStub{name: "x", satisfied: false, requires: []string{"pre"}, applied: &targetApplied},
+	)
+	// --only x must NOT refuse on the always-run, never-satisfied "pre", and the
+	// always-run step still executes ahead of the target.
+	events, err := eng.Run(context.Background(), &config.Server{}, bssh.NewFakeRunner(), Options{Only: "x"})
+	if err != nil {
+		t.Fatalf("Run(--only x) refused on an always-run prerequisite: %v", err)
+	}
+	collect(events)
+	if !preApplied {
+		t.Error("always-run prerequisite should still execute under --only")
+	}
+	if !targetApplied {
+		t.Error("target step should have been applied under --only")
 	}
 }
 
