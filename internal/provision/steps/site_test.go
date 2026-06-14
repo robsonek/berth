@@ -13,8 +13,9 @@ import (
 
 func siteServer() *config.Server {
 	return &config.Server{
-		Host: "app.example.com",
-		PHP:  config.PHP{Version: "8.4", Source: "auto"},
+		Host:      "app.example.com",
+		PHP:       config.PHP{Version: "8.4", Source: "auto"},
+		Scheduler: true,
 		Sites: []config.Site{{
 			Domain:     "app.example.com",
 			DeployPath: "/home/deploy/myapp",
@@ -243,6 +244,190 @@ func TestQUICReuseportOwner(t *testing.T) {
 	}
 }
 
+func TestNginxHTTPListensIPv6(t *testing.T) {
+	s := siteServer()
+	got, err := renderNginxHTTP(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "listen [::]:80;") {
+		t.Errorf("nginx HTTP block must listen on IPv6 :80;\n%s", got)
+	}
+}
+
+func TestNginxHTTPSRedirectListensIPv6(t *testing.T) {
+	s := siteServer()
+	got, err := renderNginxHTTPS(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "listen [::]:80;") {
+		t.Errorf("nginx HTTPS redirect block must listen on IPv6 :80;\n%s", got)
+	}
+}
+
+func TestNginxHTTPSHSTSForRealCert(t *testing.T) {
+	s := siteServer()
+	s.Sites[0].SSL = true // CertMode() defaults to letsencrypt -> real cert -> HSTS on
+	got, err := renderNginxHTTPS(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), `add_header Strict-Transport-Security "max-age=31536000" always;`) {
+		t.Errorf("a real-cert HTTPS vhost must send HSTS;\n%s", got)
+	}
+}
+
+func TestNginxHTTPSNoHSTSForSelfSigned(t *testing.T) {
+	s := siteServer()
+	s.Sites[0].SSL = true
+	s.Sites[0].SSLMode = "selfsigned" // self-signed must NOT pin browsers via HSTS
+	got, err := renderNginxHTTPS(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(got), "Strict-Transport-Security") {
+		t.Errorf("a self-signed HTTPS vhost must NOT send HSTS;\n%s", got)
+	}
+}
+
+func TestNginxHTTPSHasTLSTuning(t *testing.T) {
+	s := siteServer()
+	s.Sites[0].SSL = true
+	got, err := renderNginxHTTPS(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "ssl_protocols TLSv1.2 TLSv1.3;") {
+		t.Errorf("HTTPS vhost must pin modern TLS protocols;\n%s", got)
+	}
+	if !strings.Contains(string(got), "ssl_session_tickets off;") {
+		t.Errorf("HTTPS vhost must disable TLS session tickets;\n%s", got)
+	}
+}
+
+func TestSiteHTTPSRenderMatchesTLSSwap(t *testing.T) {
+	// site's cert-aware HTTPS render and the tls step's swap share renderNginxHTTPS,
+	// so they must be byte-identical or `site` re-runs detect endless drift.
+	s := siteServer()
+	s.Sites[0].SSL = true
+	withCert := bssh.NewFakeRunner()
+	withCert.On("test -e "+shQuote(certFullchainPath(s.Sites[0])), bssh.Result{ExitCode: 0})
+	siteRender, err := renderSiteNginx(context.Background(), withCert, s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	swapRender, err := renderNginxHTTPS(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(siteRender) != string(swapRender) {
+		t.Errorf("site cert-aware HTTPS render must equal tls swap render (byte-identical)")
+	}
+}
+
+func TestSiteApplyWritesLogrotate(t *testing.T) {
+	s := siteServer()
+	f := bssh.NewFakeRunner()
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var lr *bssh.FileSpec
+	for i := range f.Writes() {
+		if f.Writes()[i].Path == logrotatePath {
+			lr = &f.Writes()[i]
+		}
+	}
+	if lr == nil {
+		t.Fatal("logrotate fragment was not written")
+	}
+	if !strings.Contains(string(lr.Content), "managed by berth") || !strings.Contains(string(lr.Content), "copytruncate") {
+		t.Errorf("logrotate fragment must carry the marker and use copytruncate;\n%s", lr.Content)
+	}
+	var validated bool
+	for _, c := range f.Calls() {
+		if c.Cmd == "logrotate -d "+shQuote(logrotatePath) {
+			validated = true
+		}
+	}
+	if !validated {
+		t.Error("Apply must validate the logrotate fragment with `logrotate -d`")
+	}
+}
+
+func TestSiteCheckUnsatisfiedWhenLogrotateMissing(t *testing.T) {
+	s := siteServer()
+	f := bssh.NewFakeRunner()
+	stubManagedSiteFiles(t, s, f)
+	// Override: the global logrotate fragment is absent on the host.
+	f.On("cat "+shQuote(logrotatePath), bssh.Result{ExitCode: 1})
+	cr, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied when the global logrotate fragment is absent")
+	}
+}
+
+func TestSiteApplyRemovesCronWhenSchedulerDisabled(t *testing.T) {
+	s := siteServer()
+	off := false
+	s.Sites[0].Scheduler = &off
+	cp := cronPath(s.Sites[0].Domain)
+
+	f := bssh.NewFakeRunner()
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+	// A berth-managed cron currently exists -> Apply must remove it.
+	f.On("cat "+shQuote(cp), bssh.Result{Stdout: managedMarker + "\n* * * * * deploy ...\n", ExitCode: 0})
+	f.On("rm -f "+shQuote(cp), bssh.Result{})
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var rmSeen bool
+	for _, c := range f.Calls() {
+		if c.Cmd == "rm -f "+shQuote(cp) {
+			rmSeen = true
+		}
+	}
+	if !rmSeen {
+		t.Error("expected the disabled scheduler cron to be removed")
+	}
+	for _, w := range f.Writes() {
+		if w.Path == cp {
+			t.Error("must not write a cron when the scheduler is disabled")
+		}
+	}
+}
+
+func TestSiteCheckUnsatisfiedWhenDisabledCronLingers(t *testing.T) {
+	s := siteServer()
+	off := false
+	s.Sites[0].Scheduler = &off
+	f := bssh.NewFakeRunner()
+	stubManagedSiteFiles(t, s, f)
+	// Override: a berth-managed cron still exists at the path that should be empty.
+	cp := cronPath(s.Sites[0].Domain)
+	f.On("cat "+shQuote(cp), bssh.Result{Stdout: managedMarker + "\n* * * * * deploy ...\n", ExitCode: 0})
+
+	cr, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied: a disabled scheduler's cron still lingers")
+	}
+}
+
 // stubManagedSiteFiles makes every managed site file read back as up-to-date so
 // the Check's content-hash comparison is satisfied.
 func stubManagedSiteFiles(t *testing.T, s *config.Server, f *bssh.FakeRunner) {
@@ -256,10 +441,12 @@ func stubManagedSiteFiles(t *testing.T, s *config.Server, f *bssh.FakeRunner) {
 	}
 }
 
-// stubFPMApply stubs the FPM commands the Apply path runs after writing the pool:
-// disabling the stock www pool, validating, and reloading php-fpm.
+// stubFPMApply stubs the commands the Apply path runs after writing the pool:
+// disabling the stock www pool, validating + reloading php-fpm, and validating
+// the global logrotate fragment.
 func stubFPMApply(s *config.Server, f *bssh.FakeRunner) {
 	f.On(fmt.Sprintf("test -f %[1]s && mv -f %[1]s %[1]s.disabled || true", shQuote(defaultFPMPoolPath(s))), bssh.Result{})
 	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
 	f.On("systemctl reload "+fpmService(s), bssh.Result{})
+	f.On("logrotate -d "+shQuote(logrotatePath), bssh.Result{})
 }

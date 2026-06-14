@@ -43,8 +43,9 @@ berth provision servers/<name>.yml --dry-run   # preview changes only
 - **Idempotent** — safe to re-run; it only fills in what is missing.
 - **Declarative** — a server is described by a version-controllable, secret-free
   config file.
-- **Safe by default** — anti-lockout SSH hardening, a least-privilege deploy
-  account, secret redaction, and explicit host-key verification.
+- **Safe by default** — anti-lockout SSH hardening, automatic security updates,
+  a tuned fail2ban jail, HSTS, a least-privilege deploy account, secret
+  redaction, and explicit host-key verification.
 
 ## How it works
 
@@ -108,6 +109,41 @@ after('deploy:publish', function () {
 });
 // plus: php artisan queue:restart  (so a running worker picks up the new code)
 ```
+
+## Security & hardening
+
+Every provision hardens the host (in addition to the anti-lockout SSH drop-in,
+which disables root login and password authentication only after verifying the
+`berth` admin account can connect with a key and sudo):
+
+- **Automatic security updates** — the APT periodic config is written so
+  `unattended-upgrades` actually applies updates (the package alone is inert
+  without it).
+- **fail2ban** — a managed jail bans SSH brute-forcers (bound to your configured
+  SSH port) and repeat offenders (`recidive`). Tunable, with safe defaults:
+
+  ```yaml
+  fail2ban:
+    bantime: 1h       # ban duration
+    findtime: 10m     # window failures are counted in
+    maxretry: 5       # failures before a ban
+  ```
+
+- **TLS** — HTTPS sites with a real (Let's Encrypt) certificate send HSTS
+  (`max-age` one year) and use a modern TLS profile (TLS 1.2/1.3, strong ciphers,
+  session tickets off); self-signed sites deliberately omit HSTS.
+- **Log rotation** — per-site PHP-FPM and queue-worker logs are rotated so they
+  never fill the disk.
+- **Firewall** — `ufw` allows only SSH and 80/443 (plus UDP/443 with HTTP/3).
+
+## Scheduler & queue workers
+
+berth installs Laravel's scheduler as a per-site cron running `php artisan
+schedule:run` every minute as the site's own user. It is **on by default**; set
+`scheduler: false` server-wide, or `scheduler: false` on an individual site, to
+skip it (disabling it on a re-run removes the cron). With `queue: true` berth
+also installs a dormant Supervisor `queue:work` program per site for your
+deployer to start and restart.
 
 ## Multiple sites (isolated per domain)
 

@@ -144,6 +144,9 @@ func TestValidateRejects(t *testing.T) {
 			s.Sites[0].SSLEmail = "ops@example.com"
 			s.Sites[0].HTTP3 = true
 		},
+		"bad fail2ban bantime":           func(s *Server) { s.Fail2ban.Bantime = "5 minutes" },
+		"bad fail2ban maxretry":          func(s *Server) { s.Fail2ban.Maxretry = 9999 },
+		"bad fail2ban maxretry negative": func(s *Server) { s.Fail2ban.Maxretry = -1 },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -153,6 +156,26 @@ func TestValidateRejects(t *testing.T) {
 				t.Errorf("expected error for %s, got nil", name)
 			}
 		})
+	}
+}
+
+func TestSchedulerEnabled(t *testing.T) {
+	s := base()
+	s.Scheduler = true
+	site := s.Sites[0]
+	if !s.SchedulerEnabled(site) {
+		t.Error("server default true, no per-site override -> enabled")
+	}
+	off := false
+	site.Scheduler = &off
+	if s.SchedulerEnabled(site) {
+		t.Error("per-site false must override the server default")
+	}
+	on := true
+	site.Scheduler = &on
+	s.Scheduler = false
+	if !s.SchedulerEnabled(site) {
+		t.Error("per-site true must override server default false")
 	}
 }
 

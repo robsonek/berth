@@ -16,3 +16,8 @@ coverage.*
 .DS_Store
 .idea/
 .vscode/
+
+# Local-only — maintainer notes, real server configs, and the test app we deploy
+# against (must NEVER reach this public repo)
+/CLAUDE.md
+/servers/

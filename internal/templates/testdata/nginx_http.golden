@@ -1,6 +1,7 @@
 # managed by berth
 server {
     listen 80;
+    listen [::]:80;
     server_name app.example.com;
     root /home/deploy/myapp/current/public;
     index index.php;

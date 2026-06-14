@@ -1,0 +1,10 @@
+/var/log/php/*-fpm.error.log
+/var/log/supervisor/berth-*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

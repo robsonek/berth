@@ -9,12 +9,26 @@ import (
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
 	bssh "github.com/robsonek/berth/internal/ssh"
+	"github.com/robsonek/berth/internal/templates"
 )
 
 const (
-	sshdDropInPath = "/etc/ssh/sshd_config.d/berth.conf"
-	sshdDropInBody = managedMarker + "\nPermitRootLogin no\nPasswordAuthentication no\n"
+	sshdDropInPath   = "/etc/ssh/sshd_config.d/berth.conf"
+	sshdDropInBody   = managedMarker + "\nPermitRootLogin no\nPasswordAuthentication no\n"
+	fail2banJailPath = "/etc/fail2ban/jail.local"
 )
+
+// renderFail2banJail renders the managed jail.local: a port-bound sshd jail
+// (journald backend) plus the recidive jail, with operator-tunable knobs.
+func renderFail2banJail(s *config.Server) ([]byte, error) {
+	return templates.Render("fail2ban_jail.tmpl", struct {
+		Bantime, Findtime string
+		Maxretry, SSHPort int
+	}{
+		Bantime: s.Fail2ban.Bantime, Findtime: s.Fail2ban.Findtime,
+		Maxretry: s.Fail2ban.Maxretry, SSHPort: s.SSH.Port,
+	})
+}
 
 // re443udp matches a `443/udp` ufw rule on a port boundary so unrelated UDP rules
 // whose port merely ends in 443 (e.g. 10443/udp, 8443/udp) do not false-positive
@@ -81,7 +95,21 @@ func (hardening) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 		return provision.CheckResult{}, err
 	}
 
-	if ufwActive && f2bUp && sshdOK && udpOK {
+	// The managed fail2ban jail must be present and up to date.
+	jailWant, err := renderFail2banJail(s)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	jailState, err := checkManagedFile(ctx, r, fail2banJailPath, jailWant)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	jailOK, err := managedFileSatisfied(jailState, fail2banJailPath, rc.Force)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+
+	if ufwActive && f2bUp && sshdOK && udpOK && jailOK {
 		return provision.CheckResult{Satisfied: true, Reason: "firewall, fail2ban and sshd hardening in place"}, nil
 	}
 	return provision.CheckResult{
@@ -90,6 +118,7 @@ func (hardening) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 		Changes: []string{
 			"ufw allow ssh/80/443 + enable",
 			"install fail2ban",
+			"write managed fail2ban jail (sshd port-bound, recidive)",
 			"disable root login and password auth (after anti-lockout gate)",
 		},
 	}, nil
@@ -139,6 +168,37 @@ func (h hardening) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serv
 		return err
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("reload ssh: %s", res.Stderr)
+	}
+
+	// Managed fail2ban jail: harden sshd (bound to the real port, journald backend)
+	// and enable recidive. Validate before reloading, mirroring nginx -t / visudo.
+	jail, err := renderFail2banJail(s)
+	if err != nil {
+		return err
+	}
+	if err := r.WriteFile(ctx, bssh.FileSpec{
+		Path: fail2banJailPath, Content: jail, Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
+	}); err != nil {
+		return fmt.Errorf("write %s: %w", fail2banJailPath, err)
+	}
+	if res, err := r.Run(ctx, "fail2ban-client -t", nil); err != nil {
+		return err
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("fail2ban-client -t failed, refusing to reload: %s", res.Stderr)
+	}
+	// Guarantee fail2ban is enabled+active before reloading: a stopped service
+	// cannot be reloaded, and an active-but-not-enabled one never converges
+	// (Check requires both). enable --now makes both true; reload then applies
+	// the freshly written jail.
+	if res, err := r.Run(ctx, "systemctl enable --now fail2ban", nil); err != nil {
+		return err
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("enable fail2ban: %s", res.Stderr)
+	}
+	if res, err := r.Run(ctx, "systemctl reload fail2ban", nil); err != nil {
+		return err
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("reload fail2ban: %s", res.Stderr)
 	}
 	return nil
 }

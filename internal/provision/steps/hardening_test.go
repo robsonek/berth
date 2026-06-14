@@ -26,7 +26,10 @@ func stubGate(t *testing.T, err error, ran *bool) {
 }
 
 func hardeningServer() *config.Server {
-	return &config.Server{Host: "192.0.2.10", SSH: config.SSH{Port: 2222}}
+	return &config.Server{
+		Host: "192.0.2.10", SSH: config.SSH{Port: 2222},
+		Fail2ban: config.Fail2ban{Bantime: "1h", Findtime: "10m", Maxretry: 5},
+	}
 }
 
 func TestHardeningRequiresAccounts(t *testing.T) {
@@ -46,6 +49,9 @@ func TestHardeningApplyAllowsBeforeEnableAndGatesBeforeSshd(t *testing.T) {
 	f.On("ufw --force enable", bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
 	f.On("systemctl reload ssh", bssh.Result{})
+	f.On("fail2ban-client -t", bssh.Result{})
+	f.On("systemctl enable --now fail2ban", bssh.Result{})
+	f.On("systemctl reload fail2ban", bssh.Result{})
 
 	if err := Hardening().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -129,6 +135,8 @@ func TestHardeningCheckSatisfied(t *testing.T) {
 	f.On("systemctl is-active fail2ban", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled fail2ban", bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{Stdout: sshdDropInBody, ExitCode: 0})
+	jailWant, _ := renderFail2banJail(hardeningServer())
+	f.On("cat "+shQuote(fail2banJailPath), bssh.Result{Stdout: string(jailWant), ExitCode: 0})
 	cr, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
 	if err != nil {
 		t.Fatal(err)
@@ -151,6 +159,9 @@ func TestHardeningCheckAbortsOnUnmanagedSshdDropIn(t *testing.T) {
 	}
 
 	// With --force, it reconciles instead of aborting (not satisfied, no error).
+	// The --force branch proceeds past the unmanaged sshd file to the jail check.
+	jailWant, _ := renderFail2banJail(hardeningServer())
+	f.On("cat "+shQuote(fail2banJailPath), bssh.Result{Stdout: string(jailWant), ExitCode: 0})
 	cr, err := Hardening().Check(context.Background(), provision.RunCtx{Force: true}, hardeningServer(), f)
 	if err != nil {
 		t.Fatalf("with --force, expected no error; got %v", err)
@@ -166,6 +177,8 @@ func TestHardeningCheckUnsatisfiedWhenUfwInactive(t *testing.T) {
 	f.On("systemctl is-active fail2ban", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled fail2ban", bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{Stdout: sshdDropInBody, ExitCode: 0})
+	jailWant, _ := renderFail2banJail(hardeningServer())
+	f.On("cat "+shQuote(fail2banJailPath), bssh.Result{Stdout: string(jailWant), ExitCode: 0})
 	cr, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
 	if err != nil {
 		t.Fatal(err)
@@ -186,6 +199,9 @@ func TestHardeningApplyOpensUDP443WhenHTTP3(t *testing.T) {
 	f.On("ufw --force enable", bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
 	f.On("systemctl reload ssh", bssh.Result{})
+	f.On("fail2ban-client -t", bssh.Result{})
+	f.On("systemctl enable --now fail2ban", bssh.Result{})
+	f.On("systemctl reload fail2ban", bssh.Result{})
 
 	if err := Hardening().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -210,6 +226,8 @@ func TestHardeningCheckRequiresUDP443WhenHTTP3(t *testing.T) {
 	f.On("systemctl is-active fail2ban", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled fail2ban", bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{Stdout: sshdDropInBody, ExitCode: 0})
+	jailWant, _ := renderFail2banJail(s)
+	f.On("cat "+shQuote(fail2banJailPath), bssh.Result{Stdout: string(jailWant), ExitCode: 0})
 	cr, err := Hardening().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -234,5 +252,87 @@ func TestHardeningCheckRequiresUDP443WhenHTTP3(t *testing.T) {
 	}
 	if !cr.Satisfied {
 		t.Errorf("expected satisfied once 443/udp is open; got %+v", cr)
+	}
+}
+
+func TestHardeningCheckUnsatisfiedWhenJailMissing(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("ufw status", bssh.Result{Stdout: "Status: active\n", ExitCode: 0})
+	f.On("systemctl is-active fail2ban", bssh.Result{ExitCode: 0})
+	f.On("systemctl is-enabled fail2ban", bssh.Result{ExitCode: 0})
+	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{Stdout: sshdDropInBody, ExitCode: 0})
+	f.On("cat "+shQuote(fail2banJailPath), bssh.Result{ExitCode: 1}) // jail.local absent
+	cr, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied when the fail2ban jail.local is absent")
+	}
+}
+
+func TestHardeningCheckUnsatisfiedWhenJailDrifted(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("ufw status", bssh.Result{Stdout: "Status: active\n", ExitCode: 0})
+	f.On("systemctl is-active fail2ban", bssh.Result{ExitCode: 0})
+	f.On("systemctl is-enabled fail2ban", bssh.Result{ExitCode: 0})
+	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{Stdout: sshdDropInBody, ExitCode: 0})
+	// Managed by berth but stale content (different hash) -> drifted -> unsatisfied.
+	f.On("cat "+shQuote(fail2banJailPath), bssh.Result{Stdout: managedMarker + "\n[sshd]\nenabled = true\nport = 9999\n", ExitCode: 0})
+	cr, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied when the managed jail.local content has drifted")
+	}
+}
+
+func TestHardeningApplyWritesFail2banJail(t *testing.T) {
+	stubGate(t, nil, nil)
+	s := hardeningServer()
+	f := bssh.NewFakeRunner()
+	f.On("ufw allow 2222/tcp", bssh.Result{})
+	f.On("ufw allow 80,443/tcp", bssh.Result{})
+	f.On("ufw --force enable", bssh.Result{})
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
+	f.On("systemctl reload ssh", bssh.Result{})
+	f.On("fail2ban-client -t", bssh.Result{})
+	f.On("systemctl enable --now fail2ban", bssh.Result{})
+	f.On("systemctl reload fail2ban", bssh.Result{})
+
+	if err := Hardening().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var jail *bssh.FileSpec
+	for i := range f.Writes() {
+		if f.Writes()[i].Path == fail2banJailPath {
+			jail = &f.Writes()[i]
+		}
+	}
+	if jail == nil {
+		t.Fatal("fail2ban jail.local was not written")
+	}
+	body := string(jail.Content)
+	if !strings.Contains(body, "managed by berth") || !strings.Contains(body, "port = 2222") {
+		t.Errorf("jail must carry the marker and bind the configured SSH port;\n%s", body)
+	}
+	var idxTest, idxEnable, idxReload = -1, -1, -1
+	for i, c := range f.Calls() {
+		switch c.Cmd {
+		case "fail2ban-client -t":
+			idxTest = i
+		case "systemctl enable --now fail2ban":
+			idxEnable = i
+		case "systemctl reload fail2ban":
+			idxReload = i
+		}
+	}
+	if idxTest < 0 || idxReload < 0 || idxTest > idxReload {
+		t.Errorf("fail2ban-client -t must run before reload; test=%d reload=%d", idxTest, idxReload)
+	}
+	// enable --now must converge fail2ban (active+enabled) before the reload.
+	if idxEnable < 0 || !(idxTest < idxEnable && idxEnable <= idxReload) {
+		t.Errorf("enable --now must run after -t and before/at reload; test=%d enable=%d reload=%d", idxTest, idxEnable, idxReload)
 	}
 }

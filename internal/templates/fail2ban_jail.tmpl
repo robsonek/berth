@@ -1,0 +1,12 @@
+[DEFAULT]
+bantime = {{ .Bantime }}
+findtime = {{ .Findtime }}
+maxretry = {{ .Maxretry }}
+
+[sshd]
+enabled = true
+port = {{ .SSHPort }}
+backend = systemd
+
+[recidive]
+enabled = true

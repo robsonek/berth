@@ -31,3 +31,23 @@ func TestLoadDefaultsPort(t *testing.T) {
 		t.Error("expected default ssh.port to be applied")
 	}
 }
+
+func TestLoadFail2banDefaults(t *testing.T) {
+	s, err := Load("testdata/defaults.yml")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if s.Fail2ban.Bantime != "1h" || s.Fail2ban.Findtime != "10m" || s.Fail2ban.Maxretry != 5 {
+		t.Errorf("fail2ban defaults not applied: %+v", s.Fail2ban)
+	}
+}
+
+func TestLoadSchedulerDefaultsOn(t *testing.T) {
+	s, err := Load("testdata/defaults.yml")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !s.Scheduler {
+		t.Error("scheduler should default to true when the key is absent")
+	}
+}

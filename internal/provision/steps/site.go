@@ -34,6 +34,12 @@ func supervisorProgramPath(domain string) string {
 }
 func cronPath(domain string) string { return "/etc/cron.d/berth-" + poolName(domain) }
 
+// logrotatePath is the single global logrotate fragment covering every site's
+// FPM and supervisor logs via globs (rotation is host-global, not per-tenant).
+const logrotatePath = "/etc/logrotate.d/berth"
+
+func renderLogrotate() ([]byte, error) { return templates.Render("logrotate.conf.tmpl", nil) }
+
 // fpmService is the systemd unit for the configured PHP-FPM version.
 func fpmService(s *config.Server) string { return "php" + s.PHP.Version + "-fpm" }
 
@@ -43,10 +49,13 @@ func defaultFPMPoolPath(s *config.Server) string {
 	return fmt.Sprintf("/etc/php/%s/fpm/pool.d/www.conf", s.PHP.Version)
 }
 
-// siteFile pairs a desired managed file's path with its rendered content.
+// siteFile pairs a desired managed file's path with its rendered content. When
+// remove is true the file must be ABSENT (a disabled feature): Check flags a
+// lingering berth-managed file as drift and Apply rm -f's it.
 type siteFile struct {
 	path    string
 	content []byte
+	remove  bool
 }
 
 // managedSiteFiles returns every config file the site step owns for every site,
@@ -60,23 +69,32 @@ func managedSiteFiles(ctx context.Context, r bssh.Runner, s *config.Server) ([]s
 		if err != nil {
 			return nil, err
 		}
-		files = append(files, siteFile{nginxAvailablePath(site.Domain), conf})
+		files = append(files, siteFile{path: nginxAvailablePath(site.Domain), content: conf})
 		pool, err := renderFPMPool(s, site)
 		if err != nil {
 			return nil, err
 		}
-		files = append(files, siteFile{fpmPoolPath(s.PHP.Version, site.Domain), pool})
+		files = append(files, siteFile{path: fpmPoolPath(s.PHP.Version, site.Domain), content: pool})
 		prog, err := renderSupervisor(s, site)
 		if err != nil {
 			return nil, err
 		}
-		files = append(files, siteFile{supervisorProgramPath(site.Domain), prog})
-		cron, err := renderCron(s, site)
-		if err != nil {
-			return nil, err
+		files = append(files, siteFile{path: supervisorProgramPath(site.Domain), content: prog})
+		if s.SchedulerEnabled(site) {
+			cron, err := renderCron(s, site)
+			if err != nil {
+				return nil, err
+			}
+			files = append(files, siteFile{path: cronPath(site.Domain), content: cron})
+		} else {
+			files = append(files, siteFile{path: cronPath(site.Domain), remove: true})
 		}
-		files = append(files, siteFile{cronPath(site.Domain), cron})
 	}
+	lr, err := renderLogrotate()
+	if err != nil {
+		return nil, err
+	}
+	files = append(files, siteFile{path: logrotatePath, content: lr})
 	return files, nil
 }
 
@@ -119,10 +137,11 @@ func renderSiteNginx(ctx context.Context, r bssh.Runner, s *config.Server, site 
 // the site's own PHP-FPM socket so each domain proxies to its own pool/user;
 // CertPath/KeyPath point at the site's TLS material (LE or self-signed). HTTP3
 // adds the QUIC listeners + Alt-Svc; QUICReuseport marks the one site that owns
-// the `reuseport` flag on the shared :443 QUIC socket.
+// the `reuseport` flag on the shared :443 QUIC socket. HSTS is set only for
+// real (non-self-signed) certificates to avoid bricking a domain in browsers.
 type nginxData struct {
 	Domain, DeployPath, ACMEWebroot, Socket, CertPath, KeyPath string
-	HTTP3, QUICReuseport                                       bool
+	HTTP3, QUICReuseport, HSTS                                 bool
 }
 
 func nginxRenderData(s *config.Server, site config.Site) nginxData {
@@ -132,6 +151,10 @@ func nginxRenderData(s *config.Server, site config.Site) nginxData {
 		CertPath: certFullchainPath(site), KeyPath: certKeyPath(site),
 		HTTP3:         site.HTTP3,
 		QUICReuseport: site.HTTP3 && quicReuseportOwner(s) == site.Domain,
+		// HSTS is derived purely from static config (SSL + cert mode), never cert
+		// presence, so site re-render and tls swap stay byte-identical. Self-signed
+		// is excluded: pinning a browser to an untrusted cert would brick the site.
+		HSTS: site.SSL && site.CertMode() != "selfsigned",
 	}
 }
 
@@ -206,6 +229,16 @@ func (st site) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 		return provision.CheckResult{}, err
 	}
 	for _, mf := range mfs {
+		if mf.remove {
+			present, err := managedFilePresent(ctx, r, mf.path)
+			if err != nil {
+				return provision.CheckResult{}, err
+			}
+			if present {
+				return provision.CheckResult{Satisfied: false, Reason: mf.path + " should be removed (feature disabled)", Changes: st.changes()}, nil
+			}
+			continue
+		}
 		state, err := checkManagedFile(ctx, r, mf.path, mf.content)
 		if err != nil {
 			return provision.CheckResult{}, err
@@ -237,7 +270,8 @@ func (site) changes() []string {
 		"write per-site nginx server block + enable it",
 		"write per-site FPM pool (own user + socket)",
 		"install per-site dormant supervisor worker",
-		"install per-site scheduler cron",
+		"reconcile per-site scheduler cron (install or remove)",
+		"write global logrotate fragment",
 	}
 }
 
@@ -315,16 +349,47 @@ func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 		}); err != nil {
 			return fmt.Errorf("write supervisor program for %s: %w", site.Domain, err)
 		}
-		cron, err := renderCron(s, site)
-		if err != nil {
-			return fmt.Errorf("render scheduler cron for %s: %w", site.Domain, err)
+		if s.SchedulerEnabled(site) {
+			cron, err := renderCron(s, site)
+			if err != nil {
+				return fmt.Errorf("render scheduler cron for %s: %w", site.Domain, err)
+			}
+			if err := r.WriteFile(ctx, bssh.FileSpec{
+				Path: cronPath(site.Domain), Content: cron,
+				Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
+			}); err != nil {
+				return fmt.Errorf("write scheduler cron for %s: %w", site.Domain, err)
+			}
+		} else {
+			// Scheduler disabled: drift-remove a berth-managed cron (never a foreign file).
+			present, err := managedFilePresent(ctx, r, cronPath(site.Domain))
+			if err != nil {
+				return err
+			}
+			if present {
+				if res, err := r.Run(ctx, "rm -f "+shQuote(cronPath(site.Domain)), nil); err != nil {
+					return err
+				} else if res.ExitCode != 0 {
+					return fmt.Errorf("remove scheduler cron for %s: %s", site.Domain, res.Stderr)
+				}
+			}
 		}
-		if err := r.WriteFile(ctx, bssh.FileSpec{
-			Path: cronPath(site.Domain), Content: cron,
-			Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
-		}); err != nil {
-			return fmt.Errorf("write scheduler cron for %s: %w", site.Domain, err)
-		}
+	}
+
+	// 6) Global logrotate fragment for FPM + supervisor logs (one file, globs).
+	lr, err := renderLogrotate()
+	if err != nil {
+		return err
+	}
+	if err := r.WriteFile(ctx, bssh.FileSpec{
+		Path: logrotatePath, Content: lr, Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
+	}); err != nil {
+		return fmt.Errorf("write %s: %w", logrotatePath, err)
+	}
+	if res, err := r.Run(ctx, "logrotate -d "+shQuote(logrotatePath), nil); err != nil {
+		return err
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("logrotate -d failed for %s: %s", logrotatePath, res.Stderr)
 	}
 	return nil
 }

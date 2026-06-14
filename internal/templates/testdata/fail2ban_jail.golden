@@ -1,0 +1,13 @@
+# managed by berth
+[DEFAULT]
+bantime = 1h
+findtime = 10m
+maxretry = 5
+
+[sshd]
+enabled = true
+port = 22
+backend = systemd
+
+[recidive]
+enabled = true
