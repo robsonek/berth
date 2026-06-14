@@ -36,11 +36,10 @@ func testServerWithKey(t *testing.T) *config.Server {
 }
 
 // stubAccountExists stubs the read-only checks that report a fully-provisioned
-// account (user present, sudoers present+valid, authorized_keys up to date).
-func stubAccountExists(f *bssh.FakeRunner, user string, want []byte) {
+// account (user present, sudoers content up to date, authorized_keys up to date).
+func stubAccountExists(f *bssh.FakeRunner, user string, sudoers, want []byte) {
 	f.On("id "+user, bssh.Result{ExitCode: 0})
-	f.On("test -e "+shQuote(sudoersPath(user)), bssh.Result{ExitCode: 0})
-	f.On("visudo -cf "+shQuote(sudoersPath(user)), bssh.Result{ExitCode: 0})
+	f.On("cat "+shQuote(sudoersPath(user)), bssh.Result{Stdout: string(sudoers), ExitCode: 0})
 	f.On("cat "+shQuote(authorizedKeysPath(user)), bssh.Result{Stdout: string(want), ExitCode: 0})
 }
 
@@ -78,15 +77,73 @@ func TestAccountsCheckUnsatisfiedWhenUserMissing(t *testing.T) {
 func TestAccountsCheckSatisfiedWhenAllPresent(t *testing.T) {
 	s := testServerWithKey(t)
 	want := authorizedKeys(testOperatorKey)
+	deploySudoers, err := renderSiteSudoers(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
 	f := bssh.NewFakeRunner()
-	stubAccountExists(f, "berth", want)
-	stubAccountExists(f, "deploy", want) // single site -> legacy "deploy"
+	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
+	stubAccountExists(f, "deploy", deploySudoers, want) // single site -> legacy "deploy"
 	cr, err := Accounts().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !cr.Satisfied {
 		t.Errorf("expected satisfied; got %+v", cr)
+	}
+}
+
+func TestAccountsCheckUnsatisfiedWhenSudoersDrifted(t *testing.T) {
+	s := testServerWithKey(t)
+	want := authorizedKeys(testOperatorKey)
+	f := bssh.NewFakeRunner()
+	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
+	// deploy's sudoers carries the managed marker but has stale content (e.g. an
+	// out-of-date program list) — Check must content-drift detect and report
+	// unsatisfied so a changed program list converges on an already-provisioned host.
+	stale := []byte(managedMarker + "\ndeploy ALL=(root) NOPASSWD: /usr/bin/supervisorctl restart berth-old\\:*\n")
+	stubAccountExists(f, "deploy", stale, want)
+	cr, err := Accounts().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Errorf("expected unsatisfied when site sudoers content has drifted; got %+v", cr)
+	}
+}
+
+func TestSiteSudoersIsolationPerProgram(t *testing.T) {
+	s := &config.Server{
+		PHP: config.PHP{Version: "8.4"}, Queue: true,
+		Sites: []config.Site{
+			{Domain: "a.example.com", DeployPath: "/var/www/a", User: "auser"},
+			{Domain: "b.example.com", DeployPath: "/var/www/b", User: "buser"},
+		},
+	}
+	bBody, err := renderSiteSudoers(s, s.Sites[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(bBody), "berth-a_example_com") {
+		t.Errorf("site B sudoers must NOT reference site A's program:\n%s", bBody)
+	}
+	if !strings.Contains(string(bBody), `supervisorctl restart berth-b_example_com\:*`) {
+		t.Errorf("site B sudoers must control its own program:\n%s", bBody)
+	}
+}
+
+func TestSiteSudoersIncludesDaemonPrograms(t *testing.T) {
+	s := &config.Server{PHP: config.PHP{Version: "8.4"}, Queue: true,
+		Sites: []config.Site{{Domain: "a.example.com", DeployPath: "/var/www/a", User: "auser",
+			Daemons: []config.Daemon{{Name: "reverb", Command: "php artisan reverb:start"}}}}}
+	body, err := renderSiteSudoers(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`start berth-a_example_com\:*`, `start berth-a_example_com-reverb\:*`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("missing grant %q in:\n%s", want, body)
+		}
 	}
 }
 

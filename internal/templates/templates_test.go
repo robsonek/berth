@@ -133,9 +133,17 @@ func TestRenderEnvGolden(t *testing.T) {
 }
 
 func TestRenderSudoersDeployGolden(t *testing.T) {
-	checkGolden(t, "sudoers_deploy.tmpl", "sudoers_deploy.golden", struct{ User, PHPVersion, ProgramName string }{
-		User: "webuser", PHPVersion: "8.5", ProgramName: "berth-app_example_com",
-	})
+	checkGolden(t, "sudoers_deploy.tmpl", "sudoers_deploy.golden", struct {
+		User, PHPVersion string
+		Programs         []string
+	}{User: "webuser", PHPVersion: "8.5", Programs: []string{"berth-app_example_com"}})
+}
+
+func TestRenderSudoersDeployDaemonsGolden(t *testing.T) {
+	checkGolden(t, "sudoers_deploy.tmpl", "sudoers_deploy_daemons.golden", struct {
+		User, PHPVersion string
+		Programs         []string
+	}{User: "webuser", PHPVersion: "8.5", Programs: []string{"berth-app_example_com", "berth-app_example_com-reverb"}})
 }
 
 func TestRenderSchedulerCronGolden(t *testing.T) {

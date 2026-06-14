@@ -54,8 +54,9 @@ func authorizedKeysPath(user string) string {
 // php-fpm version + manage only its own supervisor program), as the site user.
 func renderSiteSudoers(s *config.Server, site config.Site) ([]byte, error) {
 	return templates.Render("sudoers_deploy.tmpl", struct {
-		User, PHPVersion, ProgramName string
-	}{User: s.SiteUser(site), PHPVersion: s.PHP.Version, ProgramName: programName(site.Domain)})
+		User, PHPVersion string
+		Programs         []string
+	}{User: s.SiteUser(site), PHPVersion: s.PHP.Version, Programs: s.SiteProgramNames(site)})
 }
 
 // authorizedKeys is the managed authorized_keys body for an account: the berth
@@ -87,6 +88,18 @@ func (a accounts) Check(ctx context.Context, rc provision.RunCtx, s *config.Serv
 	}
 	want := authorizedKeys(operatorKey)
 
+	// Desired sudoers body per managed account: berth's full grant plus each
+	// site user's narrow per-program grant. Content-drift (not just existence) so
+	// a changed program list converges on an already-provisioned host.
+	sudoersWant := map[string][]byte{"berth": []byte(sudoersBerthBody)}
+	for _, site := range s.Sites {
+		body, err := renderSiteSudoers(s, site)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		sudoersWant[s.SiteUser(site)] = body
+	}
+
 	for _, u := range managedAccounts(s) {
 		ok, err := userExists(ctx, r, u)
 		if err != nil {
@@ -95,24 +108,21 @@ func (a accounts) Check(ctx context.Context, rc provision.RunCtx, s *config.Serv
 		if !ok {
 			return provision.CheckResult{Satisfied: false, Reason: "account " + u + " missing", Changes: a.changes()}, nil
 		}
-		// sudoers present + valid.
+		// sudoers carries the managed marker and matches the desired content.
 		p := sudoersPath(u)
-		exists, err := fileExists(ctx, r, p)
+		state, err := checkManagedFile(ctx, r, p, sudoersWant[u])
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
-		if !exists {
-			return provision.CheckResult{Satisfied: false, Reason: p + " missing", Changes: a.changes()}, nil
-		}
-		valid, err := sudoersValid(ctx, r, p)
+		okSudo, err := managedFileSatisfied(state, p, rc.Force)
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
-		if !valid {
-			return provision.CheckResult{Satisfied: false, Reason: p + " fails visudo -cf", Changes: a.changes()}, nil
+		if !okSudo {
+			return provision.CheckResult{Satisfied: false, Reason: p + " not up to date", Changes: a.changes()}, nil
 		}
 		// authorized_keys carries the managed marker + the expected key.
-		state, err := checkManagedFile(ctx, r, authorizedKeysPath(u), want)
+		state, err = checkManagedFile(ctx, r, authorizedKeysPath(u), want)
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
