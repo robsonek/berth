@@ -127,8 +127,25 @@ func TestSiteSudoersIsolationPerProgram(t *testing.T) {
 	if strings.Contains(string(bBody), "berth-a_example_com") {
 		t.Errorf("site B sudoers must NOT reference site A's program:\n%s", bBody)
 	}
-	if !strings.Contains(string(bBody), `supervisorctl restart berth-b_example_com\:*`) {
+	if !strings.Contains(string(bBody), `supervisorctl restart berth-b_example_com\:\*`) {
 		t.Errorf("site B sudoers must control its own program:\n%s", bBody)
+	}
+}
+
+func TestSiteSudoersEscapesWildcardForIsolation(t *testing.T) {
+	s := &config.Server{PHP: config.PHP{Version: "8.4"}, Queue: true,
+		Sites: []config.Site{{Domain: "a.example.com", DeployPath: "/var/www/a", User: "auser"}}}
+	body, err := renderSiteSudoers(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The wildcard MUST be escaped (literal) so the sudoers arg cannot cross
+	// whitespace into another tenant's program.
+	if !strings.Contains(string(body), `restart berth-a_example_com\:\*`) {
+		t.Errorf("supervisorctl grant must escape the wildcard (\\:\\*) for tenant isolation:\n%s", body)
+	}
+	if strings.Contains(string(body), `berth-a_example_com\:*`+"\n") {
+		t.Errorf("unescaped \\:* wildcard must not appear:\n%s", body)
 	}
 }
 
@@ -140,7 +157,7 @@ func TestSiteSudoersIncludesDaemonPrograms(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`start berth-a_example_com\:*`, `start berth-a_example_com-reverb\:*`} {
+	for _, want := range []string{`start berth-a_example_com\:\*`, `start berth-a_example_com-reverb\:\*`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("missing grant %q in:\n%s", want, body)
 		}

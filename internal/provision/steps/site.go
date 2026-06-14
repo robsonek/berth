@@ -375,7 +375,7 @@ func (site) changes() []string {
 	return []string{
 		"write per-site nginx server block + enable it",
 		"write per-site FPM pool (own user + socket)",
-		"install per-site dormant supervisor worker",
+		"write per-site supervisor programs (worker + daemons) and remove orphans",
 		"reconcile per-site scheduler cron (install or remove)",
 		"write global logrotate fragment",
 	}

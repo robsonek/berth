@@ -232,9 +232,12 @@ func (st *Site) validateQueueDaemons() error {
 		default:
 			return fmt.Errorf("queue.driver %q must be work or horizon", q.Driver)
 		}
-		for name, v := range map[string]int{"processes": q.Processes, "sleep": q.Sleep, "tries": q.Tries, "timeout": q.Timeout, "max_memory": q.MaxMemory} {
-			if v < 0 {
-				return fmt.Errorf("queue.%s must not be negative", name)
+		for _, kv := range []struct {
+			name string
+			v    int
+		}{{"processes", q.Processes}, {"sleep", q.Sleep}, {"tries", q.Tries}, {"timeout", q.Timeout}, {"max_memory", q.MaxMemory}} {
+			if kv.v < 0 {
+				return fmt.Errorf("queue.%s must not be negative", kv.name)
 			}
 		}
 		if q.Processes > 64 {

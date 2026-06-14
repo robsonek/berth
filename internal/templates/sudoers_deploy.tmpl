@@ -2,7 +2,7 @@
 {{ .User }} ALL=(root) NOPASSWD: /usr/bin/supervisorctl reread
 {{ .User }} ALL=(root) NOPASSWD: /usr/bin/supervisorctl update
 {{- range .Programs }}
-{{ $.User }} ALL=(root) NOPASSWD: /usr/bin/supervisorctl start {{ . }}\:*
-{{ $.User }} ALL=(root) NOPASSWD: /usr/bin/supervisorctl stop {{ . }}\:*
-{{ $.User }} ALL=(root) NOPASSWD: /usr/bin/supervisorctl restart {{ . }}\:*
+{{ $.User }} ALL=(root) NOPASSWD: /usr/bin/supervisorctl start {{ . }}\:\*
+{{ $.User }} ALL=(root) NOPASSWD: /usr/bin/supervisorctl stop {{ . }}\:\*
+{{ $.User }} ALL=(root) NOPASSWD: /usr/bin/supervisorctl restart {{ . }}\:\*
 {{- end }}

@@ -52,6 +52,17 @@ func authorizedKeysPath(user string) string {
 
 // renderSiteSudoers renders the narrow per-site deploy sudoers (reload its
 // php-fpm version + manage only its own supervisor program), as the site user.
+//
+// The '*' in the supervisorctl grants is ESCAPED (\*) on purpose. In sudoers, an
+// unescaped '*' is an fnmatch wildcard that matches ACROSS WHITESPACE, so a site
+// user could append another tenant's program to the command
+// (e.g. `supervisorctl restart berth-a\:* berth-b\:*`) and the `berth-a\:*` rule
+// would still match — silently acting on berth-b too. Escaping to a literal
+// `berth-<prog>:*` removes the wildcard, so sudoers requires an EXACT (same
+// arg-count) match and denies any extra target. This preserves per-tenant
+// isolation; the deployer still works because it passes the literal `:*` group
+// form. Do not "simplify" `\:\*` back to `\:*` — that reopens the cross-tenant
+// control hole.
 func renderSiteSudoers(s *config.Server, site config.Site) ([]byte, error) {
 	return templates.Render("sudoers_deploy.tmpl", struct {
 		User, PHPVersion string
