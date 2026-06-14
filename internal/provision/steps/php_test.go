@@ -43,6 +43,7 @@ func TestPHPApplyWritesOpcacheDropIn(t *testing.T) {
 	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}} // stock -> no Surý repo
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
+	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
 	f.On("php-fpm8.4 -t", bssh.Result{})
 	f.On("systemctl reload php8.4-fpm", bssh.Result{})
 
@@ -73,6 +74,15 @@ func TestPHPApplyWritesOpcacheDropIn(t *testing.T) {
 			t.Errorf("must not write a CLI OPcache drop-in: %s", w.Path)
 		}
 	}
+	var createdLogDir bool
+	for _, c := range f.Calls() {
+		if c.Cmd == "install -d -o root -g root -m 0755 "+shQuote(phpLogDir) {
+			createdLogDir = true
+		}
+	}
+	if !createdLogDir {
+		t.Error("Apply must create " + phpLogDir)
+	}
 }
 
 func TestPHPCheckUnsatisfiedWhenOpcacheDropInMissing(t *testing.T) {
@@ -98,11 +108,31 @@ func TestPHPCheckSatisfiedWhenInstalledAndOpcacheManaged(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(want), ExitCode: 0})
+	f.On("test -d "+shQuote(phpLogDir), bssh.Result{ExitCode: 0})
 	cr, err := PHP().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !cr.Satisfied {
 		t.Errorf("expected satisfied when installed and OPcache drop-in up to date; got %+v", cr)
+	}
+}
+
+func TestPHPCheckUnsatisfiedWhenLogDirMissing(t *testing.T) {
+	s := &config.Server{PHP: config.PHP{Version: "8.4"}}
+	want, err := renderOpcache()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0})
+	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(want), ExitCode: 0})
+	f.On("test -d "+shQuote(phpLogDir), bssh.Result{ExitCode: 1}) // /var/log/php missing
+	cr, err := PHP().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied when /var/log/php is missing")
 	}
 }

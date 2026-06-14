@@ -13,6 +13,11 @@ import (
 
 const debianStockPHP = "8.4" // Debian 13 (trixie) ships PHP 8.4
 
+// phpLogDir holds the per-site FPM error logs (/var/log/php/<pool>-fpm.error.log).
+// PHP-FPM does not create this directory, and no other step did — so the per-site
+// error log was silently lost. The php step owns the FPM runtime, so it ensures it.
+const phpLogDir = "/var/log/php"
+
 // opcacheDropInPath is the FPM-only OPcache tuning drop-in. It is FPM-only on
 // purpose: the CLI SAPI keeps Debian's stock opcache.enable_cli=0, so long-lived
 // queue workers and repeated artisan runs never serve stale bytecode.
@@ -48,7 +53,7 @@ func useSury(p config.PHP) (bool, error) {
 }
 
 func (php) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
-	changes := []string{"install php" + s.PHP.Version + " + extensions", "write production OPcache drop-in"}
+	changes := []string{"install php" + s.PHP.Version + " + extensions", "write production OPcache drop-in", "ensure " + phpLogDir}
 	res, err := r.Run(ctx, "dpkg -s php"+s.PHP.Version+"-fpm", nil)
 	if err != nil {
 		return provision.CheckResult{}, err
@@ -69,10 +74,19 @@ func (php) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	if ok {
-		return provision.CheckResult{Satisfied: true, Reason: "php" + s.PHP.Version + "-fpm installed; OPcache tuned for production"}, nil
+	if !ok {
+		return provision.CheckResult{Satisfied: false, Reason: "OPcache drop-in not up to date", Changes: changes}, nil
 	}
-	return provision.CheckResult{Satisfied: false, Reason: "OPcache drop-in not up to date", Changes: changes}, nil
+	// PHP-FPM does not create the parent dir of the per-site error_log
+	// (/var/log/php/<pool>-fpm.error.log); ensure it exists.
+	dir, err := r.Run(ctx, "test -d "+shQuote(phpLogDir), nil)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	if dir.ExitCode != 0 {
+		return provision.CheckResult{Satisfied: false, Reason: phpLogDir + " missing", Changes: changes}, nil
+	}
+	return provision.CheckResult{Satisfied: true, Reason: "php" + s.PHP.Version + "-fpm installed; OPcache tuned for production"}, nil
 }
 
 func (php) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) error {
@@ -93,6 +107,11 @@ func (php) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r bs
 	}
 	if err := m.EnsurePackages(ctx, nil, pkgs...); err != nil {
 		return err
+	}
+	if res, err := r.Run(ctx, "install -d -o root -g root -m 0755 "+shQuote(phpLogDir), nil); err != nil {
+		return err
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("create %s: %s", phpLogDir, res.Stderr)
 	}
 	// Production OPcache tuning (FPM SAPI only). validate_timestamps=0 means new
 	// code is picked up only after an FPM reload — the deployer does that
