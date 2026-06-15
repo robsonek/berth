@@ -107,7 +107,7 @@ symlink it must reload FPM (and restart any running queue worker):
 after('deploy:publish', function () {
     run('sudo systemctl reload php{{php_version}}-fpm'); // clear OPcache -> serve new bytecode
 });
-// plus: php artisan queue:restart  (so a running worker picks up the new code)
+// plus: php artisan queue:restart  (or horizon:terminate) so a running worker picks up the new code
 ```
 
 ## Security & hardening
@@ -132,18 +132,45 @@ which disables root login and password authentication only after verifying the
 - **TLS** — HTTPS sites with a real (Let's Encrypt) certificate send HSTS
   (`max-age` one year) and use a modern TLS profile (TLS 1.2/1.3, strong ciphers,
   session tickets off); self-signed sites deliberately omit HSTS.
-- **Log rotation** — per-site PHP-FPM and queue-worker logs are rotated so they
-  never fill the disk.
+- **Log rotation** — per-site PHP-FPM and Supervisor program (queue worker +
+  daemon) logs are rotated so they never fill the disk.
 - **Firewall** — `ufw` allows only SSH and 80/443 (plus UDP/443 with HTTP/3).
 
-## Scheduler & queue workers
+## Scheduler, queue workers & daemons
 
 berth installs Laravel's scheduler as a per-site cron running `php artisan
 schedule:run` every minute as the site's own user. It is **on by default**; set
 `scheduler: false` server-wide, or `scheduler: false` on an individual site, to
-skip it (disabling it on a re-run removes the cron). With `queue: true` berth
-also installs a dormant Supervisor `queue:work` program per site for your
-deployer to start and restart.
+skip it (disabling it on a re-run removes the cron).
+
+With `queue: true` berth installs a dormant Supervisor `queue:work` program per
+site. Tune that worker — or replace it with **Horizon** — and add arbitrary
+long-running processes, per site:
+
+```yaml
+queue: true                  # server-wide default: a queue:work worker on every site
+sites:
+  - domain: app.example.com
+    deploy_path: /var/www/app
+    queue:                   # tune this site's worker (omit to keep the default above)
+      processes: 4           # numprocs
+      connection: redis
+      queue: default,emails
+      tries: 3
+      timeout: 90
+      max_memory: 256        # MB
+    # queue: horizon         # …or run Laravel Horizon instead of queue:work
+    daemons:                 # arbitrary long-running programs (full command)
+      - { name: reverb, command: php artisan reverb:start }
+```
+
+Every program is installed **dormant** (`autostart=false`) — your deployer starts
+and restarts them; berth never runs them. `queue: horizon` emits an `artisan
+horizon` program instead of `queue:work` (Horizon runs single-process and manages
+its own workers, so the `queue:work` knobs don't apply; configure it in your app's
+`config/horizon.php`, and note it needs the Redis/Valkey queue driver). Each site
+user gets **narrow sudoers** to control only its own programs, and Supervisor is
+installed whenever any site declares a worker or a daemon.
 
 ## Multiple sites (isolated per domain)
 
