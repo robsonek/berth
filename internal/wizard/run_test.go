@@ -1,6 +1,7 @@
 package wizard
 
 import (
+	"strconv"
 	"testing"
 )
 
@@ -77,5 +78,143 @@ func TestRunSingleSiteNoAdvanced(t *testing.T) {
 	}
 	if len(f.errors) != 0 {
 		t.Errorf("unexpected errors: %v", f.errors)
+	}
+}
+
+func TestRunDuplicateDomainReprompts(t *testing.T) {
+	f := &fakePrompter{
+		serverCore: baseServer,
+		siteCore: []func(int, *SiteAnswers){
+			func(_ int, sa *SiteAnswers) {
+				sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "a.example.com", "/srv/a", "ad", "au"
+			},
+			func(_ int, sa *SiteAnswers) {
+				sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "a.example.com", "/srv/b", "bd", "bu"
+			}, // dup domain
+			func(_ int, sa *SiteAnswers) {
+				sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "b.example.com", "/srv/b", "bd", "bu"
+			}, // fixed
+		},
+		// site0: advanced? add-another? | site1 retry has no extra confirms until valid | site1: advanced? add-another?
+		confirms: []bool{false /*srv adv*/, false /*s0 adv*/, true /*add*/, false /*s1 adv*/, false /*add*/},
+	}
+	a, err := run(f)
+	if err != nil {
+		t.Fatalf("run error = %v", err)
+	}
+	if len(a.Sites) != 2 || a.Sites[1].Domain != "b.example.com" {
+		t.Fatalf("sites = %+v", a.Sites)
+	}
+	if len(f.errors) != 1 {
+		t.Errorf("expected exactly 1 shown error (the duplicate), got %v", f.errors)
+	}
+}
+
+func TestRunHTTP3DeclineDropsHTTP3(t *testing.T) {
+	f := &fakePrompter{
+		serverCore: func(a *Answers) { baseServer(a); a.NginxSource = "debian" },
+		siteCore: []func(int, *SiteAnswers){
+			func(_ int, sa *SiteAnswers) {
+				sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "a.example.com", "/srv/a", "ad", "au"
+				sa.SSL, sa.SSLMode, sa.SSLEmail, sa.HTTP3 = true, "letsencrypt", "x@y.com", true
+			},
+		},
+		// srv-adv? | http3-switch? (decline) | site-adv? | add-another?
+		confirms: []bool{false, false, false, false},
+	}
+	a, err := run(f)
+	if err != nil {
+		t.Fatalf("run error = %v", err)
+	}
+	if a.NginxSource != "debian" || a.Sites[0].HTTP3 {
+		t.Errorf("expected http3 dropped and nginx unchanged: nginx=%q http3=%v", a.NginxSource, a.Sites[0].HTTP3)
+	}
+	if err := a.ToServer().Validate(); err != nil {
+		t.Errorf("declined http3 config should be valid: %v", err)
+	}
+}
+
+func TestRunHTTP3AcceptSwitchesNginx(t *testing.T) {
+	f := &fakePrompter{
+		serverCore: func(a *Answers) { baseServer(a); a.NginxSource = "debian" },
+		siteCore: []func(int, *SiteAnswers){
+			func(_ int, sa *SiteAnswers) {
+				sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "a.example.com", "/srv/a", "ad", "au"
+				sa.SSL, sa.SSLMode, sa.SSLEmail, sa.HTTP3 = true, "selfsigned", "", true
+			},
+		},
+		// srv-adv? | http3-switch? (accept) | site-adv? | add-another?
+		confirms: []bool{false, true, false, false},
+	}
+	a, err := run(f)
+	if err != nil {
+		t.Fatalf("run error = %v", err)
+	}
+	if a.NginxSource != "nginx" || !a.Sites[0].HTTP3 {
+		t.Errorf("expected nginx switched + http3 kept: nginx=%q http3=%v", a.NginxSource, a.Sites[0].HTTP3)
+	}
+}
+
+func TestRunValkeyCapsAtSixteen(t *testing.T) {
+	makeSite := func(i int, sa *SiteAnswers) {
+		n := strconv.Itoa(i)
+		sa.Domain, sa.DeployPath = "s"+n+".example.com", "/srv/"+n
+		sa.DBName, sa.DBUser = "d"+n, "u"+n
+		sa.User = "user" + n // explicit, distinct, avoids derived-name edge cases
+	}
+	cores := make([]func(int, *SiteAnswers), 16)
+	for i := range cores {
+		cores[i] = makeSite
+	}
+	// confirms: srv-adv? then per site: site-adv?(false) add-another?(true) — but the
+	// 16th site never gets an "add another?" (gated), so 1 + (15*2 + 1) = 32 confirms.
+	confirms := []bool{false}
+	for i := 0; i < 16; i++ {
+		confirms = append(confirms, false) // site-advanced?
+		if i < 15 {
+			confirms = append(confirms, true) // add another?
+		}
+	}
+	f := &fakePrompter{serverCore: func(a *Answers) { baseServer(a); a.Valkey = true }, siteCore: cores, confirms: confirms}
+	a, err := run(f)
+	if err != nil {
+		t.Fatalf("run error = %v", err)
+	}
+	if len(a.Sites) != 16 {
+		t.Fatalf("expected 16 sites (capped), got %d", len(a.Sites))
+	}
+	if err := a.ToServer().Validate(); err != nil {
+		t.Fatalf("16-site valkey config should validate: %v", err)
+	}
+	if len(f.errors) != 1 {
+		t.Errorf("expected the cap note once, got %v", f.errors)
+	}
+}
+
+func TestRunDaemonSubLoop(t *testing.T) {
+	f := &fakePrompter{
+		serverCore: baseServer,
+		siteCore: []func(int, *SiteAnswers){
+			func(_ int, sa *SiteAnswers) {
+				sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "a.example.com", "/srv/a", "ad", "au"
+			},
+		},
+		siteScheduler: func(sa *SiteAnswers) { sa.SchedulerOverride = "inherit" },
+		daemons: []func(*DaemonAnswers){
+			func(d *DaemonAnswers) { d.Name, d.Command, d.Processes = "reverb", "php artisan reverb:start", 1 },
+			func(d *DaemonAnswers) { d.Name, d.Command, d.Processes = "horizon", "php artisan horizon", 1 },
+		},
+		// srv-adv? | s0 adv?(yes) | dedicated-queue?(no) | add-daemon?(yes) | another-daemon?(yes) | another-daemon?(no) | add-site?(no)
+		confirms: []bool{false, true, false, true, true, false, false},
+	}
+	a, err := run(f)
+	if err != nil {
+		t.Fatalf("run error = %v", err)
+	}
+	if len(a.Sites[0].Daemons) != 2 || a.Sites[0].Daemons[1].Name != "horizon" {
+		t.Fatalf("daemons = %+v", a.Sites[0].Daemons)
+	}
+	if err := a.ToServer().Validate(); err != nil {
+		t.Fatalf("daemon config should validate: %v", err)
 	}
 }
