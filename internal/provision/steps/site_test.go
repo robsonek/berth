@@ -86,6 +86,7 @@ func TestSiteApplyAbortsOnNginxTestFailure(t *testing.T) {
 
 func TestSiteApplyWritesManagedFiles(t *testing.T) {
 	s := siteServer()
+	s.Queue = true // queue enabled so a worker program (autostart=false) is written
 	f := bssh.NewFakeRunner()
 	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
 	f.On("nginx -t", bssh.Result{ExitCode: 0})
@@ -164,6 +165,7 @@ func TestSiteNginxIsCertAware(t *testing.T) {
 	// challenge can complete (never reference a cert that does not exist).
 	noCert := bssh.NewFakeRunner()
 	noCert.On("test -e "+shQuote(certPath), bssh.Result{ExitCode: 1})
+	noCert.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{})
 	mfs, err := managedSiteFiles(context.Background(), noCert, s)
 	if err != nil {
 		t.Fatal(err)
@@ -176,6 +178,7 @@ func TestSiteNginxIsCertAware(t *testing.T) {
 	// re-run does not revert the TLS step's 443 block back to HTTP.
 	withCert := bssh.NewFakeRunner()
 	withCert.On("test -e "+shQuote(certPath), bssh.Result{ExitCode: 0})
+	withCert.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{})
 	mfs, err = managedSiteFiles(context.Background(), withCert, s)
 	if err != nil {
 		t.Fatal(err)
@@ -432,6 +435,7 @@ func TestSiteCheckUnsatisfiedWhenDisabledCronLingers(t *testing.T) {
 // the Check's content-hash comparison is satisfied.
 func stubManagedSiteFiles(t *testing.T, s *config.Server, f *bssh.FakeRunner) {
 	t.Helper()
+	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{})
 	mfs, err := managedSiteFiles(context.Background(), f, s)
 	if err != nil {
 		t.Fatalf("managedSiteFiles: %v", err)
@@ -449,6 +453,7 @@ func stubFPMApply(s *config.Server, f *bssh.FakeRunner) {
 	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
 	f.On("systemctl reload "+fpmService(s), bssh.Result{})
 	f.On("logrotate -d "+shQuote(logrotatePath), bssh.Result{})
+	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{})
 }
 
 // replayWritesAsReads seeds dst with `cat '<path>'` stubs for every file written
@@ -508,6 +513,7 @@ func TestSiteCheckSatisfiedAfterTLSSwap(t *testing.T) {
 	fCheck.On("test -e "+shQuote(certFullchainPath(site)), bssh.Result{ExitCode: 0})
 	fCheck.On("nginx -t", bssh.Result{ExitCode: 0})
 	fCheck.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
+	fCheck.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{})
 
 	cr, err := Site().Check(ctx, provision.RunCtx{}, s, fCheck)
 	if err != nil {
@@ -518,5 +524,137 @@ func TestSiteCheckSatisfiedAfterTLSSwap(t *testing.T) {
 	}
 	if n := len(fCheck.Writes()); n != 0 {
 		t.Errorf("site.Check must be side-effect-free; got %d writes", n)
+	}
+}
+
+func TestManagedSiteFilesEnumeratesWorkerAndDaemons(t *testing.T) {
+	s := siteServer()
+	s.Queue = true
+	s.Sites[0].Daemons = []config.Daemon{{Name: "reverb", Command: "php artisan reverb:start"}}
+	f := bssh.NewFakeRunner()
+	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{ExitCode: 0, Stdout: ""})
+	mfs, err := managedSiteFiles(context.Background(), f, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawWorker, sawDaemon bool
+	for _, mf := range mfs {
+		if mf.path == "/etc/supervisor/conf.d/berth-app_example_com.conf" && !mf.remove {
+			sawWorker = true
+		}
+		if mf.path == "/etc/supervisor/conf.d/berth-app_example_com-reverb.conf" && !mf.remove {
+			sawDaemon = true
+		}
+	}
+	if !sawWorker || !sawDaemon {
+		t.Errorf("expected worker + daemon program files; worker=%v daemon=%v", sawWorker, sawDaemon)
+	}
+}
+
+func TestManagedSiteFilesNoWorkerWhenQueueDisabled(t *testing.T) {
+	s := siteServer() // Server.Queue false, no site.Queue -> QueueEnabled false
+	s.Queue = false
+	f := bssh.NewFakeRunner()
+	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{ExitCode: 0, Stdout: ""})
+	mfs, err := managedSiteFiles(context.Background(), f, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range mfs {
+		if mf.path == "/etc/supervisor/conf.d/berth-app_example_com.conf" && !mf.remove {
+			t.Error("no worker program expected when queue disabled")
+		}
+	}
+}
+
+func TestManagedSiteFilesFlagsOrphanProgram(t *testing.T) {
+	s := siteServer()
+	s.Queue = true // worker berth-app_example_com is desired; berth-app_example_com-old is NOT
+	f := bssh.NewFakeRunner()
+	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{ExitCode: 0,
+		Stdout: "/etc/supervisor/conf.d/berth-app_example_com.conf\n/etc/supervisor/conf.d/berth-app_example_com-old.conf\n"})
+	mfs, err := managedSiteFiles(context.Background(), f, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawOrphanRemove bool
+	for _, mf := range mfs {
+		if mf.path == "/etc/supervisor/conf.d/berth-app_example_com-old.conf" && mf.remove {
+			sawOrphanRemove = true
+		}
+		if mf.path == "/etc/supervisor/conf.d/berth-app_example_com.conf" && mf.remove {
+			t.Error("the desired worker must NOT be flagged for removal")
+		}
+	}
+	if !sawOrphanRemove {
+		t.Error("an undesired berth-*.conf program file must be flagged for removal")
+	}
+}
+
+func TestSiteApplyWritesDaemonAndRemovesOrphan(t *testing.T) {
+	s := siteServer()
+	s.Queue = true
+	s.Sites[0].Daemons = []config.Daemon{{Name: "reverb", Command: "php artisan reverb:start"}}
+	f := bssh.NewFakeRunner()
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+	// One orphan program file exists on the host and must be removed.
+	orphan := "/etc/supervisor/conf.d/berth-app_example_com-old.conf"
+	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{ExitCode: 0,
+		Stdout: "/etc/supervisor/conf.d/berth-app_example_com.conf\n/etc/supervisor/conf.d/berth-app_example_com-reverb.conf\n" + orphan + "\n"})
+	f.On("cat "+shQuote(orphan), bssh.Result{ExitCode: 0, Stdout: managedMarker + "\n[program:berth-app_example_com-old]\n"})
+	f.On("rm -f "+shQuote(orphan), bssh.Result{})
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	var wroteDaemon, removedOrphan bool
+	for _, w := range f.Writes() {
+		if w.Path == "/etc/supervisor/conf.d/berth-app_example_com-reverb.conf" && strings.Contains(string(w.Content), "reverb:start") {
+			wroteDaemon = true
+		}
+	}
+	for _, c := range f.Calls() {
+		if c.Cmd == "rm -f "+shQuote(orphan) {
+			removedOrphan = true
+		}
+	}
+	if !wroteDaemon {
+		t.Error("expected the reverb daemon program file to be written")
+	}
+	if !removedOrphan {
+		t.Error("expected the orphan program file to be removed")
+	}
+}
+
+func TestQueueCommandDefaultByteIdentical(t *testing.T) {
+	s := siteServer()
+	s.Queue = true
+	got := queueCommand(s, s.Sites[0])
+	want := "php /home/deploy/myapp/current/artisan queue:work --sleep=3 --tries=3 --max-time=3600"
+	if got != want {
+		t.Errorf("default queue command must be byte-identical to today\n got: %s\nwant: %s", got, want)
+	}
+}
+
+func TestQueueCommandTuned(t *testing.T) {
+	s := siteServer()
+	s.Sites[0].Queue = &config.QueueConfig{Processes: 2, Connection: "redis", Queue: "emails", Tries: 5, Timeout: 90, MaxMemory: 128}
+	got := queueCommand(s, s.Sites[0])
+	want := "php /home/deploy/myapp/current/artisan queue:work redis --queue=emails --sleep=3 --tries=5 --max-time=3600 --timeout=90 --memory=128"
+	if got != want {
+		t.Errorf("tuned queue command wrong\n got: %s\nwant: %s", got, want)
+	}
+}
+
+func TestQueueCommandHorizon(t *testing.T) {
+	s := siteServer()
+	s.Sites[0].Queue = &config.QueueConfig{Driver: "horizon"}
+	got := queueCommand(s, s.Sites[0])
+	want := "php /home/deploy/myapp/current/artisan horizon"
+	if got != want {
+		t.Errorf("horizon command wrong: %s", got)
 	}
 }

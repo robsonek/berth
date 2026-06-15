@@ -179,6 +179,85 @@ func TestSchedulerEnabled(t *testing.T) {
 	}
 }
 
+func validQueueServer() *Server {
+	return &Server{
+		Host: "app.example.com",
+		SSH:  SSH{Port: 22, User: "deploy", Key: "~/.ssh/id_rsa"},
+		PHP:  PHP{Version: "8.4", Source: "auto"}, Nginx: Nginx{Source: "debian"},
+		Database: Database{Engine: "mariadb", Source: "mariadb"},
+		Sites: []Site{{Domain: "app.example.com", DeployPath: "/var/www/app",
+			User: "appuser", Database: SiteDatabase{Name: "app", User: "app"}}},
+	}
+}
+
+func TestValidateRejectsBadDriver(t *testing.T) {
+	s := validQueueServer()
+	s.Sites[0].Queue = &QueueConfig{Driver: "bogus"}
+	if s.Validate() == nil {
+		t.Error("expected error for unknown queue driver")
+	}
+}
+
+func TestValidateRejectsControlCharInCommand(t *testing.T) {
+	s := validQueueServer()
+	s.Sites[0].Daemons = []Daemon{{Name: "x", Command: "php artisan x\nmalicious=1"}}
+	if s.Validate() == nil {
+		t.Error("expected error for newline in daemon command (config injection)")
+	}
+}
+
+func TestValidateRejectsHorizonWithKnobs(t *testing.T) {
+	s := validQueueServer()
+	s.Sites[0].Queue = &QueueConfig{Driver: "horizon", Tries: 5}
+	if s.Validate() == nil {
+		t.Error("expected error for horizon combined with queue:work knobs")
+	}
+}
+
+func TestValidateRejectsHorizonProcessesGtOne(t *testing.T) {
+	s := validQueueServer()
+	s.Sites[0].Queue = &QueueConfig{Driver: "horizon", Processes: 2}
+	if s.Validate() == nil {
+		t.Error("expected error for horizon with processes > 1")
+	}
+}
+
+func TestValidateRejectsNegativeKnob(t *testing.T) {
+	s := validQueueServer()
+	s.Sites[0].Queue = &QueueConfig{Tries: -1}
+	if s.Validate() == nil {
+		t.Error("expected error for negative tries")
+	}
+}
+
+func TestValidateRejectsBadDaemonName(t *testing.T) {
+	s := validQueueServer()
+	s.Sites[0].Daemons = []Daemon{{Name: "Bad Name", Command: "php artisan x"}}
+	if s.Validate() == nil {
+		t.Error("expected error for invalid daemon name")
+	}
+}
+
+func TestValidateRejectsCrossSiteProgramCollision(t *testing.T) {
+	s := validQueueServer()
+	s.Queue = true
+	s.Sites[0].Daemons = []Daemon{{Name: "x", Command: "php artisan x"}}
+	s.Sites = append(s.Sites, Site{Domain: "app.example.com-x", DeployPath: "/var/www/b",
+		User: "buser", Database: SiteDatabase{Name: "b", User: "b"}})
+	if s.Validate() == nil {
+		t.Error("expected error: two sites map to the same supervisor program berth-app_example_com-x")
+	}
+}
+
+func TestValidateAcceptsValidQueueAndDaemons(t *testing.T) {
+	s := validQueueServer()
+	s.Sites[0].Queue = &QueueConfig{Processes: 2, Queue: "default,emails", Tries: 3}
+	s.Sites[0].Daemons = []Daemon{{Name: "reverb", Command: "php artisan reverb:start"}}
+	if err := s.Validate(); err != nil {
+		t.Errorf("valid queue+daemons must pass: %v", err)
+	}
+}
+
 func TestGitHost(t *testing.T) {
 	for in, want := range map[string]string{
 		"git@github.com:owner/repo.git":        "github.com",

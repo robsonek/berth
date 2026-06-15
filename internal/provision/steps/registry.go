@@ -15,7 +15,7 @@ func Pipeline(s *config.Server, red *secret.Redactor, skipSSL bool) []provision.
 	if s.Valkey {
 		steps = append(steps, Valkey())
 	}
-	if s.Queue {
+	if s.NeedsSupervisor() {
 		steps = append(steps, Supervisor())
 	}
 	steps = append(steps, AppDirs(), Database(red))

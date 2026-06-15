@@ -1,0 +1,14 @@
+# managed by berth
+[program:berth-app_example_com]
+process_name=%(program_name)s_%(process_num)02d
+command=php /home/deploy/myapp/current/artisan horizon
+directory=/home/deploy/myapp/current
+user=webuser
+numprocs=1
+autostart=false
+autorestart=true
+stopwaitsecs=3600
+redirect_stderr=true
+stdout_logfile=/var/log/supervisor/berth-app_example_com.log
+stopasgroup=true
+killasgroup=true

@@ -15,6 +15,7 @@ var (
 	reEmail        = regexp.MustCompile(`^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$`)
 	reLinuxUser    = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 	reFail2banTime = regexp.MustCompile(`^[0-9]+[smhdw]?$`)
+	reDaemonName   = regexp.MustCompile(`^[a-z0-9-]+$`)
 )
 
 var allowedPHPVersions = map[string]bool{"8.2": true, "8.3": true, "8.4": true, "8.5": true}
@@ -76,6 +77,7 @@ func (s *Server) Validate() error {
 		return fmt.Errorf("at least one site is required")
 	}
 	seenDomain, seenUser, seenDBName, seenDBUser, seenPath := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
+	seenProgram := map[string]bool{}
 	dup := func(seen map[string]bool, key, what string) error {
 		if seen[key] {
 			return fmt.Errorf("two sites share the same %s %q; each site must be distinct for isolation", what, key)
@@ -135,6 +137,11 @@ func (s *Server) Validate() error {
 		if err := dup(seenPath, site.DeployPath, "deploy_path"); err != nil {
 			return err
 		}
+		for _, prog := range s.SiteProgramNames(site) {
+			if err := dup(seenProgram, prog, "supervisor program"); err != nil {
+				return err
+			}
+		}
 	}
 	// The legacy top-level database.name/user can back exactly one site; with
 	// several inheriting sites it is ambiguous — each needs its own database block.
@@ -171,6 +178,9 @@ func (st *Site) validate() error {
 			return fmt.Errorf("ssl_email %q is not a valid email address", st.SSLEmail)
 		}
 	}
+	if err := st.validateQueueDaemons(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -201,4 +211,69 @@ func GitHost(repo string) (string, error) {
 		return "", fmt.Errorf("cannot parse host from %q", repo)
 	}
 	return repo[at+1 : colon], nil
+}
+
+// hasControlChars reports whether s contains a newline, carriage return, NUL, or
+// other ASCII control character — rejected for any value rendered onto a single
+// Supervisor/command line (config injection guard).
+func hasControlChars(s string) bool {
+	for _, r := range s {
+		if r == 0 || r == '\n' || r == '\r' || r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+func (st *Site) validateQueueDaemons() error {
+	if q := st.Queue; q != nil {
+		switch q.Driver {
+		case "", "work", "horizon":
+		default:
+			return fmt.Errorf("queue.driver %q must be work or horizon", q.Driver)
+		}
+		for _, kv := range []struct {
+			name string
+			v    int
+		}{{"processes", q.Processes}, {"sleep", q.Sleep}, {"tries", q.Tries}, {"timeout", q.Timeout}, {"max_memory", q.MaxMemory}} {
+			if kv.v < 0 {
+				return fmt.Errorf("queue.%s must not be negative", kv.name)
+			}
+		}
+		if q.Processes > 64 {
+			return fmt.Errorf("queue.processes %d exceeds the cap of 64", q.Processes)
+		}
+		if hasControlChars(q.Connection) || hasControlChars(q.Queue) {
+			return fmt.Errorf("queue.connection/queue must be single-line (no control characters)")
+		}
+		if q.Driver == "horizon" {
+			if q.Connection != "" || q.Queue != "" || q.Sleep != 0 || q.Tries != 0 || q.Timeout != 0 || q.MaxMemory != 0 {
+				return fmt.Errorf("queue: horizon manages its own workers; remove connection/queue/sleep/tries/timeout/max_memory")
+			}
+			if q.Processes > 1 {
+				return fmt.Errorf("queue: horizon forces numprocs=1; remove processes > 1")
+			}
+		}
+	}
+	seen := map[string]bool{}
+	for i := range st.Daemons {
+		d := st.Daemons[i]
+		if !reDaemonName.MatchString(d.Name) {
+			return fmt.Errorf("daemon %d: name %q must match [a-z0-9-]+", i, d.Name)
+		}
+		if seen[d.Name] {
+			return fmt.Errorf("daemon name %q is duplicated within the site", d.Name)
+		}
+		seen[d.Name] = true
+		if strings.TrimSpace(d.Command) == "" {
+			return fmt.Errorf("daemon %q: command is required", d.Name)
+		}
+		if hasControlChars(d.Command) {
+			return fmt.Errorf("daemon %q: command must be single-line (no control characters)", d.Name)
+		}
+		if d.Processes < 0 || d.Processes > 64 {
+			return fmt.Errorf("daemon %q: processes %d out of range (0-64)", d.Name, d.Processes)
+		}
+	}
+	return nil
 }

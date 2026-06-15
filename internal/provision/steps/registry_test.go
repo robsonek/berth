@@ -71,6 +71,20 @@ func TestTLSPresenceTracksAnySiteSSL(t *testing.T) {
 	}
 }
 
+func TestPipelineIncludesSupervisorForDaemonOnlySite(t *testing.T) {
+	s := &config.Server{
+		PHP: config.PHP{Version: "8.4"}, Nginx: config.Nginx{Source: "debian"},
+		Database: config.Database{Engine: "mariadb", Source: "mariadb"},
+		// Queue false, but a daemon exists -> supervisor must be included.
+		Sites: []config.Site{{Domain: "a.example.com", DeployPath: "/var/www/a",
+			Daemons: []config.Daemon{{Name: "reverb", Command: "php artisan reverb:start"}}}},
+	}
+	names := stepNames(steps.Pipeline(s, secret.NewRedactor(), true))
+	if !contains(names, "supervisor") {
+		t.Error("a daemon-only site (Server.Queue false) must still include the supervisor step")
+	}
+}
+
 func stepNames(ss []provision.Step) []string {
 	names := make([]string, len(ss))
 	for i, s := range ss {
