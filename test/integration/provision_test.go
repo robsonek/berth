@@ -71,7 +71,10 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	// Run the full pipeline.
 	red := secret.NewRedactor()
 	eng := provision.New(steps.Pipeline(srv, red, skipSSL)...)
-	events, err := eng.Run(ctx, srv, client, provision.Options{SSLStaging: os.Getenv("BERTH_TEST_SSL_STAGING") == "true"})
+	events, err := eng.Run(ctx, srv, client, provision.Options{
+		Force:      os.Getenv("BERTH_TEST_FORCE") == "true",
+		SSLStaging: os.Getenv("BERTH_TEST_SSL_STAGING") == "true",
+	})
 	if err != nil {
 		t.Fatalf("pipeline pre-flight: %v", err)
 	}
@@ -89,8 +92,13 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	// Assert the documented end state over the same connection.
 	assertServicesActive(ctx, t, client, srv)
 	assertExitZero(ctx, t, client, "nginx -t", "sudo nginx -t")
-	assertExitZero(ctx, t, client, "mariadb socket",
-		`sudo mysql --protocol=socket -e 'SELECT 1'`)
+	if srv.Database.Engine == "postgres" {
+		assertExitZero(ctx, t, client, "postgres peer",
+			`sudo -u postgres psql -tAc 'SELECT 1'`)
+	} else {
+		assertExitZero(ctx, t, client, "mariadb socket",
+			`sudo mysql --protocol=socket -e 'SELECT 1'`)
+	}
 	assertHTTPServes(t, "http://"+net.JoinHostPort(srv.Host, "80")+"/", false)
 
 	// When TLS was actually provisioned, the site must answer over HTTPS too.
@@ -163,7 +171,7 @@ func assertServicesActive(ctx context.Context, t *testing.T, c *bssh.Client, srv
 	units := []string{
 		"nginx",
 		fmt.Sprintf("php%s-fpm", srv.PHP.Version),
-		"mariadb",
+		dbServiceName(srv.Database.Engine),
 	}
 	if srv.Valkey {
 		units = append(units, "valkey-server")
