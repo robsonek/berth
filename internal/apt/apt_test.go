@@ -94,6 +94,8 @@ func TestEnsureRepoRetriesOnAptLock(t *testing.T) {
 	f.OnSeq("apt-get update",
 		bssh.Result{ExitCode: 100, Stderr: "E: Could not get lock /var/lib/apt/lists/lock. It is held by process 999 (apt-get)"},
 		bssh.Result{ExitCode: 0})
+	// After the full update succeeds, the index-verification guard runs; stub it OK.
+	f.On("apt-get update -o Dir::Etc::sourcelist=sources.list.d/sury-php.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o APT::Update::Error-Mode=any", bssh.Result{ExitCode: 0})
 
 	if err := New(f).EnsureRepo(context.Background(), Sury()); err != nil {
 		t.Fatalf("EnsureRepo should wait out apt-lock contention; got %v", err)
@@ -119,5 +121,100 @@ func TestEnsureRepoUsesKeyURLNotURISuffix(t *testing.T) {
 	// the command actually issued (proving KeyURL is used, not URI+apt.gpg).
 	if err := New(f).EnsureRepo(context.Background(), NginxOrg()); err == nil || !strings.Contains(err.Error(), "fingerprint") {
 		t.Fatalf("expected fingerprint mismatch, got %v", err)
+	}
+}
+
+func TestEnsureRepoFailsWhenUpstreamNeverIndexes(t *testing.T) {
+	prevLock, prevIdx := aptLockSleep, repoIndexSleep
+	aptLockSleep, repoIndexSleep = func() {}, func() {}
+	defer func() { aptLockSleep, repoIndexSleep = prevLock, prevIdx }()
+
+	f := bssh.NewFakeRunner()
+	f.On("curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor --yes -o /usr/share/keyrings/sury-php.gpg", bssh.Result{})
+	f.On("gpg --show-keys --with-colons /usr/share/keyrings/sury-php.gpg", bssh.Result{Stdout: "fpr:::::::::" + Sury().Fingerprint + ":\n"})
+	f.On("apt-get update", bssh.Result{ExitCode: 0}) // full update tolerates the ignored source
+	// The single-source verify keeps failing (dead upstream mirror).
+	verify := "apt-get update -o Dir::Etc::sourcelist=sources.list.d/sury-php.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o APT::Update::Error-Mode=any"
+	f.On(verify, bssh.Result{ExitCode: 100, Stderr: "Err:1 ... Could not connect"})
+
+	err := New(f).EnsureRepo(context.Background(), Sury())
+	if err == nil || !strings.Contains(err.Error(), "sury-php") || !strings.Contains(err.Error(), "failed to index") {
+		t.Fatalf("expected a loud index-failure error, got %v", err)
+	}
+	var verifies int
+	for _, c := range f.Calls() {
+		if c.Cmd == verify {
+			verifies++
+		}
+	}
+	if verifies != repoIndexRetries {
+		t.Errorf("expected the verify to be retried %d times, got %d", repoIndexRetries, verifies)
+	}
+}
+
+func TestEnsureRepoRetriesIndexThenSucceeds(t *testing.T) {
+	prevLock, prevIdx := aptLockSleep, repoIndexSleep
+	aptLockSleep, repoIndexSleep = func() {}, func() {}
+	defer func() { aptLockSleep, repoIndexSleep = prevLock, prevIdx }()
+
+	f := bssh.NewFakeRunner()
+	f.On("curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor --yes -o /usr/share/keyrings/sury-php.gpg", bssh.Result{})
+	f.On("gpg --show-keys --with-colons /usr/share/keyrings/sury-php.gpg", bssh.Result{Stdout: "fpr:::::::::" + Sury().Fingerprint + ":\n"})
+	f.On("apt-get update", bssh.Result{ExitCode: 0})
+	verify := "apt-get update -o Dir::Etc::sourcelist=sources.list.d/sury-php.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o APT::Update::Error-Mode=any"
+	f.OnSeq(verify, bssh.Result{ExitCode: 100, Stderr: "transient"}, bssh.Result{ExitCode: 0})
+
+	if err := New(f).EnsureRepo(context.Background(), Sury()); err != nil {
+		t.Fatalf("EnsureRepo should succeed once the index retry lands; got %v", err)
+	}
+}
+
+func TestEnsureRepoVerifiesIndexOnSuccess(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor --yes -o /usr/share/keyrings/sury-php.gpg", bssh.Result{})
+	f.On("gpg --show-keys --with-colons /usr/share/keyrings/sury-php.gpg", bssh.Result{Stdout: "fpr:::::::::" + Sury().Fingerprint + ":\n"})
+	f.On("apt-get update", bssh.Result{ExitCode: 0})
+	verify := "apt-get update -o Dir::Etc::sourcelist=sources.list.d/sury-php.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o APT::Update::Error-Mode=any"
+	f.On(verify, bssh.Result{ExitCode: 0})
+
+	if err := New(f).EnsureRepo(context.Background(), Sury()); err != nil {
+		t.Fatalf("EnsureRepo should pass when the source indexes; got %v", err)
+	}
+	// The full `apt-get update` must run BEFORE the single-source verify.
+	idxFull, idxVerify := -1, -1
+	for i, c := range f.Calls() {
+		switch c.Cmd {
+		case "apt-get update":
+			idxFull = i
+		case verify:
+			idxVerify = i
+		}
+	}
+	if idxFull < 0 || idxVerify < 0 {
+		t.Fatalf("expected both the full update and the verify; calls=%v", f.Calls())
+	}
+	if idxFull > idxVerify {
+		t.Error("the full apt-get update must run before the single-source verify")
+	}
+}
+
+func TestEnsureRepoGuardWaitsOutAptLock(t *testing.T) {
+	prevLock, prevIdx := aptLockSleep, repoIndexSleep
+	aptLockSleep, repoIndexSleep = func() {}, func() {}
+	defer func() { aptLockSleep, repoIndexSleep = prevLock, prevIdx }()
+
+	f := bssh.NewFakeRunner()
+	f.On("curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor --yes -o /usr/share/keyrings/sury-php.gpg", bssh.Result{})
+	f.On("gpg --show-keys --with-colons /usr/share/keyrings/sury-php.gpg", bssh.Result{Stdout: "fpr:::::::::" + Sury().Fingerprint + ":\n"})
+	f.On("apt-get update", bssh.Result{ExitCode: 0})
+	// The verify first hits apt-lock contention (must be waited out, NOT counted as
+	// an index failure), then succeeds.
+	verify := "apt-get update -o Dir::Etc::sourcelist=sources.list.d/sury-php.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o APT::Update::Error-Mode=any"
+	f.OnSeq(verify,
+		bssh.Result{ExitCode: 100, Stderr: "E: Could not get lock /var/lib/apt/lists/lock. It is held by process 999 (apt-get)"},
+		bssh.Result{ExitCode: 0})
+
+	if err := New(f).EnsureRepo(context.Background(), Sury()); err != nil {
+		t.Fatalf("EnsureRepo must wait out apt-lock contention in the guard; got %v", err)
 	}
 }

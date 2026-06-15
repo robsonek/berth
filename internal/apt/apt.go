@@ -18,6 +18,15 @@ var aptLockSleep = func() { time.Sleep(5 * time.Second) }
 // (5s × 120 ≈ 10 min, matching berth's DPkg::Lock::Timeout philosophy).
 const aptLockMaxAttempts = 120
 
+// repoIndexRetries bounds how many times EnsureRepo re-verifies that a freshly
+// added upstream source actually indexed before failing loud. The mariadb.org
+// redirector can route to a dead mirror; a later attempt may land on a live one.
+const repoIndexRetries = 3
+
+// repoIndexSleep is the pause between repo-index retries; a package var so tests
+// stub it to return immediately.
+var repoIndexSleep = func() { time.Sleep(3 * time.Second) }
+
 // isAptLockBusy reports whether an apt failure is transient lock contention
 // (another process holds the dpkg/lists lock) rather than a real error.
 // DPkg::Lock::Timeout makes apt wait for the dpkg/archives locks, but NOT for
@@ -148,7 +157,55 @@ func (m *Manager) EnsureRepo(ctx context.Context, repo Repo) error {
 	}); err != nil {
 		return fmt.Errorf("write source: %w", err)
 	}
-	return m.runAptWaitingForLock(ctx, "apt-get update", "apt-get update after adding "+repo.Name)
+	if err := m.runAptWaitingForLock(ctx, "apt-get update", "apt-get update after adding "+repo.Name); err != nil {
+		return err
+	}
+	// Guard against silent Debian fallback: `apt-get update` exits 0 even when a
+	// source fails to download (it "ignores" it), so a dead upstream would let the
+	// later install resolve to Debian's package. Re-update ONLY this source with
+	// Error-Mode=any (non-zero iff THIS source failed), retrying — the mariadb.org
+	// redirector may pick a live mirror later. After repoIndexRetries, fail loud.
+	// apt-lock contention is waited out separately (another apt process can grab the
+	// lock between the full update above and this one) and is NOT an index failure.
+	//
+	// APT::Get::List-Cleanup=0 is LOAD-BEARING, not optional: restricting the source
+	// set to this one repo (sourceparts=-) makes apt treat every OTHER source as
+	// unconfigured and, by default, prune their downloaded lists from
+	// /var/lib/apt/lists — so the immediately-following install would lose Debian
+	// main (unresolvable deps, "held broken packages"). Disabling the cleanup keeps
+	// the other sources' lists intact while still indexing this one for the exit code.
+	verify := fmt.Sprintf(
+		"apt-get update -o Dir::Etc::sourcelist=sources.list.d/%s.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o APT::Update::Error-Mode=any",
+		repo.Name)
+	var last string
+	indexAttempts, lockAttempts := 0, 0
+	for {
+		res, err := m.r.Run(ctx, verify, nil)
+		if err != nil {
+			return err
+		}
+		if res.ExitCode == 0 {
+			return nil
+		}
+		if isAptLockBusy(res.Stderr) {
+			lockAttempts++
+			if lockAttempts >= aptLockMaxAttempts {
+				return fmt.Errorf("verify index for %s: %s", repo.Name, res.Stderr)
+			}
+			aptLockSleep()
+			continue
+		}
+		indexAttempts++
+		if last = res.Stderr; last == "" {
+			last = res.Stdout // apt prints Err:/acquisition lines on stdout
+		}
+		if indexAttempts >= repoIndexRetries {
+			break
+		}
+		repoIndexSleep()
+	}
+	return fmt.Errorf("upstream repo %s (%s) failed to index after %d attempts; refusing to install the Debian fallback (last: %s)",
+		repo.Name, repo.URI, repoIndexRetries, last)
 }
 
 // EnsurePackages installs packages non-interactively from the stock repos (or
