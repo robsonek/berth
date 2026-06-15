@@ -1,0 +1,4 @@
+# managed by berth
+[Service]
+ExecStart=
+ExecStart=/usr/bin/valkey-server /etc/valkey/valkey.conf --supervised systemd --daemonize no --maxmemory 256mb --maxmemory-policy allkeys-lru

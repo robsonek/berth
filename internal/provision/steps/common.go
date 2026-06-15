@@ -62,6 +62,18 @@ func serviceUp(ctx context.Context, r bssh.Runner, unit string) (bool, error) {
 	return active.ExitCode == 0 && enabled.ExitCode == 0, nil
 }
 
+// serviceActive reports whether a systemd unit is currently active (running),
+// regardless of whether it is enabled at boot. The tuning step uses this rather
+// than serviceUp because enablement is owned by the service's own step; requiring
+// enabled here would never converge (tuning's Apply restarts but does not enable).
+func serviceActive(ctx context.Context, r bssh.Runner, unit string) (bool, error) {
+	res, err := r.Run(ctx, "systemctl is-active "+unit, nil)
+	if err != nil {
+		return false, err
+	}
+	return res.ExitCode == 0, nil
+}
+
 // fileExists reports whether a path exists on the host (test -e exit 0).
 func fileExists(ctx context.Context, r bssh.Runner, path string) (bool, error) {
 	res, err := r.Run(ctx, "test -e "+shQuote(path), nil)

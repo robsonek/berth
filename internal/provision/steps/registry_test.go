@@ -85,6 +85,39 @@ func TestPipelineIncludesSupervisorForDaemonOnlySite(t *testing.T) {
 	}
 }
 
+func TestPipelineIncludesTuningForMariaDB(t *testing.T) {
+	s := &config.Server{Database: config.Database{Engine: "mariadb"}, Sites: []config.Site{{Domain: "a.example.com"}}}
+	names := stepNames(steps.Pipeline(s, nil, true))
+	if !contains(names, "tuning") {
+		t.Errorf("expected tuning step for mariadb; got %v", names)
+	}
+}
+
+func TestPipelineIncludesTuningForValkey(t *testing.T) {
+	s := &config.Server{Valkey: true, Database: config.Database{Engine: "postgres"}, Sites: []config.Site{{Domain: "a.example.com"}}}
+	names := stepNames(steps.Pipeline(s, nil, true))
+	if !contains(names, "tuning") {
+		t.Errorf("expected tuning step for valkey; got %v", names)
+	}
+}
+
+func TestPipelineOmitsTuningForPostgresNoValkey(t *testing.T) {
+	s := &config.Server{Valkey: false, Database: config.Database{Engine: "postgres"}, Sites: []config.Site{{Domain: "a.example.com"}}}
+	names := stepNames(steps.Pipeline(s, nil, true))
+	if contains(names, "tuning") {
+		t.Errorf("did not expect tuning step; got %v", names)
+	}
+}
+
+func TestPipelineTuningAfterDatabase(t *testing.T) {
+	s := &config.Server{Database: config.Database{Engine: "mariadb"}, Sites: []config.Site{{Domain: "a.example.com"}}}
+	names := stepNames(steps.Pipeline(s, nil, true))
+	dbIdx, tuneIdx := indexOf(names, "database"), indexOf(names, "tuning")
+	if dbIdx < 0 || tuneIdx < 0 || tuneIdx < dbIdx {
+		t.Errorf("tuning must come after database; names=%v", names)
+	}
+}
+
 func stepNames(ss []provision.Step) []string {
 	names := make([]string, len(ss))
 	for i, s := range ss {
