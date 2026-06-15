@@ -111,6 +111,16 @@ func TestProvisionFreshDebian13(t *testing.T) {
 		assertSelfSignedCert(ctx, t, client, srv)
 	}
 
+	// Load-bearing invariants (iter-4): cross-tenant isolation (multi-site only),
+	// per-site DB auth over the app's real path + Postgres e2e, hardening end-state.
+	// Fresh context — a slow first provision may have nearly exhausted ctx (30m); these
+	// are quick read-only checks (mirrors assertSecondRunIdempotent's fresh deadline).
+	invCtx, invCancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer invCancel()
+	assertMultiSiteIsolation(invCtx, t, client, srv)
+	assertDBAuth(invCtx, t, client, srv)
+	assertHardeningEndState(invCtx, t, client, srv)
+
 	// berth's defining contract: an immediate second run must change nothing
 	// (every step satisfied), except preflight which re-runs apt by design.
 	assertSecondRunIdempotent(t, eng, srv, client)
