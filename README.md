@@ -54,6 +54,82 @@ config. `berth provision <server>` then connects over SSH and brings the host to
 the desired state through an ordered pipeline of idempotent steps. Re-running is
 always safe; `--dry-run` shows what would change.
 
+## Configuration reference
+
+A server is one YAML file in `servers/<name>.yml`. `berth init` can generate
+**any** of the configs in this README interactively — the advanced sections
+(fail2ban, tuning, per-site queue/daemons) sit behind optional prompts, so the
+common path stays short — or you can write the file by hand. Every field, with
+its default and accepted values:
+
+```yaml
+host: 203.0.113.10             # required — server IP or DNS name
+
+ssh:
+  user: root                   # default root — the login user berth connects as
+  port: 22                     # default 22
+  key: ~/.ssh/id_ed25519       # path to your private SSH key
+  fingerprint: ""              # optional host-key pin "SHA256:…"; empty = trust
+                               # on first connect (TOFU, confirmed interactively).
+                               # Pin it to defeat MITM — get the value with:
+                               #   ssh-keyscan -t ed25519 HOST | ssh-keygen -lf - | awk '{print $2}'
+
+php:
+  version: "8.5"               # 8.2 | 8.3 | 8.4 | 8.5
+  source: auto                 # auto | sury | debian  (Debian ships 8.4; Surý → 8.5)
+
+nginx:
+  source: debian               # debian | nginx  (nginx.org mainline; needed for HTTP/3)
+
+database:
+  engine: mariadb              # mariadb | postgres   (server-wide)
+  source: debian               # debian | mariadb (MariaDB) | pgdg (PostgreSQL)
+  # name / user: legacy single-site only — multi-site sites carry their own block
+
+valkey: false                  # install Valkey as the cache/session/queue backend
+                               # (multi-site is capped at 16 sites — one logical DB each)
+queue: false                   # server-wide default: a queue:work worker on every site
+scheduler: true                # install the Laravel scheduler cron (per site)
+
+fail2ban:                      # optional — omit the block to use these defaults
+  bantime: 1h
+  findtime: 10m
+  maxretry: 5
+
+tuning:                        # optional — omit any field to keep its default
+  valkey_maxmemory: 256mb
+  valkey_maxmemory_policy: allkeys-lru   # any Valkey eviction policy
+  mariadb_innodb_buffer_pool: 256M
+
+sites:                         # one or more
+  - domain: app.example.com            # required
+    deploy_path: /var/www/app          # required — absolute path
+    user: app                          # optional — derived from the domain when
+                                       # omitted (a lone site keeps the "deploy" user)
+    repository: git@github.com:acme/app.git   # optional — SSH git URL only
+    database: { name: app, user: app }        # per-site DB (required with 2+ sites)
+    ssl: true
+    ssl_mode: letsencrypt              # letsencrypt (default) | selfsigned
+    ssl_email: admin@example.com       # required with letsencrypt
+    http3: false                       # requires ssl: true + nginx.source: nginx
+    scheduler: true                    # per-site override of the server default
+    queue:                             # tune this site's worker (omit = server default)
+      driver: work                     # work (default) | horizon
+      processes: 4                     # numprocs
+      connection: redis
+      queue: default,emails
+      tries: 3
+      timeout: 90
+      sleep: 3
+      max_memory: 256                  # MB
+    daemons:                           # arbitrary long-running Supervisor programs
+      - { name: reverb, command: php artisan reverb:start, processes: 1 }
+```
+
+Generated passwords are cached in a gitignored `.berth/` directory (the secrets
+file is mode 0600) and reused across runs — never rotated. The thematic sections
+below explain each area in depth.
+
 ## Package sources
 
 By default every component is installed from Debian 13's own repositories. Where
