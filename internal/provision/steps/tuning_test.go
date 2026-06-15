@@ -106,3 +106,73 @@ func TestTuningApplyValkeyWritesDropInReloadsRestarts(t *testing.T) {
 		}
 	}
 }
+
+const mariadbLiveness = `[ "$(stat -c %Y '/etc/mysql/mariadb.conf.d/99-berth.cnf' 2>/dev/null)" -le "$(date -d "$(systemctl show -p ActiveEnterTimestamp --value mariadb.service)" +%s 2>/dev/null)" ]`
+
+func mariadbOnlyServer() *config.Server {
+	return &config.Server{Valkey: false, Database: config.Database{Engine: "mariadb"}}
+}
+
+func TestTuningCheckMariaDBSatisfiedWhenLoaded(t *testing.T) {
+	srv := mariadbOnlyServer()
+	want, _ := renderMariaDBTuning(srv)
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
+	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
+	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("expected satisfied; got %+v", cr)
+	}
+}
+
+func TestTuningApplyMariaDBWritesDropInRestarts(t *testing.T) {
+	srv := mariadbOnlyServer()
+	f := bssh.NewFakeRunner()
+	f.On("systemctl restart mariadb.service", bssh.Result{})
+	if err := Tuning().Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var found bool
+	want, _ := renderMariaDBTuning(srv)
+	for _, w := range f.Writes() {
+		if w.Path == "/etc/mysql/mariadb.conf.d/99-berth.cnf" {
+			found = true
+			if string(w.Content) != string(want) {
+				t.Errorf("cnf content mismatch:\n got: %q\nwant: %q", w.Content, want)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("mariadb tuning cnf not written")
+	}
+	var cmds []string
+	for _, c := range f.Calls() {
+		cmds = append(cmds, c.Cmd)
+	}
+	if !strings.Contains(strings.Join(cmds, "\n"), "systemctl restart mariadb.service") {
+		t.Errorf("Apply did not restart mariadb; calls: %v", cmds)
+	}
+}
+
+func TestTuningGatingSkipsAbsentServices(t *testing.T) {
+	// Postgres + no Valkey: Apply must touch nothing (no writes, no calls).
+	srv := &config.Server{Valkey: false, Database: config.Database{Engine: "postgres"}}
+	f := bssh.NewFakeRunner()
+	if err := Tuning().Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if len(f.Writes()) != 0 || len(f.Calls()) != 0 {
+		t.Errorf("expected no-op; got writes=%v calls=%v", f.Writes(), f.Calls())
+	}
+	// And Check is trivially satisfied.
+	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("expected satisfied no-op; got %+v", cr)
+	}
+}

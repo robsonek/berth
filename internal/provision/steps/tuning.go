@@ -135,5 +135,19 @@ func (tuning) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r
 			}
 		}
 	}
-	return nil // MariaDB path added in Task 5
+	if s.Database.Engine == "mariadb" {
+		cfg, err := renderMariaDBTuning(s)
+		if err != nil {
+			return err
+		}
+		if err := r.WriteFile(ctx, bssh.FileSpec{Path: mariadbTuningPath, Content: cfg, Owner: "root", Group: "root", Mode: 0o644, Sudo: true}); err != nil {
+			return fmt.Errorf("write %s: %w", mariadbTuningPath, err)
+		}
+		if res, err := r.Run(ctx, "systemctl restart "+mariadbUnit, nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("restart %s: %s", mariadbUnit, res.Stderr)
+		}
+	}
+	return nil
 }
