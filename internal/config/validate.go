@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"fmt"
 	"net/url"
 	"path"
@@ -82,6 +83,26 @@ func DatabaseChoices() []DatabaseChoice {
 	return out
 }
 
+// ValidFingerprint reports whether fp is acceptable as ssh.fingerprint. Empty is
+// allowed (host key trusted on first use). A non-empty value must mirror
+// xssh.FingerprintSHA256 output: "SHA256:" + unpadded base64 decoding to exactly
+// 32 bytes. The authoritative match against the live host key still happens in
+// internal/ssh/hostkey.go; this only rejects impossible pins at config load.
+func ValidFingerprint(fp string) error {
+	if fp == "" {
+		return nil
+	}
+	rest, ok := strings.CutPrefix(fp, "SHA256:")
+	if !ok {
+		return fmt.Errorf("ssh.fingerprint %q must be SHA256:<base64> (e.g. from ssh-keyscan)", fp)
+	}
+	raw, err := base64.RawStdEncoding.DecodeString(rest)
+	if err != nil || len(raw) != 32 {
+		return fmt.Errorf("ssh.fingerprint %q is not a valid SHA256 fingerprint", fp)
+	}
+	return nil
+}
+
 // Validate checks every field that reaches a shell, SQL statement, or path.
 func (s *Server) Validate() error {
 	if !reHostname.MatchString(s.Host) {
@@ -89,6 +110,9 @@ func (s *Server) Validate() error {
 	}
 	if s.SSH.Port < 1 || s.SSH.Port > 65535 {
 		return fmt.Errorf("ssh.port %d out of range", s.SSH.Port)
+	}
+	if err := ValidFingerprint(s.SSH.Fingerprint); err != nil {
+		return err
 	}
 	if !rePHPVer.MatchString(s.PHP.Version) || !allowedPHPVersions[s.PHP.Version] {
 		return fmt.Errorf("php.version %q is not an allowed version", s.PHP.Version)

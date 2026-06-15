@@ -294,3 +294,23 @@ func TestDatabaseChoices(t *testing.T) {
 		}
 	}
 }
+
+func TestValidFingerprint(t *testing.T) {
+	cases := []struct {
+		fp string
+		ok bool
+	}{
+		{"", true},
+		{"SHA256:oP7LMMAE8JnXUfq6N8eUvsvdyIBNTXhcLAnNynp9BfA", true},
+		{"oP7LMMAE8JnXUfq6N8eUvsvdyIBNTXhcLAnNynp9BfA", false},
+		{"SHA256:not-base64-$$$", false},
+		{"SHA256:YWJj", false},
+		{"MD5:aa:bb:cc", false},
+	}
+	for _, c := range cases {
+		err := ValidFingerprint(c.fp)
+		if (err == nil) != c.ok {
+			t.Errorf("ValidFingerprint(%q) err=%v, want ok=%v", c.fp, err, c.ok)
+		}
+	}
+}
