@@ -3,7 +3,10 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestLoadValid(t *testing.T) {
@@ -123,5 +126,35 @@ func TestSiteProgramNamesAndEnablement(t *testing.T) {
 	got = on.SiteProgramNames(on.Sites[0])
 	if len(got) != 2 || got[0] != "berth-a_example_com" || got[1] != "berth-a_example_com-x" {
 		t.Fatalf("program names = %v, want [berth-a_example_com berth-a_example_com-x]", got)
+	}
+}
+
+func TestServerYAMLOmitsEmptyOptionalFields(t *testing.T) {
+	s := &Server{
+		Host: "h.example", SSH: SSH{User: "root", Port: 22, Key: "~/.ssh/id_ed25519"},
+		PHP: PHP{Version: "8.5", Source: "auto"}, Nginx: Nginx{Source: "debian"},
+		Database: Database{Engine: "mariadb", Source: "debian"},
+		Sites:    []Site{{Domain: "a.example", DeployPath: "/srv/a", Database: SiteDatabase{Name: "app", User: "app"}}},
+	}
+	b, err := yaml.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(b)
+	for _, absent := range []string{"fingerprint:", "ssl_mode:", "ssl_email:", "repository:"} {
+		if strings.Contains(out, absent) {
+			t.Errorf("expected %q to be omitted, got:\n%s", absent, out)
+		}
+	}
+	if strings.Contains(out, "name: \"\"") || strings.Contains(out, "user: \"\"") {
+		t.Errorf("empty top-level database name/user should be omitted:\n%s", out)
+	}
+	dir := t.TempDir()
+	p := dir + "/s.yml"
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(p); err != nil {
+		t.Fatalf("re-Load failed: %v", err)
 	}
 }

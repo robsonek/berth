@@ -15,7 +15,7 @@ type SSH struct {
 	User        string `mapstructure:"user" yaml:"user"`
 	Port        int    `mapstructure:"port" yaml:"port"`
 	Key         string `mapstructure:"key" yaml:"key"`
-	Fingerprint string `mapstructure:"fingerprint" yaml:"fingerprint"`
+	Fingerprint string `mapstructure:"fingerprint" yaml:"fingerprint,omitempty"`
 }
 
 type PHP struct {
@@ -84,8 +84,8 @@ type Database struct {
 	Source string `mapstructure:"source" yaml:"source"` // debian | mariadb | pgdg
 	// Name/User are legacy single-site fields; multi-site sites carry their own
 	// database block. A lone site without a site.database inherits these.
-	Name string `mapstructure:"name" yaml:"name"`
-	User string `mapstructure:"user" yaml:"user"`
+	Name string `mapstructure:"name" yaml:"name,omitempty"`
+	User string `mapstructure:"user" yaml:"user,omitempty"`
 }
 
 // SiteDatabase is a per-site database name + user (each domain its own DB).
@@ -120,11 +120,11 @@ type Daemon struct {
 type Site struct {
 	Domain     string       `mapstructure:"domain" yaml:"domain"`
 	DeployPath string       `mapstructure:"deploy_path" yaml:"deploy_path"`
-	User       string       `mapstructure:"user" yaml:"user"` // OS user that owns/runs the site; derived when empty
-	Repository string       `mapstructure:"repository" yaml:"repository"`
+	User       string       `mapstructure:"user" yaml:"user,omitempty"` // OS user that owns/runs the site; derived when empty
+	Repository string       `mapstructure:"repository" yaml:"repository,omitempty"`
 	SSL        bool         `mapstructure:"ssl" yaml:"ssl"`
-	SSLMode    string       `mapstructure:"ssl_mode" yaml:"ssl_mode"` // letsencrypt (default) | selfsigned
-	SSLEmail   string       `mapstructure:"ssl_email" yaml:"ssl_email"`
+	SSLMode    string       `mapstructure:"ssl_mode" yaml:"ssl_mode,omitempty"` // letsencrypt (default) | selfsigned
+	SSLEmail   string       `mapstructure:"ssl_email" yaml:"ssl_email,omitempty"`
 	HTTP3      bool         `mapstructure:"http3" yaml:"http3"` // HTTP/3 (QUIC); requires ssl + nginx.source: nginx
 	Database   SiteDatabase `mapstructure:"database" yaml:"database"`
 	Scheduler  *bool        `mapstructure:"scheduler" yaml:"scheduler,omitempty"` // per-site override; nil = inherit server default
