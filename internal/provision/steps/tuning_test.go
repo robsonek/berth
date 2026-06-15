@@ -32,7 +32,7 @@ func TestTuningCheckValkeySatisfiedWhenLoaded(t *testing.T) {
 	}
 	f := bssh.NewFakeRunner()
 	f.On("cat '/etc/systemd/system/valkey-server.service.d/berth.conf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
-	stubServiceUp(f, valkeyUnit)
+	stubServiceActive(f, valkeyUnit)
 	f.On(valkeyLiveness, bssh.Result{ExitCode: 0})
 	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
 	if err != nil {
@@ -43,12 +43,12 @@ func TestTuningCheckValkeySatisfiedWhenLoaded(t *testing.T) {
 	}
 }
 
-// stubServiceUp stubs the two commands serviceUp issues for a unit so the unit
-// reads as active+enabled (up). Check now requires the service to be up before
-// consulting liveness.
-func stubServiceUp(f *bssh.FakeRunner, unit string) {
+// stubServiceActive stubs the single command serviceActive issues so the unit
+// reads as active (running). Check requires the service to be active before
+// consulting liveness; enablement is the service's own step's responsibility, so
+// tuning never consults systemctl is-enabled.
+func stubServiceActive(f *bssh.FakeRunner, unit string) {
 	f.On("systemctl is-active "+unit, bssh.Result{ExitCode: 0})
-	f.On("systemctl is-enabled "+unit, bssh.Result{ExitCode: 0})
 }
 
 func TestTuningCheckValkeyUnsatisfiedWhenDropInAbsent(t *testing.T) {
@@ -68,7 +68,7 @@ func TestTuningCheckValkeyUnsatisfiedWhenNotLoaded(t *testing.T) {
 	want, _ := renderValkeyDropIn(srv)
 	f := bssh.NewFakeRunner()
 	f.On("cat '/etc/systemd/system/valkey-server.service.d/berth.conf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
-	stubServiceUp(f, valkeyUnit)
+	stubServiceActive(f, valkeyUnit)
 	f.On(valkeyLiveness, bssh.Result{ExitCode: 1}) // file newer than last restart
 	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
 	if err != nil {
@@ -83,16 +83,40 @@ func TestTuningCheckValkeyUnsatisfiedWhenServiceDown(t *testing.T) {
 	srv := valkeyOnlyServer()
 	want, _ := renderValkeyDropIn(srv)
 	f := bssh.NewFakeRunner()
-	// File is up-to-date, but the unit is stopped: serviceUp fails before liveness.
+	// File is up-to-date, but the unit is stopped: serviceActive fails before liveness.
 	f.On("cat '/etc/systemd/system/valkey-server.service.d/berth.conf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
 	f.On("systemctl is-active "+valkeyUnit, bssh.Result{ExitCode: 1})
-	f.On("systemctl is-enabled "+valkeyUnit, bssh.Result{ExitCode: 0})
 	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cr.Satisfied {
 		t.Error("expected unsatisfied when up-to-date drop-in but service is down")
+	}
+}
+
+func TestTuningCheckValkeyActiveButDisabledStillSatisfied(t *testing.T) {
+	srv := valkeyOnlyServer()
+	want, _ := renderValkeyDropIn(srv)
+	f := bssh.NewFakeRunner()
+	// Up-to-date file, active but DISABLED unit, loaded config. tuning must NOT
+	// require enabled — enablement is the valkey step's job. Requiring it here would
+	// never converge (Apply restarts but never enables). The is-enabled stub is
+	// present only to prove it is never consulted (asserted via Calls below).
+	f.On("cat '/etc/systemd/system/valkey-server.service.d/berth.conf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
+	f.On("systemctl is-active "+valkeyUnit, bssh.Result{ExitCode: 0})
+	f.On("systemctl is-enabled "+valkeyUnit, bssh.Result{ExitCode: 1}) // disabled
+	f.On(valkeyLiveness, bssh.Result{ExitCode: 0})
+	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("expected satisfied for active-but-disabled service; got %+v", cr)
+	}
+	// Prove checkTuned never asks about enablement (else it would loop forever).
+	if calledCmd(f, "systemctl is-enabled "+valkeyUnit) {
+		t.Error("checkTuned must not consult systemctl is-enabled (enablement is the service step's job)")
 	}
 }
 
@@ -157,7 +181,7 @@ func TestTuningCheckMariaDBSatisfiedWhenLoaded(t *testing.T) {
 	want, _ := renderMariaDBTuning(srv)
 	f := bssh.NewFakeRunner()
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
-	stubServiceUp(f, mariadbUnit)
+	stubServiceActive(f, mariadbUnit)
 	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
 	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
 	if err != nil {
@@ -272,7 +296,7 @@ func TestTuningCheckMariaDBUnsatisfiedWhenNotLoaded(t *testing.T) {
 	want, _ := renderMariaDBTuning(srv)
 	f := bssh.NewFakeRunner()
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
-	stubServiceUp(f, mariadbUnit)
+	stubServiceActive(f, mariadbUnit)
 	f.On(mariadbLiveness, bssh.Result{ExitCode: 1}) // file newer than last restart
 	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
 	if err != nil {
@@ -311,10 +335,10 @@ func TestTuningCheckCombinedSatisfiedWhenBothLoaded(t *testing.T) {
 	}
 	f := bssh.NewFakeRunner()
 	f.On("cat '/etc/systemd/system/valkey-server.service.d/berth.conf'", bssh.Result{ExitCode: 0, Stdout: string(vWant)})
-	stubServiceUp(f, valkeyUnit)
+	stubServiceActive(f, valkeyUnit)
 	f.On(valkeyLiveness, bssh.Result{ExitCode: 0})
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(mWant)})
-	stubServiceUp(f, mariadbUnit)
+	stubServiceActive(f, mariadbUnit)
 	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
 	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
 	if err != nil {
@@ -415,7 +439,7 @@ func TestTuningApplyCombinedOnlyValkeyDriftedRestartsOnlyValkey(t *testing.T) {
 	f.On("systemctl restart valkey-server.service", bssh.Result{})
 	// MariaDB block satisfied (file up-to-date, service up, loaded).
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(mWant)})
-	stubServiceUp(f, mariadbUnit)
+	stubServiceActive(f, mariadbUnit)
 	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
 
 	if err := Tuning().Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
@@ -442,7 +466,7 @@ func TestTuningApplyCombinedOnlyMariaDBDriftedRestartsOnlyMariaDB(t *testing.T) 
 	f := bssh.NewFakeRunner()
 	// Valkey block satisfied (file up-to-date, service up, loaded).
 	f.On("cat '/etc/systemd/system/valkey-server.service.d/berth.conf'", bssh.Result{ExitCode: 0, Stdout: string(vWant)})
-	stubServiceUp(f, valkeyUnit)
+	stubServiceActive(f, valkeyUnit)
 	f.On(valkeyLiveness, bssh.Result{ExitCode: 0})
 	// MariaDB block unsatisfied (cnf absent).
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 1})

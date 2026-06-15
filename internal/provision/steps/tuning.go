@@ -64,11 +64,14 @@ func serviceConfigLoaded(ctx context.Context, r bssh.Runner, unit, path string) 
 	return res.ExitCode == 0, nil
 }
 
-// checkTuned reports whether a managed tuning file is up to date, its unit is up
-// (active+enabled), AND the running config has loaded the file. The contract is
-// managedFileSatisfied && serviceUp && liveness, evaluated in that order: a unit that
-// was active then STOPPED retains its old ActiveEnterTimestamp, so liveness alone
-// would falsely pass for a down service — serviceUp guards that. It returns a
+// checkTuned reports whether a managed tuning file is up to date, its unit is
+// active (running), AND the running config has loaded the file. The contract is
+// managedFileSatisfied && serviceActive && liveness, evaluated in that order: a unit
+// that was active then STOPPED retains its old ActiveEnterTimestamp, so liveness alone
+// would falsely pass for a down service — serviceActive guards that. It checks active
+// only (not enabled): enablement is the service's own step's responsibility, and
+// tuning's Apply restarts but never enables, so requiring enabled here would never
+// converge (an active-but-disabled unit would fail Check forever). It returns a
 // human-readable change list when not satisfied.
 func checkTuned(ctx context.Context, rc provision.RunCtx, r bssh.Runner, unit, path string, want []byte, what string) (bool, []string, error) {
 	state, err := checkManagedFile(ctx, r, path, want)
@@ -82,11 +85,11 @@ func checkTuned(ctx context.Context, rc provision.RunCtx, r bssh.Runner, unit, p
 	if !fileOK {
 		return false, []string{"write " + path + " (" + what + "), restart " + unit}, nil
 	}
-	up, err := serviceUp(ctx, r, unit)
+	active, err := serviceActive(ctx, r, unit)
 	if err != nil {
 		return false, nil, err
 	}
-	if !up {
+	if !active {
 		return false, []string{"restart " + unit + " (not running)"}, nil
 	}
 	loaded, err := serviceConfigLoaded(ctx, r, unit, path)
