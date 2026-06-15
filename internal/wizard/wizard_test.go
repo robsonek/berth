@@ -105,10 +105,10 @@ func TestWriteRejectsLetsEncryptWithoutEmail(t *testing.T) {
 
 func TestRoundTripQueueWork(t *testing.T) {
 	a := validSingle()
-	a.Sites[0].Queue = &QueueAnswers{Driver: "work", Processes: 2, Tries: 5}
+	a.Sites[0].Queue = &QueueAnswers{Driver: "work", Processes: 2, Tries: 5, Sleep: 7, MaxMemory: 128}
 	srv := writeAndLoad(t, a)
 	q := srv.Sites[0].Queue
-	if q == nil || q.Processes != 2 || q.Tries != 5 {
+	if q == nil || q.Processes != 2 || q.Tries != 5 || q.Sleep != 7 || q.MaxMemory != 128 {
 		t.Errorf("queue = %+v", q)
 	}
 }

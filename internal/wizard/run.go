@@ -39,6 +39,10 @@ func run(p prompter) (Answers, error) {
 					sa.HTTP3 = false
 				}
 			}
+			// Shallow copy is safe here: sa has no pointer fields populated yet
+			// (Queue/Daemons are filled only after this validate loop), so cand
+			// shares nothing mutable with sa. If that ordering ever changes, this
+			// copy would alias sa.Queue's pointer — deep-copy then.
 			cand := a
 			cand.Sites = append(append([]SiteAnswers(nil), a.Sites...), sa)
 			if verr := cand.ToServer().Validate(); verr != nil {

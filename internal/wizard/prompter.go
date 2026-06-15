@@ -152,12 +152,15 @@ func (h *huhPrompter) Queue(q *QueueAnswers) error {
 		return nil
 	}
 	tries, timeout := "3", "60"
+	sleep, maxmem := "3", "0"
 	form := huh.NewForm(huh.NewGroup(
 		huh.NewInput().Title("Processes (1-64)").Value(&procs).Validate(validIntField("processes", 1, 64)),
 		huh.NewInput().Title("Connection (blank=default)").Value(&q.Connection),
 		huh.NewInput().Title("Queue name (blank=default)").Value(&q.Queue),
 		huh.NewInput().Title("Tries").Value(&tries).Validate(validIntField("tries", 0, 1000)),
 		huh.NewInput().Title("Timeout (s)").Value(&timeout).Validate(validIntField("timeout", 0, 86400)),
+		huh.NewInput().Title("Sleep (s when no job)").Value(&sleep).Validate(validIntField("sleep", 0, 86400)),
+		huh.NewInput().Title("Max memory (MB, 0 = unlimited)").Value(&maxmem).Validate(validIntField("max_memory", 0, 4096)),
 	))
 	if err := form.Run(); err != nil {
 		return err
@@ -165,6 +168,8 @@ func (h *huhPrompter) Queue(q *QueueAnswers) error {
 	q.Processes, _ = strconv.Atoi(procs)
 	q.Tries, _ = strconv.Atoi(tries)
 	q.Timeout, _ = strconv.Atoi(timeout)
+	q.Sleep, _ = strconv.Atoi(sleep)
+	q.MaxMemory, _ = strconv.Atoi(maxmem)
 	return nil
 }
 
