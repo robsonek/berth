@@ -1,150 +1,119 @@
 // Package wizard builds a server config interactively and serializes it.
+//
+// The wizard collects every supported feature combination (multi-site,
+// postgres+pgdg, nginx.org upstream, self-signed/HTTP3 TLS, per-site
+// queue/daemons/scheduler, fail2ban + tuning, optional ssh.fingerprint pinning)
+// with progressive disclosure and incremental validation.
+//
+// All TTY I/O (huh forms) lives behind the prompter interface (prompter.go) so
+// the orchestration in run.go is exercised with a scripted fake. Normalization
+// is a pure Answers.ToServer() mapping (toserver.go) proven by round-trip
+// Write -> config.Load tests; config.Server.Validate() stays authoritative.
 package wizard
 
 import (
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
-	"regexp"
-	"strings"
 
-	"charm.land/huh/v2"
-	"github.com/robsonek/berth/internal/config"
 	"gopkg.in/yaml.v3"
 )
 
-// Answers is the flat set of values the huh form collects.
+// Answers is the data the wizard collects: server-level fields plus one or more sites.
 type Answers struct {
-	Name       string
-	Host       string
-	Port       int
-	Key        string
-	PHPVersion string
-	PHPSource  string
-	DBName     string
-	DBUser     string
-	Valkey     bool
-	Queue      bool
-	Scheduler  bool
+	Name string // -> servers/<Name>.yml
+
+	// connection
+	Host        string
+	SSHUser     string
+	Port        int
+	Key         string
+	Fingerprint string // "" => omitted (TOFU)
+
+	// server runtime
+	PHPVersion  string
+	PHPSource   string
+	DBEngine    string // mariadb | postgres
+	DBSource    string // debian | mariadb | pgdg (paired with engine)
+	NginxSource string // debian | nginx
+	Valkey      bool
+	Queue       bool // server-wide default worker
+	Scheduler   bool // server-wide default
+
+	// server advanced (zero unless the gate is taken)
+	Fail2ban Fail2banAnswers
+	Tuning   TuningAnswers
+
+	Sites []SiteAnswers
+}
+
+type Fail2banAnswers struct {
+	Bantime  string
+	Findtime string
+	Maxretry int
+}
+
+type TuningAnswers struct {
+	ValkeyMaxmemory       string
+	ValkeyMaxmemoryPolicy string
+	MariaDBBufferPool     string
+}
+
+type SiteAnswers struct {
 	Domain     string
 	DeployPath string
+	User       string // "" => derived (or "deploy" for a single site)
+	DBName     string
+	DBUser     string
 	Repository string
 	SSL        bool
+	SSLMode    string // letsencrypt | selfsigned (only meaningful when SSL)
 	SSLEmail   string
+	HTTP3      bool
+
+	// site advanced
+	SchedulerOverride string        // "inherit" | "on" | "off"
+	Queue             *QueueAnswers // nil => inherit server-wide
+	Daemons           []DaemonAnswers
 }
 
-// Run presents the interactive form and returns the collected answers.
-func Run() (Answers, error) {
-	a := Answers{Port: 22, PHPVersion: "8.5", PHPSource: "auto", Key: "~/.ssh/id_ed25519"}
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewInput().Title("Config name").Value(&a.Name).Validate(required("config name")),
-			huh.NewInput().Title("Host (IP)").Value(&a.Host).Validate(validHostname("host")),
-			huh.NewInput().Title("SSH key path").Value(&a.Key).Validate(required("SSH key path")),
-		),
-		huh.NewGroup(
-			huh.NewSelect[string]().Title("PHP version").
-				Options(huh.NewOptions("8.5", "8.4", "8.3", "8.2")...).Value(&a.PHPVersion),
-			huh.NewSelect[string]().Title("PHP source").
-				Options(huh.NewOptions("auto", "sury", "debian")...).Value(&a.PHPSource),
-		),
-		huh.NewGroup(
-			huh.NewInput().Title("Database name").Value(&a.DBName).Validate(validSQLIdent("database name")),
-			huh.NewInput().Title("Database user").Value(&a.DBUser).Validate(validSQLIdent("database user")),
-			huh.NewConfirm().Title("Install Valkey?").Value(&a.Valkey),
-			huh.NewConfirm().Title("Queue worker (Supervisor)?").Value(&a.Queue),
-			huh.NewConfirm().Title("Scheduler (cron)?").Value(&a.Scheduler),
-		),
-		huh.NewGroup(
-			huh.NewInput().Title("Domain").Value(&a.Domain).Validate(validHostname("domain")),
-			huh.NewInput().Title("Deploy path").Value(&a.DeployPath).Validate(validDeployPath),
-			huh.NewInput().Title("Repository (optional)").Value(&a.Repository),
-			huh.NewConfirm().Title("Enable TLS (Let's Encrypt)?").Value(&a.SSL),
-			huh.NewInput().Title("TLS email").Value(&a.SSLEmail).Validate(validTLSEmail(&a.SSL)),
-		),
-	)
-	if err := form.Run(); err != nil {
-		return Answers{}, err
-	}
-	return a, nil
+type QueueAnswers struct {
+	Driver     string // "" | "work" | "horizon"
+	Processes  int
+	Connection string
+	Queue      string
+	Sleep      int
+	Tries      int
+	Timeout    int
+	MaxMemory  int
 }
 
-// The validators below mirror config.Server.Validate for inline feedback as the
-// user types; config.Server.Validate remains the authoritative gate in Write.
-var (
-	reHostname = regexp.MustCompile(`^(?i)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
-	reSQLIdent = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
-	reEmail    = regexp.MustCompile(`^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$`)
-)
+type DaemonAnswers struct {
+	Name      string
+	Command   string
+	Processes int
+}
 
-func required(field string) func(string) error {
-	return func(s string) error {
-		if strings.TrimSpace(s) == "" {
-			return fmt.Errorf("%s is required", field)
-		}
-		return nil
+// defaults returns an Answers pre-seeded with berth's conventional defaults so the
+// huh forms (and the fake prompter) start from a valid, idiomatic baseline.
+func defaults() Answers {
+	return Answers{
+		SSHUser: "root", Port: 22, Key: "~/.ssh/id_ed25519",
+		PHPVersion: "8.5", PHPSource: "auto",
+		DBEngine: "mariadb", DBSource: "debian",
+		NginxSource: "debian",
+		Scheduler:   true,
 	}
 }
 
-func validHostname(field string) func(string) error {
-	return func(s string) error {
-		if !reHostname.MatchString(s) {
-			return fmt.Errorf("%s %q is not a valid hostname or IP", field, s)
-		}
-		return nil
-	}
-}
+// Run presents the interactive wizard and returns the collected answers.
+func Run() (Answers, error) { return run(newHuhPrompter()) }
 
-func validSQLIdent(field string) func(string) error {
-	return func(s string) error {
-		if !reSQLIdent.MatchString(s) {
-			return fmt.Errorf("%s %q is not a valid SQL identifier", field, s)
-		}
-		return nil
-	}
-}
-
-func validDeployPath(s string) error {
-	// Deploy paths target the remote Debian server, so use POSIX path
-	// semantics (path.IsAbs) to match config.Site.validate.
-	if !path.IsAbs(s) || strings.ContainsAny(s, " ;&|$`\n\t") {
-		return fmt.Errorf("deploy path %q must be absolute without shell metacharacters", s)
-	}
-	return nil
-}
-
-// validTLSEmail requires a valid address only when TLS is enabled.
-func validTLSEmail(ssl *bool) func(string) error {
-	return func(s string) error {
-		if !*ssl {
-			return nil
-		}
-		if !reEmail.MatchString(s) {
-			return fmt.Errorf("TLS email %q is not a valid email address", s)
-		}
-		return nil
-	}
-}
-
-// ToServer maps validated answers into a config.Server.
-func (a Answers) ToServer() *config.Server {
-	return &config.Server{
-		Host:     a.Host,
-		SSH:      config.SSH{User: "root", Port: a.Port, Key: a.Key},
-		PHP:      config.PHP{Version: a.PHPVersion, Source: a.PHPSource},
-		Nginx:    config.Nginx{Source: "debian"},
-		Database: config.Database{Engine: "mariadb", Name: a.DBName, User: a.DBUser, Source: "debian"},
-		Valkey:   a.Valkey, Queue: a.Queue, Scheduler: a.Scheduler,
-		Sites: []config.Site{{
-			Domain: a.Domain, DeployPath: a.DeployPath, Repository: a.Repository,
-			SSL: a.SSL, SSLEmail: a.SSLEmail,
-		}},
-	}
-}
-
-// Write validates the server and writes servers/<name>.yml (refusing to clobber).
+// Write validates the answers and writes servers/<name>.yml, refusing to clobber.
 func (a Answers) Write() (string, error) {
+	if err := required("config name")(a.Name); err != nil {
+		return "", err
+	}
 	srv := a.ToServer()
 	if err := srv.Validate(); err != nil {
 		return "", err

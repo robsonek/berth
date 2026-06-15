@@ -1,10 +1,12 @@
 package config
 
 import (
+	"encoding/base64"
 	"fmt"
 	"net/url"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -48,6 +50,79 @@ var reservedOSUsers = map[string]bool{
 // value its database.source may take (its trusted producer repo).
 var dbEngineUpstreamSource = map[string]string{"mariadb": "mariadb", "postgres": "pgdg"}
 
+// DatabaseChoice is one selectable (engine, source) pair with a display label.
+// It is the single source of truth the wizard's database picker builds from, so
+// adding a 5th pair stays a one-line edit to dbEngineUpstreamSource (plus labels).
+type DatabaseChoice struct {
+	Engine string
+	Source string
+	Label  string
+}
+
+var dbEngineLabel = map[string]string{"mariadb": "MariaDB", "postgres": "PostgreSQL"}
+var dbSourceLabel = map[string]string{"debian": "Debian", "mariadb": "mariadb.org", "pgdg": "pgdg"}
+
+// DatabaseChoices returns every valid (engine, source) pair in deterministic
+// order: engines sorted, each emitting its implicit "debian" source then its
+// upstream source from dbEngineUpstreamSource.
+func DatabaseChoices() []DatabaseChoice {
+	engines := make([]string, 0, len(dbEngineUpstreamSource))
+	for e := range dbEngineUpstreamSource {
+		engines = append(engines, e)
+	}
+	sort.Strings(engines)
+	out := make([]DatabaseChoice, 0, len(engines)*2)
+	for _, e := range engines {
+		el := dbEngineLabel[e]
+		if el == "" {
+			el = e
+		}
+		for _, src := range []string{"debian", dbEngineUpstreamSource[e]} {
+			sl := dbSourceLabel[src]
+			if sl == "" {
+				sl = src
+			}
+			out = append(out, DatabaseChoice{
+				Engine: e, Source: src,
+				Label: el + " (" + sl + ")",
+			})
+		}
+	}
+	return out
+}
+
+// supportedEngines returns the sorted, comma-joined list of supported database
+// engines, derived from dbEngineUpstreamSource so a new engine flows through to
+// error messages automatically.
+func supportedEngines() string {
+	es := make([]string, 0, len(dbEngineUpstreamSource))
+	for e := range dbEngineUpstreamSource {
+		es = append(es, e)
+	}
+	sort.Strings(es)
+	return strings.Join(es, ", ")
+}
+
+// ValidFingerprint reports whether fp is acceptable as ssh.fingerprint. Empty is
+// allowed (host key trusted on first use). A non-empty value must mirror
+// xssh.FingerprintSHA256 output: "SHA256:" + unpadded base64 decoding to exactly
+// 32 bytes. The authoritative match against the live host key still happens in
+// internal/ssh/hostkey.go; this only rejects impossible pins at config load.
+func ValidFingerprint(fp string) error {
+	if fp == "" {
+		return nil
+	}
+	rest, ok := strings.CutPrefix(fp, "SHA256:")
+	if !ok {
+		return fmt.Errorf("ssh.fingerprint %q must be SHA256:<base64> (e.g. from ssh-keyscan)", fp)
+	}
+	raw, err := base64.RawStdEncoding.DecodeString(rest)
+	if err != nil || len(raw) != 32 {
+		return fmt.Errorf("ssh.fingerprint %q is not a valid SHA256 fingerprint", fp)
+	}
+	return nil
+}
+
 // Validate checks every field that reaches a shell, SQL statement, or path.
 func (s *Server) Validate() error {
 	if !reHostname.MatchString(s.Host) {
@@ -55,6 +130,9 @@ func (s *Server) Validate() error {
 	}
 	if s.SSH.Port < 1 || s.SSH.Port > 65535 {
 		return fmt.Errorf("ssh.port %d out of range", s.SSH.Port)
+	}
+	if err := ValidFingerprint(s.SSH.Fingerprint); err != nil {
+		return err
 	}
 	if !rePHPVer.MatchString(s.PHP.Version) || !allowedPHPVersions[s.PHP.Version] {
 		return fmt.Errorf("php.version %q is not an allowed version", s.PHP.Version)
@@ -79,7 +157,7 @@ func (s *Server) Validate() error {
 	}
 	upstream, engineOK := dbEngineUpstreamSource[s.Database.Engine]
 	if !engineOK {
-		return fmt.Errorf("database.engine %q unsupported (supported: mariadb, postgres)", s.Database.Engine)
+		return fmt.Errorf("database.engine %q unsupported (supported: %s)", s.Database.Engine, supportedEngines())
 	}
 	if s.Database.Source != "debian" && s.Database.Source != upstream {
 		return fmt.Errorf("database.source %q invalid for engine %q (use debian or %s)", s.Database.Source, s.Database.Engine, upstream)
