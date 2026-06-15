@@ -1,0 +1,23 @@
+# Minimal single-site config — the simplest thing that provisions.
+# Copy it and edit:  cp examples/minimal.yml servers/myserver.yml
+#
+# One site on MariaDB from Debian's own repos, no TLS. Everything not set here
+# falls back to berth's defaults (ssh.user=root, ssh.port=22, nginx debian,
+# database.source=debian, scheduler on). A lone site runs as the shared "deploy"
+# user and inherits the top-level database name/user.
+host: 203.0.113.10
+
+ssh:
+  key: ~/.ssh/id_ed25519   # your private SSH key
+
+php:
+  version: "8.5"
+
+database:
+  engine: mariadb
+  name: myapp
+  user: myapp
+
+sites:
+  - domain: app.example.com
+    deploy_path: /var/www/app

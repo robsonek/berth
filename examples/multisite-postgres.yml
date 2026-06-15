@@ -1,0 +1,50 @@
+# Multi-site config — two isolated tenants on PostgreSQL (PGDG), nginx.org.
+# Copy it and edit:  cp examples/multisite-postgres.yml servers/myserver.yml
+#
+# Each site runs under its OWN OS user and gets its OWN database + user, so a
+# compromise of one cannot read another's files. With 2+ sites every site needs
+# its own `database:` block and a distinct user/domain/deploy_path.
+host: 203.0.113.20
+
+ssh:
+  user: root
+  port: 22
+  key: ~/.ssh/id_ed25519
+
+php:
+  version: "8.4"
+  source: debian
+
+nginx:
+  source: nginx          # nginx.org mainline (needed for site-one's HTTP/3)
+
+database:
+  engine: postgres       # server-wide engine + source
+  source: pgdg           # apt.postgresql.org / PGDG
+
+valkey: true
+queue: true              # server-wide default worker; tuned/overridden per site below
+scheduler: true
+
+sites:
+  # Public production tenant: Let's Encrypt + HTTP/3, a tuned worker and a daemon.
+  - domain: app-one.example.com
+    deploy_path: /var/www/app-one
+    user: app_one
+    database: { name: app_one, user: app_one }
+    ssl: true
+    ssl_email: admin@example.com
+    http3: true
+    queue:
+      processes: 2
+      tries: 5
+    daemons:
+      - { name: reverb, command: php artisan reverb:start }
+
+  # Internal/staging tenant: self-signed TLS — no public DNS or email required.
+  - domain: app-two.example.com
+    deploy_path: /var/www/app-two
+    user: app_two
+    database: { name: app_two, user: app_two }
+    ssl: true
+    ssl_mode: selfsigned

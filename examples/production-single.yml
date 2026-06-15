@@ -1,0 +1,47 @@
+# Production single-site config — newest PHP from Surý, MariaDB from mariadb.org,
+# Valkey + a queue worker, Let's Encrypt TLS with HTTP/3, hardened.
+# Copy it and edit:  cp examples/production-single.yml servers/myserver.yml
+host: 203.0.113.10
+
+ssh:
+  user: root
+  port: 22
+  key: ~/.ssh/id_ed25519
+  # Pin the host key to defeat MITM (otherwise berth trusts it on first connect).
+  # Get the value with:
+  #   ssh-keyscan -t ed25519 203.0.113.10 | ssh-keygen -lf - | awk '{print $2}'
+  # fingerprint: "SHA256:..."
+
+php:
+  version: "8.5"
+  source: sury          # Debian ships 8.4; Surý provides 8.5
+
+nginx:
+  source: nginx         # nginx.org mainline — required for HTTP/3
+
+database:
+  engine: mariadb
+  source: mariadb       # mariadb.org 12.3 LTS
+  name: myapp
+  user: myapp
+
+valkey: true            # cache / session / queue backend
+queue: true             # a dormant queue:work worker (your deployer starts it)
+scheduler: true
+
+fail2ban:
+  bantime: 1h
+  findtime: 10m
+  maxretry: 5
+
+tuning:
+  valkey_maxmemory: 512mb
+  mariadb_innodb_buffer_pool: 512M
+
+sites:
+  - domain: app.example.com
+    deploy_path: /var/www/app
+    repository: git@github.com:acme/app.git   # optional — SSH git URL only
+    ssl: true
+    ssl_email: admin@example.com              # required with Let's Encrypt
+    http3: true                               # needs ssl + nginx.source: nginx
