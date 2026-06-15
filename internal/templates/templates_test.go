@@ -166,3 +166,15 @@ func TestRenderFail2banJailGolden(t *testing.T) {
 func TestRenderLogrotateGolden(t *testing.T) {
 	checkGolden(t, "logrotate.conf.tmpl", "logrotate.golden", nil)
 }
+
+func TestRenderValkeyDropInGolden(t *testing.T) {
+	checkGolden(t, "valkey_dropin.conf.tmpl", "valkey_dropin.golden", struct{ Maxmemory, Policy string }{
+		Maxmemory: "256mb", Policy: "allkeys-lru",
+	})
+}
+
+func TestRenderMariaDBTuningGolden(t *testing.T) {
+	checkGolden(t, "mariadb_tuning.cnf.tmpl", "mariadb_tuning.golden", struct{ BufferPool string }{
+		BufferPool: "256M",
+	})
+}

@@ -1,0 +1,3 @@
+# managed by berth
+[mysqld]
+innodb_buffer_pool_size = 256M
