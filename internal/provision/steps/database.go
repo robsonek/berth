@@ -125,7 +125,7 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 		return fmt.Errorf("install %s: %w", eng.ServerPackage(), err)
 	}
 
-	driver, port := eng.EnvConnection()
+	driver, host, port, socket := eng.EnvConnection()
 	// Accumulate per-site secrets and write the local cache once at the end so
 	// sites do not clobber each other's cached passwords.
 	cache, _ := secret.LoadCache(s.Host)
@@ -147,7 +147,7 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 		// Persist FIRST (atomic), so a crash before EnsureUser still leaves a
 		// recoverable secret on the host. i is the site's per-site Redis logical
 		// DB index when Valkey is enabled.
-		if err := d.seedSharedEnv(ctx, r, s, site, i, dbName, dbUser, pw, appKey, driver, port); err != nil {
+		if err := d.seedSharedEnv(ctx, r, s, site, i, dbName, dbUser, pw, appKey, driver, host, port, socket); err != nil {
 			return err
 		}
 		if err := eng.EnsureDatabase(ctx, r, dbName); err != nil {
@@ -215,7 +215,7 @@ func (d database) resolveAppKey(ctx context.Context, r bssh.Runner, site config.
 
 // seedSharedEnv renders a site's shared/.env and writes it atomically, owned by
 // that site's OS user (mode 0600) so other site users cannot read it.
-func (d database) seedSharedEnv(ctx context.Context, r bssh.Runner, s *config.Server, site config.Site, siteIdx int, dbName, dbUser, pw, appKey, driver, port string) error {
+func (d database) seedSharedEnv(ctx context.Context, r bssh.Runner, s *config.Server, site config.Site, siteIdx int, dbName, dbUser, pw, appKey, driver, host, port, socket string) error {
 	user := s.SiteUser(site)
 	kv := map[string]string{
 		"APP_ENV":       "production",
@@ -223,13 +223,16 @@ func (d database) seedSharedEnv(ctx context.Context, r bssh.Runner, s *config.Se
 		"APP_URL":       appURL(site),
 		appKeyKey:       appKey,
 		"DB_CONNECTION": driver,
-		"DB_HOST":       "127.0.0.1",
+		"DB_HOST":       host,
 		"DB_PORT":       port,
 		"DB_DATABASE":   dbName,
 		"DB_USERNAME":   dbUser,
 		dbPasswordKey:   pw,
 		"REDIS_HOST":    "127.0.0.1",
 		"REDIS_PORT":    "6379",
+	}
+	if socket != "" {
+		kv["DB_SOCKET"] = socket
 	}
 	// When Valkey is provisioned, use it for cache, session and queue (Laravel
 	// otherwise falls back to the database driver). Each site gets its own Redis

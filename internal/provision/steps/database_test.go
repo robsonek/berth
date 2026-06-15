@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/robsonek/berth/internal/config"
+	dbpkg "github.com/robsonek/berth/internal/database"
 	"github.com/robsonek/berth/internal/provision"
 	"github.com/robsonek/berth/internal/secret"
 	bssh "github.com/robsonek/berth/internal/ssh"
@@ -354,5 +355,41 @@ func TestDatabaseApplyRejectsTamperedPassword(t *testing.T) {
 	err := Database(red).Apply(context.Background(), provision.RunCtx{}, s, f)
 	if err == nil {
 		t.Fatal("expected rejection of a reused password outside the allowed charset")
+	}
+}
+
+func TestSeedSharedEnvMariaDBUsesSocket(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	d := database{redactor: secret.NewRedactor()}
+	eng, _ := dbpkg.Get("mariadb")
+	driver, host, port, socket := eng.EnvConnection()
+	s := &config.Server{Database: config.Database{Engine: "mariadb"}, Sites: []config.Site{{Domain: "x.example.com", DeployPath: "/srv/x"}}}
+	if err := d.seedSharedEnv(context.Background(), f, s, s.Sites[0], 0, "db", "u", "pw", "appkey", driver, host, port, socket); err != nil {
+		t.Fatal(err)
+	}
+	env := string(f.Writes()[0].Content)
+	if !strings.Contains(env, "DB_HOST=localhost") {
+		t.Errorf("mariadb .env should use DB_HOST=localhost; got:\n%s", env)
+	}
+	if !strings.Contains(env, "DB_SOCKET=/run/mysqld/mysqld.sock") {
+		t.Errorf("mariadb .env should set DB_SOCKET; got:\n%s", env)
+	}
+}
+
+func TestSeedSharedEnvPostgresUsesTCPNoSocket(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	d := database{redactor: secret.NewRedactor()}
+	eng, _ := dbpkg.Get("postgres")
+	driver, host, port, socket := eng.EnvConnection()
+	s := &config.Server{Database: config.Database{Engine: "postgres"}, Sites: []config.Site{{Domain: "x.example.com", DeployPath: "/srv/x"}}}
+	if err := d.seedSharedEnv(context.Background(), f, s, s.Sites[0], 0, "db", "u", "pw", "appkey", driver, host, port, socket); err != nil {
+		t.Fatal(err)
+	}
+	env := string(f.Writes()[0].Content)
+	if !strings.Contains(env, "DB_HOST=127.0.0.1") {
+		t.Errorf("postgres .env should use DB_HOST=127.0.0.1; got:\n%s", env)
+	}
+	if strings.Contains(env, "DB_SOCKET=") {
+		t.Errorf("postgres .env must NOT set DB_SOCKET; got:\n%s", env)
 	}
 }
