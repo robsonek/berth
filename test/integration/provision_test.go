@@ -217,18 +217,6 @@ func assertSelfSignedCert(ctx context.Context, t *testing.T, c *bssh.Client, srv
 	}
 }
 
-// assertExitZero fails unless cmd exits 0 on the target.
-func assertExitZero(ctx context.Context, t *testing.T, c *bssh.Client, label, cmd string) {
-	t.Helper()
-	res, err := c.Run(ctx, cmd, nil)
-	if err != nil {
-		t.Fatalf("%s: run: %v", label, err)
-	}
-	if res.ExitCode != 0 {
-		t.Errorf("%s: exit %d, stderr %q", label, res.ExitCode, strings.TrimSpace(res.Stderr))
-	}
-}
-
 // assertHTTPServes fails if the server never answers, or answers with an
 // unexpected server error. A 502 (Bad Gateway) is accepted: nginx is up and
 // correctly proxying to PHP-FPM, but no app is deployed yet ("Primary script
@@ -255,13 +243,4 @@ func assertHTTPServes(t *testing.T, url string, insecureTLS bool) {
 	if resp.StatusCode >= 500 && resp.StatusCode != http.StatusBadGateway {
 		t.Errorf("GET %s -> %d, want < 500 or the pre-deploy 502", url, resp.StatusCode)
 	}
-}
-
-// knownHostsPath returns ~/.ssh/known_hosts, or "" if the home dir is unknown.
-func knownHostsPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return home + "/.ssh/known_hosts"
 }
