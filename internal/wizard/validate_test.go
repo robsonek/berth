@@ -50,4 +50,13 @@ func TestInlineValidators(t *testing.T) {
 	if validIntField("port", 1, 65535)("70000") == nil {
 		t.Error("int field validator accepted out-of-range")
 	}
+	if validOSUser("") != nil {
+		t.Error("validOSUser rejected blank")
+	}
+	if validOSUser("onee-sync") != nil {
+		t.Error("validOSUser rejected a valid hyphenated name")
+	}
+	if validOSUser("Bad User") == nil {
+		t.Error("validOSUser accepted spaces/uppercase")
+	}
 }

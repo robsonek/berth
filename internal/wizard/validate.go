@@ -129,3 +129,15 @@ func validDaemonName(s string) error {
 	}
 	return nil
 }
+
+// reOSUser mirrors config.reLinuxUser for inline feedback (the reserved-name
+// check stays authoritative in config.Validate).
+var reOSUser = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+
+// validOSUser allows blank (the user is then derived) or a valid Linux username.
+func validOSUser(s string) error {
+	if s == "" || reOSUser.MatchString(s) {
+		return nil
+	}
+	return fmt.Errorf("os user %q must be lowercase [a-z_][a-z0-9_-]{0,31} or blank to derive", s)
+}
