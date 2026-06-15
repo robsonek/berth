@@ -176,3 +176,169 @@ func TestTuningGatingSkipsAbsentServices(t *testing.T) {
 		t.Errorf("expected satisfied no-op; got %+v", cr)
 	}
 }
+
+func TestTuningCheckValkeyUnmanagedAbortsWithoutForce(t *testing.T) {
+	srv := valkeyOnlyServer()
+	// A pre-existing, foreign drop-in lacking the "# managed by berth" marker.
+	unmanaged := "[Service]\nExecStart=/usr/bin/valkey-server\n"
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/systemd/system/valkey-server.service.d/berth.conf'", bssh.Result{ExitCode: 0, Stdout: unmanaged})
+
+	// Without --force: unmanaged file must abort (unsatisfied + non-nil error).
+	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
+	if err == nil {
+		t.Error("expected error aborting on unmanaged drop-in without --force")
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied on unmanaged drop-in")
+	}
+
+	// With --force: unsatisfied (will be overwritten), but no error.
+	cr, err = Tuning().Check(context.Background(), provision.RunCtx{Force: true}, srv, f)
+	if err != nil {
+		t.Errorf("unexpected error with --force: %v", err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied (overwrite pending) on unmanaged drop-in with --force")
+	}
+}
+
+func TestTuningCheckValkeyDriftedUnsatisfied(t *testing.T) {
+	srv := valkeyOnlyServer()
+	want, err := renderValkeyDropIn(srv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Managed (keeps the marker) but content differs from desired.
+	drifted := strings.Replace(string(want), "256mb", "999mb", 1)
+	if drifted == string(want) {
+		t.Fatal("test setup: expected drifted content to differ from desired")
+	}
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/systemd/system/valkey-server.service.d/berth.conf'", bssh.Result{ExitCode: 0, Stdout: drifted})
+	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied when managed drop-in content has drifted")
+	}
+}
+
+func TestTuningCheckMariaDBUnsatisfiedWhenNotLoaded(t *testing.T) {
+	srv := mariadbOnlyServer()
+	want, _ := renderMariaDBTuning(srv)
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
+	f.On(mariadbLiveness, bssh.Result{ExitCode: 1}) // file newer than last restart
+	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied when mariadb cnf present but not yet loaded")
+	}
+}
+
+func TestTuningCheckMariaDBUnsatisfiedWhenAbsent(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 1})
+	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, mariadbOnlyServer(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied when mariadb cnf absent")
+	}
+}
+
+func valkeyAndMariaDBServer() *config.Server {
+	return &config.Server{Valkey: true, Database: config.Database{Engine: "mariadb"}}
+}
+
+func TestTuningCheckCombinedSatisfiedWhenBothLoaded(t *testing.T) {
+	srv := valkeyAndMariaDBServer()
+	vWant, err := renderValkeyDropIn(srv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mWant, err := renderMariaDBTuning(srv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/systemd/system/valkey-server.service.d/berth.conf'", bssh.Result{ExitCode: 0, Stdout: string(vWant)})
+	f.On(valkeyLiveness, bssh.Result{ExitCode: 0})
+	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(mWant)})
+	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
+	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("expected satisfied when both drop-ins loaded; got %+v", cr)
+	}
+}
+
+func TestTuningApplyCombinedWritesBothRestartsBoth(t *testing.T) {
+	srv := valkeyAndMariaDBServer()
+	f := bssh.NewFakeRunner()
+	f.On("mkdir -p /etc/systemd/system/valkey-server.service.d", bssh.Result{})
+	f.On("systemctl daemon-reload", bssh.Result{})
+	f.On("systemctl restart valkey-server.service", bssh.Result{})
+	f.On("systemctl restart mariadb.service", bssh.Result{})
+	if err := Tuning().Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	vWant, _ := renderValkeyDropIn(srv)
+	mWant, _ := renderMariaDBTuning(srv)
+	var vFound, mFound bool
+	for _, w := range f.Writes() {
+		switch w.Path {
+		case "/etc/systemd/system/valkey-server.service.d/berth.conf":
+			vFound = true
+			if string(w.Content) != string(vWant) {
+				t.Errorf("valkey drop-in content mismatch:\n got: %q\nwant: %q", w.Content, vWant)
+			}
+		case "/etc/mysql/mariadb.conf.d/99-berth.cnf":
+			mFound = true
+			if string(w.Content) != string(mWant) {
+				t.Errorf("mariadb cnf content mismatch:\n got: %q\nwant: %q", w.Content, mWant)
+			}
+		}
+	}
+	if !vFound {
+		t.Error("valkey drop-in not written")
+	}
+	if !mFound {
+		t.Error("mariadb tuning cnf not written")
+	}
+
+	var cmds []string
+	for _, c := range f.Calls() {
+		cmds = append(cmds, c.Cmd)
+	}
+	joined := strings.Join(cmds, "\n")
+	for _, w := range []string{
+		"mkdir -p /etc/systemd/system/valkey-server.service.d",
+		"systemctl daemon-reload",
+		"systemctl restart valkey-server.service",
+		"systemctl restart mariadb.service",
+	} {
+		if !strings.Contains(joined, w) {
+			t.Errorf("Apply did not run %q; calls:\n%s", w, joined)
+		}
+	}
+}
+
+func TestTuningApplyValkeyRestartErrorPropagates(t *testing.T) {
+	srv := valkeyOnlyServer()
+	f := bssh.NewFakeRunner()
+	f.On("mkdir -p /etc/systemd/system/valkey-server.service.d", bssh.Result{})
+	f.On("systemctl daemon-reload", bssh.Result{})
+	f.On("systemctl restart valkey-server.service", bssh.Result{ExitCode: 1, Stderr: "boom"})
+	if err := Tuning().Apply(context.Background(), provision.RunCtx{}, srv, f); err == nil {
+		t.Fatal("expected error when systemctl restart fails")
+	}
+}

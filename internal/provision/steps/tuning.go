@@ -45,7 +45,9 @@ func renderMariaDBTuning(s *config.Server) ([]byte, error) {
 // newer than the unit's ActiveEnterTimestamp. A file newer than the last start means
 // Apply wrote it but the restart has not happened yet (e.g. a crash mid-Apply), so
 // the running config is stale. Read-only; an inactive unit (empty timestamp) yields
-// a non-zero exit, i.e. "not loaded".
+// a non-zero exit, i.e. "not loaded". Liveness keys on the file's MTIME, not its
+// content, so a benign out-of-band `touch` of an otherwise up-to-date drop-in
+// triggers one reconciling restart — intentional, conservative behavior.
 func serviceConfigLoaded(ctx context.Context, r bssh.Runner, unit, path string) (bool, error) {
 	cmd := `[ "$(stat -c %Y ` + shQuote(path) + ` 2>/dev/null)" -le "$(date -d "$(systemctl show -p ActiveEnterTimestamp --value ` + unit + `)" +%s 2>/dev/null)" ]`
 	res, err := r.Run(ctx, cmd, nil)
