@@ -16,11 +16,19 @@ var (
 	reLinuxUser    = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 	reFail2banTime = regexp.MustCompile(`^[0-9]+[smhdw]?$`)
 	reDaemonName   = regexp.MustCompile(`^[a-z0-9-]+$`)
+	reValkeyMem    = regexp.MustCompile(`^(?i)[0-9]+(b|kb|mb|gb|k|m|g)?$`)
+	reMariaDBSize  = regexp.MustCompile(`^(?i)[0-9]+[kmg]?$`)
 )
 
 var allowedPHPVersions = map[string]bool{"8.2": true, "8.3": true, "8.4": true, "8.5": true}
 var allowedPHPSources = map[string]bool{"auto": true, "sury": true, "debian": true}
 var allowedNginxSources = map[string]bool{"debian": true, "nginx": true}
+
+// allowedValkeyPolicies are the maxmemory-policy values Valkey accepts.
+var allowedValkeyPolicies = map[string]bool{
+	"noeviction": true, "allkeys-lru": true, "allkeys-lfu": true, "allkeys-random": true,
+	"volatile-lru": true, "volatile-lfu": true, "volatile-random": true, "volatile-ttl": true,
+}
 
 // reservedOSUsers are names berth refuses for a site OS user: stock Debian
 // system accounts (whose homes are not /home/<user> and which own privileged
@@ -65,6 +73,9 @@ func (s *Server) Validate() error {
 	}
 	if s.Fail2ban.Maxretry != 0 && (s.Fail2ban.Maxretry < 1 || s.Fail2ban.Maxretry > 100) {
 		return fmt.Errorf("fail2ban.maxretry %d out of range (1-100)", s.Fail2ban.Maxretry)
+	}
+	if err := s.Tuning.validate(); err != nil {
+		return err
 	}
 	upstream, engineOK := dbEngineUpstreamSource[s.Database.Engine]
 	if !engineOK {
@@ -152,6 +163,22 @@ func (s *Server) Validate() error {
 	// Redis ships 16 logical DBs, so per-site isolation caps at 16 sites.
 	if s.Valkey && len(s.Sites) > 16 {
 		return fmt.Errorf("valkey: true supports at most 16 sites (one Redis logical DB each); got %d — reduce sites or set valkey: false", len(s.Sites))
+	}
+	return nil
+}
+
+// validate checks the tuning knobs that reach a config / unit file. Empty values
+// mean "use the default" and pass; non-empty values are format-/allow-list-guarded
+// (config-injection defence — the values are rendered verbatim into config files).
+func (t Tuning) validate() error {
+	if t.ValkeyMaxmemory != "" && !reValkeyMem.MatchString(t.ValkeyMaxmemory) {
+		return fmt.Errorf("tuning.valkey_maxmemory %q must be a number optionally suffixed b/kb/mb/gb (e.g. 256mb)", t.ValkeyMaxmemory)
+	}
+	if t.ValkeyMaxmemoryPolicy != "" && !allowedValkeyPolicies[t.ValkeyMaxmemoryPolicy] {
+		return fmt.Errorf("tuning.valkey_maxmemory_policy %q is not a valid Valkey eviction policy", t.ValkeyMaxmemoryPolicy)
+	}
+	if t.MariaDBBufferPool != "" && !reMariaDBSize.MatchString(t.MariaDBBufferPool) {
+		return fmt.Errorf("tuning.mariadb_innodb_buffer_pool %q must be a number optionally suffixed K/M/G (e.g. 256M)", t.MariaDBBufferPool)
 	}
 	return nil
 }

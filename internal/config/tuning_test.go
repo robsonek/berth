@@ -27,3 +27,30 @@ func TestTuningAccessorsHonorOverrides(t *testing.T) {
 		t.Errorf("MariaDBBufferPoolEff() = %q, want 1G", got)
 	}
 }
+
+func TestTuningValidateAcceptsEmptyAndValid(t *testing.T) {
+	for _, tn := range []Tuning{
+		{}, // empty = use defaults
+		{ValkeyMaxmemory: "256mb", ValkeyMaxmemoryPolicy: "allkeys-lru", MariaDBBufferPool: "256M"},
+		{ValkeyMaxmemory: "1gb", ValkeyMaxmemoryPolicy: "volatile-ttl", MariaDBBufferPool: "2G"},
+		{ValkeyMaxmemory: "104857600"}, // bare bytes
+	} {
+		if err := tn.validate(); err != nil {
+			t.Errorf("validate(%+v) unexpected error: %v", tn, err)
+		}
+	}
+}
+
+func TestTuningValidateRejectsBad(t *testing.T) {
+	for _, tn := range []Tuning{
+		{ValkeyMaxmemory: "256 mb; rm -rf /"},
+		{ValkeyMaxmemory: "lots"},
+		{ValkeyMaxmemoryPolicy: "allkeys-bogus"},
+		{MariaDBBufferPool: "256MB"}, // MariaDB uses K/M/G, not MB
+		{MariaDBBufferPool: "big"},
+	} {
+		if err := tn.validate(); err == nil {
+			t.Errorf("validate(%+v) expected error, got nil", tn)
+		}
+	}
+}
