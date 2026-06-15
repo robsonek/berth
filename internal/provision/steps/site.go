@@ -313,6 +313,22 @@ func listSupervisorPrograms(ctx context.Context, r bssh.Runner) ([]string, error
 	return paths, nil
 }
 
+// supervisorReload registers berth's program set with the running supervisord
+// (reread then update). update does NOT start an autostart=false program, so
+// workers stay STOPPED (dormant); this is what makes the deployer's
+// `supervisorctl start/restart berth-<pool>:*` work — otherwise the conf is on
+// disk but supervisord never loaded it ("no such process").
+func supervisorReload(ctx context.Context, r bssh.Runner) error {
+	for _, cmd := range []string{"supervisorctl reread", "supervisorctl update"} {
+		if res, err := r.Run(ctx, cmd, nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("%s: %s", cmd, res.Stderr)
+		}
+	}
+	return nil
+}
+
 func renderCron(s *config.Server, site config.Site) ([]byte, error) {
 	return templates.Render("scheduler.cron.tmpl", struct {
 		DeployPath, User string
@@ -367,6 +383,24 @@ func (st site) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 		return provision.CheckResult{}, err
 	} else if res.ExitCode != 0 {
 		return provision.CheckResult{Satisfied: false, Reason: "php-fpm -t fails", Changes: st.changes()}, nil
+	}
+	// Every desired supervisor program must be LOADED in supervisord (not just on
+	// disk), or the deployer's start/restart fails. A box whose conf predates this
+	// enforcement reports "no such" here -> unsatisfied -> Apply reread/updates it.
+	if s.NeedsSupervisor() {
+		for _, site := range s.Sites {
+			for _, prog := range s.SiteProgramNames(site) {
+				// Quote the group glob so the sudo `/bin/sh -c` wrapper passes
+				// "<prog>:*" to supervisorctl literally instead of pathname-expanding it.
+				res, err := r.Run(ctx, "supervisorctl status "+shQuote(prog+":*"), nil)
+				if err != nil {
+					return provision.CheckResult{}, err
+				}
+				if strings.Contains(res.Stdout+res.Stderr, "no such") {
+					return provision.CheckResult{Satisfied: false, Reason: prog + " not loaded in supervisord", Changes: st.changes()}, nil
+				}
+			}
+		}
 	}
 	return provision.CheckResult{Satisfied: true, Reason: "site config in place; nginx and php-fpm valid"}, nil
 }
@@ -498,7 +532,9 @@ func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 	}
 
 	// Global orphan removal: rm berth-managed supervisor program files no site
-	// desires (never a foreign/unmanaged file).
+	// desires (never a foreign/unmanaged file). removedOrphan is declared at
+	// function scope so the reload below can see it after the block closes.
+	removedOrphan := false
 	{
 		desired := desiredProgramPaths(s)
 		progs, err := listSupervisorPrograms(ctx, r)
@@ -519,6 +555,35 @@ func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 				} else if res.ExitCode != 0 {
 					return fmt.Errorf("remove orphan supervisor program %s: %s", p, res.Stderr)
 				}
+				removedOrphan = true
+			}
+		}
+	}
+
+	// Register/refresh the program set with the running supervisord so the deployer
+	// can drive it (start/restart). Without this the conf is on disk but supervisord
+	// never loaded it; update leaves autostart=false workers STOPPED, never started.
+	if s.NeedsSupervisor() {
+		// No presence guard here (unlike the orphan branch below): when programs are
+		// desired, the supervisor step runs before site on a full pipeline and has
+		// already installed+enabled supervisord, so it is present. (`--only site` is
+		// documented as not perfectly isolated; there a missing supervisord surfaces
+		// as a loud Apply error, which is the correct signal for a partial run.)
+		if err := supervisorReload(ctx, r); err != nil {
+			return err
+		}
+	} else if removedOrphan {
+		// No desired programs, but a stale one was removed: unload it from
+		// supervisord too — only if supervisor is actually present (a server that
+		// never needed it may not have it installed). A non-zero probe exit just
+		// means absent (skip); a transport error propagates like any Apply command.
+		up, err := serviceUp(ctx, r, "supervisor")
+		if err != nil {
+			return err
+		}
+		if up {
+			if err := supervisorReload(ctx, r); err != nil {
+				return err
 			}
 		}
 	}

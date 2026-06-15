@@ -446,14 +446,19 @@ func stubManagedSiteFiles(t *testing.T, s *config.Server, f *bssh.FakeRunner) {
 }
 
 // stubFPMApply stubs the commands the Apply path runs after writing the pool:
-// disabling the stock www pool, validating + reloading php-fpm, and validating
-// the global logrotate fragment.
+// disabling the stock www pool, validating + reloading php-fpm, validating the
+// global logrotate fragment, and refreshing supervisord (reread/update) so a
+// queue/daemon site's programs load. The supervisor verbs are stubbed
+// unconditionally; they fire only when NeedsSupervisor (or an orphan was removed
+// on a host that has supervisor), so non-supervisor Apply tests leave them unused.
 func stubFPMApply(s *config.Server, f *bssh.FakeRunner) {
 	f.On(fmt.Sprintf("test -f %[1]s && mv -f %[1]s %[1]s.disabled || true", shQuote(defaultFPMPoolPath(s))), bssh.Result{})
 	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
 	f.On("systemctl reload "+fpmService(s), bssh.Result{})
 	f.On("logrotate -d "+shQuote(logrotatePath), bssh.Result{})
 	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{})
+	f.On("supervisorctl reread", bssh.Result{})
+	f.On("supervisorctl update", bssh.Result{})
 }
 
 // replayWritesAsReads seeds dst with `cat '<path>'` stubs for every file written
@@ -656,5 +661,206 @@ func TestQueueCommandHorizon(t *testing.T) {
 	want := "php /home/deploy/myapp/current/artisan horizon"
 	if got != want {
 		t.Errorf("horizon command wrong: %s", got)
+	}
+}
+
+// TestSiteApplyRereadsAndUpdatesSupervisor proves a queue site's Apply registers
+// its program set with the running supervisord (reread THEN update) — otherwise
+// the conf is on disk but never loaded and the deployer's restart hits "no such
+// process". update does not start an autostart=false program, so it stays dormant.
+func TestSiteApplyRereadsAndUpdatesSupervisor(t *testing.T) {
+	s := siteServer()
+	s.Queue = true // a worker program exists -> supervisord must be told to load it
+	f := bssh.NewFakeRunner()
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	idxReread, idxUpdate := -1, -1
+	for i, c := range f.Calls() {
+		switch c.Cmd {
+		case "supervisorctl reread":
+			idxReread = i
+		case "supervisorctl update":
+			idxUpdate = i
+		}
+	}
+	if idxReread < 0 || idxUpdate < 0 {
+		t.Fatalf("expected supervisorctl reread + update; calls=%v", f.Calls())
+	}
+	if idxReread > idxUpdate {
+		t.Error("supervisorctl reread must run before supervisorctl update")
+	}
+}
+
+// TestSiteApplyReloadsSupervisorAfterOrphanRemovalWithoutQueue covers the
+// disabled-queue path: NeedsSupervisor is false, but a stale berth-managed
+// program lingers from a prior config. Removing the conf is not enough —
+// supervisord still has it loaded — so Apply must reread/update to unload it,
+// gated on supervisor actually being present.
+func TestSiteApplyReloadsSupervisorAfterOrphanRemovalWithoutQueue(t *testing.T) {
+	s := siteServer() // no queue, no daemons -> NeedsSupervisor false
+	f := bssh.NewFakeRunner()
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+	// A stale managed program lingers from a prior queue config and must be unloaded.
+	orphan := "/etc/supervisor/conf.d/berth-app_example_com.conf"
+	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{Stdout: orphan + "\n"})
+	f.On("cat "+shQuote(orphan), bssh.Result{ExitCode: 0, Stdout: managedMarker + "\n[program:berth-app_example_com]\n"})
+	f.On("rm -f "+shQuote(orphan), bssh.Result{})
+	// supervisord is present, so the orphan removal must be followed by reread/update.
+	f.On("systemctl is-active supervisor", bssh.Result{ExitCode: 0, Stdout: "active\n"})
+	f.On("systemctl is-enabled supervisor", bssh.Result{ExitCode: 0, Stdout: "enabled\n"})
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var sawReread, sawUpdate bool
+	for _, c := range f.Calls() {
+		switch c.Cmd {
+		case "supervisorctl reread":
+			sawReread = true
+		case "supervisorctl update":
+			sawUpdate = true
+		}
+	}
+	if !sawReread || !sawUpdate {
+		t.Errorf("orphan removal on a supervisor host must refresh supervisord; reread=%v update=%v", sawReread, sawUpdate)
+	}
+}
+
+// TestSiteApplyNoSupervisorReloadWhenNotNeeded pins the negative gate: a site
+// with no queue/daemons and no orphan to remove must NOT touch supervisord, so a
+// regression that always reloaded would be caught (the stubs make reread/update
+// available but they must stay uncalled).
+func TestSiteApplyNoSupervisorReloadWhenNotNeeded(t *testing.T) {
+	s := siteServer() // no queue, no daemons -> NeedsSupervisor false
+	f := bssh.NewFakeRunner()
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f) // ls returns empty -> no orphan removed
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	for _, c := range f.Calls() {
+		if c.Cmd == "supervisorctl reread" || c.Cmd == "supervisorctl update" {
+			t.Errorf("must not refresh supervisord when no program is desired and none removed; saw %q", c.Cmd)
+		}
+	}
+}
+
+// TestSiteApplyOrphanReloadSkippedWhenSupervisorAbsent pins the safety guard on
+// the orphan-unload path: when supervisord is not present (serviceUp false), the
+// stale conf is still removed but supervisorctl is NOT invoked.
+func TestSiteApplyOrphanReloadSkippedWhenSupervisorAbsent(t *testing.T) {
+	s := siteServer() // no queue -> NeedsSupervisor false; reload only via removedOrphan
+	f := bssh.NewFakeRunner()
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+	orphan := "/etc/supervisor/conf.d/berth-app_example_com.conf"
+	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{Stdout: orphan + "\n"})
+	f.On("cat "+shQuote(orphan), bssh.Result{ExitCode: 0, Stdout: managedMarker + "\n[program:berth-app_example_com]\n"})
+	f.On("rm -f "+shQuote(orphan), bssh.Result{})
+	// supervisord is absent: both probes report non-zero (serviceUp => false).
+	f.On("systemctl is-active supervisor", bssh.Result{ExitCode: 3, Stdout: "inactive\n"})
+	f.On("systemctl is-enabled supervisor", bssh.Result{ExitCode: 1, Stdout: "disabled\n"})
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var rmSeen bool
+	for _, c := range f.Calls() {
+		if c.Cmd == "rm -f "+shQuote(orphan) {
+			rmSeen = true
+		}
+		if c.Cmd == "supervisorctl reread" || c.Cmd == "supervisorctl update" {
+			t.Errorf("must not invoke supervisorctl when supervisord is absent; saw %q", c.Cmd)
+		}
+	}
+	if !rmSeen {
+		t.Error("the stale orphan conf must still be removed even when supervisord is absent")
+	}
+}
+
+// TestSiteApplyOrphanReloadPropagatesServiceUpError proves the orphan-unload
+// path surfaces a transport failure from the supervisor probe rather than
+// swallowing it (a non-zero exit means "absent" and is fine; a Go error is not).
+func TestSiteApplyOrphanReloadPropagatesServiceUpError(t *testing.T) {
+	s := siteServer() // no queue -> reload only via removedOrphan
+	f := bssh.NewFakeRunner()
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+	orphan := "/etc/supervisor/conf.d/berth-app_example_com.conf"
+	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{Stdout: orphan + "\n"})
+	f.On("cat "+shQuote(orphan), bssh.Result{ExitCode: 0, Stdout: managedMarker + "\n[program:berth-app_example_com]\n"})
+	f.On("rm -f "+shQuote(orphan), bssh.Result{})
+	// The probe itself fails at the transport layer -> Apply must not hide it.
+	f.OnError("systemctl is-active supervisor", fmt.Errorf("ssh: connection lost"))
+
+	err := Site().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil {
+		t.Fatal("expected Apply to propagate the serviceUp transport error, got nil")
+	}
+	if !strings.Contains(err.Error(), "connection lost") {
+		t.Errorf("expected the transport error to surface; got %v", err)
+	}
+}
+
+// TestSiteCheckUnsatisfiedWhenSupervisorProgramNotLoaded proves Check is
+// convergent for a box whose worker conf is on disk but was never loaded into
+// supervisord (the real bug the live run found): status reports "no such group",
+// so Check must flag drift -> Apply reread/updates it.
+func TestSiteCheckUnsatisfiedWhenSupervisorProgramNotLoaded(t *testing.T) {
+	s := siteServer()
+	s.Queue = true
+	f := bssh.NewFakeRunner()
+	stubManagedSiteFiles(t, s, f)
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
+	// The worker conf is on disk but supervisord never loaded it. The glob is
+	// shell-quoted (so /bin/sh -c never pathname-expands it), matching the step.
+	f.On("supervisorctl status "+shQuote("berth-app_example_com:*"), bssh.Result{ExitCode: 4, Stdout: "berth-app_example_com: ERROR (no such group)\n"})
+
+	cr, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied when the supervisor program is on disk but not loaded")
+	}
+}
+
+// TestSiteCheckSatisfiedWhenSupervisorProgramLoaded guards the convergence
+// endpoint: once the program is loaded (dormant STOPPED, no "no such"), Check is
+// satisfied so the engine stops re-applying. Inverting the load condition would
+// trip this.
+func TestSiteCheckSatisfiedWhenSupervisorProgramLoaded(t *testing.T) {
+	s := siteServer()
+	s.Queue = true
+	f := bssh.NewFakeRunner()
+	stubManagedSiteFiles(t, s, f)
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
+	// supervisord has the program loaded (dormant); status lists it, no "no such".
+	f.On("supervisorctl status "+shQuote("berth-app_example_com:*"), bssh.Result{ExitCode: 3, Stdout: "berth-app_example_com:berth-app_example_com_00   STOPPED   Not started\n"})
+
+	cr, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("expected satisfied when the supervisor program is loaded; got %+v", cr)
 	}
 }
