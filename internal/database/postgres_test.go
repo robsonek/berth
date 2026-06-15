@@ -54,9 +54,9 @@ func TestPostgresMetadata(t *testing.T) {
 	if p.ServerPackage() != "postgresql" {
 		t.Errorf("ServerPackage = %q", p.ServerPackage())
 	}
-	driver, port := p.EnvConnection()
-	if driver != "pgsql" || port != "5432" {
-		t.Errorf("EnvConnection = %q/%q, want pgsql/5432", driver, port)
+	driver, host, port, socket := p.EnvConnection()
+	if driver != "pgsql" || host != "127.0.0.1" || port != "5432" || socket != "" {
+		t.Errorf("EnvConnection = %q/%q/%q/%q, want pgsql/127.0.0.1/5432/\"\"", driver, host, port, socket)
 	}
 	repo, ok := p.UpstreamRepo()
 	if !ok || repo.Name != "pgdg" {

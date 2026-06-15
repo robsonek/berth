@@ -38,3 +38,14 @@ func TestMariaDBEnsureDatabaseIdempotent(t *testing.T) {
 		t.Error("expected idempotent CREATE DATABASE IF NOT EXISTS")
 	}
 }
+
+func TestMariaDBMetadata(t *testing.T) {
+	m := MariaDB{}
+	if m.Name() != "mariadb" {
+		t.Errorf("Name = %q", m.Name())
+	}
+	driver, host, port, socket := m.EnvConnection()
+	if driver != "mysql" || host != "localhost" || port != "3306" || socket != "/run/mysqld/mysqld.sock" {
+		t.Errorf("EnvConnection = %q/%q/%q/%q, want mysql/localhost/3306//run/mysqld/mysqld.sock", driver, host, port, socket)
+	}
+}
