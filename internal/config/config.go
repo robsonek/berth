@@ -37,6 +37,48 @@ type Fail2ban struct {
 	Maxretry int    `mapstructure:"maxretry" yaml:"maxretry,omitempty"`
 }
 
+// Tuning holds optional, conservative performance-tuning overrides applied as
+// managed drop-ins (Valkey systemd drop-in; MariaDB mariadb.conf.d). Empty fields
+// fall back to the defaults returned by the *Eff accessors. The defaults live in
+// the accessors (NOT in Load() via SetDefault) so wizard ToServer() and literal
+// Server callers that bypass Load() still render valid, non-empty values — an
+// empty value would otherwise produce a broken directive (e.g. "maxmemory ").
+type Tuning struct {
+	ValkeyMaxmemory       string `mapstructure:"valkey_maxmemory" yaml:"valkey_maxmemory,omitempty"`
+	ValkeyMaxmemoryPolicy string `mapstructure:"valkey_maxmemory_policy" yaml:"valkey_maxmemory_policy,omitempty"`
+	MariaDBBufferPool     string `mapstructure:"mariadb_innodb_buffer_pool" yaml:"mariadb_innodb_buffer_pool,omitempty"`
+}
+
+const (
+	defaultValkeyMaxmemory       = "256mb"
+	defaultValkeyMaxmemoryPolicy = "allkeys-lru"
+	defaultMariaDBBufferPool     = "256M"
+)
+
+// ValkeyMaxmemoryEff returns the configured maxmemory or the conservative default.
+func (t Tuning) ValkeyMaxmemoryEff() string {
+	if t.ValkeyMaxmemory == "" {
+		return defaultValkeyMaxmemory
+	}
+	return t.ValkeyMaxmemory
+}
+
+// ValkeyMaxmemoryPolicyEff returns the configured eviction policy or the default.
+func (t Tuning) ValkeyMaxmemoryPolicyEff() string {
+	if t.ValkeyMaxmemoryPolicy == "" {
+		return defaultValkeyMaxmemoryPolicy
+	}
+	return t.ValkeyMaxmemoryPolicy
+}
+
+// MariaDBBufferPoolEff returns the configured innodb_buffer_pool_size or the default.
+func (t Tuning) MariaDBBufferPoolEff() string {
+	if t.MariaDBBufferPool == "" {
+		return defaultMariaDBBufferPool
+	}
+	return t.MariaDBBufferPool
+}
+
 type Database struct {
 	Engine string `mapstructure:"engine" yaml:"engine"` // mariadb | postgres (server-wide)
 	Source string `mapstructure:"source" yaml:"source"` // debian | mariadb | pgdg
@@ -204,6 +246,7 @@ type Server struct {
 	Queue     bool     `mapstructure:"queue" yaml:"queue"`
 	Scheduler bool     `mapstructure:"scheduler" yaml:"scheduler"`
 	Fail2ban  Fail2ban `mapstructure:"fail2ban" yaml:"fail2ban,omitempty"`
+	Tuning    Tuning   `mapstructure:"tuning" yaml:"tuning,omitempty"`
 	Sites     []Site   `mapstructure:"sites" yaml:"sites"`
 }
 
