@@ -48,6 +48,13 @@ func renderMariaDBTuning(s *config.Server) ([]byte, error) {
 // a non-zero exit, i.e. "not loaded". Liveness keys on the file's MTIME, not its
 // content, so a benign out-of-band `touch` of an otherwise up-to-date drop-in
 // triggers one reconciling restart — intentional, conservative behavior.
+//
+// The comparison truncates both the file MTIME and ActiveEnterTimestamp to whole
+// seconds, so in the astronomically rare case where a written-but-unloaded drop-in
+// shares the same wall-clock second as the unit's last (re)start it could read as
+// loaded. This is accepted as negligible: the crash-between-write-and-restart window
+// is sub-second and would have to coincide with an unrelated prior start in the same
+// second. (serviceUp in checkTuned independently covers the down-service case.)
 func serviceConfigLoaded(ctx context.Context, r bssh.Runner, unit, path string) (bool, error) {
 	cmd := `[ "$(stat -c %Y ` + shQuote(path) + ` 2>/dev/null)" -le "$(date -d "$(systemctl show -p ActiveEnterTimestamp --value ` + unit + `)" +%s 2>/dev/null)" ]`
 	res, err := r.Run(ctx, cmd, nil)
@@ -57,8 +64,12 @@ func serviceConfigLoaded(ctx context.Context, r bssh.Runner, unit, path string) 
 	return res.ExitCode == 0, nil
 }
 
-// checkTuned reports whether a managed tuning file is up to date AND loaded by its
-// unit. It returns a human-readable change list when not satisfied.
+// checkTuned reports whether a managed tuning file is up to date, its unit is up
+// (active+enabled), AND the running config has loaded the file. The contract is
+// managedFileSatisfied && serviceUp && liveness, evaluated in that order: a unit that
+// was active then STOPPED retains its old ActiveEnterTimestamp, so liveness alone
+// would falsely pass for a down service — serviceUp guards that. It returns a
+// human-readable change list when not satisfied.
 func checkTuned(ctx context.Context, rc provision.RunCtx, r bssh.Runner, unit, path string, want []byte, what string) (bool, []string, error) {
 	state, err := checkManagedFile(ctx, r, path, want)
 	if err != nil {
@@ -70,6 +81,13 @@ func checkTuned(ctx context.Context, rc provision.RunCtx, r bssh.Runner, unit, p
 	}
 	if !fileOK {
 		return false, []string{"write " + path + " (" + what + "), restart " + unit}, nil
+	}
+	up, err := serviceUp(ctx, r, unit)
+	if err != nil {
+		return false, nil, err
+	}
+	if !up {
+		return false, []string{"restart " + unit + " (not running)"}, nil
 	}
 	loaded, err := serviceConfigLoaded(ctx, r, unit, path)
 	if err != nil {
@@ -115,25 +133,35 @@ func (tuning) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 	return provision.CheckResult{Satisfied: false, Reason: "service tuning not applied", Changes: changes}, nil
 }
 
-func (tuning) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) error {
+// Apply reconciles only the service blocks that are actually unsatisfied. Each block
+// re-runs the SAME checkTuned predicate Check uses, so a healthy service is skipped
+// entirely (no spurious restart) — a Valkey-only drift never restarts MariaDB, and
+// vice versa. This is re-entrant and idempotent.
+func (tuning) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
 	if s.Valkey {
 		cfg, err := renderValkeyDropIn(s)
 		if err != nil {
 			return err
 		}
-		if res, err := r.Run(ctx, "mkdir -p "+valkeyDropInDir, nil); err != nil {
+		ok, _, err := checkTuned(ctx, rc, r, valkeyUnit, valkeyDropInPath, cfg, "valkey maxmemory/eviction")
+		if err != nil {
 			return err
-		} else if res.ExitCode != 0 {
-			return fmt.Errorf("mkdir %s: %s", valkeyDropInDir, res.Stderr)
 		}
-		if err := r.WriteFile(ctx, bssh.FileSpec{Path: valkeyDropInPath, Content: cfg, Owner: "root", Group: "root", Mode: 0o644, Sudo: true}); err != nil {
-			return fmt.Errorf("write %s: %w", valkeyDropInPath, err)
-		}
-		for _, cmd := range []string{"systemctl daemon-reload", "systemctl restart " + valkeyUnit} {
-			if res, err := r.Run(ctx, cmd, nil); err != nil {
+		if !ok {
+			if res, err := r.Run(ctx, "mkdir -p "+valkeyDropInDir, nil); err != nil {
 				return err
 			} else if res.ExitCode != 0 {
-				return fmt.Errorf("tuning %q: %s", cmd, res.Stderr)
+				return fmt.Errorf("mkdir %s: %s", valkeyDropInDir, res.Stderr)
+			}
+			if err := r.WriteFile(ctx, bssh.FileSpec{Path: valkeyDropInPath, Content: cfg, Owner: "root", Group: "root", Mode: 0o644, Sudo: true}); err != nil {
+				return fmt.Errorf("write %s: %w", valkeyDropInPath, err)
+			}
+			for _, cmd := range []string{"systemctl daemon-reload", "systemctl restart " + valkeyUnit} {
+				if res, err := r.Run(ctx, cmd, nil); err != nil {
+					return err
+				} else if res.ExitCode != 0 {
+					return fmt.Errorf("tuning %q: %s", cmd, res.Stderr)
+				}
 			}
 		}
 	}
@@ -142,13 +170,19 @@ func (tuning) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r
 		if err != nil {
 			return err
 		}
-		if err := r.WriteFile(ctx, bssh.FileSpec{Path: mariadbTuningPath, Content: cfg, Owner: "root", Group: "root", Mode: 0o644, Sudo: true}); err != nil {
-			return fmt.Errorf("write %s: %w", mariadbTuningPath, err)
-		}
-		if res, err := r.Run(ctx, "systemctl restart "+mariadbUnit, nil); err != nil {
+		ok, _, err := checkTuned(ctx, rc, r, mariadbUnit, mariadbTuningPath, cfg, "mariadb innodb_buffer_pool_size")
+		if err != nil {
 			return err
-		} else if res.ExitCode != 0 {
-			return fmt.Errorf("restart %s: %s", mariadbUnit, res.Stderr)
+		}
+		if !ok {
+			if err := r.WriteFile(ctx, bssh.FileSpec{Path: mariadbTuningPath, Content: cfg, Owner: "root", Group: "root", Mode: 0o644, Sudo: true}); err != nil {
+				return fmt.Errorf("write %s: %w", mariadbTuningPath, err)
+			}
+			if res, err := r.Run(ctx, "systemctl restart "+mariadbUnit, nil); err != nil {
+				return err
+			} else if res.ExitCode != 0 {
+				return fmt.Errorf("restart %s: %s", mariadbUnit, res.Stderr)
+			}
 		}
 	}
 	return nil
