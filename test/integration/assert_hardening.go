@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -44,7 +45,7 @@ func assertHardeningEndState(ctx context.Context, t *testing.T, c *bssh.Client, 
 			t.Errorf("ufw missing rule for %s:\n%s", port, ufw.Stdout)
 		}
 	}
-	if anySiteHTTP3(srv) && !strings.Contains(ufw.Stdout, "443/udp") {
+	if anySiteHTTP3(srv) && !regexp.MustCompile(`(^|[^0-9])443/udp`).MatchString(ufw.Stdout) {
 		t.Errorf("ufw missing 443/udp for HTTP/3:\n%s", ufw.Stdout)
 	}
 

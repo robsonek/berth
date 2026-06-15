@@ -28,7 +28,7 @@ func assertMultiSiteIsolation(ctx context.Context, t *testing.T, c *bssh.Client,
 		// nginx, so we assert the *process* owner, not the socket).
 		assertExitZero(ctx, t, c, "fpm socket exists "+a.Domain, "test -S /run/php/berth-"+poolA+".sock")
 		assertExitZero(ctx, t, c, "fpm pool runs as "+userA,
-			fmt.Sprintf("pgrep -u %s -f 'pool berth-%s'", userA, poolA))
+			fmt.Sprintf("pgrep -u %s -f 'pool %s'", userA, poolA))
 		for _, b := range srv.Sites {
 			if b.Domain == a.Domain {
 				continue
@@ -47,6 +47,12 @@ func assertMultiSiteIsolation(ctx context.Context, t *testing.T, c *bssh.Client,
 			// would false-pass while a sudoers hole exists. `sudo -l` tests the grant.
 			assertDenied(ctx, t, c, fmt.Sprintf("%s authorized for %s supervisor program", userB, a.Domain),
 				fmt.Sprintf("sudo -u %s sudo -n -l /usr/bin/supervisorctl restart 'berth-%s:*'", userB, poolA))
+			// Also deny the iter-2 exploit shape: B's OWN target PLUS A's appended as an
+			// extra arg — an unescaped sudoers `*` matched across whitespace, letting B
+			// drive A's program. The escaped grant (literal `berth-<pool>:*`) rejects it.
+			poolB := config.PoolName(b.Domain)
+			assertDenied(ctx, t, c, fmt.Sprintf("%s appends %s program to its own", userB, a.Domain),
+				fmt.Sprintf("sudo -u %s sudo -n -l /usr/bin/supervisorctl restart 'berth-%s:*' 'berth-%s:*'", userB, poolB, poolA))
 		}
 	}
 }
