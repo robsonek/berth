@@ -19,8 +19,8 @@ var aptLockSleep = func() { time.Sleep(5 * time.Second) }
 const aptLockMaxAttempts = 120
 
 // repoIndexRetries bounds how many times EnsureRepo re-verifies that a freshly
-// added upstream source actually indexed before failing loud. The mariadb.org
-// redirector can route to a dead mirror; a later attempt may land on a live one.
+// added upstream source actually indexed before failing loud. An upstream mirror
+// or CDN can transiently fail to index; a later attempt may succeed.
 const repoIndexRetries = 3
 
 // repoIndexSleep is the pause between repo-index retries; a package var so tests
@@ -111,14 +111,19 @@ func PostgresPGDG() Repo {
 	}
 }
 
-// MariaDBOrg returns the official mariadb.org 12.3 LTS repository for Debian 13,
-// used by the database step when database.source is "mariadb". Fingerprint is the
-// full 40-hex MariaDB release signing key (the 12.3 repo is signed by the same
-// key as 11.8; mariadb.org's key bundle also carries a newer key for rotation).
+// MariaDBOrg returns the official MariaDB 12.3 LTS repository for Debian 13, used
+// by the database step when database.source is "mariadb". The URI is dlm.mariadb.com
+// (MariaDB's official download-manager endpoint, the one their own mariadb_repo_setup
+// configures) rather than the deb.mariadb.org MirrorBrain redirector: the redirector
+// geo-routes to third-party mirrors that are frequently unreachable, which made the
+// install silently fall back to Debian's package; dlm.mariadb.com serves the identical
+// signed repo from a reliable CDN. Fingerprint is the full 40-hex MariaDB release
+// signing key (the 12.3 repo is signed by the same key as 11.8; the key bundle also
+// carries a newer key for rotation).
 func MariaDBOrg() Repo {
 	return Repo{
 		Name:        "mariadb-org",
-		URI:         "https://deb.mariadb.org/12.3/debian/",
+		URI:         "https://dlm.mariadb.com/repo/mariadb-server/12.3/repo/debian/",
 		Suite:       "trixie",
 		Components:  []string{"main"},
 		KeyURL:      "https://mariadb.org/mariadb_release_signing_key.asc",
@@ -163,8 +168,8 @@ func (m *Manager) EnsureRepo(ctx context.Context, repo Repo) error {
 	// Guard against silent Debian fallback: `apt-get update` exits 0 even when a
 	// source fails to download (it "ignores" it), so a dead upstream would let the
 	// later install resolve to Debian's package. Re-update ONLY this source with
-	// Error-Mode=any (non-zero iff THIS source failed), retrying — the mariadb.org
-	// redirector may pick a live mirror later. After repoIndexRetries, fail loud.
+	// Error-Mode=any (non-zero iff THIS source failed), retrying — a transient
+	// upstream/CDN hiccup may clear on a later attempt. After repoIndexRetries, fail loud.
 	// apt-lock contention is waited out separately (another apt process can grab the
 	// lock between the full update above and this one) and is NOT an index failure.
 	//
