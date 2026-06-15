@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -47,6 +48,39 @@ var reservedOSUsers = map[string]bool{
 // dbEngineUpstreamSource maps each supported database engine to the non-"debian"
 // value its database.source may take (its trusted producer repo).
 var dbEngineUpstreamSource = map[string]string{"mariadb": "mariadb", "postgres": "pgdg"}
+
+// DatabaseChoice is one selectable (engine, source) pair with a display label.
+// It is the single source of truth the wizard's database picker builds from, so
+// adding a 5th pair stays a one-line edit to dbEngineUpstreamSource (plus labels).
+type DatabaseChoice struct {
+	Engine string
+	Source string
+	Label  string
+}
+
+var dbEngineLabel = map[string]string{"mariadb": "MariaDB", "postgres": "PostgreSQL"}
+var dbSourceLabel = map[string]string{"debian": "Debian", "mariadb": "mariadb.org", "pgdg": "pgdg"}
+
+// DatabaseChoices returns every valid (engine, source) pair in deterministic
+// order: engines sorted, each emitting its implicit "debian" source then its
+// upstream source from dbEngineUpstreamSource.
+func DatabaseChoices() []DatabaseChoice {
+	engines := make([]string, 0, len(dbEngineUpstreamSource))
+	for e := range dbEngineUpstreamSource {
+		engines = append(engines, e)
+	}
+	sort.Strings(engines)
+	out := make([]DatabaseChoice, 0, len(engines)*2)
+	for _, e := range engines {
+		for _, src := range []string{"debian", dbEngineUpstreamSource[e]} {
+			out = append(out, DatabaseChoice{
+				Engine: e, Source: src,
+				Label: dbEngineLabel[e] + " (" + dbSourceLabel[src] + ")",
+			})
+		}
+	}
+	return out
+}
 
 // Validate checks every field that reaches a shell, SQL statement, or path.
 func (s *Server) Validate() error {

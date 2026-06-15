@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"reflect"
 	"testing"
 )
 
@@ -267,6 +268,29 @@ func TestGitHost(t *testing.T) {
 		got, err := GitHost(in)
 		if err != nil || got != want {
 			t.Errorf("GitHost(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+}
+
+func TestDatabaseChoices(t *testing.T) {
+	got := DatabaseChoices()
+	want := []DatabaseChoice{
+		{Engine: "mariadb", Source: "debian", Label: "MariaDB (Debian)"},
+		{Engine: "mariadb", Source: "mariadb", Label: "MariaDB (mariadb.org)"},
+		{Engine: "postgres", Source: "debian", Label: "PostgreSQL (Debian)"},
+		{Engine: "postgres", Source: "pgdg", Label: "PostgreSQL (pgdg)"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("DatabaseChoices() =\n %+v\nwant\n %+v", got, want)
+	}
+	for _, c := range got {
+		s := &Server{
+			Host: "h.example", SSH: SSH{Port: 22}, PHP: PHP{Version: "8.5", Source: "auto"},
+			Nginx: Nginx{Source: "debian"}, Database: Database{Engine: c.Engine, Source: c.Source},
+			Sites: []Site{{Domain: "a.example", DeployPath: "/srv/a", Database: SiteDatabase{Name: "a", User: "a"}}},
+		}
+		if err := s.Validate(); err != nil {
+			t.Errorf("choice %+v rejected by Validate: %v", c, err)
 		}
 	}
 }
