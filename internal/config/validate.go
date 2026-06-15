@@ -73,14 +73,34 @@ func DatabaseChoices() []DatabaseChoice {
 	sort.Strings(engines)
 	out := make([]DatabaseChoice, 0, len(engines)*2)
 	for _, e := range engines {
+		el := dbEngineLabel[e]
+		if el == "" {
+			el = e
+		}
 		for _, src := range []string{"debian", dbEngineUpstreamSource[e]} {
+			sl := dbSourceLabel[src]
+			if sl == "" {
+				sl = src
+			}
 			out = append(out, DatabaseChoice{
 				Engine: e, Source: src,
-				Label: dbEngineLabel[e] + " (" + dbSourceLabel[src] + ")",
+				Label: el + " (" + sl + ")",
 			})
 		}
 	}
 	return out
+}
+
+// supportedEngines returns the sorted, comma-joined list of supported database
+// engines, derived from dbEngineUpstreamSource so a new engine flows through to
+// error messages automatically.
+func supportedEngines() string {
+	es := make([]string, 0, len(dbEngineUpstreamSource))
+	for e := range dbEngineUpstreamSource {
+		es = append(es, e)
+	}
+	sort.Strings(es)
+	return strings.Join(es, ", ")
 }
 
 // ValidFingerprint reports whether fp is acceptable as ssh.fingerprint. Empty is
@@ -137,7 +157,7 @@ func (s *Server) Validate() error {
 	}
 	upstream, engineOK := dbEngineUpstreamSource[s.Database.Engine]
 	if !engineOK {
-		return fmt.Errorf("database.engine %q unsupported (supported: mariadb, postgres)", s.Database.Engine)
+		return fmt.Errorf("database.engine %q unsupported (supported: %s)", s.Database.Engine, supportedEngines())
 	}
 	if s.Database.Source != "debian" && s.Database.Source != upstream {
 		return fmt.Errorf("database.source %q invalid for engine %q (use debian or %s)", s.Database.Source, s.Database.Engine, upstream)
