@@ -19,8 +19,13 @@ type Engine interface {
 	// UpstreamRepo returns the engine's producer apt repository and true, or a
 	// zero Repo and false if the engine has no trusted upstream.
 	UpstreamRepo() (apt.Repo, bool)
-	// EnvConnection returns the Laravel .env DB_CONNECTION driver and DB_PORT.
-	EnvConnection() (driver, port string)
+	// EnvConnection returns the Laravel .env DB_CONNECTION driver, DB_HOST, DB_PORT
+	// and DB_SOCKET (socket is "" for engines that connect over TCP). Each engine
+	// reports its natural local transport: MariaDB the unix socket its
+	// '<user>'@'localhost' grant was created for; Postgres TCP to 127.0.0.1 (its
+	// app role cannot use the socket — peer auth maps to the OS user name, not the
+	// role name).
+	EnvConnection() (driver, host, port, socket string)
 	// EnsureDatabase creates the application database if absent (idempotent).
 	EnsureDatabase(ctx context.Context, r bssh.Runner, name string) error
 	// EnsureUser creates the application user/role (or re-syncs its password) and

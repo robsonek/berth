@@ -23,8 +23,11 @@ func (Postgres) ServerPackage() string { return "postgresql" }
 // UpstreamRepo is the official PostgreSQL Global Development Group repository.
 func (Postgres) UpstreamRepo() (apt.Repo, bool) { return apt.PostgresPGDG(), true }
 
-// EnvConnection is Laravel's PostgreSQL driver and default port.
-func (Postgres) EnvConnection() (driver, port string) { return "pgsql", "5432" }
+// EnvConnection is Laravel's PostgreSQL driver over TCP loopback (the app role
+// cannot use peer-auth socket access).
+func (Postgres) EnvConnection() (driver, host, port, socket string) {
+	return "pgsql", "127.0.0.1", "5432", ""
+}
 
 // runPSQL pipes a SQL script to psql as the postgres superuser. ON_ERROR_STOP
 // makes any failing statement abort with a non-zero exit.

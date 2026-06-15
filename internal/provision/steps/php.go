@@ -28,6 +28,27 @@ func opcacheDropInPath(ver string) string {
 // renderOpcache renders the production OPcache settings (INI, ';' marker).
 func renderOpcache() ([]byte, error) { return templates.RenderINI("php_opcache.ini.tmpl", nil) }
 
+// phpPDOExt is the PHP PDO extension for a database engine: pgsql for postgres,
+// else mysql. A Postgres app needs pdo_pgsql; installing the wrong one leaves the
+// box unable to connect.
+func phpPDOExt(engine string) string {
+	if engine == "postgres" {
+		return "pgsql"
+	}
+	return "mysql"
+}
+
+// phpPackages returns the php<ver>-<ext> packages to install, including the
+// engine-appropriate PDO driver.
+func phpPackages(version, engine string) []string {
+	exts := []string{"fpm", "cli", "mbstring", "xml", "bcmath", "curl", "intl", "zip", "gd", "redis", phpPDOExt(engine)}
+	pkgs := make([]string, len(exts))
+	for i, ext := range exts {
+		pkgs[i] = fmt.Sprintf("php%s-%s", version, ext)
+	}
+	return pkgs
+}
+
 type php struct{}
 
 func PHP() provision.Step { return php{} }
@@ -86,6 +107,16 @@ func (php) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 	if dir.ExitCode != 0 {
 		return provision.CheckResult{Satisfied: false, Reason: phpLogDir + " missing", Changes: changes}, nil
 	}
+	// The engine PDO driver must be installed too (a Postgres box with only pdo_mysql
+	// can't run a DB_CONNECTION=pgsql app even though fpm is present).
+	pdoPkg := "php" + s.PHP.Version + "-" + phpPDOExt(s.Database.Engine)
+	pdo, err := r.Run(ctx, "dpkg -s "+pdoPkg, nil)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	if pdo.ExitCode != 0 {
+		return provision.CheckResult{Satisfied: false, Reason: pdoPkg + " not installed", Changes: changes}, nil
+	}
 	return provision.CheckResult{Satisfied: true, Reason: "php" + s.PHP.Version + "-fpm installed; OPcache tuned for production"}, nil
 }
 
@@ -101,10 +132,7 @@ func (php) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r bs
 		}
 	}
 	v := s.PHP.Version
-	pkgs := []string{}
-	for _, ext := range []string{"fpm", "cli", "mbstring", "xml", "bcmath", "curl", "intl", "zip", "gd", "redis", "mysql"} {
-		pkgs = append(pkgs, fmt.Sprintf("php%s-%s", v, ext))
-	}
+	pkgs := phpPackages(v, s.Database.Engine)
 	if err := m.EnsurePackages(ctx, nil, pkgs...); err != nil {
 		return err
 	}

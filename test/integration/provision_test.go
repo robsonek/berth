@@ -71,7 +71,10 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	// Run the full pipeline.
 	red := secret.NewRedactor()
 	eng := provision.New(steps.Pipeline(srv, red, skipSSL)...)
-	events, err := eng.Run(ctx, srv, client, provision.Options{SSLStaging: os.Getenv("BERTH_TEST_SSL_STAGING") == "true"})
+	events, err := eng.Run(ctx, srv, client, provision.Options{
+		Force:      os.Getenv("BERTH_TEST_FORCE") == "true",
+		SSLStaging: os.Getenv("BERTH_TEST_SSL_STAGING") == "true",
+	})
 	if err != nil {
 		t.Fatalf("pipeline pre-flight: %v", err)
 	}
@@ -89,8 +92,13 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	// Assert the documented end state over the same connection.
 	assertServicesActive(ctx, t, client, srv)
 	assertExitZero(ctx, t, client, "nginx -t", "sudo nginx -t")
-	assertExitZero(ctx, t, client, "mariadb socket",
-		`sudo mysql --protocol=socket -e 'SELECT 1'`)
+	if srv.Database.Engine == "postgres" {
+		assertExitZero(ctx, t, client, "postgres peer",
+			`sudo -u postgres psql -tAc 'SELECT 1'`)
+	} else {
+		assertExitZero(ctx, t, client, "mariadb socket",
+			`sudo mysql --protocol=socket -e 'SELECT 1'`)
+	}
 	assertHTTPServes(t, "http://"+net.JoinHostPort(srv.Host, "80")+"/", false)
 
 	// When TLS was actually provisioned, the site must answer over HTTPS too.
@@ -102,6 +110,16 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	if !skipSSL && anySiteSelfSigned(srv) {
 		assertSelfSignedCert(ctx, t, client, srv)
 	}
+
+	// Load-bearing invariants (iter-4): cross-tenant isolation (multi-site only),
+	// per-site DB auth over the app's real path + Postgres e2e, hardening end-state.
+	// Fresh context — a slow first provision may have nearly exhausted ctx (30m); these
+	// are quick read-only checks (mirrors assertSecondRunIdempotent's fresh deadline).
+	invCtx, invCancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer invCancel()
+	assertMultiSiteIsolation(invCtx, t, client, srv)
+	assertDBAuth(invCtx, t, client, srv)
+	assertHardeningEndState(invCtx, t, client, srv)
 
 	// berth's defining contract: an immediate second run must change nothing
 	// (every step satisfied), except preflight which re-runs apt by design.
@@ -163,7 +181,7 @@ func assertServicesActive(ctx context.Context, t *testing.T, c *bssh.Client, srv
 	units := []string{
 		"nginx",
 		fmt.Sprintf("php%s-fpm", srv.PHP.Version),
-		"mariadb",
+		dbServiceName(srv.Database.Engine),
 	}
 	if srv.Valkey {
 		units = append(units, "valkey-server")
@@ -199,18 +217,6 @@ func assertSelfSignedCert(ctx context.Context, t *testing.T, c *bssh.Client, srv
 	}
 }
 
-// assertExitZero fails unless cmd exits 0 on the target.
-func assertExitZero(ctx context.Context, t *testing.T, c *bssh.Client, label, cmd string) {
-	t.Helper()
-	res, err := c.Run(ctx, cmd, nil)
-	if err != nil {
-		t.Fatalf("%s: run: %v", label, err)
-	}
-	if res.ExitCode != 0 {
-		t.Errorf("%s: exit %d, stderr %q", label, res.ExitCode, strings.TrimSpace(res.Stderr))
-	}
-}
-
 // assertHTTPServes fails if the server never answers, or answers with an
 // unexpected server error. A 502 (Bad Gateway) is accepted: nginx is up and
 // correctly proxying to PHP-FPM, but no app is deployed yet ("Primary script
@@ -237,13 +243,4 @@ func assertHTTPServes(t *testing.T, url string, insecureTLS bool) {
 	if resp.StatusCode >= 500 && resp.StatusCode != http.StatusBadGateway {
 		t.Errorf("GET %s -> %d, want < 500 or the pre-deploy 502", url, resp.StatusCode)
 	}
-}
-
-// knownHostsPath returns ~/.ssh/known_hosts, or "" if the home dir is unknown.
-func knownHostsPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return home + "/.ssh/known_hosts"
 }

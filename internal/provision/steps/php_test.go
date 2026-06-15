@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -109,12 +110,47 @@ func TestPHPCheckSatisfiedWhenInstalledAndOpcacheManaged(t *testing.T) {
 	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(want), ExitCode: 0})
 	f.On("test -d "+shQuote(phpLogDir), bssh.Result{ExitCode: 0})
+	f.On("dpkg -s php8.4-mysql", bssh.Result{ExitCode: 0}) // engine "" -> pdo_mysql, installed
 	cr, err := PHP().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !cr.Satisfied {
 		t.Errorf("expected satisfied when installed and OPcache drop-in up to date; got %+v", cr)
+	}
+}
+
+func TestPHPPackagesEngineAware(t *testing.T) {
+	mar := phpPackages("8.5", "mariadb")
+	if !slices.Contains(mar, "php8.5-mysql") || slices.Contains(mar, "php8.5-pgsql") {
+		t.Errorf("mariadb packages = %v; want php8.5-mysql, not php8.5-pgsql", mar)
+	}
+	if !slices.Contains(mar, "php8.5-fpm") || !slices.Contains(mar, "php8.5-redis") {
+		t.Errorf("mariadb packages missing base extensions: %v", mar)
+	}
+	pg := phpPackages("8.5", "postgres")
+	if !slices.Contains(pg, "php8.5-pgsql") || slices.Contains(pg, "php8.5-mysql") {
+		t.Errorf("postgres packages = %v; want php8.5-pgsql, not php8.5-mysql", pg)
+	}
+}
+
+func TestPHPCheckUnsatisfiedWhenPDODriverMissing(t *testing.T) {
+	s := &config.Server{PHP: config.PHP{Version: "8.4"}, Database: config.Database{Engine: "postgres"}}
+	want, err := renderOpcache()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0})
+	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(want), ExitCode: 0})
+	f.On("test -d "+shQuote(phpLogDir), bssh.Result{ExitCode: 0})
+	f.On("dpkg -s php8.4-pgsql", bssh.Result{ExitCode: 1}) // PDO driver missing
+	cr, err := PHP().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied when the engine PDO driver (php8.4-pgsql) is missing")
 	}
 }
 

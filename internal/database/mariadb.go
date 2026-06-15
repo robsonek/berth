@@ -20,8 +20,10 @@ func (MariaDB) ServerPackage() string { return "mariadb-server" }
 // UpstreamRepo is mariadb.org's 12.3 LTS repository.
 func (MariaDB) UpstreamRepo() (apt.Repo, bool) { return apt.MariaDBOrg(), true }
 
-// EnvConnection is Laravel's MySQL-protocol driver and default port.
-func (MariaDB) EnvConnection() (driver, port string) { return "mysql", "3306" }
+// EnvConnection is Laravel's MySQL driver over the local unix socket.
+func (MariaDB) EnvConnection() (driver, host, port, socket string) {
+	return "mysql", "localhost", "3306", "/run/mysqld/mysqld.sock"
+}
 
 // runSQL pipes a statement to the local socket as root (unix_socket auth on Debian).
 func runSQL(ctx context.Context, r bssh.Runner, sql string) error {
