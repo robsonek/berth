@@ -96,6 +96,30 @@ berth tunes the host for production Laravel out of the box:
 - nginx serves fingerprinted Vite assets under `/build/assets/` with a one-year
   cache and gzip, and raises `client_max_body_size` for typical uploads.
 
+### Service tuning (`tuning:`)
+
+berth applies conservative, managed tuning drop-ins automatically:
+
+- **Valkey** (when `valkey: true`) — a systemd drop-in sets `maxmemory` and
+  `maxmemory-policy` so the cache evicts instead of returning OOM errors once
+  full (Debian's default is `noeviction` with no `maxmemory`, so a full cache
+  fails writes).
+- **MariaDB** (when `database.engine: mariadb`) — a `mariadb.conf.d` drop-in
+  sets `innodb_buffer_pool_size`.
+
+Every value is overridable; omit a field to keep its default:
+
+```yaml
+tuning:
+  valkey_maxmemory: 256mb              # default
+  valkey_maxmemory_policy: allkeys-lru # default; any Valkey eviction policy
+  mariadb_innodb_buffer_pool: 256M     # default
+```
+
+With one shared Valkey for cache, session and queue, `allkeys-lru` can evict
+queued jobs under memory pressure; use `volatile-lru` to evict only keys that
+carry a TTL.
+
 ### Deploy hook (required with OPcache)
 
 Because `opcache.validate_timestamps=0`, new code is served only after PHP-FPM is
