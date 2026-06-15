@@ -48,7 +48,7 @@ func TestUpstreamRepoDefinitions(t *testing.T) {
 	}{
 		{Sury(), "sury", "main"},
 		{NginxOrg(), "nginx.org", "nginx"},
-		{MariaDBOrg(), "mariadb.org", "main"},
+		{MariaDBOrg(), "dlm.mariadb.com", "main"},
 	} {
 		if len(c.repo.Fingerprint) != 40 {
 			t.Errorf("%s: fingerprint %q is not a full 40-hex value", c.repo.Name, c.repo.Fingerprint)
