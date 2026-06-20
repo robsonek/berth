@@ -314,3 +314,32 @@ func TestValidFingerprint(t *testing.T) {
 		}
 	}
 }
+
+func TestSystemValidate(t *testing.T) {
+	cases := []struct {
+		name    string
+		sys     System
+		wantErr bool
+	}{
+		{"empty is off", System{}, false},
+		{"sysctl only", System{Sysctl: true}, false},
+		{"swap 2G", System{Swap: "2G"}, false},
+		{"swap 512M", System{Swap: "512M"}, false},
+		{"swap lowercase g", System{Swap: "2g"}, false},
+		{"swap lowercase m", System{Swap: "512m"}, false},
+		{"swap zero", System{Swap: "0G"}, true},
+		{"swap no unit", System{Swap: "2"}, true},
+		{"swap GB two letters", System{Swap: "2GB"}, true},
+		{"swap trailing space", System{Swap: "2G "}, true},
+		{"swap negative", System{Swap: "-1G"}, true},
+		{"swap kilobytes unit", System{Swap: "1024K"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.sys.validate()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validate() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+		})
+	}
+}
