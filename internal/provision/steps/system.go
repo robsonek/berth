@@ -26,6 +26,14 @@ const (
 // and a /swapfile line WITHOUT it is treated as a foreign (operator-managed) swap.
 const fstabSwapLine = swapfilePath + " none swap sw 0 0 " + managedMarker
 
+// fstabSedAny deletes ANY /swapfile mount line; used before appending berth's line
+// (a no-op on a clean box, a clean takeover under --force). fstabSedMarked deletes
+// ONLY berth's marked line; used on removal so a foreign swap is never touched.
+const (
+	fstabSedAny    = `\|^[[:space:]]*` + swapfilePath + `[[:space:]]|d`
+	fstabSedMarked = `\|^[[:space:]]*` + swapfilePath + `[[:space:]].*` + managedMarker + `$|d`
+)
+
 // parseSwapBytes converts a validated swap size ("2G", "512M", case-insensitive)
 // to bytes. Units are binary (M = MiB, G = GiB) to match `fallocate -l` and
 // `stat -c %s`. It re-rejects bad input defensively (config.Validate already guards).
@@ -306,7 +314,199 @@ func checkSysctlRemoval(ctx context.Context, r bssh.Runner) (bool, []string, err
 }
 
 func (system) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
-	return nil // Task 5 fills this in
+	if s.System.Swap != "" {
+		if err := applySwap(ctx, rc, r, s.System.Swap); err != nil {
+			return err
+		}
+	} else {
+		if err := applySwapRemoval(ctx, r); err != nil {
+			return err
+		}
+	}
+	if s.System.Sysctl {
+		if err := applySysctl(ctx, rc, r); err != nil {
+			return err
+		}
+	} else {
+		if err := applySysctlRemoval(ctx, r); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// runOK runs cmd and fails on a transport error OR a non-zero exit.
+func runOK(ctx context.Context, r bssh.Runner, cmd string) error {
+	res, err := r.Run(ctx, cmd, nil)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("%q: %s", cmd, res.Stderr)
+	}
+	return nil
+}
+
+// swapoffIfActive runs `swapoff /swapfile` only when it is an active swap area, failing
+// loud (runOK) if that swapoff fails — e.g. ENOMEM on a memory-pressured small box — so
+// a caller never rm's/recreates over a still-active swap. A no-op when inactive (a "not
+// active" state is never treated as an error).
+func swapoffIfActive(ctx context.Context, r bssh.Runner) error {
+	active, err := swapActive(ctx, r)
+	if err != nil {
+		return err
+	}
+	if !active {
+		return nil
+	}
+	return runOK(ctx, r, "swapoff "+swapfilePath)
+}
+
+// applySwap creates/converges the swap file, fstab entry and swappiness drop-in. It
+// re-runs checkSwap first (so a satisfied swap is a no-op, and the conflict guard aborts
+// as in Check). `recreate` also fires when the existing /swapfile is unmarked (a --force
+// takeover): a crash between fallocate and mkswap could have left a non-swap file, so we
+// never trust an unmarked file — we rebuild it.
+func applySwap(ctx context.Context, rc provision.RunCtx, r bssh.Runner, size string) error {
+	ok, _, err := checkSwap(ctx, rc, r, size)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return nil
+	}
+	norm := strings.ToUpper(strings.TrimSpace(size))
+	wantBytes, err := parseSwapBytes(norm)
+	if err != nil {
+		return err
+	}
+	fstab, _, err := catTrim(ctx, r, fstabPath)
+	if err != nil {
+		return err
+	}
+	marked, foreign := fstabSwapState(fstab)
+	exists, gotBytes, err := swapfileSize(ctx, r)
+	if err != nil {
+		return err
+	}
+	recreate := !exists || gotBytes != wantBytes || !marked
+	if exists && recreate {
+		if err := swapoffIfActive(ctx, r); err != nil {
+			return err
+		}
+		if err := runOK(ctx, r, "rm -f "+swapfilePath); err != nil {
+			return err
+		}
+	}
+	if recreate {
+		for _, cmd := range []string{
+			"fallocate -l " + norm + " " + swapfilePath,
+			"chmod 600 " + swapfilePath,
+			"mkswap " + swapfilePath,
+		} {
+			if err := runOK(ctx, r, cmd); err != nil {
+				return err
+			}
+		}
+	}
+	active, err := swapActive(ctx, r)
+	if err != nil {
+		return err
+	}
+	if !active {
+		if err := runOK(ctx, r, "swapon "+swapfilePath); err != nil {
+			return err
+		}
+	}
+	// Normalize fstab to exactly one marked line when ours is missing OR a foreign line
+	// exists: delete any /swapfile line (no-op when clean), then newline-safe append so a
+	// missing trailing newline in /etc/fstab cannot merge our entry onto the prior line.
+	if !marked || foreign {
+		if err := runOK(ctx, r, "sed -i "+shQuote(fstabSedAny)+" "+fstabPath); err != nil {
+			return err
+		}
+		if err := runOK(ctx, r, "printf '\\n%s\\n' "+shQuote(fstabSwapLine)+" >> "+fstabPath); err != nil {
+			return err
+		}
+	}
+	want, err := renderSwapSysctl()
+	if err != nil {
+		return err
+	}
+	if err := r.WriteFile(ctx, bssh.FileSpec{Path: swapSysctlPath, Content: want, Owner: "root", Group: "root", Mode: 0o644, Sudo: true}); err != nil {
+		return fmt.Errorf("write %s: %w", swapSysctlPath, err)
+	}
+	return runOK(ctx, r, "sysctl -p "+swapSysctlPath)
+}
+
+// applySwapRemoval removes berth's swap artifacts when swap is off. It removes the
+// swap file + fstab line only if berth marked it (never a foreign swap), and the
+// swappiness drop-in if berth-managed.
+func applySwapRemoval(ctx context.Context, r bssh.Runner) error {
+	fstab, _, err := catTrim(ctx, r, fstabPath)
+	if err != nil {
+		return err
+	}
+	marked, _ := fstabSwapState(fstab)
+	dropPresent, err := managedFilePresent(ctx, r, swapSysctlPath)
+	if err != nil {
+		return err
+	}
+	if !marked && !dropPresent {
+		return nil
+	}
+	if marked {
+		if err := swapoffIfActive(ctx, r); err != nil {
+			return err
+		}
+		if err := runOK(ctx, r, "sed -i "+shQuote(fstabSedMarked)+" "+fstabPath); err != nil {
+			return err
+		}
+		if err := runOK(ctx, r, "rm -f "+swapfilePath); err != nil {
+			return err
+		}
+	}
+	if dropPresent {
+		if err := runOK(ctx, r, "rm -f "+swapSysctlPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// applySysctl writes the general drop-in and reloads, unless already satisfied.
+func applySysctl(ctx context.Context, rc provision.RunCtx, r bssh.Runner) error {
+	ok, _, err := checkSysctl(ctx, rc, r)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return nil
+	}
+	want, err := renderSysctl()
+	if err != nil {
+		return err
+	}
+	if err := r.WriteFile(ctx, bssh.FileSpec{Path: sysctlPath, Content: want, Owner: "root", Group: "root", Mode: 0o644, Sudo: true}); err != nil {
+		return fmt.Errorf("write %s: %w", sysctlPath, err)
+	}
+	return runOK(ctx, r, "sysctl --system")
+}
+
+// applySysctlRemoval removes the general drop-in when sysctl is off and it is
+// berth-managed, then reloads.
+func applySysctlRemoval(ctx context.Context, r bssh.Runner) error {
+	present, err := managedFilePresent(ctx, r, sysctlPath)
+	if err != nil {
+		return err
+	}
+	if !present {
+		return nil
+	}
+	if err := runOK(ctx, r, "rm -f "+sysctlPath); err != nil {
+		return err
+	}
+	return runOK(ctx, r, "sysctl --system")
 }
 
 // renderSwapSysctl renders the vm.swappiness drop-in (static; '#' marker).
