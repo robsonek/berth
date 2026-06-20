@@ -1,65 +1,22 @@
+# managed by berth
 server {
     listen 80;
     listen [::]:80;
-    server_name {{ .Domain }};
-
-    server_tokens off;
-
-    location /.well-known/acme-challenge/ {
-        root {{ .ACMEWebroot }};
-    }
-
-    location / {
-{{- if .CloudflareOnly }}
-        if ($berth_cloudflare = 0) { return 444; }
-{{- end }}
-        return 301 https://$host$request_uri;
-    }
-}
-
-server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-{{- if .HTTP3 }}
-    listen 443 quic{{ if .QUICReuseport }} reuseport{{ end }};
-    listen [::]:443 quic{{ if .QUICReuseport }} reuseport{{ end }};
-{{- end }}
-    http2 on;
-{{- if .HTTP3 }}
-    http3 on;
-{{- end }}
-    server_name {{ .Domain }};
-    root {{ .DeployPath }}/current/public;
+    server_name app.example.com;
+    root /home/deploy/myapp/current/public;
     index index.php;
 
     server_tokens off;
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
-{{- if .HSTS }}
-    add_header Strict-Transport-Security "max-age=31536000" always;
-{{- end }}
-{{- if .HTTP3 }}
-    add_header Alt-Svc 'h3=":443"; ma=86400' always;
-{{- end }}
     client_max_body_size 32m;
 
-    ssl_certificate {{ .CertPath }};
-    ssl_certificate_key {{ .KeyPath }};
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_prefer_server_ciphers off;
-    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 1d;
-    ssl_session_tickets off;
-
     location /.well-known/acme-challenge/ {
-        root {{ .ACMEWebroot }};
+        root /var/www/berth-acme/app.example.com;
     }
 
     location / {
-{{- if .CloudflareOnly }}
         if ($berth_cloudflare = 0) { return 444; }
-{{- end }}
         try_files $uri $uri/ /index.php?$query_string;
     }
 
@@ -81,14 +38,11 @@ server {
     error_page 404 /index.php;
 
     location ~ \.php$ {
-{{- if .CloudflareOnly }}
         if ($berth_cloudflare = 0) { return 444; }
-{{- end }}
-        fastcgi_pass unix:{{ .Socket }};
+        fastcgi_pass unix:/run/php/berth-app_example_com.sock;
         fastcgi_split_path_info ^(.+\.php)(/.+)$;
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
-        fastcgi_param HTTPS on;
         fastcgi_hide_header X-Powered-By;
         fastcgi_buffer_size 32k;
         fastcgi_buffers 16 16k;

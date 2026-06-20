@@ -160,7 +160,7 @@ func renderSiteNginx(ctx context.Context, r bssh.Runner, s *config.Server, site 
 // real (non-self-signed) certificates to avoid bricking a domain in browsers.
 type nginxData struct {
 	Domain, DeployPath, ACMEWebroot, Socket, CertPath, KeyPath string
-	HTTP3, QUICReuseport, HSTS                                 bool
+	HTTP3, QUICReuseport, HSTS, CloudflareOnly                 bool
 }
 
 func nginxRenderData(s *config.Server, site config.Site) nginxData {
@@ -174,6 +174,10 @@ func nginxRenderData(s *config.Server, site config.Site) nginxData {
 		// presence, so site re-render and tls swap stay byte-identical. Self-signed
 		// is excluded: pinning a browser to an untrusted cert would brick the site.
 		HSTS: site.SSL && site.CertMode() != "selfsigned",
+		// CloudflareOnly is derived purely from static config (like HSTS), never
+		// from cert presence, so the site re-render and the tls swap stay
+		// byte-identical.
+		CloudflareOnly: s.CloudflareOnlyEnabled(site),
 	}
 }
 

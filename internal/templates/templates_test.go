@@ -45,7 +45,7 @@ func checkGoldenRender(t *testing.T, render func(string, any) ([]byte, error), n
 
 type nginxData struct {
 	Domain, DeployPath, ACMEWebroot, Socket, CertPath, KeyPath string
-	HTTP3, QUICReuseport, HSTS                                 bool
+	HTTP3, QUICReuseport, HSTS, CloudflareOnly                 bool
 }
 
 const testSocket = "/run/php/berth-app_example_com.sock"
@@ -81,6 +81,18 @@ func TestRenderNginxHTTPSNoHSTSGolden(t *testing.T) {
 	d := nginxGoldenData()
 	d.HSTS = false
 	checkGolden(t, "nginx_https.conf.tmpl", "nginx_https_nohsts.golden", d)
+}
+
+func TestRenderNginxHTTPCloudflareGolden(t *testing.T) {
+	d := nginxGoldenData()
+	d.CloudflareOnly = true
+	checkGolden(t, "nginx_http.conf.tmpl", "nginx_http_cloudflare.golden", d)
+}
+
+func TestRenderNginxHTTPSCloudflareGolden(t *testing.T) {
+	d := nginxGoldenData()
+	d.CloudflareOnly = true
+	checkGolden(t, "nginx_https.conf.tmpl", "nginx_https_cloudflare.golden", d)
 }
 
 func TestRenderPHPOpcacheGolden(t *testing.T) {

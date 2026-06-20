@@ -329,6 +329,59 @@ func TestSiteHTTPSRenderMatchesTLSSwap(t *testing.T) {
 	}
 }
 
+func TestNginxGuardWhenCloudflareOnly(t *testing.T) {
+	s := siteServer()
+	tru := true
+	s.Sites[0].CloudflareOnly = &tru
+	s.Sites[0].SSL = true
+	guard := "if ($berth_cloudflare = 0) { return 444; }"
+
+	http, err := renderNginxHTTP(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(http), guard) != 2 {
+		t.Errorf("HTTP block must guard location / and the php location:\n%s", http)
+	}
+
+	https, err := renderNginxHTTPS(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := string(https)
+	if strings.Count(hs, guard) != 3 {
+		t.Errorf("HTTPS must guard the 80 redirect /, the 443 /, and the php location:\n%s", hs)
+	}
+	// ACME must stay reachable so Let's Encrypt HTTP-01 still works: NO ACME block
+	// (port-80 OR 443) may contain the guard. Scan every occurrence, panic-safe.
+	const acmeLoc = "location /.well-known/acme-challenge/"
+	for rest := hs; ; {
+		i := strings.Index(rest, acmeLoc)
+		if i == -1 {
+			break
+		}
+		block := rest[i:]
+		if end := strings.Index(block, "}"); end != -1 {
+			block = block[:end]
+		}
+		if strings.Contains(block, "$berth_cloudflare") {
+			t.Error("the ACME challenge location must NOT be guarded")
+		}
+		rest = rest[i+len(acmeLoc):]
+	}
+}
+
+func TestNginxNoGuardWhenNotCloudflareOnly(t *testing.T) {
+	s := siteServer() // cloudflare_only unset -> false
+	http, err := renderNginxHTTP(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(http), "$berth_cloudflare") {
+		t.Errorf("no guard expected when cloudflare_only is off:\n%s", http)
+	}
+}
+
 func TestSiteApplyWritesLogrotate(t *testing.T) {
 	s := siteServer()
 	f := bssh.NewFakeRunner()
