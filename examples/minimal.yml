@@ -18,6 +18,8 @@ database:
   name: myapp
   user: myapp
 
+cloudflare_only: false   # opt-in origin lockdown (default off); see README "Cloudflare origin lockdown"
+
 sites:
   - domain: app.example.com
     deploy_path: /var/www/app
