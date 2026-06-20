@@ -178,3 +178,9 @@ func TestRenderMariaDBTuningGolden(t *testing.T) {
 		BufferPool: "256M",
 	})
 }
+
+func TestRenderCloudflareGolden(t *testing.T) {
+	checkGolden(t, "cloudflare.conf.tmpl", "cloudflare.golden", struct{ Ranges []string }{
+		[]string{"203.0.113.0/24", "2001:db8::/32"},
+	})
+}
