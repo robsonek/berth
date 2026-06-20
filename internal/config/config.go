@@ -79,6 +79,15 @@ func (t Tuning) MariaDBBufferPoolEff() string {
 	return t.MariaDBBufferPool
 }
 
+// System holds optional, opt-in host-level OS provisioning knobs. Both default
+// off: an empty Swap and a false Sysctl mean berth never touches swap or kernel
+// sysctl. Values are constants in the step (no SetDefault), so wizard ToServer()
+// and literal-Server callers that bypass Load() need nothing seeded.
+type System struct {
+	Swap   string `mapstructure:"swap"   yaml:"swap,omitempty"`   // e.g. "2G"; empty = no swap
+	Sysctl bool   `mapstructure:"sysctl" yaml:"sysctl,omitempty"` // default false = no sysctl drop-in
+}
+
 type Database struct {
 	Engine string `mapstructure:"engine" yaml:"engine"` // mariadb | postgres (server-wide)
 	Source string `mapstructure:"source" yaml:"source"` // debian | mariadb | pgdg
@@ -270,6 +279,7 @@ type Server struct {
 	CloudflareOnly bool     `mapstructure:"cloudflare_only" yaml:"cloudflare_only"`
 	Fail2ban       Fail2ban `mapstructure:"fail2ban" yaml:"fail2ban,omitempty"`
 	Tuning         Tuning   `mapstructure:"tuning" yaml:"tuning,omitempty"`
+	System         System   `mapstructure:"system" yaml:"system,omitempty"`
 	Sites          []Site   `mapstructure:"sites" yaml:"sites"`
 }
 

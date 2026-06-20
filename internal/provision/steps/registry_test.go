@@ -118,6 +118,26 @@ func TestPipelineTuningAfterDatabase(t *testing.T) {
 	}
 }
 
+func TestPipelineIncludesSystemAfterBase(t *testing.T) {
+	s := &config.Server{Database: config.Database{Engine: "postgres"}, Sites: []config.Site{{Domain: "a.example.com"}}}
+	names := stepNames(steps.Pipeline(s, secret.NewRedactor(), true))
+	idx := func(want string) int {
+		for i, n := range names {
+			if n == want {
+				return i
+			}
+		}
+		return -1
+	}
+	if idx("system") < 0 {
+		t.Fatalf("system step missing from pipeline: %v", names)
+	}
+	if !(idx("base") < idx("system") && idx("system") < idx("php")) {
+		t.Errorf("system must sit between base and php; got base=%d system=%d php=%d",
+			idx("base"), idx("system"), idx("php"))
+	}
+}
+
 func stepNames(ss []provision.Step) []string {
 	names := make([]string, len(ss))
 	for i, s := range ss {

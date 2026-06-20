@@ -9,7 +9,7 @@ import (
 // Pipeline returns the ordered steps for a server, honoring toggles and flags.
 func Pipeline(s *config.Server, red *secret.Redactor, skipSSL bool) []provision.Step {
 	steps := []provision.Step{
-		Preflight(), SystemBase(), Accounts(), Hardening(),
+		Preflight(), SystemBase(), System(), Accounts(), Hardening(),
 		PHP(), Nginx(), Composer(),
 	}
 	if s.Valkey {

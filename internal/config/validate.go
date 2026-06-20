@@ -20,6 +20,7 @@ var (
 	reDaemonName   = regexp.MustCompile(`^[a-z0-9-]+$`)
 	reValkeyMem    = regexp.MustCompile(`^(?i)[0-9]+(b|kb|mb|gb|k|m|g)?$`)
 	reMariaDBSize  = regexp.MustCompile(`^(?i)[0-9]+[kmg]?$`)
+	reSwapSize     = regexp.MustCompile(`^[1-9][0-9]*[MmGg]$`)
 )
 
 var allowedPHPVersions = map[string]bool{"8.2": true, "8.3": true, "8.4": true, "8.5": true}
@@ -155,6 +156,9 @@ func (s *Server) Validate() error {
 	if err := s.Tuning.validate(); err != nil {
 		return err
 	}
+	if err := s.System.validate(); err != nil {
+		return err
+	}
 	upstream, engineOK := dbEngineUpstreamSource[s.Database.Engine]
 	if !engineOK {
 		return fmt.Errorf("database.engine %q unsupported (supported: %s)", s.Database.Engine, supportedEngines())
@@ -257,6 +261,16 @@ func (t Tuning) validate() error {
 	}
 	if t.MariaDBBufferPool != "" && !reMariaDBSize.MatchString(t.MariaDBBufferPool) {
 		return fmt.Errorf("tuning.mariadb_innodb_buffer_pool %q must be a number optionally suffixed K/M/G (e.g. 256M)", t.MariaDBBufferPool)
+	}
+	return nil
+}
+
+// validate guards the system knobs. Empty Swap / false Sysctl mean "off" and pass.
+// A non-empty Swap must be a positive integer suffixed M (MiB) or G (GiB); the value
+// reaches `fallocate -l` verbatim, so reject anything else (config-injection defence).
+func (sy System) validate() error {
+	if sy.Swap != "" && !reSwapSize.MatchString(sy.Swap) {
+		return fmt.Errorf("system.swap %q must be a positive size suffixed M or G (e.g. 512M, 2G)", sy.Swap)
 	}
 	return nil
 }

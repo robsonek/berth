@@ -1,0 +1,2 @@
+# managed by berth
+vm.swappiness = 10
