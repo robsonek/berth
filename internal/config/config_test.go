@@ -158,3 +158,58 @@ func TestServerYAMLOmitsEmptyOptionalFields(t *testing.T) {
 		t.Fatalf("re-Load failed: %v", err)
 	}
 }
+
+func TestCloudflareOnlyEnabled(t *testing.T) {
+	tru, fls := true, false
+	s := &Server{CloudflareOnly: false, Sites: []Site{
+		{Domain: "a"},                       // nil override -> inherits server (false)
+		{Domain: "b", CloudflareOnly: &tru}, // per-site true beats server false
+	}}
+	if s.CloudflareOnlyEnabled(s.Sites[0]) {
+		t.Error("nil override should inherit server default false")
+	}
+	if !s.CloudflareOnlyEnabled(s.Sites[1]) {
+		t.Error("per-site true override should win over server false")
+	}
+	s.CloudflareOnly = true
+	s.Sites = append(s.Sites, Site{Domain: "c", CloudflareOnly: &fls})
+	if !s.CloudflareOnlyEnabled(s.Sites[0]) {
+		t.Error("nil override should inherit server default true")
+	}
+	if s.CloudflareOnlyEnabled(s.Sites[2]) {
+		t.Error("per-site false override should win over server true")
+	}
+}
+
+func TestAnyCloudflareOnly(t *testing.T) {
+	fls := false
+	none := &Server{CloudflareOnly: false, Sites: []Site{{Domain: "a"}}}
+	if none.AnyCloudflareOnly() {
+		t.Error("no site enabled -> AnyCloudflareOnly false")
+	}
+	mixed := &Server{CloudflareOnly: true, Sites: []Site{
+		{Domain: "a", CloudflareOnly: &fls}, {Domain: "b"},
+	}}
+	if !mixed.AnyCloudflareOnly() {
+		t.Error("one inheriting site enabled -> true")
+	}
+	allOff := &Server{CloudflareOnly: true, Sites: []Site{
+		{Domain: "a", CloudflareOnly: &fls}, {Domain: "b", CloudflareOnly: &fls},
+	}}
+	if allOff.AnyCloudflareOnly() {
+		t.Error("all sites overridden off -> false even with server true")
+	}
+}
+
+func TestCloudflareOnlyDecodes(t *testing.T) {
+	s, err := Load(writeTmpConfig(t, "cloudflare_only: true\n"+baseCfg+"    cloudflare_only: false\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.CloudflareOnly {
+		t.Error("server cloudflare_only should decode true")
+	}
+	if s.Sites[0].CloudflareOnly == nil || *s.Sites[0].CloudflareOnly {
+		t.Fatalf("site cloudflare_only should decode to *false; got %v", s.Sites[0].CloudflareOnly)
+	}
+}

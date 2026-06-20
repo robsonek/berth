@@ -118,18 +118,19 @@ type Daemon struct {
 }
 
 type Site struct {
-	Domain     string       `mapstructure:"domain" yaml:"domain"`
-	DeployPath string       `mapstructure:"deploy_path" yaml:"deploy_path"`
-	User       string       `mapstructure:"user" yaml:"user,omitempty"` // OS user that owns/runs the site; derived when empty
-	Repository string       `mapstructure:"repository" yaml:"repository,omitempty"`
-	SSL        bool         `mapstructure:"ssl" yaml:"ssl"`
-	SSLMode    string       `mapstructure:"ssl_mode" yaml:"ssl_mode,omitempty"` // letsencrypt (default) | selfsigned
-	SSLEmail   string       `mapstructure:"ssl_email" yaml:"ssl_email,omitempty"`
-	HTTP3      bool         `mapstructure:"http3" yaml:"http3"` // HTTP/3 (QUIC); requires ssl + nginx.source: nginx
-	Database   SiteDatabase `mapstructure:"database" yaml:"database"`
-	Scheduler  *bool        `mapstructure:"scheduler" yaml:"scheduler,omitempty"` // per-site override; nil = inherit server default
-	Queue      *QueueConfig `mapstructure:"queue" yaml:"queue,omitempty"`
-	Daemons    []Daemon     `mapstructure:"daemons" yaml:"daemons,omitempty"`
+	Domain         string       `mapstructure:"domain" yaml:"domain"`
+	DeployPath     string       `mapstructure:"deploy_path" yaml:"deploy_path"`
+	User           string       `mapstructure:"user" yaml:"user,omitempty"` // OS user that owns/runs the site; derived when empty
+	Repository     string       `mapstructure:"repository" yaml:"repository,omitempty"`
+	SSL            bool         `mapstructure:"ssl" yaml:"ssl"`
+	SSLMode        string       `mapstructure:"ssl_mode" yaml:"ssl_mode,omitempty"` // letsencrypt (default) | selfsigned
+	SSLEmail       string       `mapstructure:"ssl_email" yaml:"ssl_email,omitempty"`
+	HTTP3          bool         `mapstructure:"http3" yaml:"http3"` // HTTP/3 (QUIC); requires ssl + nginx.source: nginx
+	Database       SiteDatabase `mapstructure:"database" yaml:"database"`
+	Scheduler      *bool        `mapstructure:"scheduler" yaml:"scheduler,omitempty"`             // per-site override; nil = inherit server default
+	CloudflareOnly *bool        `mapstructure:"cloudflare_only" yaml:"cloudflare_only,omitempty"` // per-site override; nil = inherit server default
+	Queue          *QueueConfig `mapstructure:"queue" yaml:"queue,omitempty"`
+	Daemons        []Daemon     `mapstructure:"daemons" yaml:"daemons,omitempty"`
 }
 
 // CertMode returns the certificate mode for a site, defaulting to "letsencrypt".
@@ -162,6 +163,27 @@ func (s *Server) SchedulerEnabled(site Site) bool {
 		return *site.Scheduler
 	}
 	return s.Scheduler
+}
+
+// CloudflareOnlyEnabled reports whether origin lockdown applies to a site: an
+// explicit per-site sites[].cloudflare_only wins; otherwise the server-level
+// default applies. Twin of SchedulerEnabled.
+func (s *Server) CloudflareOnlyEnabled(site Site) bool {
+	if site.CloudflareOnly != nil {
+		return *site.CloudflareOnly
+	}
+	return s.CloudflareOnly
+}
+
+// AnyCloudflareOnly reports whether at least one site resolves to enabled, which
+// drives whether the global nginx http-context snippet is written or removed.
+func (s *Server) AnyCloudflareOnly() bool {
+	for _, site := range s.Sites {
+		if s.CloudflareOnlyEnabled(site) {
+			return true
+		}
+	}
+	return false
 }
 
 // PoolName derives the FPM pool / supervisor program slug from a domain
@@ -237,17 +259,18 @@ func DerivedSiteUser(domain string) string {
 }
 
 type Server struct {
-	Host      string   `mapstructure:"host" yaml:"host"`
-	SSH       SSH      `mapstructure:"ssh" yaml:"ssh"`
-	PHP       PHP      `mapstructure:"php" yaml:"php"`
-	Nginx     Nginx    `mapstructure:"nginx" yaml:"nginx"`
-	Database  Database `mapstructure:"database" yaml:"database"`
-	Valkey    bool     `mapstructure:"valkey" yaml:"valkey"`
-	Queue     bool     `mapstructure:"queue" yaml:"queue"`
-	Scheduler bool     `mapstructure:"scheduler" yaml:"scheduler"`
-	Fail2ban  Fail2ban `mapstructure:"fail2ban" yaml:"fail2ban,omitempty"`
-	Tuning    Tuning   `mapstructure:"tuning" yaml:"tuning,omitempty"`
-	Sites     []Site   `mapstructure:"sites" yaml:"sites"`
+	Host           string   `mapstructure:"host" yaml:"host"`
+	SSH            SSH      `mapstructure:"ssh" yaml:"ssh"`
+	PHP            PHP      `mapstructure:"php" yaml:"php"`
+	Nginx          Nginx    `mapstructure:"nginx" yaml:"nginx"`
+	Database       Database `mapstructure:"database" yaml:"database"`
+	Valkey         bool     `mapstructure:"valkey" yaml:"valkey"`
+	Queue          bool     `mapstructure:"queue" yaml:"queue"`
+	Scheduler      bool     `mapstructure:"scheduler" yaml:"scheduler"`
+	CloudflareOnly bool     `mapstructure:"cloudflare_only" yaml:"cloudflare_only"`
+	Fail2ban       Fail2ban `mapstructure:"fail2ban" yaml:"fail2ban,omitempty"`
+	Tuning         Tuning   `mapstructure:"tuning" yaml:"tuning,omitempty"`
+	Sites          []Site   `mapstructure:"sites" yaml:"sites"`
 }
 
 // Load reads a YAML config file, applies defaults, and validates it.
