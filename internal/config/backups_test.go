@@ -41,3 +41,30 @@ func TestBackupsEnabled(t *testing.T) {
 		t.Error("AnyBackupsEnabled should be false by default")
 	}
 }
+
+func TestBackupsValidate(t *testing.T) {
+	ok := []Backups{
+		{}, // all defaults
+		{Schedule: "30 3 * * *"},
+		{Schedule: "*/15 * * * *"},
+		{Schedule: "0 2 * * 0", Retention: 14},
+	}
+	for _, b := range ok {
+		if err := b.validate(); err != nil {
+			t.Errorf("validate(%+v) = %v, want nil", b, err)
+		}
+	}
+	bad := []Backups{
+		{Schedule: "30 3 * *"},            // 4 fields
+		{Schedule: "30 3 * * * *"},        // 6 fields
+		{Schedule: "30 3 * * mon"},        // letters not allowed
+		{Schedule: "30 3 * * *\nroot id"}, // newline injection
+		{Retention: -1},
+		{Retention: 4000},
+	}
+	for _, b := range bad {
+		if err := b.validate(); err == nil {
+			t.Errorf("validate(%+v) = nil, want error", b)
+		}
+	}
+}

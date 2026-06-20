@@ -21,6 +21,14 @@ var (
 	reValkeyMem    = regexp.MustCompile(`^(?i)[0-9]+(b|kb|mb|gb|k|m|g)?$`)
 	reMariaDBSize  = regexp.MustCompile(`^(?i)[0-9]+[kmg]?$`)
 	reSwapSize     = regexp.MustCompile(`^[1-9][0-9]*[MmGg]$`)
+	// reCronSchedule matches exactly five space-separated cron fields over a strict
+	// character class (digits and * , - /). It rejects extra fields, embedded
+	// newlines and any other shell/cron metacharacter — the value is rendered
+	// verbatim into /etc/cron.d as root, so a loose value is injection. This is an
+	// injection/shape guard, NOT a semantic cron validator: it accepts out-of-range-
+	// but-harmless values like "99 99 * * *" (cron itself rejects those at run time).
+	// Full per-field range checking is intentionally out of scope.
+	reCronSchedule = regexp.MustCompile(`^[0-9*,/-]+( [0-9*,/-]+){4}$`)
 )
 
 var allowedPHPVersions = map[string]bool{"8.2": true, "8.3": true, "8.4": true, "8.5": true}
@@ -159,6 +167,9 @@ func (s *Server) Validate() error {
 	if err := s.System.validate(); err != nil {
 		return err
 	}
+	if err := s.Backups.validate(); err != nil {
+		return err
+	}
 	upstream, engineOK := dbEngineUpstreamSource[s.Database.Engine]
 	if !engineOK {
 		return fmt.Errorf("database.engine %q unsupported (supported: %s)", s.Database.Engine, supportedEngines())
@@ -275,11 +286,26 @@ func (sy System) validate() error {
 	return nil
 }
 
+// validate guards the backup knobs. Zero/empty values mean "use the default" and
+// pass (the *Eff accessors supply them). A non-empty schedule must be exactly five
+// strict cron fields with no control characters — it is written verbatim into a
+// root /etc/cron.d file, so a loose value is command injection. Retention, when
+// set, must be a sane positive number of days.
+func (b Backups) validate() error {
+	if b.Schedule != "" && (hasControlChars(b.Schedule) || !reCronSchedule.MatchString(b.Schedule)) {
+		return fmt.Errorf("backups.schedule %q must be 5 cron fields over [0-9*,/-] (e.g. \"30 3 * * *\")", b.Schedule)
+	}
+	if b.Retention != 0 && (b.Retention < 1 || b.Retention > 3650) {
+		return fmt.Errorf("backups.retention_days %d out of range (1-3650)", b.Retention)
+	}
+	return nil
+}
+
 func (st *Site) validate() error {
 	if !reHostname.MatchString(st.Domain) {
 		return fmt.Errorf("domain %q is not a valid hostname", st.Domain)
 	}
-	if !path.IsAbs(st.DeployPath) || strings.ContainsAny(st.DeployPath, " ;&|$`\n\t") {
+	if !path.IsAbs(st.DeployPath) || strings.ContainsAny(st.DeployPath, " ;&|$`\n\t\"'\\*?[]{}~") {
 		return fmt.Errorf("deploy_path %q must be an absolute path without shell metacharacters", st.DeployPath)
 	}
 	if st.Repository != "" && !validGitURL(st.Repository) {

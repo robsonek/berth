@@ -125,6 +125,8 @@ func TestValidateRejects(t *testing.T) {
 		},
 		"relative path":   func(s *Server) { s.Sites[0].DeployPath = "deploy/x" },
 		"shell meta path": func(s *Server) { s.Sites[0].DeployPath = "/home/$(whoami)" },
+		"quote in path":   func(s *Server) { s.Sites[0].DeployPath = `/srv/a"b` },
+		"glob in path":    func(s *Server) { s.Sites[0].DeployPath = "/srv/*" },
 		"ssl no email":    func(s *Server) { s.Sites[0].SSL = true },
 		"ssl bad email": func(s *Server) {
 			s.Sites[0].SSL = true
