@@ -350,9 +350,7 @@ needed — handy for staging or internal hosts).
 ## Beyond v1
 
 `berth site:add` (incremental add) and package-manager distribution are planned
-for later releases. See the
-[design specification](docs/design/2026-06-13-berth-design.md) for the full
-scope.
+for later releases.
 
 ## License
 
