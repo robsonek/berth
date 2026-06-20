@@ -138,6 +138,18 @@ func TestPipelineIncludesSystemAfterBase(t *testing.T) {
 	}
 }
 
+func TestPipelineIncludesBackupsAfterSite(t *testing.T) {
+	s := &config.Server{
+		PHP: config.PHP{Version: "8.5"}, Database: config.Database{Engine: "mariadb"},
+		Sites: []config.Site{{Domain: "a.example.com", DeployPath: "/srv/a"}},
+	}
+	names := stepNames(steps.Pipeline(s, nil, true))
+	si, bi := indexOf(names, "site"), indexOf(names, "backups")
+	if si < 0 || bi < 0 || bi != si+1 {
+		t.Errorf("backups must immediately follow site; got %v", names)
+	}
+}
+
 func stepNames(ss []provision.Step) []string {
 	names := make([]string, len(ss))
 	for i, s := range ss {
