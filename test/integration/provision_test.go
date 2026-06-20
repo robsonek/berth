@@ -120,6 +120,7 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	assertMultiSiteIsolation(invCtx, t, client, srv)
 	assertDBAuth(invCtx, t, client, srv)
 	assertHardeningEndState(invCtx, t, client, srv)
+	assertSwapSysctl(invCtx, t, client, srv)
 
 	// iter-5: runtime + deploy-reload (#36) and apt provenance (#35).
 	assertRuntime(invCtx, t, client, srv)
