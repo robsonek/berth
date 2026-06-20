@@ -114,6 +114,19 @@ func managedSiteFiles(ctx context.Context, r bssh.Runner, s *config.Server) ([]s
 		return nil, err
 	}
 	files = append(files, siteFile{path: logrotatePath, content: lr})
+	// Global http-context snippet defining the $berth_cloudflare geo flag +
+	// real-IP restoration. Present when any site is cloudflare_only; otherwise a
+	// remove entry drift-cleans a lingering berth-managed copy (guarded so a
+	// foreign conf.d file is never clobbered).
+	if s.AnyCloudflareOnly() {
+		cf, err := renderCloudflareConf()
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, siteFile{path: cloudflareConfPath, content: cf})
+	} else {
+		files = append(files, siteFile{path: cloudflareConfPath, remove: true})
+	}
 	return files, nil
 }
 
@@ -416,10 +429,39 @@ func (site) changes() []string {
 		"write per-site supervisor programs (worker + daemons) and remove orphans",
 		"reconcile per-site scheduler cron (install or remove)",
 		"write global logrotate fragment",
+		"reconcile the global Cloudflare origin-lockdown snippet (write or remove)",
 	}
 }
 
 func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) error {
+	// 0) Reconcile the global http-context Cloudflare snippet BEFORE the per-site
+	//    vhosts so the $berth_cloudflare geo flag is defined when nginx -t validates
+	//    a vhost that references it. When disabled, drift-remove a lingering
+	//    berth-managed copy (guarded so a foreign conf.d file is never clobbered).
+	if s.AnyCloudflareOnly() {
+		cf, err := renderCloudflareConf()
+		if err != nil {
+			return err
+		}
+		if err := r.WriteFile(ctx, bssh.FileSpec{
+			Path: cloudflareConfPath, Content: cf, Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
+		}); err != nil {
+			return fmt.Errorf("write %s: %w", cloudflareConfPath, err)
+		}
+	} else {
+		present, err := managedFilePresent(ctx, r, cloudflareConfPath)
+		if err != nil {
+			return err
+		}
+		if present {
+			if res, err := r.Run(ctx, "rm -f "+shQuote(cloudflareConfPath), nil); err != nil {
+				return err
+			} else if res.ExitCode != 0 {
+				return fmt.Errorf("remove %s: %s", cloudflareConfPath, res.Stderr)
+			}
+		}
+	}
+
 	// 1) Per-site nginx server block (cert-aware) + enable.
 	for _, site := range s.Sites {
 		conf, err := renderSiteNginx(ctx, r, s, site)

@@ -71,6 +71,7 @@ func TestSiteApplyAbortsOnNginxTestFailure(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
 	f.On("nginx -t", bssh.Result{ExitCode: 1, Stderr: "invalid config"})
+	f.On("cat "+shQuote(cloudflareConfPath), bssh.Result{ExitCode: 1}) // step-0 cloudflare snippet absent
 	// systemctl reload is intentionally NOT stubbed: it must never be called.
 
 	err := Site().Apply(context.Background(), provision.RunCtx{}, s, f)
@@ -504,6 +505,8 @@ func stubManagedSiteFiles(t *testing.T, s *config.Server, f *bssh.FakeRunner) {
 // queue/daemon site's programs load. The supervisor verbs are stubbed
 // unconditionally; they fire only when NeedsSupervisor (or an orphan was removed
 // on a host that has supervisor), so non-supervisor Apply tests leave them unused.
+// It also stubs the step-0 Cloudflare-snippet probe (cat -> absent), which every
+// Apply success path now hits via managedFilePresent when cloudflare_only is off.
 func stubFPMApply(s *config.Server, f *bssh.FakeRunner) {
 	f.On(fmt.Sprintf("test -f %[1]s && mv -f %[1]s %[1]s.disabled || true", shQuote(defaultFPMPoolPath(s))), bssh.Result{})
 	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
@@ -512,6 +515,7 @@ func stubFPMApply(s *config.Server, f *bssh.FakeRunner) {
 	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{})
 	f.On("supervisorctl reread", bssh.Result{})
 	f.On("supervisorctl update", bssh.Result{})
+	f.On("cat "+shQuote(cloudflareConfPath), bssh.Result{ExitCode: 1}) // step-0 cloudflare snippet absent
 }
 
 // replayWritesAsReads seeds dst with `cat '<path>'` stubs for every file written
@@ -572,6 +576,7 @@ func TestSiteCheckSatisfiedAfterTLSSwap(t *testing.T) {
 	fCheck.On("nginx -t", bssh.Result{ExitCode: 0})
 	fCheck.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
 	fCheck.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{})
+	fCheck.On("cat "+shQuote(cloudflareConfPath), bssh.Result{ExitCode: 1}) // cloudflare snippet absent (off), remove-entry satisfied
 
 	cr, err := Site().Check(ctx, provision.RunCtx{}, s, fCheck)
 	if err != nil {
@@ -646,6 +651,109 @@ func TestManagedSiteFilesFlagsOrphanProgram(t *testing.T) {
 	}
 	if !sawOrphanRemove {
 		t.Error("an undesired berth-*.conf program file must be flagged for removal")
+	}
+}
+
+func TestManagedSiteFilesIncludesCloudflareConf(t *testing.T) {
+	s := siteServer()
+	tru := true
+	s.Sites[0].CloudflareOnly = &tru
+	f := bssh.NewFakeRunner()
+	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{})
+	mfs, err := managedSiteFiles(context.Background(), f, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, mf := range mfs {
+		if mf.path == cloudflareConfPath {
+			found = true
+			if mf.remove {
+				t.Error("cloudflare conf should be present (content), not marked for removal")
+			}
+			if !strings.Contains(string(mf.content), "geo $realip_remote_addr $berth_cloudflare {") {
+				t.Errorf("cloudflare conf content missing geo block:\n%s", mf.content)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("managedSiteFiles must include %s when a site is cloudflare_only", cloudflareConfPath)
+	}
+}
+
+func TestManagedSiteFilesRemovesCloudflareConfWhenDisabled(t *testing.T) {
+	s := siteServer() // cloudflare_only off
+	f := bssh.NewFakeRunner()
+	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{})
+	mfs, err := managedSiteFiles(context.Background(), f, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range mfs {
+		if mf.path == cloudflareConfPath {
+			if !mf.remove {
+				t.Error("cloudflare conf should be marked for removal when no site is cloudflare_only")
+			}
+			return
+		}
+	}
+	t.Errorf("managedSiteFiles must include a remove entry for %s when disabled", cloudflareConfPath)
+}
+
+func TestSiteApplyWritesCloudflareConfWhenEnabled(t *testing.T) {
+	s := siteServer()
+	tru := true
+	s.Sites[0].CloudflareOnly = &tru
+	f := bssh.NewFakeRunner()
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	var wrote bool
+	for _, w := range f.Writes() {
+		if w.Path == cloudflareConfPath {
+			wrote = true
+			if !strings.Contains(string(w.Content), "geo $realip_remote_addr $berth_cloudflare {") {
+				t.Errorf("cloudflare conf write missing geo block:\n%s", w.Content)
+			}
+		}
+	}
+	if !wrote {
+		t.Errorf("Apply must write %s when a site is cloudflare_only", cloudflareConfPath)
+	}
+	// NOTE: FakeRunner records WriteFile (Writes) and Run (Calls) in separate logs,
+	// so the "snippet written before the first nginx -t" ordering cannot be asserted
+	// here — it is guaranteed structurally by step 0 being the first action in Apply
+	// (see Task 4 Step 7) and is covered by code review, not this test.
+}
+
+func TestSiteApplyRemovesCloudflareConfWhenDisabled(t *testing.T) {
+	s := siteServer() // cloudflare_only off
+	f := bssh.NewFakeRunner()
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+	// A lingering berth-managed snippet is present -> Apply must rm it.
+	f.On("cat "+shQuote(cloudflareConfPath), bssh.Result{ExitCode: 0, Stdout: "# managed by berth\nold\n"})
+	f.On("rm -f "+shQuote(cloudflareConfPath), bssh.Result{ExitCode: 0})
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var removed bool
+	for _, c := range f.Calls() {
+		if c.Cmd == "rm -f "+shQuote(cloudflareConfPath) {
+			removed = true
+		}
+	}
+	if !removed {
+		t.Error("Apply must rm the lingering berth-managed cloudflare conf when disabled")
 	}
 }
 
