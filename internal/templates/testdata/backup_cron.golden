@@ -1,0 +1,2 @@
+# managed by berth
+30 3 * * * root bash /usr/local/sbin/berth-backup-app_example_com
