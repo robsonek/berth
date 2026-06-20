@@ -66,3 +66,11 @@ func (Postgres) EnsureUser(ctx context.Context, r bssh.Runner, user, password, d
 		user, database, password)
 	return runPSQL(ctx, r, sql)
 }
+
+// DumpCommand writes a plain-SQL dump of database to stdout as the postgres
+// superuser (peer auth). Plain format restores with psql (not pg_restore);
+// --no-owner omits ownership statements so a restore into a fresh role works.
+// database is a validated SQL identifier, so it carries no shell metacharacters.
+func (Postgres) DumpCommand(database string) string {
+	return "sudo -u postgres pg_dump --no-owner " + database
+}

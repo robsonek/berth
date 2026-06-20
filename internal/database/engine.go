@@ -31,6 +31,11 @@ type Engine interface {
 	// EnsureUser creates the application user/role (or re-syncs its password) and
 	// grants it the database (idempotent). Called after EnsureDatabase.
 	EnsureUser(ctx context.Context, r bssh.Runner, user, password, database string) error
+	// DumpCommand returns the shell command that writes a logical dump of database
+	// to stdout. Unlike EnsureDatabase/EnsureUser it does not execute — it is
+	// rendered into the managed backup script and run later from root's cron, so it
+	// must stay passwordless (socket/peer auth, matching this engine's admin SQL).
+	DumpCommand(database string) string
 }
 
 var registry = map[string]Engine{}
