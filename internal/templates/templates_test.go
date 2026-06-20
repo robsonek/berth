@@ -216,7 +216,7 @@ func TestRenderBackupScriptGolden(t *testing.T) {
 		DeployPath:    "/home/deploy/myapp",
 		BackupDir:     "/var/backups/berth/app_example_com",
 		LogFile:       "/var/log/berth/backup-app_example_com.log",
-		LockFile:      "/run/lock/berth-backup-app_example_com.lock",
+		LockFile:      "/var/backups/berth/app_example_com/.lock",
 		RetentionDays: 7,
 	})
 }

@@ -68,9 +68,12 @@ func (Postgres) EnsureUser(ctx context.Context, r bssh.Runner, user, password, d
 }
 
 // DumpCommand writes a plain-SQL dump of database to stdout as the postgres
-// superuser (peer auth). Plain format restores with psql (not pg_restore);
-// --no-owner omits ownership statements so a restore into a fresh role works.
+// superuser (peer auth). Plain format restores with psql (not pg_restore). The
+// dump CARRIES ownership (`ALTER ... OWNER TO <approle>`), so restoring as the
+// postgres superuser reestablishes app-role ownership — berth always makes the
+// app role the database owner. The app role/database must already exist; berth
+// provisions them, so for disaster recovery re-run berth before restoring.
 // database is a validated SQL identifier, so it carries no shell metacharacters.
 func (Postgres) DumpCommand(database string) string {
-	return "sudo -u postgres pg_dump --no-owner " + database
+	return "sudo -u postgres pg_dump " + database
 }

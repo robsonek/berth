@@ -87,6 +87,7 @@ func TestBackupsCheckSatisfiedInPlace(t *testing.T) {
 	f.On("ls -1 "+backupScriptGlob+" 2>/dev/null", bssh.Result{Stdout: backupScriptPath(site.Domain) + "\n"})
 	f.On("ls -1 "+backupCronGlob+" 2>/dev/null", bssh.Result{Stdout: backupCronPath(site.Domain) + "\n"})
 	f.On("cat '"+backupLogrotatePath+"'", bssh.Result{Stdout: string(lr)})
+	f.On("stat -c '%U:%G %a' '"+backupLogrotatePath+"'", bssh.Result{Stdout: "root:root 644\n"})
 	f.On("systemctl is-active cron", okResult)
 	f.On("systemctl is-enabled cron", okResult)
 	f.On("command -v mysqldump >/dev/null 2>&1", okResult)

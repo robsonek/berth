@@ -28,9 +28,7 @@ func backupDir(domain string) string      { return backupBaseDir + "/" + poolNam
 func backupLogPath(domain string) string {
 	return backupLogDir + "/backup-" + poolName(domain) + ".log"
 }
-func backupLockPath(domain string) string {
-	return "/run/lock/berth-backup-" + poolName(domain) + ".lock"
-}
+func backupLockPath(domain string) string { return backupDir(domain) + "/.lock" }
 
 // dumpClientPackage / dumpClientBinary name the apt package shipping the engine's
 // logical-dump tool and the binary the backup script invokes.
@@ -237,6 +235,11 @@ func (b backups) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 		}
 		if !ok {
 			changes = append(changes, "write "+backupLogrotatePath)
+		}
+		if meta, present, err := statOwnerMode(ctx, r, backupLogrotatePath); err != nil {
+			return provision.CheckResult{}, err
+		} else if present && meta != "root:root 644" {
+			changes = append(changes, "fix owner/mode of "+backupLogrotatePath)
 		}
 		up, err := serviceUp(ctx, r, "cron")
 		if err != nil {

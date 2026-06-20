@@ -358,6 +358,11 @@ gunzip -c /var/backups/berth/<pool>/<db>-<ts>.sql.gz | sudo -u postgres psql <db
 tar -xzf /var/backups/berth/<pool>/<pool>-files-<ts>.tar.gz -C <deploy_path>
 ```
 
+The PostgreSQL dump carries ownership (`ALTER ... OWNER TO <approle>`), so the app
+role and database must already exist before you restore for ownership to be
+reestablished. For disaster recovery, re-run berth (it recreates the role/database)
+before restoring.
+
 **Limitations:** local only (no offsite copy) — backups are root-owned so they survive a
 compromised *site*, but a lost *host* loses them; the DB dump and files tar are independent,
 so a failed run may leave one without the other (match artifacts by UTC timestamp); the first

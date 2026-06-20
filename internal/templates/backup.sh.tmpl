@@ -4,13 +4,16 @@ exec >>{{ .LogFile }} 2>&1
 exec 9>{{ .LockFile }}
 flock -n 9 || { echo "[$(date -u +%FT%TZ)] berth backup {{ .Pool }}: skipped (another run holds the lock)"; exit 0; }
 ts="$(date -u +%Y%m%dT%H%M%SZ)"
-db_tmp="{{ .BackupDir }}/.db-$ts.sql.gz.tmp"
-files_tmp="{{ .BackupDir }}/.files-$ts.tar.gz.tmp"
-trap 'rm -f "$db_tmp" "$files_tmp"' EXIT
+db_tmp=""
+files_tmp=""
+trap 'rm -f -- "$db_tmp" "$files_tmp"' EXIT
+find "{{ .BackupDir }}" -maxdepth 1 -type f -name '.tmp-*' -mmin +1440 -delete
 echo "[$(date -u +%FT%TZ)] berth backup {{ .Pool }}: start"
+db_tmp="$(mktemp "{{ .BackupDir }}/.tmp-XXXXXXXX")"
 {{ .DumpCommand }} | gzip -c > "$db_tmp"
 chmod 0600 "$db_tmp"
 mv "$db_tmp" "{{ .BackupDir }}/{{ .DBName }}-$ts.sql.gz"
+files_tmp="$(mktemp "{{ .BackupDir }}/.tmp-XXXXXXXX")"
 tar -czf "$files_tmp" -C "{{ .DeployPath }}" shared || [ $? -eq 1 ]
 chmod 0600 "$files_tmp"
 mv "$files_tmp" "{{ .BackupDir }}/{{ .Pool }}-files-$ts.tar.gz"
