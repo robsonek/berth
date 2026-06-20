@@ -1,6 +1,9 @@
 package steps
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseSwapBytes(t *testing.T) {
 	cases := []struct {
@@ -65,5 +68,18 @@ func TestFstabSwapState(t *testing.T) {
 	marked, foreign = fstabSwapState(indented)
 	if !marked || foreign {
 		t.Errorf("indented marked line: marked=%v foreign=%v, want true,false", marked, foreign)
+	}
+}
+
+func TestSysctlKeysMatchTemplate(t *testing.T) {
+	out, err := renderSysctl()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kv := range sysctlKeys {
+		want := kv.Key + " = " + kv.Value
+		if !strings.Contains(string(out), want) {
+			t.Errorf("sysctl_berth.conf.tmpl missing %q (keep sysctlKeys in sync with the template)", want)
+		}
 	}
 }
