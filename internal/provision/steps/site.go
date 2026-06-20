@@ -114,6 +114,19 @@ func managedSiteFiles(ctx context.Context, r bssh.Runner, s *config.Server) ([]s
 		return nil, err
 	}
 	files = append(files, siteFile{path: logrotatePath, content: lr})
+	// Global http-context snippet defining the $berth_cloudflare geo flag +
+	// real-IP restoration. Present when any site is cloudflare_only; otherwise a
+	// remove entry drift-cleans a lingering berth-managed copy (guarded so a
+	// foreign conf.d file is never clobbered).
+	if s.AnyCloudflareOnly() {
+		cf, err := renderCloudflareConf()
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, siteFile{path: cloudflareConfPath, content: cf})
+	} else {
+		files = append(files, siteFile{path: cloudflareConfPath, remove: true})
+	}
 	return files, nil
 }
 
@@ -160,7 +173,7 @@ func renderSiteNginx(ctx context.Context, r bssh.Runner, s *config.Server, site 
 // real (non-self-signed) certificates to avoid bricking a domain in browsers.
 type nginxData struct {
 	Domain, DeployPath, ACMEWebroot, Socket, CertPath, KeyPath string
-	HTTP3, QUICReuseport, HSTS                                 bool
+	HTTP3, QUICReuseport, HSTS, CloudflareOnly                 bool
 }
 
 func nginxRenderData(s *config.Server, site config.Site) nginxData {
@@ -174,6 +187,10 @@ func nginxRenderData(s *config.Server, site config.Site) nginxData {
 		// presence, so site re-render and tls swap stay byte-identical. Self-signed
 		// is excluded: pinning a browser to an untrusted cert would brick the site.
 		HSTS: site.SSL && site.CertMode() != "selfsigned",
+		// CloudflareOnly is derived purely from static config (like HSTS), never
+		// from cert presence, so the site re-render and the tls swap stay
+		// byte-identical.
+		CloudflareOnly: s.CloudflareOnlyEnabled(site),
 	}
 }
 
@@ -350,6 +367,24 @@ func (st site) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
+	// Enforce the managed-marker policy for the global Cloudflare snippet
+	// regardless of loop position: an earlier drifted file (e.g. a vhost that just
+	// gained the guard) would otherwise short-circuit Check before this entry's
+	// unmanaged-conflict check ran, letting Apply overwrite a foreign
+	// berth-cloudflare.conf without --force. (Mirrors systembase's unconditional pre-check.)
+	if s.AnyCloudflareOnly() {
+		cf, err := renderCloudflareConf()
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		state, err := checkManagedFile(ctx, r, cloudflareConfPath, cf)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if _, err := managedFileSatisfied(state, cloudflareConfPath, rc.Force); err != nil {
+			return provision.CheckResult{}, err
+		}
+	}
 	for _, mf := range mfs {
 		if mf.remove {
 			present, err := managedFilePresent(ctx, r, mf.path)
@@ -412,10 +447,28 @@ func (site) changes() []string {
 		"write per-site supervisor programs (worker + daemons) and remove orphans",
 		"reconcile per-site scheduler cron (install or remove)",
 		"write global logrotate fragment",
+		"reconcile the global Cloudflare origin-lockdown snippet (write or remove)",
 	}
 }
 
 func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) error {
+	// 0) When cloudflare_only is active, write the global geo/realip snippet BEFORE
+	//    the per-site vhosts so $berth_cloudflare is defined when nginx -t validates a
+	//    guarded vhost. (The disabled-state removal happens AFTER the vhosts are
+	//    rewritten unguarded — step 2b below — so the geo outlives the last vhost
+	//    that references it.)
+	if s.AnyCloudflareOnly() {
+		cf, err := renderCloudflareConf()
+		if err != nil {
+			return err
+		}
+		if err := r.WriteFile(ctx, bssh.FileSpec{
+			Path: cloudflareConfPath, Content: cf, Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
+		}); err != nil {
+			return fmt.Errorf("write %s: %w", cloudflareConfPath, err)
+		}
+	}
+
 	// 1) Per-site nginx server block (cert-aware) + enable.
 	for _, site := range s.Sites {
 		conf, err := renderSiteNginx(ctx, r, s, site)
@@ -446,6 +499,24 @@ func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 		return err
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("reload nginx: %s", res.Stderr)
+	}
+
+	// 2b) cloudflare_only disabled: now that the vhosts have been rewritten without
+	//     the guard and nginx reloaded, drift-remove a lingering berth-managed
+	//     snippet (guarded so a foreign conf.d file is never clobbered). Removing it
+	//     only here guarantees the geo outlived every vhost that referenced it.
+	if !s.AnyCloudflareOnly() {
+		present, err := managedFilePresent(ctx, r, cloudflareConfPath)
+		if err != nil {
+			return err
+		}
+		if present {
+			if res, err := r.Run(ctx, "rm -f "+shQuote(cloudflareConfPath), nil); err != nil {
+				return err
+			} else if res.ExitCode != 0 {
+				return fmt.Errorf("remove %s: %s", cloudflareConfPath, res.Stderr)
+			}
+		}
 	}
 
 	// 3) Per-site FPM pools (each its own user + socket). Disable the stock www

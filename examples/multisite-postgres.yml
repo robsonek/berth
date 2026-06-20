@@ -25,9 +25,12 @@ database:
 valkey: true
 queue: true              # server-wide default worker; tuned/overridden per site below
 scheduler: true
+cloudflare_only: true    # server-wide: refuse non-Cloudflare requests (overridden per site below)
 
 sites:
   # Public production tenant: Let's Encrypt + HTTP/3, a tuned worker and a daemon.
+  # Not proxied through Cloudflare, so opt out of the server-wide origin lockdown
+  # (it needs a public A record for Let's Encrypt issuance).
   - domain: app-one.example.com
     deploy_path: /var/www/app-one
     user: app_one
@@ -35,13 +38,17 @@ sites:
     ssl: true
     ssl_email: admin@example.com
     http3: true
+    cloudflare_only: false
     queue:
       processes: 2
       tries: 5
     daemons:
       - { name: reverb, command: php artisan reverb:start }
 
-  # Internal/staging tenant: self-signed TLS — no public DNS or email required.
+  # Cloudflare-proxied tenant: inherits the server-wide cloudflare_only lockdown,
+  # so it refuses any request not coming from Cloudflare's edge. Paired with
+  # self-signed TLS (a Cloudflare Origin Certificate, served behind SSL/TLS mode
+  # "Full") because the proxied A record makes Let's Encrypt issuance impossible.
   - domain: app-two.example.com
     deploy_path: /var/www/app-two
     user: app_two

@@ -71,6 +71,7 @@ func TestSiteApplyAbortsOnNginxTestFailure(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
 	f.On("nginx -t", bssh.Result{ExitCode: 1, Stderr: "invalid config"})
+	f.On("cat "+shQuote(cloudflareConfPath), bssh.Result{ExitCode: 1}) // step-0 cloudflare snippet absent
 	// systemctl reload is intentionally NOT stubbed: it must never be called.
 
 	err := Site().Apply(context.Background(), provision.RunCtx{}, s, f)
@@ -329,6 +330,59 @@ func TestSiteHTTPSRenderMatchesTLSSwap(t *testing.T) {
 	}
 }
 
+func TestNginxGuardWhenCloudflareOnly(t *testing.T) {
+	s := siteServer()
+	tru := true
+	s.Sites[0].CloudflareOnly = &tru
+	s.Sites[0].SSL = true
+	guard := "if ($berth_cloudflare = 0) { return 444; }"
+
+	http, err := renderNginxHTTP(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(http), guard) != 2 {
+		t.Errorf("HTTP block must guard location / and the php location:\n%s", http)
+	}
+
+	https, err := renderNginxHTTPS(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := string(https)
+	if strings.Count(hs, guard) != 3 {
+		t.Errorf("HTTPS must guard the 80 redirect /, the 443 /, and the php location:\n%s", hs)
+	}
+	// ACME must stay reachable so Let's Encrypt HTTP-01 still works: NO ACME block
+	// (port-80 OR 443) may contain the guard. Scan every occurrence, panic-safe.
+	const acmeLoc = "location /.well-known/acme-challenge/"
+	for rest := hs; ; {
+		i := strings.Index(rest, acmeLoc)
+		if i == -1 {
+			break
+		}
+		block := rest[i:]
+		if end := strings.Index(block, "}"); end != -1 {
+			block = block[:end]
+		}
+		if strings.Contains(block, "$berth_cloudflare") {
+			t.Error("the ACME challenge location must NOT be guarded")
+		}
+		rest = rest[i+len(acmeLoc):]
+	}
+}
+
+func TestNginxNoGuardWhenNotCloudflareOnly(t *testing.T) {
+	s := siteServer() // cloudflare_only unset -> false
+	http, err := renderNginxHTTP(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(http), "$berth_cloudflare") {
+		t.Errorf("no guard expected when cloudflare_only is off:\n%s", http)
+	}
+}
+
 func TestSiteApplyWritesLogrotate(t *testing.T) {
 	s := siteServer()
 	f := bssh.NewFakeRunner()
@@ -451,6 +505,8 @@ func stubManagedSiteFiles(t *testing.T, s *config.Server, f *bssh.FakeRunner) {
 // queue/daemon site's programs load. The supervisor verbs are stubbed
 // unconditionally; they fire only when NeedsSupervisor (or an orphan was removed
 // on a host that has supervisor), so non-supervisor Apply tests leave them unused.
+// It also stubs the step-0 Cloudflare-snippet probe (cat -> absent), which every
+// Apply success path now hits via managedFilePresent when cloudflare_only is off.
 func stubFPMApply(s *config.Server, f *bssh.FakeRunner) {
 	f.On(fmt.Sprintf("test -f %[1]s && mv -f %[1]s %[1]s.disabled || true", shQuote(defaultFPMPoolPath(s))), bssh.Result{})
 	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
@@ -459,6 +515,7 @@ func stubFPMApply(s *config.Server, f *bssh.FakeRunner) {
 	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{})
 	f.On("supervisorctl reread", bssh.Result{})
 	f.On("supervisorctl update", bssh.Result{})
+	f.On("cat "+shQuote(cloudflareConfPath), bssh.Result{ExitCode: 1}) // step-0 cloudflare snippet absent
 }
 
 // replayWritesAsReads seeds dst with `cat '<path>'` stubs for every file written
@@ -519,6 +576,7 @@ func TestSiteCheckSatisfiedAfterTLSSwap(t *testing.T) {
 	fCheck.On("nginx -t", bssh.Result{ExitCode: 0})
 	fCheck.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
 	fCheck.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{})
+	fCheck.On("cat "+shQuote(cloudflareConfPath), bssh.Result{ExitCode: 1}) // cloudflare snippet absent (off), remove-entry satisfied
 
 	cr, err := Site().Check(ctx, provision.RunCtx{}, s, fCheck)
 	if err != nil {
@@ -593,6 +651,162 @@ func TestManagedSiteFilesFlagsOrphanProgram(t *testing.T) {
 	}
 	if !sawOrphanRemove {
 		t.Error("an undesired berth-*.conf program file must be flagged for removal")
+	}
+}
+
+func TestManagedSiteFilesIncludesCloudflareConf(t *testing.T) {
+	s := siteServer()
+	tru := true
+	s.Sites[0].CloudflareOnly = &tru
+	f := bssh.NewFakeRunner()
+	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{})
+	mfs, err := managedSiteFiles(context.Background(), f, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, mf := range mfs {
+		if mf.path == cloudflareConfPath {
+			found = true
+			if mf.remove {
+				t.Error("cloudflare conf should be present (content), not marked for removal")
+			}
+			if !strings.Contains(string(mf.content), "geo $realip_remote_addr $berth_cloudflare {") {
+				t.Errorf("cloudflare conf content missing geo block:\n%s", mf.content)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("managedSiteFiles must include %s when a site is cloudflare_only", cloudflareConfPath)
+	}
+}
+
+func TestManagedSiteFilesRemovesCloudflareConfWhenDisabled(t *testing.T) {
+	s := siteServer() // cloudflare_only off
+	f := bssh.NewFakeRunner()
+	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{})
+	mfs, err := managedSiteFiles(context.Background(), f, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range mfs {
+		if mf.path == cloudflareConfPath {
+			if !mf.remove {
+				t.Error("cloudflare conf should be marked for removal when no site is cloudflare_only")
+			}
+			return
+		}
+	}
+	t.Errorf("managedSiteFiles must include a remove entry for %s when disabled", cloudflareConfPath)
+}
+
+func TestSiteApplyWritesCloudflareConfWhenEnabled(t *testing.T) {
+	s := siteServer()
+	tru := true
+	s.Sites[0].CloudflareOnly = &tru
+	f := bssh.NewFakeRunner()
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	var wrote bool
+	for _, w := range f.Writes() {
+		if w.Path == cloudflareConfPath {
+			wrote = true
+			if !strings.Contains(string(w.Content), "geo $realip_remote_addr $berth_cloudflare {") {
+				t.Errorf("cloudflare conf write missing geo block:\n%s", w.Content)
+			}
+		}
+	}
+	if !wrote {
+		t.Errorf("Apply must write %s when a site is cloudflare_only", cloudflareConfPath)
+	}
+	// NOTE: FakeRunner records WriteFile (Writes) and Run (Calls) in separate logs,
+	// so the "snippet written before the first nginx -t" ordering cannot be asserted
+	// here — it is guaranteed structurally by step 0 being the first action in Apply
+	// (see Task 4 Step 7) and is covered by code review, not this test.
+}
+
+func TestSiteApplyRemovesCloudflareConfWhenDisabled(t *testing.T) {
+	s := siteServer() // cloudflare_only off
+	f := bssh.NewFakeRunner()
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+	// A lingering berth-managed snippet is present -> Apply must rm it.
+	f.On("cat "+shQuote(cloudflareConfPath), bssh.Result{ExitCode: 0, Stdout: "# managed by berth\nold\n"})
+	f.On("rm -f "+shQuote(cloudflareConfPath), bssh.Result{ExitCode: 0})
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	// The rm must run AFTER the vhosts are rewritten (unguarded) and nginx reloaded,
+	// so the $berth_cloudflare geo always outlives the last vhost that referenced it
+	// — a partial failure mid-Apply must never leave a guarded vhost without its geo.
+	idxReload, idxRemove := -1, -1
+	for i, c := range f.Calls() {
+		switch c.Cmd {
+		case "systemctl reload nginx":
+			idxReload = i
+		case "rm -f " + shQuote(cloudflareConfPath):
+			idxRemove = i
+		}
+	}
+	if idxRemove < 0 {
+		t.Fatal("Apply must rm the lingering berth-managed cloudflare conf when disabled")
+	}
+	if idxReload < 0 || idxRemove < idxReload {
+		t.Errorf("rm of the cloudflare snippet (idx %d) must run AFTER systemctl reload nginx (idx %d)", idxRemove, idxReload)
+	}
+}
+
+// An unmanaged (foreign) berth-cloudflare.conf must abort Check without --force,
+// even when an earlier-drifting guarded vhost would otherwise short-circuit the
+// managed-site-files loop before the snippet's unmanaged-conflict check ran. We
+// force that short-circuit by making the per-site vhost read back as drifted
+// (managed marker, different content) — the realistic case on a disable->enable
+// transition where the vhost just gained the guard.
+func TestSiteCheckAbortsOnUnmanagedCloudflareConf(t *testing.T) {
+	s := siteServer()
+	tru := true
+	s.Sites[0].CloudflareOnly = &tru
+	vhost := nginxAvailablePath(s.Sites[0].Domain)
+	drifted := bssh.Result{ExitCode: 0, Stdout: "# managed by berth\nserver { listen 80; } # stale\n"}
+	foreign := bssh.Result{ExitCode: 0, Stdout: "server { listen 80; }\n"} // no berth marker
+
+	f := bssh.NewFakeRunner()
+	stubManagedSiteFiles(t, s, f) // stubs cat for all managed files (incl. cloudflare, with the marker)
+	// The vhost drifts FIRST in the loop; the snippet is the LAST entry. Without the
+	// unconditional pre-check, the loop returns at the vhost and never reaches the
+	// snippet's unmanaged-conflict check.
+	f.On("cat "+shQuote(vhost), drifted)
+	// Override: the snippet exists but is FOREIGN (no berth marker).
+	f.On("cat "+shQuote(cloudflareConfPath), foreign)
+	_, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil {
+		t.Fatal("Check must error on an unmanaged berth-cloudflare.conf (no --force)")
+	}
+	// And with Force it must NOT error on that account.
+	f2 := bssh.NewFakeRunner()
+	stubManagedSiteFiles(t, s, f2)
+	f2.On("cat "+shQuote(vhost), drifted)
+	f2.On("cat "+shQuote(cloudflareConfPath), foreign)
+	f2.On("nginx -t", bssh.Result{ExitCode: 0})
+	f2.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
+	cr, err := Site().Check(context.Background(), provision.RunCtx{Force: true}, s, f2)
+	if err != nil {
+		t.Fatalf("with --force, Check must not abort on the unmanaged snippet: %v", err)
+	}
+	// With force, the unmanaged snippet no longer aborts; the drifted vhost still
+	// makes Check unsatisfied (it will be reconciled by Apply).
+	if cr.Satisfied {
+		t.Error("a drifted vhost must leave Check unsatisfied (reconciled by Apply)")
 	}
 }
 

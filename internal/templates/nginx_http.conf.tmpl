@@ -15,6 +15,9 @@ server {
     }
 
     location / {
+{{- if .CloudflareOnly }}
+        if ($berth_cloudflare = 0) { return 444; }
+{{- end }}
         try_files $uri $uri/ /index.php?$query_string;
     }
 
@@ -36,6 +39,9 @@ server {
     error_page 404 /index.php;
 
     location ~ \.php$ {
+{{- if .CloudflareOnly }}
+        if ($berth_cloudflare = 0) { return 444; }
+{{- end }}
         fastcgi_pass unix:{{ .Socket }};
         fastcgi_split_path_info ^(.+\.php)(/.+)$;
         include fastcgi_params;
