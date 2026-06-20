@@ -92,6 +92,7 @@ valkey: false                  # install Valkey as the cache/session/queue backe
                                # (multi-site is capped at 16 sites — one logical DB each)
 queue: false                   # server-wide default: a queue:work worker on every site
 scheduler: true                # install the Laravel scheduler cron (per site)
+cloudflare_only: false         # opt-in: refuse non-Cloudflare requests (per site)
 
 fail2ban:                      # optional — omit the block to use these defaults
   bantime: 1h
@@ -115,6 +116,7 @@ sites:                         # one or more
     ssl_email: admin@example.com       # required with letsencrypt
     http3: false                       # requires ssl: true + nginx.source: nginx
     scheduler: true                    # per-site override of the server default
+    cloudflare_only: true              # per-site override of the server default
     queue:                             # tune this site's worker (omit = server default)
       driver: work                     # work (default) | horizon
       processes: 4                     # numprocs
@@ -237,6 +239,38 @@ which disables root login and password authentication only after verifying the
 - **Log rotation** — per-site PHP-FPM and Supervisor program (queue worker +
   daemon) logs are rotated so they never fill the disk.
 - **Firewall** — `ufw` allows only SSH and 80/443 (plus UDP/443 with HTTP/3).
+
+### Cloudflare origin lockdown (`cloudflare_only:`)
+
+When a site sits behind Cloudflare's proxy, direct hits to the origin IP bypass
+the edge entirely. Set `cloudflare_only: true` to lock the origin down to
+Cloudflare's network. It is **opt-in** (default `false`), server-wide with a
+per-site override:
+
+```yaml
+cloudflare_only: true          # server-wide default
+sites:
+  - domain: app.example.com
+    deploy_path: /var/www/app
+    ssl: true
+    ssl_mode: selfsigned       # see the cert note below
+    cloudflare_only: false     # per-site override of the server default
+```
+
+Enforcement is at the nginx layer: requests whose source IP is not in
+Cloudflare's published edge ranges are dropped with a bare `444` (connection
+closed, no response). berth also restores the real visitor IP from the
+`CF-Connecting-IP` header (via `set_real_ip_from` / `real_ip_header`), so access
+logs and fail2ban see the actual client rather than Cloudflare's edge.
+
+**Certificate guidance:** pair a *proxied* `cloudflare_only` site with
+`ssl_mode: selfsigned`. With the A record pointing at Cloudflare, the origin is
+not publicly reachable on its own name, so berth skips Let's Encrypt issuance
+(it warns rather than fails). Use a [Cloudflare Origin
+Certificate](https://developers.cloudflare.com/ssl/origin-configuration/origin-ca/)
+(or any self-signed cert) on the origin and set the Cloudflare SSL/TLS mode to
+**Full** so the edge encrypts to the origin without validating its certificate
+against a public CA.
 
 ## Scheduler, queue workers & daemons
 
