@@ -22,10 +22,19 @@ func assertSwapSysctl(ctx context.Context, t *testing.T, c *bssh.Client, srv *co
 		if err != nil {
 			t.Fatalf("swapon --show: %v", err)
 		}
-		if !strings.Contains(on.Stdout, "/swapfile") {
+		// Require an EXACT /swapfile line (so e.g. /swapfile-old never passes a substring).
+		active := false
+		for _, line := range strings.Split(on.Stdout, "\n") {
+			if strings.TrimSpace(line) == "/swapfile" {
+				active = true
+				break
+			}
+		}
+		if !active {
 			t.Errorf("/swapfile not an active swap area:\n%s", on.Stdout)
 		}
-		fstab, err := c.Run(ctx, "grep -F '/swapfile none swap sw 0 0 # managed by berth' /etc/fstab", nil)
+		// -F fixed-string, -x whole-line match, -q quiet: the fstab line must match exactly.
+		fstab, err := c.Run(ctx, "grep -Fxq '/swapfile none swap sw 0 0 # managed by berth' /etc/fstab", nil)
 		if err != nil {
 			t.Fatalf("grep fstab: %v", err)
 		}

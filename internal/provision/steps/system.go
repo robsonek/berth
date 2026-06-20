@@ -31,7 +31,7 @@ const fstabSwapLine = swapfilePath + " none swap sw 0 0 " + managedMarker
 // ONLY berth's marked line; used on removal so a foreign swap is never touched.
 const (
 	fstabSedAny    = `\|^[[:space:]]*` + swapfilePath + `[[:space:]]|d`
-	fstabSedMarked = `\|^[[:space:]]*` + swapfilePath + `[[:space:]].*` + managedMarker + `$|d`
+	fstabSedMarked = `\|^[[:space:]]*` + swapfilePath + `[[:space:]].*` + managedMarker + `[[:space:]]*$|d`
 )
 
 // parseSwapBytes converts a validated swap size ("2G", "512M", case-insensitive)
@@ -60,8 +60,9 @@ func parseSwapBytes(size string) (int64, error) {
 // /swapfile mount line ENDS WITH the berth marker (berth owns it); foreign is true if a
 // /swapfile mount line lacks the marker at end-of-line (operator-managed). Comment lines
 // are ignored. Ownership is HasSuffix(trimmed, marker) — NOT Contains — so this matches
-// the removal sed (which anchors the marker at `$`); using Contains would classify a
-// line with the marker mid-text as owned while the sed left it in place.
+// the removal sed (which anchors the marker at `[[:space:]]*$`, tolerating trailing
+// whitespace just as TrimSpace does here); using Contains would classify a line with the
+// marker mid-text as owned while the sed left it in place.
 func fstabSwapState(content string) (marked, foreign bool) {
 	for _, line := range strings.Split(content, "\n") {
 		t := strings.TrimSpace(line)
@@ -165,6 +166,9 @@ func swapActive(ctx context.Context, r bssh.Runner) (bool, error) {
 	res, err := r.Run(ctx, "swapon --show=NAME --noheadings", nil)
 	if err != nil {
 		return false, err
+	}
+	if res.ExitCode != 0 {
+		return false, fmt.Errorf("swapon --show: %s", res.Stderr)
 	}
 	for _, line := range strings.Split(res.Stdout, "\n") {
 		if strings.TrimSpace(line) == swapfilePath {
@@ -293,6 +297,9 @@ func checkSysctl(ctx context.Context, rc provision.RunCtx, r bssh.Runner) (bool,
 		if err != nil {
 			return false, nil, err
 		}
+		if res.ExitCode != 0 {
+			return false, nil, fmt.Errorf("sysctl -n %s: %s", kv.Key, res.Stderr)
+		}
 		if strings.TrimSpace(res.Stdout) != kv.Value {
 			return false, []string{"reload " + sysctlPath + " (running values stale)"}, nil
 		}
@@ -398,6 +405,12 @@ func applySwap(ctx context.Context, rc provision.RunCtx, r bssh.Runner, size str
 			return err
 		}
 	}
+	// DEFERRED (by design): /swapfile perms (0600) are set here at create time and NOT
+	// reconciled on later runs — berth targets fresh-provision correctness, not long-lived
+	// perm-drift healing. DEFERRED (by design): a crash between fallocate and the fstab
+	// append below leaves an UNMARKED /swapfile, which the next run treats as foreign;
+	// recovery is an explicit `--force` re-provision (berth never adopts an unmarked swap
+	// file it cannot prove it created).
 	if recreate {
 		for _, cmd := range []string{
 			"fallocate -l " + norm + " " + swapfilePath,

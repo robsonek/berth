@@ -75,6 +75,22 @@ func TestFstabSwapState(t *testing.T) {
 	if !marked || foreign {
 		t.Errorf("indented marked line: marked=%v foreign=%v, want true,false", marked, foreign)
 	}
+
+	// Trailing whitespace AFTER the marker -> still owned (the classifier trims, and the
+	// removal sed tolerates trailing whitespace before EOL so the two stay in lockstep).
+	const trailingWS = "/swapfile none swap sw 0 0 # managed by berth   \n"
+	marked, foreign = fstabSwapState(trailingWS)
+	if !marked || foreign {
+		t.Errorf("trailing-whitespace marked line: marked=%v foreign=%v, want true,false", marked, foreign)
+	}
+}
+
+func TestSwapActiveErrorsOnNonZeroExit(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("swapon --show=NAME --noheadings", bssh.Result{ExitCode: 1, Stderr: "swapon: not available"})
+	if _, err := swapActive(context.Background(), f); err == nil {
+		t.Error("expected swapActive to error when swapon --show exits non-zero")
+	}
 }
 
 func TestSysctlKeysMatchTemplate(t *testing.T) {
@@ -334,7 +350,7 @@ func TestSystemApplySwapRemovalTargetsMarkedLineOnly(t *testing.T) {
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 0, Stdout: "# managed by berth\nvm.swappiness = 10\n"})
 	f.On("swapon --show=NAME --noheadings", bssh.Result{ExitCode: 0, Stdout: "/swapfile\n"}) // swapoffIfActive sees it active
 	f.On("swapoff /swapfile", bssh.Result{})
-	f.On("sed -i '\\|^[[:space:]]*/swapfile[[:space:]].*# managed by berth$|d' /etc/fstab", bssh.Result{})
+	f.On("sed -i '\\|^[[:space:]]*/swapfile[[:space:]].*# managed by berth[[:space:]]*$|d' /etc/fstab", bssh.Result{})
 	f.On("rm -f /swapfile", bssh.Result{})
 	f.On("rm -f /etc/sysctl.d/99-berth-swap.conf", bssh.Result{})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1}) // sysctl-removal read (sysctl off)
@@ -343,7 +359,7 @@ func TestSystemApplySwapRemovalTargetsMarkedLineOnly(t *testing.T) {
 		t.Fatalf("Apply() error = %v", err)
 	}
 	for _, want := range []string{"swapoff /swapfile",
-		"sed -i '\\|^[[:space:]]*/swapfile[[:space:]].*# managed by berth$|d' /etc/fstab",
+		"sed -i '\\|^[[:space:]]*/swapfile[[:space:]].*# managed by berth[[:space:]]*$|d' /etc/fstab",
 		"rm -f /swapfile", "rm -f /etc/sysctl.d/99-berth-swap.conf"} {
 		if !calledCmd(f, want) {
 			t.Errorf("removal did not run %q", want)
