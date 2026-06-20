@@ -196,3 +196,11 @@ func TestRenderCloudflareGolden(t *testing.T) {
 		[]string{"203.0.113.0/24", "2001:db8::/32"},
 	})
 }
+
+func TestRenderSysctlSwapGolden(t *testing.T) {
+	checkGolden(t, "sysctl_swap.conf.tmpl", "sysctl_swap.golden", nil)
+}
+
+func TestRenderSysctlBerthGolden(t *testing.T) {
+	checkGolden(t, "sysctl_berth.conf.tmpl", "sysctl_berth.golden", nil)
+}
