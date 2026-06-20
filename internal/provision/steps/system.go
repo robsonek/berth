@@ -85,7 +85,224 @@ func (system) Name() string       { return "system" }
 func (system) Requires() []string { return []string{"preflight"} }
 
 func (system) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
-	return provision.CheckResult{Satisfied: true}, nil // Tasks 4 fills this in
+	var changes []string
+	if s.System.Swap != "" {
+		ok, ch, err := checkSwap(ctx, rc, r, s.System.Swap)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if !ok {
+			changes = append(changes, ch...)
+		}
+	} else {
+		ok, ch, err := checkSwapRemoval(ctx, r)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if !ok {
+			changes = append(changes, ch...)
+		}
+	}
+	if s.System.Sysctl {
+		ok, ch, err := checkSysctl(ctx, rc, r)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if !ok {
+			changes = append(changes, ch...)
+		}
+	} else {
+		ok, ch, err := checkSysctlRemoval(ctx, r)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if !ok {
+			changes = append(changes, ch...)
+		}
+	}
+	if len(changes) == 0 {
+		return provision.CheckResult{Satisfied: true, Reason: "swap & sysctl in desired state"}, nil
+	}
+	return provision.CheckResult{Satisfied: false, Reason: "system (swap/sysctl) not in desired state", Changes: changes}, nil
+}
+
+// catTrim returns the trimmed stdout of `cat <path>` and whether the file was
+// readable (exit 0). Read-only; mirrors checkManagedFile's read style.
+func catTrim(ctx context.Context, r bssh.Runner, path string) (string, bool, error) {
+	res, err := r.Run(ctx, "cat "+shQuote(path), nil)
+	if err != nil {
+		return "", false, err
+	}
+	return strings.TrimSpace(res.Stdout), res.ExitCode == 0, nil
+}
+
+// swapfileSize reports whether /swapfile exists and its size in bytes (stat -c %s).
+func swapfileSize(ctx context.Context, r bssh.Runner) (exists bool, size int64, err error) {
+	res, err := r.Run(ctx, "stat -c %s "+shQuote(swapfilePath)+" 2>/dev/null", nil)
+	if err != nil {
+		return false, 0, err
+	}
+	if res.ExitCode != 0 {
+		return false, 0, nil
+	}
+	n, perr := strconv.ParseInt(strings.TrimSpace(res.Stdout), 10, 64)
+	if perr != nil {
+		return false, 0, nil
+	}
+	return true, n, nil
+}
+
+// swapActive reports whether /swapfile is an active swap area (swapon --show).
+func swapActive(ctx context.Context, r bssh.Runner) (bool, error) {
+	res, err := r.Run(ctx, "swapon --show=NAME --noheadings", nil)
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		if strings.TrimSpace(line) == swapfilePath {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// checkSwap is the read-only predicate for an enabled swap. It enforces the conflict
+// guard (a foreign /swapfile fstab line — even alongside a berth-marked one — or a
+// /swapfile file with no berth-marked line aborts unless --force), then reports
+// satisfied iff the file exists at the configured size, is an active swap area, the
+// marked fstab line is present, and the swappiness drop-in is up-to-date AND live
+// (running vm.swappiness == 10).
+func checkSwap(ctx context.Context, rc provision.RunCtx, r bssh.Runner, size string) (bool, []string, error) {
+	wantBytes, err := parseSwapBytes(size)
+	if err != nil {
+		return false, nil, err
+	}
+	fstab, _, err := catTrim(ctx, r, fstabPath)
+	if err != nil {
+		return false, nil, err
+	}
+	marked, foreign := fstabSwapState(fstab)
+	exists, gotBytes, err := swapfileSize(ctx, r)
+	if err != nil {
+		return false, nil, err
+	}
+	// Conflict: a foreign fstab line (even if a marked one also exists — a duplicate
+	// state berth must not silently bless), or a /swapfile present with no marked line.
+	if foreign || (exists && !marked) {
+		if !rc.Force {
+			return false, nil, fmt.Errorf("%s present but not managed by berth (need %q at the end of its /etc/fstab line); re-run with --force to take it over", swapfilePath, managedMarker)
+		}
+		return false, []string{"take over and rewrite " + swapfilePath + " (--force)"}, nil
+	}
+	var changes []string
+	if !exists || gotBytes != wantBytes {
+		changes = append(changes, fmt.Sprintf("create %s (%s) + mkswap + swapon", swapfilePath, size))
+	}
+	active, err := swapActive(ctx, r)
+	if err != nil {
+		return false, nil, err
+	}
+	if !active {
+		changes = append(changes, "swapon "+swapfilePath)
+	}
+	if !marked {
+		changes = append(changes, "add "+swapfilePath+" entry to "+fstabPath)
+	}
+	swapDropOK, err := swappinessLive(ctx, rc, r)
+	if err != nil {
+		return false, nil, err
+	}
+	if !swapDropOK {
+		changes = append(changes, "write "+swapSysctlPath+" (vm.swappiness="+swappinessValue+") + sysctl -p")
+	}
+	if len(changes) == 0 {
+		return true, nil, nil
+	}
+	return false, changes, nil
+}
+
+// swappinessLive reports whether the swappiness drop-in is up-to-date (managed-file
+// drift; an unmanaged file aborts unless --force) AND the running value is loaded.
+func swappinessLive(ctx context.Context, rc provision.RunCtx, r bssh.Runner) (bool, error) {
+	want, err := renderSwapSysctl()
+	if err != nil {
+		return false, err
+	}
+	state, err := checkManagedFile(ctx, r, swapSysctlPath, want)
+	if err != nil {
+		return false, err
+	}
+	fileOK, err := managedFileSatisfied(state, swapSysctlPath, rc.Force)
+	if err != nil {
+		return false, err
+	}
+	val, _, err := catTrim(ctx, r, swappinessProcPath)
+	if err != nil {
+		return false, err
+	}
+	return fileOK && val == swappinessValue, nil
+}
+
+// checkSwapRemoval reports satisfied unless a berth-owned swap lingers while swap is
+// off: a marked fstab line or a berth-managed swappiness drop-in. A foreign swap is
+// never flagged (berth removes only what it created).
+func checkSwapRemoval(ctx context.Context, r bssh.Runner) (bool, []string, error) {
+	fstab, _, err := catTrim(ctx, r, fstabPath)
+	if err != nil {
+		return false, nil, err
+	}
+	marked, _ := fstabSwapState(fstab)
+	dropPresent, err := managedFilePresent(ctx, r, swapSysctlPath)
+	if err != nil {
+		return false, nil, err
+	}
+	if marked || dropPresent {
+		return false, []string{"remove berth swap (" + swapfilePath + " + fstab entry + " + swapSysctlPath + ")"}, nil
+	}
+	return true, nil, nil
+}
+
+// checkSysctl reports satisfied iff the general drop-in is up-to-date (unmanaged
+// aborts unless --force) AND every key's running value matches.
+func checkSysctl(ctx context.Context, rc provision.RunCtx, r bssh.Runner) (bool, []string, error) {
+	want, err := renderSysctl()
+	if err != nil {
+		return false, nil, err
+	}
+	state, err := checkManagedFile(ctx, r, sysctlPath, want)
+	if err != nil {
+		return false, nil, err
+	}
+	fileOK, err := managedFileSatisfied(state, sysctlPath, rc.Force)
+	if err != nil {
+		return false, nil, err
+	}
+	if !fileOK {
+		return false, []string{"write " + sysctlPath + " + sysctl --system"}, nil
+	}
+	for _, kv := range sysctlKeys {
+		res, err := r.Run(ctx, "sysctl -n "+kv.Key, nil)
+		if err != nil {
+			return false, nil, err
+		}
+		if strings.TrimSpace(res.Stdout) != kv.Value {
+			return false, []string{"reload " + sysctlPath + " (running values stale)"}, nil
+		}
+	}
+	return true, nil, nil
+}
+
+// checkSysctlRemoval reports satisfied unless the general drop-in is berth-managed
+// while sysctl is off.
+func checkSysctlRemoval(ctx context.Context, r bssh.Runner) (bool, []string, error) {
+	present, err := managedFilePresent(ctx, r, sysctlPath)
+	if err != nil {
+		return false, nil, err
+	}
+	if present {
+		return false, []string{"remove " + sysctlPath + " + sysctl --system"}, nil
+	}
+	return true, nil, nil
 }
 
 func (system) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
