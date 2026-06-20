@@ -358,12 +358,22 @@ func TestNginxGuardWhenCloudflareOnly(t *testing.T) {
 	if strings.Count(hs, guard) != 3 {
 		t.Errorf("HTTPS must guard the 80 redirect /, the 443 /, and the php location:\n%s", hs)
 	}
-	// ACME must stay reachable so Let's Encrypt HTTP-01 still works.
-	acme := strings.Index(hs, "location /.well-known/acme-challenge/")
-	nextGuard := strings.Index(hs[acme:], guard)
-	closeBrace := strings.Index(hs[acme:], "}")
-	if nextGuard != -1 && nextGuard < closeBrace {
-		t.Error("the ACME challenge location must NOT be guarded")
+	// ACME must stay reachable so Let's Encrypt HTTP-01 still works: NO ACME block
+	// (port-80 OR 443) may contain the guard. Scan every occurrence, panic-safe.
+	const acmeLoc = "location /.well-known/acme-challenge/"
+	for rest := hs; ; {
+		i := strings.Index(rest, acmeLoc)
+		if i == -1 {
+			break
+		}
+		block := rest[i:]
+		if end := strings.Index(block, "}"); end != -1 {
+			block = block[:end]
+		}
+		if strings.Contains(block, "$berth_cloudflare") {
+			t.Error("the ACME challenge location must NOT be guarded")
+		}
+		rest = rest[i+len(acmeLoc):]
 	}
 }
 
@@ -381,8 +391,8 @@ func TestNginxNoGuardWhenNotCloudflareOnly(t *testing.T) {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `go test ./internal/provision/steps/ -run TestNginxGuard`
-Expected: FAIL — compile error `s.Sites[0].CloudflareOnly undefined` is already resolved by Task 1, so the real failure is the assertion: the guard string is absent (count 0, not 2/3).
+Run: `go test ./internal/provision/steps/ -run 'TestNginx.*Guard'` (the broad regex matches both `TestNginxGuardWhenCloudflareOnly` and `TestNginxNoGuardWhenNotCloudflareOnly`)
+Expected: FAIL — the `CloudflareOnly` field exists (Task 1), so the failure is the assertion: the guard string is absent (count 0, not 2/3).
 
 - [ ] **Step 3: Add the `CloudflareOnly` field to `nginxData` and populate it**
 
@@ -463,8 +473,8 @@ Change the 443 block's `location ~ \.php$` (~line 77) — insert as the first li
 
 - [ ] **Step 6: Run the render tests to verify they pass**
 
-Run: `go test ./internal/provision/steps/ -run TestNginxGuard`
-Expected: PASS.
+Run: `go test ./internal/provision/steps/ -run 'TestNginx.*Guard'`
+Expected: PASS (both `TestNginxGuardWhenCloudflareOnly` and `TestNginxNoGuardWhenNotCloudflareOnly`).
 
 - [ ] **Step 7: Mirror the field in the test-local `nginxData` and add golden tests**
 
@@ -603,6 +613,12 @@ In `internal/provision/steps/site.go`, inside `managedSiteFiles`, just before th
 	}
 ```
 
+Also extend the user-facing change list `site.changes()` (~line 408) so a dry-run reflects the new managed file — add this entry after the `"write global logrotate fragment"` line:
+
+```go
+		"reconcile the global Cloudflare origin-lockdown snippet (write or remove)",
+```
+
 - [ ] **Step 4: Run the Check-side tests to verify they pass**
 
 Run: `go test ./internal/provision/steps/ -run TestManagedSiteFiles`
@@ -710,17 +726,26 @@ In `internal/provision/steps/site.go`, at the very top of `Apply` (immediately a
 	}
 ```
 
-- [ ] **Step 8: Stub the cloudflare `cat` in the existing Apply tests**
+- [ ] **Step 8: Stub the cloudflare `cat` for every existing Apply test (DRY, via the shared helper)**
 
-The disabled step-0 path runs `cat '<cloudflareConfPath>'` via `managedFilePresent`. Existing `site.Apply` success-path tests now hit it. Add this one line after each `stubFPMApply(s, f)` call in `TestSiteApplyValidatesNginxBeforeReload`, `TestSiteApplyWritesManagedFiles`, and `TestSiteApplyWritesLogrotate` (return ExitCode 1 = absent, so no rm):
+The disabled step-0 path runs `cat '<cloudflareConfPath>'` via `managedFilePresent`, and `FakeRunner` errors on **any** unstubbed command. There are several existing `site.Apply` success-path tests (more than the first few — e.g. `TestSiteApplyValidatesNginxBeforeReload`, `TestSiteApplyWritesManagedFiles`, `TestSiteApplyWritesLogrotate`, `TestSiteCheckSatisfiedAfterTLSSwap`'s Apply phase, and others further down `site_test.go`), and they ALL share one helper, `stubFPMApply`. Stub it there once rather than per-test. In `internal/provision/steps/site_test.go`, add this line inside `stubFPMApply` (~line 454) and extend its doc comment to mention it also covers the step-0 cloudflare-absent probe:
+
+```go
+	f.On("cat "+shQuote(cloudflareConfPath), bssh.Result{ExitCode: 1}) // step-0 cloudflare snippet absent
+```
+
+`TestSiteApplyAbortsOnNginxTestFailure` is the ONE Apply test that does NOT call `stubFPMApply` (it aborts at `nginx -t`, which runs AFTER step 0, so step 0's `cat` still executes). Stub it inline there, right after its existing `f.On("nginx -t", ...)` line:
 
 ```go
 	f.On("cat "+shQuote(cloudflareConfPath), bssh.Result{ExitCode: 1})
 ```
 
-`TestSiteApplyAbortsOnNginxTestFailure` aborts at `nginx -t` (step 2), which is AFTER step 0, so step 0's `cat` DOES run there too — add the same stub right after its `f.On("nginx -t", ...)` line.
+> **Ordering note for `TestSiteApplyRemovesCloudflareConfWhenDisabled` (Step 5):** it calls `stubFPMApply` first (cat → absent) and THEN overrides the cat to *present* so the `rm` fires. `FakeRunner.On` is last-write-wins (a map assignment), so the explicit present-stub MUST come after `stubFPMApply`, exactly as written in Step 5.
 
-For `TestSiteCheckSatisfiedAfterTLSSwap`'s Apply phase (the `fApply` runner, ~line 492), the site is `selfsigned` SSL with `cloudflare_only` off, so step 0 also cats — add `fApply.On("cat "+shQuote(cloudflareConfPath), bssh.Result{ExitCode: 1})` alongside the other `fApply.On(...)` stubs.
+After this change, grep to be safe — every `Apply` test now reaches step 0:
+
+Run: `grep -n "Site().Apply\|func TestSite.*Apply\|stubFPMApply" internal/provision/steps/site_test.go`
+Confirm each `Site().Apply(...)` test body either calls `stubFPMApply` or stubs the cloudflare `cat` inline (only the abort test needs the inline stub).
 
 - [ ] **Step 9: Run the full steps package test suite**
 
