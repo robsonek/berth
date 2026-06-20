@@ -746,14 +746,67 @@ func TestSiteApplyRemovesCloudflareConfWhenDisabled(t *testing.T) {
 	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
-	var removed bool
-	for _, c := range f.Calls() {
-		if c.Cmd == "rm -f "+shQuote(cloudflareConfPath) {
-			removed = true
+	// The rm must run AFTER the vhosts are rewritten (unguarded) and nginx reloaded,
+	// so the $berth_cloudflare geo always outlives the last vhost that referenced it
+	// — a partial failure mid-Apply must never leave a guarded vhost without its geo.
+	idxReload, idxRemove := -1, -1
+	for i, c := range f.Calls() {
+		switch c.Cmd {
+		case "systemctl reload nginx":
+			idxReload = i
+		case "rm -f " + shQuote(cloudflareConfPath):
+			idxRemove = i
 		}
 	}
-	if !removed {
-		t.Error("Apply must rm the lingering berth-managed cloudflare conf when disabled")
+	if idxRemove < 0 {
+		t.Fatal("Apply must rm the lingering berth-managed cloudflare conf when disabled")
+	}
+	if idxReload < 0 || idxRemove < idxReload {
+		t.Errorf("rm of the cloudflare snippet (idx %d) must run AFTER systemctl reload nginx (idx %d)", idxRemove, idxReload)
+	}
+}
+
+// An unmanaged (foreign) berth-cloudflare.conf must abort Check without --force,
+// even when an earlier-drifting guarded vhost would otherwise short-circuit the
+// managed-site-files loop before the snippet's unmanaged-conflict check ran. We
+// force that short-circuit by making the per-site vhost read back as drifted
+// (managed marker, different content) — the realistic case on a disable->enable
+// transition where the vhost just gained the guard.
+func TestSiteCheckAbortsOnUnmanagedCloudflareConf(t *testing.T) {
+	s := siteServer()
+	tru := true
+	s.Sites[0].CloudflareOnly = &tru
+	vhost := nginxAvailablePath(s.Sites[0].Domain)
+	drifted := bssh.Result{ExitCode: 0, Stdout: "# managed by berth\nserver { listen 80; } # stale\n"}
+	foreign := bssh.Result{ExitCode: 0, Stdout: "server { listen 80; }\n"} // no berth marker
+
+	f := bssh.NewFakeRunner()
+	stubManagedSiteFiles(t, s, f) // stubs cat for all managed files (incl. cloudflare, with the marker)
+	// The vhost drifts FIRST in the loop; the snippet is the LAST entry. Without the
+	// unconditional pre-check, the loop returns at the vhost and never reaches the
+	// snippet's unmanaged-conflict check.
+	f.On("cat "+shQuote(vhost), drifted)
+	// Override: the snippet exists but is FOREIGN (no berth marker).
+	f.On("cat "+shQuote(cloudflareConfPath), foreign)
+	_, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil {
+		t.Fatal("Check must error on an unmanaged berth-cloudflare.conf (no --force)")
+	}
+	// And with Force it must NOT error on that account.
+	f2 := bssh.NewFakeRunner()
+	stubManagedSiteFiles(t, s, f2)
+	f2.On("cat "+shQuote(vhost), drifted)
+	f2.On("cat "+shQuote(cloudflareConfPath), foreign)
+	f2.On("nginx -t", bssh.Result{ExitCode: 0})
+	f2.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
+	cr, err := Site().Check(context.Background(), provision.RunCtx{Force: true}, s, f2)
+	if err != nil {
+		t.Fatalf("with --force, Check must not abort on the unmanaged snippet: %v", err)
+	}
+	// With force, the unmanaged snippet no longer aborts; the drifted vhost still
+	// makes Check unsatisfied (it will be reconciled by Apply).
+	if cr.Satisfied {
+		t.Error("a drifted vhost must leave Check unsatisfied (reconciled by Apply)")
 	}
 }
 

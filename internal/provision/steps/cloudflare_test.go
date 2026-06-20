@@ -20,8 +20,24 @@ func TestRenderCloudflareConf(t *testing.T) {
 	if !strings.Contains(out, "geo $realip_remote_addr $berth_cloudflare {") {
 		t.Error("must define the geo map keyed on $realip_remote_addr")
 	}
-	if len(cloudflareIPRanges) < 20 {
-		t.Fatalf("expected the full Cloudflare range list, got %d", len(cloudflareIPRanges))
+	if len(cloudflareIPRanges) != 22 {
+		t.Fatalf("expected 22 Cloudflare ranges (15 IPv4 + 7 IPv6), got %d", len(cloudflareIPRanges))
+	}
+	var v4, v6 int
+	seen := map[string]bool{}
+	for _, c := range cloudflareIPRanges {
+		if seen[c] {
+			t.Errorf("duplicate range %s", c)
+		}
+		seen[c] = true
+		if strings.Contains(c, ":") {
+			v6++
+		} else {
+			v4++
+		}
+	}
+	if v4 != 15 || v6 != 7 {
+		t.Errorf("expected 15 IPv4 + 7 IPv6 ranges, got %d v4 / %d v6", v4, v6)
 	}
 	for _, cidr := range cloudflareIPRanges {
 		if !strings.Contains(out, "set_real_ip_from "+cidr+";") {

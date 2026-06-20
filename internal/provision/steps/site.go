@@ -367,6 +367,24 @@ func (st site) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
+	// Enforce the managed-marker policy for the global Cloudflare snippet
+	// regardless of loop position: an earlier drifted file (e.g. a vhost that just
+	// gained the guard) would otherwise short-circuit Check before this entry's
+	// unmanaged-conflict check ran, letting Apply overwrite a foreign
+	// berth-cloudflare.conf without --force. (Mirrors systembase's unconditional pre-check.)
+	if s.AnyCloudflareOnly() {
+		cf, err := renderCloudflareConf()
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		state, err := checkManagedFile(ctx, r, cloudflareConfPath, cf)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if _, err := managedFileSatisfied(state, cloudflareConfPath, rc.Force); err != nil {
+			return provision.CheckResult{}, err
+		}
+	}
 	for _, mf := range mfs {
 		if mf.remove {
 			present, err := managedFilePresent(ctx, r, mf.path)
@@ -434,10 +452,11 @@ func (site) changes() []string {
 }
 
 func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) error {
-	// 0) Reconcile the global http-context Cloudflare snippet BEFORE the per-site
-	//    vhosts so the $berth_cloudflare geo flag is defined when nginx -t validates
-	//    a vhost that references it. When disabled, drift-remove a lingering
-	//    berth-managed copy (guarded so a foreign conf.d file is never clobbered).
+	// 0) When cloudflare_only is active, write the global geo/realip snippet BEFORE
+	//    the per-site vhosts so $berth_cloudflare is defined when nginx -t validates a
+	//    guarded vhost. (The disabled-state removal happens AFTER the vhosts are
+	//    rewritten unguarded — step 2b below — so the geo outlives the last vhost
+	//    that references it.)
 	if s.AnyCloudflareOnly() {
 		cf, err := renderCloudflareConf()
 		if err != nil {
@@ -447,18 +466,6 @@ func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 			Path: cloudflareConfPath, Content: cf, Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
 		}); err != nil {
 			return fmt.Errorf("write %s: %w", cloudflareConfPath, err)
-		}
-	} else {
-		present, err := managedFilePresent(ctx, r, cloudflareConfPath)
-		if err != nil {
-			return err
-		}
-		if present {
-			if res, err := r.Run(ctx, "rm -f "+shQuote(cloudflareConfPath), nil); err != nil {
-				return err
-			} else if res.ExitCode != 0 {
-				return fmt.Errorf("remove %s: %s", cloudflareConfPath, res.Stderr)
-			}
 		}
 	}
 
@@ -492,6 +499,24 @@ func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 		return err
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("reload nginx: %s", res.Stderr)
+	}
+
+	// 2b) cloudflare_only disabled: now that the vhosts have been rewritten without
+	//     the guard and nginx reloaded, drift-remove a lingering berth-managed
+	//     snippet (guarded so a foreign conf.d file is never clobbered). Removing it
+	//     only here guarantees the geo outlived every vhost that referenced it.
+	if !s.AnyCloudflareOnly() {
+		present, err := managedFilePresent(ctx, r, cloudflareConfPath)
+		if err != nil {
+			return err
+		}
+		if present {
+			if res, err := r.Run(ctx, "rm -f "+shQuote(cloudflareConfPath), nil); err != nil {
+				return err
+			} else if res.ExitCode != 0 {
+				return fmt.Errorf("remove %s: %s", cloudflareConfPath, res.Stderr)
+			}
+		}
 	}
 
 	// 3) Per-site FPM pools (each its own user + socket). Disable the stock www
