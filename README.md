@@ -104,6 +104,11 @@ tuning:                        # optional — omit any field to keep its default
   valkey_maxmemory_policy: allkeys-lru   # any Valkey eviction policy
   mariadb_innodb_buffer_pool: 256M
 
+system:                        # optional host-level OS provisioning — both default off
+  swap: 2G                     # default off when absent; positive integer + M / G
+                               # (e.g. 512M, 2G) → creates /swapfile + vm.swappiness=10
+  sysctl: true                 # default false; writes a conservative web/DB sysctl drop-in
+
 sites:                         # one or more
   - domain: app.example.com            # required
     deploy_path: /var/www/app          # required — absolute path

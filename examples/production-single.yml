@@ -40,6 +40,11 @@ tuning:
   valkey_maxmemory: 512mb
   mariadb_innodb_buffer_pool: 512M
 
+# Optional host-level OS provisioning (both default off).
+system:
+  swap: 2G              # create /swapfile (2 GiB) + vm.swappiness=10; omit to leave swap untouched
+  sysctl: true          # write a conservative web/DB kernel sysctl drop-in
+
 sites:
   - domain: app.example.com
     deploy_path: /var/www/app
