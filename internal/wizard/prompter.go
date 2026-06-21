@@ -69,7 +69,9 @@ func (h *huhPrompter) ServerCore(a *Answers) error {
 	if err := form.Run(); err != nil {
 		return err
 	}
-	a.Port, _ = strconv.Atoi(portStr) // validated by validIntField
+	// parseIntInRange trims like the validator did, so a padded but accepted port
+	// (e.g. " 2222 ") is kept rather than silently dropped to 0 by a raw Atoi.
+	a.Port, _ = parseIntInRange("ssh.port", portStr, 1, 65535)
 	a.DBEngine, a.DBSource = choice.Engine, choice.Source
 	return nil
 }
@@ -92,7 +94,9 @@ func (h *huhPrompter) ServerAdvanced(a *Answers) error {
 	if err := form.Run(); err != nil {
 		return err
 	}
-	a.Fail2ban.Maxretry, _ = strconv.Atoi(maxretry)
+	// Trim-safe like the validator (optionalInt); blank/"0" -> 0 = default, an
+	// accepted " 5 " -> 5 (a raw Atoi would have dropped it to the default).
+	a.Fail2ban.Maxretry, _ = parseIntInRange("fail2ban.maxretry", maxretry, 0, 100)
 	return nil
 }
 
