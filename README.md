@@ -58,8 +58,10 @@ always safe; `--dry-run` shows what would change.
 
 A server is one YAML file in `servers/<name>.yml`. `berth init` can generate
 **any** of the configs in this README interactively — the advanced sections
-(fail2ban, tuning, per-site queue/daemons) sit behind optional prompts, so the
-common path stays short — or you can write the file by hand. Ready-to-copy
+(fail2ban, tuning, swap/sysctl, Cloudflare-only lockdown, and backups, plus
+per-site queue/daemons and scheduler/Cloudflare/backups overrides) sit behind
+optional prompts, so the common path stays short — or you can write the file by
+hand. Ready-to-copy
 starting points live in [`examples/`](examples/) — e.g.
 `cp examples/minimal.yml servers/myserver.yml`. Every field, with its default
 and accepted values:
