@@ -855,7 +855,7 @@ func TestConfigMatrix(t *testing.T) {
 					sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "a.example.com", "/srv/a", "adb", "ausr"
 				},
 			},
-			siteScheduler: func(sa *SiteAnswers) { sa.SchedulerOverride = "inherit" },
+			siteOverrides: func(sa *SiteAnswers) { sa.SchedulerOverride = "inherit" },
 			queue: func(q *QueueAnswers) {
 				q.Driver, q.Processes, q.Connection, q.Queue, q.Sleep, q.Tries, q.Timeout, q.MaxMemory = "work", 2, "redis", "default", 3, 5, 60, 128
 			},
@@ -1100,7 +1100,7 @@ func TestConfigMatrix(t *testing.T) {
 					sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "one.example.com", "/srv/one", "onedb", "oneuser"
 				},
 			},
-			siteScheduler: func(sa *SiteAnswers) { sa.SchedulerOverride = "on" },
+			siteOverrides: func(sa *SiteAnswers) { sa.SchedulerOverride = "on" },
 			// server-advanced? (yes) | site-advanced? (no) | add-another? (no)
 			confirms: []bool{true, false, false},
 		}
@@ -1117,7 +1117,7 @@ func TestConfigMatrix(t *testing.T) {
 		if len(a.Sites) != 1 {
 			t.Fatalf("want 1 site")
 		}
-		// site-advanced gate was false so SiteScheduler never ran: stays "inherit".
+		// site-advanced gate was false so SiteOverrides never ran: stays "inherit".
 		if a.Sites[0].SchedulerOverride != "inherit" {
 			t.Fatalf("scheduler override = %q, want inherit", a.Sites[0].SchedulerOverride)
 		}
@@ -1137,7 +1137,7 @@ func TestConfigMatrix(t *testing.T) {
 					sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "two.example.com", "/srv/two", "twodb", "twouser"
 				},
 			},
-			siteScheduler: func(sa *SiteAnswers) { sa.SchedulerOverride = "off" },
+			siteOverrides: func(sa *SiteAnswers) { sa.SchedulerOverride = "off" },
 			// server-advanced? (no) | site-advanced? (yes) | dedicated-queue? (no) | add-daemon? (no) | add-another? (no)
 			confirms: []bool{false, true, false, false, false},
 		}

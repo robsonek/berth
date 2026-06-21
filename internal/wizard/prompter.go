@@ -17,8 +17,9 @@ import (
 type prompter interface {
 	ServerCore(a *Answers) error     // host, ssh, php, db (combined), nginx, valkey, queue, scheduler
 	ServerAdvanced(a *Answers) error // fail2ban + tuning
+	ServerOps(a *Answers) error      // swap/sysctl, cloudflare-only, backups
 	SiteCore(index int, sa *SiteAnswers) error
-	SiteScheduler(sa *SiteAnswers) error // scheduler override (inherit/on/off)
+	SiteOverrides(sa *SiteAnswers) error // scheduler + cloudflare + backups overrides (inherit/on/off)
 	Queue(q *QueueAnswers) error
 	Daemon(d *DaemonAnswers) error
 	Confirm(prompt string) (bool, error)
@@ -96,6 +97,27 @@ func (h *huhPrompter) ServerAdvanced(a *Answers) error {
 	return nil
 }
 
+func (h *huhPrompter) ServerOps(a *Answers) error {
+	retention := strconv.Itoa(a.Backups.RetentionDays)
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewInput().Title("Swap file size (e.g. 2G, blank=none)").Value(&a.System.Swap).Validate(optionalSwapSize),
+			huh.NewConfirm().Title("Apply conservative kernel sysctl tuning?").Value(&a.System.Sysctl),
+			huh.NewConfirm().Title("Cloudflare-only origin lockdown (server default)?").Value(&a.CloudflareOnly),
+		),
+		huh.NewGroup(
+			huh.NewConfirm().Title("Enable nightly local backups (server default)?").Value(&a.Backups.Enabled),
+			huh.NewInput().Title("Backup retention days (1-3650, blank/0=default 7)").Value(&retention).Validate(optionalInt("backups.retention_days", 1, 3650)),
+			huh.NewInput().Title("Backup schedule (5-field cron, blank=default 30 3 * * *)").Value(&a.Backups.Schedule).Validate(optionalCronSchedule),
+		),
+	)
+	if err := form.Run(); err != nil {
+		return err
+	}
+	a.Backups.RetentionDays, _ = strconv.Atoi(retention) // blank/invalid => 0 => default; bounds enforced by the validator
+	return nil
+}
+
 func (h *huhPrompter) SiteCore(index int, sa *SiteAnswers) error {
 	core := huh.NewForm(
 		huh.NewGroup(
@@ -129,10 +151,14 @@ func (h *huhPrompter) SiteCore(index int, sa *SiteAnswers) error {
 	return tls.Run()
 }
 
-func (h *huhPrompter) SiteScheduler(sa *SiteAnswers) error {
+func (h *huhPrompter) SiteOverrides(sa *SiteAnswers) error {
 	return huh.NewForm(huh.NewGroup(
 		huh.NewSelect[string]().Title("Scheduler for this site").
 			Options(huh.NewOptions("inherit", "on", "off")...).Value(&sa.SchedulerOverride),
+		huh.NewSelect[string]().Title("Cloudflare-only for this site").
+			Options(huh.NewOptions("inherit", "on", "off")...).Value(&sa.CloudflareOverride),
+		huh.NewSelect[string]().Title("Backups for this site").
+			Options(huh.NewOptions("inherit", "on", "off")...).Value(&sa.BackupsOverride),
 	)).Run()
 }
 
