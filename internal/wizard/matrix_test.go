@@ -87,6 +87,20 @@ func TestConfigMatrix(t *testing.T) {
 		return a
 	}
 
+	// validSingleSite returns a minimal valid single-site Answers with the per-site
+	// override tristates seeded to "inherit" (the run-path default). Mirrors the
+	// neighboring valid cases' construction so the ops/* subtests only have to flip
+	// the one block under test.
+	validSingleSite := func(t *testing.T) Answers {
+		t.Helper()
+		a := base("ops", "203.0.113.10")
+		a.Sites = []SiteAnswers{{
+			Domain: "a.example.com", DeployPath: "/srv/a", DBName: "adb", DBUser: "ausr",
+			SchedulerOverride: "inherit", CloudflareOverride: "inherit", BackupsOverride: "inherit",
+		}}
+		return a
+	}
+
 	// ===================== DB engine x source x nginx x valkey =====================
 
 	t.Run("mariadb-debian-nginxdebian-novalkey", func(t *testing.T) {
@@ -1393,6 +1407,60 @@ func TestConfigMatrix(t *testing.T) {
 		if verr := a.ToServer().Validate(); verr != nil {
 			t.Fatalf("validate = %v", verr)
 		}
+	})
+
+	// ===================== Ops blocks: system / cloudflare / backups =====================
+
+	t.Run("ops/system swap+sysctl", func(t *testing.T) {
+		a := validSingleSite(t) // minimal valid Answers
+		a.System = SystemAnswers{Swap: "2G", Sysctl: true}
+		srv, raw := writeValid(t, a)
+		if srv.System.Swap != "2G" || !srv.System.Sysctl {
+			t.Errorf("system = %+v", srv.System)
+		}
+		if !strings.Contains(raw, "swap: 2G") {
+			t.Errorf("yaml missing swap:\n%s", raw)
+		}
+	})
+
+	t.Run("ops/system bad swap", func(t *testing.T) {
+		a := validSingleSite(t)
+		a.System = SystemAnswers{Swap: "2TB"}
+		err := writeInvalid(t, a)
+		mustContain(t, err, "swap")
+	})
+
+	t.Run("ops/cloudflare server + per-site override", func(t *testing.T) {
+		a := validSingleSite(t)
+		a.CloudflareOnly = true
+		a.Sites[0].CloudflareOverride = "off"
+		srv, _ := writeValid(t, a)
+		if !srv.CloudflareOnly {
+			t.Error("server CloudflareOnly should be true")
+		}
+		if srv.Sites[0].CloudflareOnly == nil || *srv.Sites[0].CloudflareOnly {
+			t.Error("site CloudflareOnly should be *false")
+		}
+	})
+
+	t.Run("ops/backups enabled + retention + schedule + per-site override", func(t *testing.T) {
+		a := validSingleSite(t)
+		a.Backups = BackupsAnswers{Enabled: true, RetentionDays: 14, Schedule: "0 2 * * 0"}
+		a.Sites[0].BackupsOverride = "on"
+		srv, _ := writeValid(t, a)
+		if !srv.Backups.Enabled || srv.Backups.Retention != 14 || srv.Backups.Schedule != "0 2 * * 0" {
+			t.Errorf("backups = %+v", srv.Backups)
+		}
+		if srv.Sites[0].Backups == nil || !*srv.Sites[0].Backups {
+			t.Error("site Backups should be *true")
+		}
+	})
+
+	t.Run("ops/backups bad schedule", func(t *testing.T) {
+		a := validSingleSite(t)
+		a.Backups = BackupsAnswers{Enabled: true, Schedule: "30 3 * * mon"}
+		err := writeInvalid(t, a)
+		mustContain(t, err, "schedule")
 	})
 
 	// ===================== Gap closure: coverage the adversarial review flagged =====================
