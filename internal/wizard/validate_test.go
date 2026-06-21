@@ -86,3 +86,19 @@ func TestOptionalCronSchedule(t *testing.T) {
 		}
 	}
 }
+
+// TestParseIntInRangeTrims locks the trim behavior that ServerOps' retention
+// conversion relies on: an accepted " 14 " must yield 14 (not be silently dropped
+// to 0/default), while blank/"0"/out-of-range return (0, err) so a `, _ =` caller
+// keeps 0 = "use default".
+func TestParseIntInRangeTrims(t *testing.T) {
+	if n, err := parseIntInRange("retention", " 14 ", 1, 3650); err != nil || n != 14 {
+		t.Errorf("parseIntInRange(\" 14 \") = (%d, %v), want (14, nil)", n, err)
+	}
+	if n, err := parseIntInRange("retention", "", 1, 3650); err == nil || n != 0 {
+		t.Errorf("parseIntInRange(\"\") = (%d, %v), want (0, error)", n, err)
+	}
+	if n, err := parseIntInRange("retention", "0", 1, 3650); err == nil || n != 0 {
+		t.Errorf("parseIntInRange(\"0\") = (%d, %v), want (0, error)", n, err)
+	}
+}

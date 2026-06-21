@@ -114,7 +114,9 @@ func (h *huhPrompter) ServerOps(a *Answers) error {
 	if err := form.Run(); err != nil {
 		return err
 	}
-	a.Backups.RetentionDays, _ = strconv.Atoi(retention) // blank/invalid => 0 => default; bounds enforced by the validator
+	// parseIntInRange trims like the validator did, so an accepted " 14 " is kept (not
+	// silently dropped by a raw Atoi); blank/"0"/out-of-range return (0, err) => 0 = default.
+	a.Backups.RetentionDays, _ = parseIntInRange("backups.retention_days", retention, 1, 3650)
 	return nil
 }
 
