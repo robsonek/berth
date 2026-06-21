@@ -19,6 +19,9 @@ func (a Answers) ToServer() *config.Server {
 			ValkeyMaxmemoryPolicy: a.Tuning.ValkeyMaxmemoryPolicy,
 			MariaDBBufferPool:     a.Tuning.MariaDBBufferPool,
 		},
+		System:         config.System{Swap: a.System.Swap, Sysctl: a.System.Sysctl},
+		CloudflareOnly: a.CloudflareOnly,
+		Backups:        config.Backups{Enabled: a.Backups.Enabled, Retention: a.Backups.RetentionDays, Schedule: a.Backups.Schedule},
 	}
 	for _, sa := range a.Sites {
 		site := config.Site{
@@ -39,6 +42,22 @@ func (a Answers) ToServer() *config.Server {
 		case "off":
 			v := false
 			site.Scheduler = &v
+		} // "inherit"/"" => nil
+		switch sa.CloudflareOverride {
+		case "on":
+			v := true
+			site.CloudflareOnly = &v
+		case "off":
+			v := false
+			site.CloudflareOnly = &v
+		} // "inherit"/"" => nil
+		switch sa.BackupsOverride {
+		case "on":
+			v := true
+			site.Backups = &v
+		case "off":
+			v := false
+			site.Backups = &v
 		} // "inherit"/"" => nil
 		if sa.Queue != nil {
 			site.Queue = &config.QueueConfig{
