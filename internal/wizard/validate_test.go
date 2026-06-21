@@ -60,3 +60,29 @@ func TestInlineValidators(t *testing.T) {
 		t.Error("validOSUser accepted spaces/uppercase")
 	}
 }
+
+func TestOptionalSwapSize(t *testing.T) {
+	for _, ok := range []string{"", "2G", "512M", "1g", "16m"} {
+		if err := optionalSwapSize(ok); err != nil {
+			t.Errorf("optionalSwapSize(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{"2", "2GB", "0G", "G", "2T", "-1G", "2 G"} {
+		if err := optionalSwapSize(bad); err == nil {
+			t.Errorf("optionalSwapSize(%q) = nil, want error", bad)
+		}
+	}
+}
+
+func TestOptionalCronSchedule(t *testing.T) {
+	for _, ok := range []string{"", "30 3 * * *", "*/15 * * * *", "0 2 * * 0"} {
+		if err := optionalCronSchedule(ok); err != nil {
+			t.Errorf("optionalCronSchedule(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{"30 3 * *", "30 3 * * * *", "30 3 * * mon", "30 3 * * *\nroot id"} {
+		if err := optionalCronSchedule(bad); err == nil {
+			t.Errorf("optionalCronSchedule(%q) = nil, want error", bad)
+		}
+	}
+}
