@@ -109,6 +109,11 @@ system:                        # optional host-level OS provisioning — both de
                                # (e.g. 512M, 2G) → creates /swapfile + vm.swappiness=10
   sysctl: true                 # default false; writes a conservative web/DB sysctl drop-in
 
+backups:                       # optional opt-in local backups — off by default
+  enabled: true                # server-wide default (off unless set)
+  retention_days: 7            # prune dumps older than N days (default 7; 1–3650)
+  schedule: "30 3 * * *"       # 5-field cron, run as root (default 03:30 daily)
+
 sites:                         # one or more
   - domain: app.example.com            # required
     deploy_path: /var/www/app          # required — absolute path
@@ -122,6 +127,8 @@ sites:                         # one or more
     http3: false                       # requires ssl: true + nginx.source: nginx
     scheduler: true                    # per-site override of the server default
     cloudflare_only: true              # per-site override of the server default
+    backups: false                     # per-site override of the server default
+                                       # (nil/absent = inherit backups.enabled)
     queue:                             # tune this site's worker (omit = server default)
       driver: work                     # work (default) | horizon
       processes: 4                     # numprocs
@@ -312,6 +319,54 @@ its own workers, so the `queue:work` knobs don't apply; configure it in your app
 `config/horizon.php`, and note it needs the Redis/Valkey queue driver). Each site
 user gets **narrow sudoers** to control only its own programs, and Supervisor is
 installed whenever any site declares a worker or a daemon.
+
+## Backups (opt-in, local)
+
+```yaml
+backups:
+  enabled: true          # server-wide default (off unless set)
+  retention_days: 7      # prune dumps older than N days (default 7)
+  schedule: "30 3 * * *" # 5-field cron, run as root (default 03:30 daily)
+sites:
+  - domain: staging.example.com
+    backups: false       # per-site override; nil/absent = inherit server default
+```
+
+When enabled, each site gets a managed root cron + `/usr/local/sbin/berth-backup-<pool>`
+that writes, into `/var/backups/berth/<pool>/` (**`root:root`, mode 0700**):
+
+- `<db>-<UTC-timestamp>.sql.gz` — passwordless engine dump (MariaDB socket-root / Postgres peer)
+- `<pool>-files-<UTC-timestamp>.tar.gz` — a tar of the site's `shared/` (`.env` + `storage/`)
+
+Old archives are pruned by age. Disabling backups (per site, or removing the site)
+deletes the cron + script but **never** the existing archive files.
+
+Backups are deliberately **root-owned** (directory and files): the dump cron runs as root,
+and a root process must not create files in a directory a tenant can write to (a symlink
+pre-planted at a predictable path would be a local-root privesc). Root ownership also means
+a compromised *site* cannot read, tamper with, or delete its own backups. Restore is a root
+operation (below).
+
+**Restore** (run on the host as root):
+
+```bash
+# MariaDB
+gunzip -c /var/backups/berth/<pool>/<db>-<ts>.sql.gz | mysql <db>
+# PostgreSQL (plain-SQL dump — psql, not pg_restore)
+gunzip -c /var/backups/berth/<pool>/<db>-<ts>.sql.gz | sudo -u postgres psql <db>
+# Files
+tar -xzf /var/backups/berth/<pool>/<pool>-files-<ts>.tar.gz -C <deploy_path>
+```
+
+The PostgreSQL dump carries ownership (`ALTER ... OWNER TO <approle>`), so the app
+role and database must already exist before you restore for ownership to be
+reestablished. For disaster recovery, re-run berth (it recreates the role/database)
+before restoring.
+
+**Limitations:** local only (no offsite copy) — backups are root-owned so they survive a
+compromised *site*, but a lost *host* loses them; the DB dump and files tar are independent,
+so a failed run may leave one without the other (match artifacts by UTC timestamp); the first
+dump runs at the next scheduled time (provisioning never runs a backup itself).
 
 ## Multiple sites (isolated per domain)
 

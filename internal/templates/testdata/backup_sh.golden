@@ -1,0 +1,22 @@
+# managed by berth
+set -euo pipefail
+umask 077
+exec >>/var/log/berth/backup-app_example_com.log 2>&1
+exec 9>/var/backups/berth/app_example_com/.lock
+flock -n 9 || { echo "[$(date -u +%FT%TZ)] berth backup app_example_com: skipped (another run holds the lock)"; exit 0; }
+ts="$(date -u +%Y%m%dT%H%M%SZ)"
+db_tmp=""
+files_tmp=""
+trap 'rm -f -- "$db_tmp" "$files_tmp"' EXIT
+find "/var/backups/berth/app_example_com" -maxdepth 1 -type f -name '.tmp-*' -mmin +1440 -delete
+echo "[$(date -u +%FT%TZ)] berth backup app_example_com: start"
+db_tmp="$(mktemp "/var/backups/berth/app_example_com/.tmp-XXXXXXXX")"
+mysqldump --protocol=socket --single-transaction --no-tablespaces --routines --events myapp | gzip -c > "$db_tmp"
+chmod 0600 "$db_tmp"
+mv "$db_tmp" "/var/backups/berth/app_example_com/myapp-$ts.sql.gz"
+files_tmp="$(mktemp "/var/backups/berth/app_example_com/.tmp-XXXXXXXX")"
+tar -czf "$files_tmp" -C "/home/deploy/myapp" shared || [ $? -eq 1 ]
+chmod 0600 "$files_tmp"
+mv "$files_tmp" "/var/backups/berth/app_example_com/app_example_com-files-$ts.tar.gz"
+find "/var/backups/berth/app_example_com" -maxdepth 1 -type f -name '*.gz' -mtime +7 -delete
+echo "[$(date -u +%FT%TZ)] berth backup app_example_com: done"

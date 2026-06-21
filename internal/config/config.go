@@ -88,6 +88,40 @@ type System struct {
 	Sysctl bool   `mapstructure:"sysctl" yaml:"sysctl,omitempty"` // default false = no sysctl drop-in
 }
 
+// Backups holds the opt-in scheduled-backup knobs. Enabled is off by default
+// (a server-wide switch; a per-site sites[].backups *bool overrides it). When
+// on, the backups step installs one managed cron + script per site that dumps
+// the site database and tars its shared/ dir locally, pruning by age. Retention
+// and Schedule fall back to the *Eff accessors' defaults (NOT SetDefault) so
+// wizard ToServer() / literal-Server callers that bypass Load() still render
+// valid values — an empty schedule would otherwise produce a broken cron line.
+type Backups struct {
+	Enabled   bool   `mapstructure:"enabled"        yaml:"enabled,omitempty"`
+	Retention int    `mapstructure:"retention_days" yaml:"retention_days,omitempty"` // age cutoff for pruning; default 7
+	Schedule  string `mapstructure:"schedule"       yaml:"schedule,omitempty"`       // 5-field cron; default "30 3 * * *"
+}
+
+const (
+	defaultBackupRetentionDays = 7
+	defaultBackupSchedule      = "30 3 * * *"
+)
+
+// RetentionDaysEff returns the configured retention in days or the default (7).
+func (b Backups) RetentionDaysEff() int {
+	if b.Retention <= 0 {
+		return defaultBackupRetentionDays
+	}
+	return b.Retention
+}
+
+// ScheduleEff returns the configured cron schedule or the default (03:30 daily).
+func (b Backups) ScheduleEff() string {
+	if b.Schedule == "" {
+		return defaultBackupSchedule
+	}
+	return b.Schedule
+}
+
 type Database struct {
 	Engine string `mapstructure:"engine" yaml:"engine"` // mariadb | postgres (server-wide)
 	Source string `mapstructure:"source" yaml:"source"` // debian | mariadb | pgdg
@@ -138,6 +172,7 @@ type Site struct {
 	Database       SiteDatabase `mapstructure:"database" yaml:"database"`
 	Scheduler      *bool        `mapstructure:"scheduler" yaml:"scheduler,omitempty"`             // per-site override; nil = inherit server default
 	CloudflareOnly *bool        `mapstructure:"cloudflare_only" yaml:"cloudflare_only,omitempty"` // per-site override; nil = inherit server default
+	Backups        *bool        `mapstructure:"backups" yaml:"backups,omitempty"`                 // per-site override; nil = inherit server default
 	Queue          *QueueConfig `mapstructure:"queue" yaml:"queue,omitempty"`
 	Daemons        []Daemon     `mapstructure:"daemons" yaml:"daemons,omitempty"`
 }
@@ -189,6 +224,28 @@ func (s *Server) CloudflareOnlyEnabled(site Site) bool {
 func (s *Server) AnyCloudflareOnly() bool {
 	for _, site := range s.Sites {
 		if s.CloudflareOnlyEnabled(site) {
+			return true
+		}
+	}
+	return false
+}
+
+// BackupsEnabled reports whether scheduled backups are installed for a site: an
+// explicit per-site sites[].backups wins; otherwise the server-level
+// backups.enabled default applies. Twin of SchedulerEnabled.
+func (s *Server) BackupsEnabled(site Site) bool {
+	if site.Backups != nil {
+		return *site.Backups
+	}
+	return s.Backups.Enabled
+}
+
+// AnyBackupsEnabled reports whether at least one site resolves to enabled, which
+// drives whether the backups step installs prerequisites and the global
+// logrotate fragment (vs drift-removing them).
+func (s *Server) AnyBackupsEnabled() bool {
+	for _, site := range s.Sites {
+		if s.BackupsEnabled(site) {
 			return true
 		}
 	}
@@ -280,6 +337,7 @@ type Server struct {
 	Fail2ban       Fail2ban `mapstructure:"fail2ban" yaml:"fail2ban,omitempty"`
 	Tuning         Tuning   `mapstructure:"tuning" yaml:"tuning,omitempty"`
 	System         System   `mapstructure:"system" yaml:"system,omitempty"`
+	Backups        Backups  `mapstructure:"backups" yaml:"backups,omitempty"`
 	Sites          []Site   `mapstructure:"sites" yaml:"sites"`
 }
 

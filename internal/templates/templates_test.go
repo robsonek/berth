@@ -204,3 +204,29 @@ func TestRenderSysctlSwapGolden(t *testing.T) {
 func TestRenderSysctlBerthGolden(t *testing.T) {
 	checkGolden(t, "sysctl_berth.conf.tmpl", "sysctl_berth.golden", nil)
 }
+
+func TestRenderBackupScriptGolden(t *testing.T) {
+	checkGolden(t, "backup.sh.tmpl", "backup_sh.golden", struct {
+		Pool, DumpCommand, DBName, DeployPath, BackupDir, LogFile, LockFile string
+		RetentionDays                                                       int
+	}{
+		Pool:          "app_example_com",
+		DumpCommand:   "mysqldump --protocol=socket --single-transaction --no-tablespaces --routines --events myapp",
+		DBName:        "myapp",
+		DeployPath:    "/home/deploy/myapp",
+		BackupDir:     "/var/backups/berth/app_example_com",
+		LogFile:       "/var/log/berth/backup-app_example_com.log",
+		LockFile:      "/var/backups/berth/app_example_com/.lock",
+		RetentionDays: 7,
+	})
+}
+
+func TestRenderBackupCronGolden(t *testing.T) {
+	checkGolden(t, "backup.cron.tmpl", "backup_cron.golden", struct{ Schedule, ScriptPath string }{
+		Schedule: "30 3 * * *", ScriptPath: "/usr/local/sbin/berth-backup-app_example_com",
+	})
+}
+
+func TestRenderBackupLogrotateGolden(t *testing.T) {
+	checkGolden(t, "backup_logrotate.conf.tmpl", "backup_logrotate.golden", nil)
+}

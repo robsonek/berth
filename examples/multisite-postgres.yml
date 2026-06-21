@@ -27,6 +27,11 @@ queue: true              # server-wide default worker; tuned/overridden per site
 scheduler: true
 cloudflare_only: true    # server-wide: refuse non-Cloudflare requests (overridden per site below)
 
+backups:                 # opt-in local backups, root-owned under /var/backups/berth/<pool>
+  enabled: true          # server-wide default (off unless set); per-site `backups:` overrides
+  retention_days: 14     # prune dumps older than N days (default 7; 1–3650)
+  schedule: "30 3 * * *" # 5-field cron, run as root (default 03:30 daily)
+
 sites:
   # Public production tenant: Let's Encrypt + HTTP/3, a tuned worker and a daemon.
   # Not proxied through Cloudflare, so opt out of the server-wide origin lockdown
@@ -55,3 +60,4 @@ sites:
     database: { name: app_two, user: app_two }
     ssl: true
     ssl_mode: selfsigned
+    backups: false                            # opt this tenant out of the server-wide default

@@ -53,3 +53,12 @@ func (MariaDB) EnsureUser(ctx context.Context, r bssh.Runner, user, password, da
 		user, database, password)
 	return runSQL(ctx, r, sql)
 }
+
+// DumpCommand writes a logical dump of database to stdout, passwordless via the
+// local socket as root (matching runSQL's auth). --single-transaction gives a
+// consistent InnoDB snapshot; --no-tablespaces avoids needing the PROCESS priv;
+// --routines/--events include stored routines and events. database is a validated
+// SQL identifier (config.Validate), so it carries no shell metacharacters.
+func (MariaDB) DumpCommand(database string) string {
+	return "mysqldump --protocol=socket --single-transaction --no-tablespaces --routines --events " + database
+}
