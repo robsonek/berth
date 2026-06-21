@@ -10,9 +10,10 @@ import (
 type fakePrompter struct {
 	serverCore     func(*Answers)
 	serverAdvanced func(*Answers)
+	serverOps      func(*Answers)
 	siteCore       []func(int, *SiteAnswers) // one per SiteCore call (incl. retries)
 	siteCoreN      int
-	siteScheduler  func(*SiteAnswers)
+	siteOverrides  func(*SiteAnswers)
 	queue          func(*QueueAnswers)
 	daemons        []func(*DaemonAnswers)
 	daemonsN       int
@@ -29,8 +30,19 @@ func (f *fakePrompter) SiteCore(i int, sa *SiteAnswers) error {
 	fn(i, sa)
 	return nil
 }
-func (f *fakePrompter) SiteScheduler(sa *SiteAnswers) error { f.siteScheduler(sa); return nil }
-func (f *fakePrompter) Queue(q *QueueAnswers) error         { f.queue(q); return nil }
+func (f *fakePrompter) ServerOps(a *Answers) error {
+	if f.serverOps != nil {
+		f.serverOps(a)
+	}
+	return nil
+}
+func (f *fakePrompter) SiteOverrides(sa *SiteAnswers) error {
+	if f.siteOverrides != nil {
+		f.siteOverrides(sa)
+	}
+	return nil
+}
+func (f *fakePrompter) Queue(q *QueueAnswers) error { f.queue(q); return nil }
 func (f *fakePrompter) Daemon(d *DaemonAnswers) error {
 	fn := f.daemons[f.daemonsN]
 	f.daemonsN++
@@ -199,7 +211,7 @@ func TestRunDaemonSubLoop(t *testing.T) {
 				sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "a.example.com", "/srv/a", "ad", "au"
 			},
 		},
-		siteScheduler: func(sa *SiteAnswers) { sa.SchedulerOverride = "inherit" },
+		siteOverrides: func(sa *SiteAnswers) { sa.SchedulerOverride = "inherit" },
 		daemons: []func(*DaemonAnswers){
 			func(d *DaemonAnswers) { d.Name, d.Command, d.Processes = "reverb", "php artisan reverb:start", 1 },
 			func(d *DaemonAnswers) { d.Name, d.Command, d.Processes = "horizon", "php artisan horizon", 1 },
@@ -216,5 +228,40 @@ func TestRunDaemonSubLoop(t *testing.T) {
 	}
 	if err := a.ToServer().Validate(); err != nil {
 		t.Fatalf("daemon config should validate: %v", err)
+	}
+}
+
+func TestRunServerOpsAndSiteOverrides(t *testing.T) {
+	f := &fakePrompter{
+		serverCore:     baseServer,
+		serverAdvanced: func(*Answers) {},
+		serverOps: func(a *Answers) {
+			a.System = SystemAnswers{Swap: "2G", Sysctl: true}
+			a.CloudflareOnly = true
+			a.Backups = BackupsAnswers{Enabled: true, RetentionDays: 7}
+		},
+		siteCore: []func(int, *SiteAnswers){
+			func(_ int, sa *SiteAnswers) {
+				sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "a.example.com", "/srv/a", "a", "a"
+			},
+		},
+		siteOverrides: func(sa *SiteAnswers) { sa.BackupsOverride = "off" },
+		// confirms: server advanced gate=true, site advanced gate=true,
+		// dedicated-queue=false, add-daemon=false, add another=false
+		confirms: []bool{true, true, false, false, false},
+	}
+	a, err := run(f)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if a.System.Swap != "2G" || !a.CloudflareOnly || !a.Backups.Enabled {
+		t.Errorf("server ops not collected: %+v", a)
+	}
+	if a.Sites[0].BackupsOverride != "off" {
+		t.Errorf("site backups override = %q, want off", a.Sites[0].BackupsOverride)
+	}
+	srv := a.ToServer()
+	if srv.Sites[0].Backups == nil || *srv.Sites[0].Backups {
+		t.Error("site backups should map to *false")
 	}
 }

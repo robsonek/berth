@@ -113,6 +113,29 @@ func optionalMariaDBSize(s string) error {
 	return fmt.Errorf("%q must be a number optionally suffixed K/M/G", s)
 }
 
+// reSwapSize / reCronSchedule mirror config.reSwapSize / config.reCronSchedule
+// (unexported there) for inline feedback; config.Server.Validate stays authoritative.
+// The cron class [0-9*,/-] already excludes newlines (and Go's $ is not multiline),
+// so the regex alone rejects control-char injection — no extra check needed here.
+var (
+	reSwapSize     = regexp.MustCompile(`^[1-9][0-9]*[MmGg]$`)
+	reCronSchedule = regexp.MustCompile(`^[0-9*,/-]+( [0-9*,/-]+){4}$`)
+)
+
+func optionalSwapSize(s string) error {
+	if s == "" || reSwapSize.MatchString(s) {
+		return nil
+	}
+	return fmt.Errorf("swap %q must be a positive number suffixed M or G (e.g. 2G)", s)
+}
+
+func optionalCronSchedule(s string) error {
+	if s == "" || reCronSchedule.MatchString(s) {
+		return nil
+	}
+	return fmt.Errorf("schedule %q must be 5 cron fields over [0-9*,/-] (e.g. \"30 3 * * *\")", s)
+}
+
 func optionalInt(field string, lo, hi int) func(string) error {
 	return func(s string) error {
 		if s == "" || s == "0" {

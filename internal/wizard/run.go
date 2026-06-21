@@ -8,7 +8,7 @@ func run(p prompter) (Answers, error) {
 	if err := p.ServerCore(&a); err != nil {
 		return Answers{}, err
 	}
-	adv, err := p.Confirm("Configure advanced server options (fail2ban, tuning)?")
+	adv, err := p.Confirm("Configure advanced server options (fail2ban, tuning, swap/sysctl, Cloudflare, backups)?")
 	if err != nil {
 		return Answers{}, err
 	}
@@ -16,10 +16,13 @@ func run(p prompter) (Answers, error) {
 		if err := p.ServerAdvanced(&a); err != nil {
 			return Answers{}, err
 		}
+		if err := p.ServerOps(&a); err != nil {
+			return Answers{}, err
+		}
 	}
 
 	for {
-		sa := SiteAnswers{SchedulerOverride: "inherit"}
+		sa := SiteAnswers{SchedulerOverride: "inherit", CloudflareOverride: "inherit", BackupsOverride: "inherit"}
 
 		// Collect core fields, resolving HTTP/3↔nginx and validating after each
 		// attempt. Server-level fields are already inline-valid, so a failure here
@@ -58,7 +61,7 @@ func run(p prompter) (Answers, error) {
 			return Answers{}, err
 		}
 		if adv {
-			if err := p.SiteScheduler(&sa); err != nil {
+			if err := p.SiteOverrides(&sa); err != nil {
 				return Answers{}, err
 			}
 			wantQueue, err := p.Confirm("Dedicated queue worker for this site?")

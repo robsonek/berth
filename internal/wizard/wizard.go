@@ -44,6 +44,10 @@ type Answers struct {
 	Fail2ban Fail2banAnswers
 	Tuning   TuningAnswers
 
+	System         SystemAnswers
+	Backups        BackupsAnswers
+	CloudflareOnly bool // server-wide origin-lockdown default
+
 	Sites []SiteAnswers
 }
 
@@ -59,6 +63,17 @@ type TuningAnswers struct {
 	MariaDBBufferPool     string
 }
 
+type SystemAnswers struct {
+	Swap   string // e.g. "2G"; blank = no swap
+	Sysctl bool
+}
+
+type BackupsAnswers struct {
+	Enabled       bool
+	RetentionDays int    // 0 = default (7)
+	Schedule      string // blank = default ("30 3 * * *")
+}
+
 type SiteAnswers struct {
 	Domain     string
 	DeployPath string
@@ -72,9 +87,11 @@ type SiteAnswers struct {
 	HTTP3      bool
 
 	// site advanced
-	SchedulerOverride string        // "inherit" | "on" | "off"
-	Queue             *QueueAnswers // nil => inherit server-wide
-	Daemons           []DaemonAnswers
+	SchedulerOverride  string        // "inherit" | "on" | "off"
+	CloudflareOverride string        // "inherit" | "on" | "off"
+	BackupsOverride    string        // "inherit" | "on" | "off"
+	Queue              *QueueAnswers // nil => inherit server-wide
+	Daemons            []DaemonAnswers
 }
 
 type QueueAnswers struct {
