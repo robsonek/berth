@@ -225,7 +225,7 @@ func TestDatabaseCheckSatisfiedDoesNotReseedExistingEnv(t *testing.T) {
 	s.Valkey = true
 	f := bssh.NewFakeRunner()
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})
-	f.On("grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0})
 	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
 	f.On(mariadbGrantProbe, bssh.Result{Stdout: "1\n"})
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
@@ -246,8 +246,8 @@ func TestDatabaseCheckUnsatisfiedWhenDatabaseMissing(t *testing.T) {
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})
-	f.On("grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // credential present
-	f.On(mariadbDBProbe, bssh.Result{Stdout: ""})                                                            // database absent
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0}) // credential present
+	f.On(mariadbDBProbe, bssh.Result{Stdout: ""})                                                                                          // database absent
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -264,7 +264,7 @@ func TestDatabaseCheckUnsatisfiedWhenUserOrGrantMissing(t *testing.T) {
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})
-	f.On("grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0})
 	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
 	f.On(mariadbGrantProbe, bssh.Result{Stdout: ""}) // role or its grant absent
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
@@ -283,7 +283,7 @@ func TestDatabaseCheckUnsatisfiedWhenEnvLacksValidPassword(t *testing.T) {
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})
-	f.On("grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // file exists but no valid DB_PASSWORD (or file absent: exit 2 — same outcome)
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 1}) // no valid DB_PASSWORD on the first line (or key/file absent — same outcome)
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -426,6 +426,27 @@ func TestDatabaseApplyRejectsTamperedPassword(t *testing.T) {
 	err := Database(red).Apply(context.Background(), provision.RunCtx{}, s, f)
 	if err == nil {
 		t.Fatal("expected rejection of a reused password outside the allowed charset")
+	}
+}
+
+func TestDatabaseApplyRejectsLeadingSpacePassword(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env already present
+	// A leading-space value fails Check's probe, so laundering it here would
+	// oscillate forever (Check unsatisfied, Apply "succeeds"). It must instead
+	// fail loudly with the charset refusal.
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD= Good123\n"})
+	err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "outside the allowed charset") {
+		t.Fatalf("err = %v, want the charset refusal for a leading-space value", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.HasPrefix(c.Cmd, "mysql") {
+			t.Fatal("no SQL may run when the reused password is rejected")
+		}
 	}
 }
 

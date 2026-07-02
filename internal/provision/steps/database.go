@@ -55,12 +55,15 @@ func sharedEnvPath(site config.Site) string {
 	return site.DeployPath + "/shared/.env"
 }
 
-// envCredentialPresent reports whether a site's shared/.env exists and carries
-// a charset-valid DB_PASSWORD line. grep -q: the exit code answers, the secret
-// never enters stdout. A missing file (grep exit 2) reads the same as a
-// missing key (exit 1): not yet persisted.
+// envCredentialPresent reports whether the FIRST DB_PASSWORD line of a site's
+// shared/.env carries a charset-valid value — the same line passwordFromEnv
+// reads, so Check and Apply always judge the same credential (a valid value on
+// a later duplicate line must not satisfy Check when Apply would read the
+// first). grep -m1 selects that line (a missing file or key yields empty
+// input); the second grep validates it strictly and only its exit code
+// answers (-q), so the secret never enters stdout.
 func envCredentialPresent(ctx context.Context, r bssh.Runner, site config.Site) (bool, error) {
-	res, err := r.Run(ctx, "grep -Eq '^"+dbPasswordKey+"=[A-Za-z0-9]+[[:space:]]*$' "+shQuote(sharedEnvPath(site)), nil)
+	res, err := r.Run(ctx, "grep -m1 '^"+dbPasswordKey+"=' "+shQuote(sharedEnvPath(site))+" | grep -Eq '^"+dbPasswordKey+"=[A-Za-z0-9]+[[:space:]]*$'", nil)
 	if err != nil {
 		return false, err
 	}
@@ -215,8 +218,12 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 // passwordFromEnv reads DB_PASSWORD from a site's existing shared/.env. The
 // file is authoritative once present: a missing value is a hard error, because
 // silently generating a new password would desync the role from the file the
-// app reads. A reused password is re-validated against the allowed charset
-// (defence-in-depth against a tampered env injecting SQL metacharacters).
+// app reads. Only trailing whitespace is trimmed off the value — a leading
+// space is NOT laundered away, it fails the charset check just as Check's
+// probe rejects that line (laundering it would make Check unsatisfied forever
+// while Apply "succeeds"). A reused password is re-validated against the
+// allowed charset (defence-in-depth against a tampered env injecting SQL
+// metacharacters).
 func (d database) passwordFromEnv(ctx context.Context, r bssh.Runner, site config.Site) (string, error) {
 	env := sharedEnvPath(site)
 	res, err := r.Run(ctx, "grep -m1 '^"+dbPasswordKey+"=' "+shQuote(env), nil)
@@ -224,7 +231,11 @@ func (d database) passwordFromEnv(ctx context.Context, r bssh.Runner, site confi
 		return "", err
 	}
 	if res.ExitCode == 0 {
-		if pw := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(res.Stdout), dbPasswordKey+"=")); pw != "" {
+		// TrimSpace only strips the line's surrounding newline and trailing
+		// whitespace: grep '^' guarantees the matched line has no leading spaces,
+		// so it cannot eat into the value.
+		line := strings.TrimRight(strings.TrimSpace(res.Stdout), " \t\r")
+		if pw := strings.TrimPrefix(line, dbPasswordKey+"="); pw != "" && pw != line {
 			if !reDBPassword.MatchString(pw) {
 				return "", fmt.Errorf("reused %s from %s is outside the allowed charset; refusing to use it", dbPasswordKey, env)
 			}
