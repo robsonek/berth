@@ -279,8 +279,9 @@ logs and fail2ban see the actual client rather than Cloudflare's edge.
 
 **Certificate guidance:** pair a *proxied* `cloudflare_only` site with
 `ssl_mode: selfsigned`. With the A record pointing at Cloudflare, the origin is
-not publicly reachable on its own name, so berth skips Let's Encrypt issuance
-(it warns rather than fails). Use a [Cloudflare Origin
+not publicly reachable on its own name, so a public CA cannot validate the
+domain against the origin; berth rejects the pairing at validation. Use a
+[Cloudflare Origin
 Certificate](https://developers.cloudflare.com/ssl/origin-configuration/origin-ca/)
 (or any self-signed cert) on the origin and set the Cloudflare SSL/TLS mode to
 **Full** so the edge encrypts to the origin without validating its certificate
