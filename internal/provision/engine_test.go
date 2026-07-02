@@ -18,6 +18,7 @@ type stepStub struct {
 	applyErr  error
 	applied   *bool
 	checked   *bool
+	onCheck   func() // invoked at the top of Check when non-nil (e.g. to cancel the run context)
 	alwaysRun bool
 }
 
@@ -25,6 +26,9 @@ func (s *stepStub) Name() string       { return s.name }
 func (s *stepStub) Requires() []string { return s.requires }
 func (s *stepStub) AlwaysRun() bool    { return s.alwaysRun }
 func (s *stepStub) Check(context.Context, RunCtx, *config.Server, bssh.Runner) (CheckResult, error) {
+	if s.onCheck != nil {
+		s.onCheck()
+	}
 	if s.checked != nil {
 		*s.checked = true
 	}
@@ -168,19 +172,81 @@ func TestEngineCancelledContextStopsBeforeNextStep(t *testing.T) {
 }
 
 func TestEngineCancelledContextWithOnlySkipsUnselectedSteps(t *testing.T) {
+	// A ctx cancelled before Run means the --only pre-flight dependency walk
+	// must stop immediately: no prerequisite Check (no further SSH probes), and
+	// the interruption surfaces through Run's returned error — the pre-flight
+	// error channel — not as a confusing "unmet prerequisites" failure.
+	aChecked := false
 	eng := New(
-		&stepStub{name: "a", satisfied: true},
+		&stepStub{name: "a", satisfied: true, checked: &aChecked},
 		&stepStub{name: "b", requires: []string{"a"}},
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	events, err := eng.Run(ctx, &config.Server{}, bssh.NewFakeRunner(), Options{Only: "b"})
+	if err == nil || !strings.Contains(err.Error(), "interrupted") {
+		t.Fatalf("Run() error = %v, want pre-flight refusal mentioning interruption", err)
+	}
+	if events != nil {
+		t.Error("events channel must be nil when pre-flight refuses")
+	}
+	if aChecked {
+		t.Error("no prerequisite Check may run after cancellation")
+	}
+}
+
+func TestEngineOnlyMidRunCancelSkipsUnselectedAndFailsTrailing(t *testing.T) {
+	// Cancellation mid-run under --only: the unselected step must never be
+	// reported as interrupted (the ctx gate sits after the --only skip gate),
+	// and a signal landing during the last selected step still surfaces as the
+	// trailing "pipeline" EventFailed even though all work completed.
+	ctx, cancel := context.WithCancel(context.Background())
+	eng := New(
+		&stepStub{name: "a", satisfied: true},
+		&stepStub{name: "b", satisfied: true, requires: []string{"a"}, onCheck: cancel},
+	)
+	events, err := eng.Run(ctx, &config.Server{}, bssh.NewFakeRunner(), Options{Only: "b"})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	evs := collect(events)
-	if len(evs) != 1 || evs[0].Step != "b" || evs[0].Kind != EventFailed {
-		t.Fatalf("expected one interrupted EventFailed for the --only target, got %+v", evs)
+	for _, e := range evs {
+		if e.Step == "a" {
+			t.Errorf("unselected step must emit no events, got %+v", e)
+		}
+	}
+	last := evs[len(evs)-1]
+	if last.Step != "pipeline" || last.Kind != EventFailed {
+		t.Fatalf("expected trailing pipeline EventFailed, got %+v", evs)
+	}
+	if last.Err == nil || !strings.Contains(last.Err.Error(), "interrupted") {
+		t.Errorf("Err = %v, want it to mention interruption", last.Err)
+	}
+}
+
+func TestEngineInterruptDuringLastStepStillFails(t *testing.T) {
+	// A signal landing while the final step is in flight has no next step to
+	// observe the cancelled ctx: the step completes, the loop ends. The run
+	// must still end with a trailing pipeline EventFailed, never exit clean.
+	ctx, cancel := context.WithCancel(context.Background())
+	eng := New(&stepStub{name: "a", satisfied: true, onCheck: cancel})
+	events, err := eng.Run(ctx, &config.Server{}, bssh.NewFakeRunner(), Options{})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	evs := collect(events)
+	if len(evs) == 0 {
+		t.Fatal("expected events, got none")
+	}
+	last := evs[len(evs)-1]
+	if last.Step != "pipeline" || last.Kind != EventFailed {
+		t.Fatalf("expected the run to end with a pipeline EventFailed, got %+v", evs)
+	}
+	if last.Err == nil || !strings.Contains(last.Err.Error(), "interrupted") {
+		t.Errorf("Err = %v, want it to mention interruption", last.Err)
+	}
+	if !hasKind(evs, "a", EventSatisfied) {
+		t.Errorf("the last step itself completed and should report satisfied, got %+v", evs)
 	}
 }
 

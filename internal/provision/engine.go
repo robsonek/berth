@@ -75,6 +75,14 @@ func (e *Engine) Run(ctx context.Context, s *config.Server, r bssh.Runner, opt O
 			}
 			ch <- Event{Step: step.Name(), Kind: EventApplied, Changes: cr.Changes, Sensitive: cr.Sensitive}
 		}
+		// A signal that lands during the last step has no next step to observe
+		// it. Emit a trailing failure so an interrupted run never exits 0, even
+		// when all remaining work happened to complete.
+		select {
+		case <-ctx.Done():
+			ch <- Event{Step: "pipeline", Kind: EventFailed, Err: fmt.Errorf("interrupted: %w", ctx.Err())}
+		default:
+		}
 	}()
 	return ch, nil
 }
@@ -95,6 +103,11 @@ func (e *Engine) checkDependencies(ctx context.Context, rc RunCtx, s *config.Ser
 	visiting, done := map[string]bool{}, map[string]bool{}
 	var walk func(name string) error
 	walk = func(name string) error {
+		// Stop probing over SSH once the run is cancelled; pre-flight problems
+		// are exactly what Run's returned error is for.
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("interrupted: %w", err)
+		}
 		if done[name] {
 			return nil
 		}
