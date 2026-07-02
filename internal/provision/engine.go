@@ -124,6 +124,13 @@ func (e *Engine) checkDependencies(ctx context.Context, rc RunCtx, s *config.Ser
 					return err
 				}
 			}
+			// Re-check after the recursion: a signal that lands during a
+			// transitive prerequisite's Check would otherwise let this node
+			// resume and run its own Check on a cancelled context — surfacing
+			// as "unmet prerequisites" instead of an interruption.
+			if err := ctx.Err(); err != nil {
+				return fmt.Errorf("interrupted: %w", err)
+			}
 			// The target itself need not be satisfied, and an always-run step
 			// (preflight) is excluded from the gate: it reports Satisfied:false
 			// by design, so it is never a "missing" prerequisite.

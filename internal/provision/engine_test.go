@@ -195,15 +195,43 @@ func TestEngineCancelledContextWithOnlySkipsUnselectedSteps(t *testing.T) {
 	}
 }
 
+func TestEngineOnlyCancelDuringTransitivePrereqCheckStopsWalk(t *testing.T) {
+	// Chain c → b → a. Cancellation lands during a's Check: the walk must stop
+	// before b's Check (no further SSH probes) and return "interrupted" through
+	// Run's pre-flight error — never a misleading "unmet prerequisites".
+	ctx, cancel := context.WithCancel(context.Background())
+	bChecked := false
+	eng := New(
+		&stepStub{name: "a", satisfied: true, onCheck: cancel},
+		&stepStub{name: "b", satisfied: false, requires: []string{"a"}, checked: &bChecked},
+		&stepStub{name: "c", requires: []string{"b"}},
+	)
+	events, err := eng.Run(ctx, &config.Server{}, bssh.NewFakeRunner(), Options{Only: "c"})
+	if err == nil || !strings.Contains(err.Error(), "interrupted") {
+		t.Fatalf("Run() error = %v, want pre-flight refusal mentioning interruption", err)
+	}
+	if strings.Contains(err.Error(), "unmet prerequisites") {
+		t.Errorf("Run() error = %v, must not misreport cancellation as unmet prerequisites", err)
+	}
+	if events != nil {
+		t.Error("events channel must be nil when pre-flight refuses")
+	}
+	if bChecked {
+		t.Error("no further prerequisite Check may run after cancellation")
+	}
+}
+
 func TestEngineOnlyMidRunCancelSkipsUnselectedAndFailsTrailing(t *testing.T) {
 	// Cancellation mid-run under --only: the unselected step must never be
 	// reported as interrupted (the ctx gate sits after the --only skip gate),
 	// and a signal landing during the last selected step still surfaces as the
 	// trailing "pipeline" EventFailed even though all work completed.
+	// The unselected step comes AFTER the target, so the loop reaches it with
+	// the ctx already cancelled — proving the gate ordering, not just timing.
 	ctx, cancel := context.WithCancel(context.Background())
 	eng := New(
+		&stepStub{name: "b", satisfied: true, onCheck: cancel},
 		&stepStub{name: "a", satisfied: true},
-		&stepStub{name: "b", satisfied: true, requires: []string{"a"}, onCheck: cancel},
 	)
 	events, err := eng.Run(ctx, &config.Server{}, bssh.NewFakeRunner(), Options{Only: "b"})
 	if err != nil {
