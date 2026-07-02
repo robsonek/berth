@@ -47,6 +47,13 @@ func newProvisionCmd() *cobra.Command {
 	return c
 }
 
+// wantTUI reports whether the live TUI should render this run. Dry-run always
+// uses the plain renderer: a plan is a report to read or pipe, and the TUI has
+// no planned-changes view.
+func wantTUI(stdoutIsTTY bool, f *provisionFlags) bool {
+	return stdoutIsTTY && !f.verbose && !f.noTTY && !f.dryRun
+}
+
 func runProvision(cmd *cobra.Command, serverPath string, f *provisionFlags) error {
 	srv, err := config.Load(serverPath)
 	if err != nil {
@@ -69,7 +76,7 @@ func runProvision(cmd *cobra.Command, serverPath string, f *provisionFlags) erro
 	if err != nil {
 		return err
 	}
-	r := ui.New(cmd.OutOrStdout(), ui.IsTTY(os.Stdout) && !f.verbose && !f.noTTY)
+	r := ui.New(cmd.OutOrStdout(), wantTUI(ui.IsTTY(os.Stdout), f))
 	return r.Render(events)
 }
 

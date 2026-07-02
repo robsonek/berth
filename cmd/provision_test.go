@@ -61,3 +61,26 @@ func TestProvisionRejectsInvalidConfigPath(t *testing.T) {
 		t.Error("expected error for missing config file")
 	}
 }
+
+func TestWantTUIDisabledForDryRunVerboseNoTTY(t *testing.T) {
+	cases := []struct {
+		name string
+		tty  bool
+		f    provisionFlags
+		want bool
+	}{
+		{"tty plain run", true, provisionFlags{}, true},
+		{"not a tty", false, provisionFlags{}, false},
+		{"dry-run forces plain", true, provisionFlags{dryRun: true}, false},
+		{"verbose forces plain", true, provisionFlags{verbose: true}, false},
+		{"no-tty forces plain", true, provisionFlags{noTTY: true}, false},
+		{"dry-run without tty stays plain", false, provisionFlags{dryRun: true}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := wantTUI(tc.tty, &tc.f); got != tc.want {
+				t.Errorf("wantTUI(%v, %+v) = %v, want %v", tc.tty, tc.f, got, tc.want)
+			}
+		})
+	}
+}
