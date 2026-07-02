@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/robsonek/berth/internal/apt"
 	bssh "github.com/robsonek/berth/internal/ssh"
@@ -50,6 +51,27 @@ func (Postgres) EnsureDatabase(ctx context.Context, r bssh.Runner, name string) 
 	return runPSQL(ctx, r, fmt.Sprintf(
 		"SELECT 'CREATE DATABASE \"%[1]s\"' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '%[1]s')\\gexec\n",
 		name))
+}
+
+// probePSQL runs a read-only scalar query as the postgres superuser (peer
+// auth) and reports whether it returned "1". A non-zero exit is false, nil.
+func probePSQL(ctx context.Context, r bssh.Runner, query string) (bool, error) {
+	res, err := r.Run(ctx, `sudo -u postgres psql -tAc "`+query+`"`, nil)
+	if err != nil {
+		return false, err
+	}
+	return res.ExitCode == 0 && strings.TrimSpace(res.Stdout) == "1", nil
+}
+
+// DatabaseExists probes pg_database. name is a validated SQL identifier.
+func (Postgres) DatabaseExists(ctx context.Context, r bssh.Runner, name string) (bool, error) {
+	return probePSQL(ctx, r, "SELECT 1 FROM pg_database WHERE datname='"+name+"'")
+}
+
+// UserGranted probes ownership: EnsureUser's LAST statement is
+// ALTER DATABASE ... OWNER TO, so a positive probe proves the whole batch ran.
+func (Postgres) UserGranted(ctx context.Context, r bssh.Runner, user, database string) (bool, error) {
+	return probePSQL(ctx, r, "SELECT 1 FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE d.datname='"+database+"' AND r.rolname='"+user+"'")
 }
 
 // EnsureUser creates the login role if absent, re-syncs its password, and makes

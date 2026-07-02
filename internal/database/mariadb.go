@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/robsonek/berth/internal/apt"
 	bssh "github.com/robsonek/berth/internal/ssh"
@@ -41,6 +42,30 @@ func (MariaDB) EnsureDatabase(ctx context.Context, r bssh.Runner, name string) e
 	// name is a validated SQL identifier (config.Validate); safe to interpolate as an identifier.
 	return runSQL(ctx, r, fmt.Sprintf(
 		"CREATE DATABASE IF NOT EXISTS `%s` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;", name))
+}
+
+// probeSQL runs a read-only scalar query inline (no secrets involved) and
+// reports whether it returned "1". A non-zero exit is false, nil.
+func probeSQL(ctx context.Context, r bssh.Runner, query string) (bool, error) {
+	res, err := r.Run(ctx, `mysql --protocol=socket -N -e "`+query+`"`, nil)
+	if err != nil {
+		return false, err
+	}
+	return res.ExitCode == 0 && strings.TrimSpace(res.Stdout) == "1", nil
+}
+
+// DatabaseExists probes information_schema for the database. name is a
+// validated SQL identifier (config.Validate) — no quotes or metacharacters.
+func (MariaDB) DatabaseExists(ctx context.Context, r bssh.Runner, name string) (bool, error) {
+	return probeSQL(ctx, r, "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='"+name+"'")
+}
+
+// UserGranted probes information_schema for any privilege of
+// '<user>'@'localhost' on the database — present once EnsureUser's GRANT ran.
+// GRANTEE stores the quoted account literal, so the embedded single quotes are
+// doubled inside the SQL string literal.
+func (MariaDB) UserGranted(ctx context.Context, r bssh.Runner, user, database string) (bool, error) {
+	return probeSQL(ctx, r, "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='"+database+"' AND GRANTEE='''"+user+"''@''localhost''' LIMIT 1")
 }
 
 func (MariaDB) EnsureUser(ctx context.Context, r bssh.Runner, user, password, database string) error {
