@@ -100,6 +100,23 @@ One owner of signals: the root context. Four changes:
   does not emit "interrupted" for a skipped step.
 - Existing golden files, templates, and integration tests untouched.
 
+## Post-implementation addendum (Codex final code review, 2026-07-02)
+
+Two gaps found by the Codex review AFTER two clean review layers (per-task +
+whole-branch), fixed in commits 9bf6745 + b90173a:
+
+- **Interrupt during the LAST step exited 0** (BLOCKER): the between-steps
+  gate has no next step to observe a signal that lands mid-final-step. A
+  trailing gate after the loop now emits `Event{Step: "pipeline", Kind:
+  EventFailed, Err: "interrupted: <ctx.Err()>"}`. Deliberate semantics: an
+  interrupted run reports failure even when all remaining work completed.
+  The channel buffer `len(steps)*2+1` accommodates the one trailing event.
+- **`--only` pre-flight kept probing after cancellation**: `checkDependencies`'
+  walk now checks `ctx.Err()` at node entry AND after its dependency
+  recursion (before the node's own Check), returning `interrupted: <err>`
+  through Run's pre-flight error channel instead of issuing further SSH
+  probes or reporting misleading "unmet prerequisites".
+
 ## Codex design-review outcomes (2026-07-02)
 
 - BLOCKER: bubbletea v2 signal handler (SIGTERM→QuitMsg→nil) — fixed via
