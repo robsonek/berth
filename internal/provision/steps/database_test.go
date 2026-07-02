@@ -225,7 +225,7 @@ func TestDatabaseCheckSatisfiedDoesNotReseedExistingEnv(t *testing.T) {
 	s.Valkey = true
 	f := bssh.NewFakeRunner()
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})
-	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	f.On("grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
 	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
 	f.On(mariadbGrantProbe, bssh.Result{Stdout: "1\n"})
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
@@ -246,8 +246,8 @@ func TestDatabaseCheckUnsatisfiedWhenDatabaseMissing(t *testing.T) {
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})
-	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present
-	f.On(mariadbDBProbe, bssh.Result{Stdout: ""})                  // database absent
+	f.On("grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // credential present
+	f.On(mariadbDBProbe, bssh.Result{Stdout: ""})                                                            // database absent
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -264,7 +264,7 @@ func TestDatabaseCheckUnsatisfiedWhenUserOrGrantMissing(t *testing.T) {
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})
-	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	f.On("grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
 	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
 	f.On(mariadbGrantProbe, bssh.Result{Stdout: ""}) // role or its grant absent
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
@@ -276,6 +276,28 @@ func TestDatabaseCheckUnsatisfiedWhenUserOrGrantMissing(t *testing.T) {
 	}
 	if !strings.Contains(cr.Reason, "database user/grant for app.example.com missing") {
 		t.Errorf("Reason = %q", cr.Reason)
+	}
+}
+
+func TestDatabaseCheckUnsatisfiedWhenEnvLacksValidPassword(t *testing.T) {
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})
+	f.On("grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // file exists but no valid DB_PASSWORD (or file absent: exit 2 — same outcome)
+	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Fatal("an env without a valid DB_PASSWORD must not satisfy Check — Apply's pointed error must get its chance to run")
+	}
+	if !strings.Contains(cr.Reason, "credential for app.example.com not yet persisted") {
+		t.Errorf("Reason = %q", cr.Reason)
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "mysql") {
+			t.Fatalf("no DB probe may run once the credential is missing; saw %q", c.Cmd)
+		}
 	}
 }
 
@@ -302,8 +324,7 @@ func TestDatabaseCheckSourceMariaDBRequiresRepo(t *testing.T) {
 	s.Database.Source = "mariadb"
 	f := bssh.NewFakeRunner()
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})
-	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
-	// mariadb.org repo not yet registered -> not satisfied.
+	// mariadb.org repo not yet registered -> not satisfied (before any per-site probe).
 	f.On("test -e "+shQuote("/etc/apt/sources.list.d/mariadb-org.list"), bssh.Result{ExitCode: 1})
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {

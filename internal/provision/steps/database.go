@@ -55,6 +55,18 @@ func sharedEnvPath(site config.Site) string {
 	return site.DeployPath + "/shared/.env"
 }
 
+// envCredentialPresent reports whether a site's shared/.env exists and carries
+// a charset-valid DB_PASSWORD line. grep -q: the exit code answers, the secret
+// never enters stdout. A missing file (grep exit 2) reads the same as a
+// missing key (exit 1): not yet persisted.
+func envCredentialPresent(ctx context.Context, r bssh.Runner, site config.Site) (bool, error) {
+	res, err := r.Run(ctx, "grep -Eq '^"+dbPasswordKey+"=[A-Za-z0-9]+[[:space:]]*$' "+shQuote(sharedEnvPath(site)), nil)
+	if err != nil {
+		return false, err
+	}
+	return res.ExitCode == 0, nil
+}
+
 func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
 	eng, err := dbpkg.Get(s.Database.Engine)
 	if err != nil {
@@ -84,11 +96,18 @@ func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	// .env file) lets a re-run heal a provision that failed between the .env
 	// write and EnsureUser.
 	for _, site := range s.Sites {
-		envExists, err := fileExists(ctx, r, sharedEnvPath(site))
+		// The credential must be PRESENT AND VALID in shared/.env, not merely the
+		// file: an operator-preseeded or truncated env without DB_PASSWORD would
+		// otherwise read as converged while the app has no credential. Exit-code
+		// only (-q) so the secret never enters the command output. The pattern
+		// mirrors passwordFromEnv's accept set (alphanumeric, trailing whitespace
+		// tolerated); anything murkier fails here and Apply reports the pointed
+		// error.
+		credOK, err := envCredentialPresent(ctx, r, site)
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
-		if !envExists {
+		if !credOK {
 			return d.unsatisfied(eng, "credential for "+site.Domain+" not yet persisted"), nil
 		}
 		dbExists, err := eng.DatabaseExists(ctx, r, s.SiteDBName(site))
