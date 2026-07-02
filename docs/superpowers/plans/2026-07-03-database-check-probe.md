@@ -56,15 +56,9 @@ func TestInstallCmdDefaultsRootAndMode(t *testing.T) {
 
 func TestInstallCmdSudoWrapsWholeChain(t *testing.T) {
 	cmd, _ := installCmd(FileSpec{Path: "/etc/f", Sudo: true}, "/tmp/t1", true)
-	if !strings.HasPrefix(cmd, "sudo -n sh -c '") {
-		t.Fatalf("privileged form must wrap the whole chain in sudo -n sh -c, got %q", cmd)
-	}
-	inner := strings.TrimPrefix(cmd, "sudo -n sh -c ")
-	if strings.Contains(inner, " sudo ") {
-		t.Fatalf("no nested sudo expected: %q", cmd)
-	}
-	if !strings.Contains(cmd, "mv -f") || !strings.Contains(cmd, "mktemp") {
-		t.Fatalf("wrapped chain must keep the mktemp+rename shape: %q", cmd)
+	inner := `t=$(mktemp '/etc/.berth.XXXXXX') && install -o 'root' -g 'root' -m 644 '/tmp/t1' "$t" && mv -f "$t" '/etc/f' && rm -f '/tmp/t1'`
+	if want := "sudo -n sh -c " + shQuote(inner); cmd != want {
+		t.Fatalf("cmd = %q\nwant  %q", cmd, want)
 	}
 }
 ```
@@ -648,7 +642,7 @@ func TestDatabaseApplyFailsWhenExistingEnvLacksPassword(t *testing.T) {
 - [ ] **Step 2: Run tests to verify the intended failures**
 
 Run: `go test -run 'TestDatabaseApply' ./internal/provision/steps/`
-Expected: the heal test FAILS (env is rewritten today — the anti-rewrite assertion fires) and the no-password test FAILS (today a fresh password is silently generated and Apply proceeds to un-stubbed commands, so the error does not contain "has no DB_PASSWORD"); the adapted fresh-path tests still pass — today's Apply never runs `test -e`, and an unused stub is harmless.
+Expected: the heal test FAILS (env is rewritten today — the anti-rewrite assertion fires); the no-password test FAILS (today a fresh password is silently generated and Apply proceeds to un-stubbed commands, so the error does not contain "has no DB_PASSWORD"); AND the adapted fresh-path tests FAIL too — today's Apply still greps DB_PASSWORD/APP_KEY via resolvePassword/resolveAppKey, so removing those stubs makes FakeRunner return "unstubbed command" errors until Step 3's implementation stops grepping on the fresh path. All go green in Step 4.
 
 - [ ] **Step 3: Implement**
 
