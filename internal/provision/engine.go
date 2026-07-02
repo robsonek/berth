@@ -44,6 +44,17 @@ func (e *Engine) Run(ctx context.Context, s *config.Server, r bssh.Runner, opt O
 			if opt.Only != "" && step.Name() != opt.Only && !isAlwaysRun(step) {
 				continue
 			}
+			// Interruption: stop before starting another step. Emitted as an
+			// EventFailed so both renderers surface it as the run's error; the
+			// two-error-channels contract is unchanged (Run's returned error
+			// remains --only pre-flight only). Placed after the --only gate so
+			// a skipped step is never reported as interrupted.
+			select {
+			case <-ctx.Done():
+				ch <- Event{Step: step.Name(), Kind: EventFailed, Err: fmt.Errorf("interrupted before %s: %w", step.Name(), ctx.Err())}
+				return
+			default:
+			}
 			ch <- Event{Step: step.Name(), Kind: EventStarted}
 			cr, err := step.Check(ctx, rc, s, r)
 			if err != nil {

@@ -3,6 +3,7 @@ package provision
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/robsonek/berth/internal/config"
@@ -16,6 +17,7 @@ type stepStub struct {
 	satisfied bool
 	applyErr  error
 	applied   *bool
+	checked   *bool
 	alwaysRun bool
 }
 
@@ -23,6 +25,9 @@ func (s *stepStub) Name() string       { return s.name }
 func (s *stepStub) Requires() []string { return s.requires }
 func (s *stepStub) AlwaysRun() bool    { return s.alwaysRun }
 func (s *stepStub) Check(context.Context, RunCtx, *config.Server, bssh.Runner) (CheckResult, error) {
+	if s.checked != nil {
+		*s.checked = true
+	}
 	return CheckResult{Satisfied: s.satisfied, Reason: "stub", Changes: []string{"do x"}}, nil
 }
 func (s *stepStub) Apply(context.Context, RunCtx, *config.Server, bssh.Runner) error {
@@ -135,6 +140,47 @@ func TestEngineOnlyAllowsAlwaysRunPrereqAndRunsIt(t *testing.T) {
 	}
 	if !targetApplied {
 		t.Error("target step should have been applied under --only")
+	}
+}
+
+func TestEngineCancelledContextStopsBeforeNextStep(t *testing.T) {
+	aChecked := false
+	eng := New(
+		&stepStub{name: "a", checked: &aChecked},
+		&stepStub{name: "b"},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancelled before the pipeline starts
+	events, err := eng.Run(ctx, &config.Server{}, bssh.NewFakeRunner(), Options{})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	evs := collect(events)
+	if len(evs) != 1 || evs[0].Kind != EventFailed || evs[0].Step != "a" {
+		t.Fatalf("expected exactly one EventFailed for step a, got %+v", evs)
+	}
+	if evs[0].Err == nil || !strings.Contains(evs[0].Err.Error(), "interrupted") {
+		t.Errorf("Err = %v, want it to mention interruption", evs[0].Err)
+	}
+	if aChecked {
+		t.Error("no step Check may run after cancellation")
+	}
+}
+
+func TestEngineCancelledContextWithOnlySkipsUnselectedSteps(t *testing.T) {
+	eng := New(
+		&stepStub{name: "a", satisfied: true},
+		&stepStub{name: "b", requires: []string{"a"}},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	events, err := eng.Run(ctx, &config.Server{}, bssh.NewFakeRunner(), Options{Only: "b"})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	evs := collect(events)
+	if len(evs) != 1 || evs[0].Step != "b" || evs[0].Kind != EventFailed {
+		t.Fatalf("expected one interrupted EventFailed for the --only target, got %+v", evs)
 	}
 }
 
