@@ -75,36 +75,49 @@ func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Serve
 			}
 		}
 	}
-	// Each site's shared/.env (carrying its credential) must exist.
+	if !installed || !sourceOK {
+		// No server to probe yet (or the wrong source): Apply reconciles.
+		return d.unsatisfied(eng, "database server or configured source not yet provisioned"), nil
+	}
+	// The server is installed: every site needs its credential persisted AND
+	// its database + user actually present. Probing real state (not just the
+	// .env file) lets a re-run heal a provision that failed between the .env
+	// write and EnsureUser.
 	for _, site := range s.Sites {
 		envExists, err := fileExists(ctx, r, sharedEnvPath(site))
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
 		if !envExists {
-			return provision.CheckResult{
-				Satisfied: false,
-				Reason:    "credential for " + site.Domain + " not yet persisted",
-				Changes:   d.changes(eng),
-				Sensitive: true,
-			}, nil
+			return d.unsatisfied(eng, "credential for "+site.Domain+" not yet persisted"), nil
+		}
+		dbExists, err := eng.DatabaseExists(ctx, r, s.SiteDBName(site))
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if !dbExists {
+			return d.unsatisfied(eng, "database for "+site.Domain+" missing"), nil
+		}
+		granted, err := eng.UserGranted(ctx, r, s.SiteDBUser(site), s.SiteDBName(site))
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if !granted {
+			return d.unsatisfied(eng, "database user/grant for "+site.Domain+" missing"), nil
 		}
 	}
-	if installed && sourceOK {
-		return provision.CheckResult{Satisfied: true, Reason: eng.ServerPackage() + " installed (" + s.Database.Source + "); per-site credentials persisted"}, nil
-	}
-	return provision.CheckResult{
-		Satisfied: false,
-		Reason:    "database server or configured source not yet provisioned",
-		Changes:   d.changes(eng),
-		Sensitive: true,
-	}, nil
+	return provision.CheckResult{Satisfied: true, Reason: eng.ServerPackage() + " installed (" + s.Database.Source + "); per-site databases, users and credentials present"}, nil
+}
+
+// unsatisfied builds this step's standard not-yet-converged result.
+func (d database) unsatisfied(eng dbpkg.Engine, reason string) provision.CheckResult {
+	return provision.CheckResult{Satisfied: false, Reason: reason, Changes: d.changes(eng), Sensitive: true}
 }
 
 func (database) changes(eng dbpkg.Engine) []string {
 	return []string{
 		"install " + eng.ServerPackage(),
-		"per site: persist DB credential to shared/.env, ensure database + user",
+		"per site: persist DB credential to shared/.env (when absent), ensure database + user",
 	}
 }
 

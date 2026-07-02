@@ -231,20 +231,82 @@ func TestDatabaseApplyReusesExistingAppKeyWithoutRotating(t *testing.T) {
 }
 
 func TestDatabaseCheckSatisfiedDoesNotReseedExistingEnv(t *testing.T) {
-	// Documents the first-provision-only wiring: once shared/.env exists the
-	// database step is satisfied, so flipping valkey: true on an already-provisioned
-	// host does NOT re-seed the Redis keys (operator removes/re-seeds .env by hand).
+	// Once installed + .env + database + user are all present the step is
+	// satisfied, so flipping valkey: true on an already-provisioned host does
+	// NOT re-seed the Redis keys (and Apply never rewrites an existing .env).
 	s := databaseServer()
 	s.Valkey = true
 	f := bssh.NewFakeRunner()
-	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})       // server installed
-	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // shared/.env already present
+	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
+	f.On(mariadbGrantProbe, bssh.Result{Stdout: "1\n"})
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !cr.Satisfied {
-		t.Errorf("expected Satisfied (installed + .env exists); got %+v — existing env is intentionally not re-seeded", cr)
+		t.Errorf("expected Satisfied (installed + .env + db + user present); got %+v", cr)
+	}
+}
+
+const (
+	mariadbDBProbe    = `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='myapp'"`
+	mariadbGrantProbe = `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='myapp' AND GRANTEE='''myapp''@''localhost''' LIMIT 1"`
+)
+
+func TestDatabaseCheckUnsatisfiedWhenDatabaseMissing(t *testing.T) {
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present
+	f.On(mariadbDBProbe, bssh.Result{Stdout: ""})                  // database absent
+	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Fatal("a present .env must not satisfy Check when the database is missing")
+	}
+	if !strings.Contains(cr.Reason, "database for app.example.com missing") {
+		t.Errorf("Reason = %q", cr.Reason)
+	}
+}
+
+func TestDatabaseCheckUnsatisfiedWhenUserOrGrantMissing(t *testing.T) {
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
+	f.On(mariadbGrantProbe, bssh.Result{Stdout: ""}) // role or its grant absent
+	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Fatal("a present database must not satisfy Check when the user/grant is missing")
+	}
+	if !strings.Contains(cr.Reason, "database user/grant for app.example.com missing") {
+		t.Errorf("Reason = %q", cr.Reason)
+	}
+}
+
+func TestDatabaseCheckSkipsProbesWhenNotInstalled(t *testing.T) {
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 1}) // not installed
+	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Fatal("missing server package must be unsatisfied")
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "mysql") {
+			t.Fatalf("no probe may run without an installed server; saw %q", c.Cmd)
+		}
 	}
 }
 
