@@ -3,6 +3,7 @@ package provision
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/robsonek/berth/internal/config"
@@ -16,6 +17,8 @@ type stepStub struct {
 	satisfied bool
 	applyErr  error
 	applied   *bool
+	checked   *bool
+	onCheck   func() // invoked at the top of Check when non-nil (e.g. to cancel the run context)
 	alwaysRun bool
 }
 
@@ -23,6 +26,12 @@ func (s *stepStub) Name() string       { return s.name }
 func (s *stepStub) Requires() []string { return s.requires }
 func (s *stepStub) AlwaysRun() bool    { return s.alwaysRun }
 func (s *stepStub) Check(context.Context, RunCtx, *config.Server, bssh.Runner) (CheckResult, error) {
+	if s.onCheck != nil {
+		s.onCheck()
+	}
+	if s.checked != nil {
+		*s.checked = true
+	}
 	return CheckResult{Satisfied: s.satisfied, Reason: "stub", Changes: []string{"do x"}}, nil
 }
 func (s *stepStub) Apply(context.Context, RunCtx, *config.Server, bssh.Runner) error {
@@ -135,6 +144,137 @@ func TestEngineOnlyAllowsAlwaysRunPrereqAndRunsIt(t *testing.T) {
 	}
 	if !targetApplied {
 		t.Error("target step should have been applied under --only")
+	}
+}
+
+func TestEngineCancelledContextStopsBeforeNextStep(t *testing.T) {
+	aChecked := false
+	eng := New(
+		&stepStub{name: "a", checked: &aChecked},
+		&stepStub{name: "b"},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancelled before the pipeline starts
+	events, err := eng.Run(ctx, &config.Server{}, bssh.NewFakeRunner(), Options{})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	evs := collect(events)
+	if len(evs) != 1 || evs[0].Kind != EventFailed || evs[0].Step != "a" {
+		t.Fatalf("expected exactly one EventFailed for step a, got %+v", evs)
+	}
+	if evs[0].Err == nil || !strings.Contains(evs[0].Err.Error(), "interrupted") {
+		t.Errorf("Err = %v, want it to mention interruption", evs[0].Err)
+	}
+	if aChecked {
+		t.Error("no step Check may run after cancellation")
+	}
+}
+
+func TestEngineCancelledContextWithOnlySkipsUnselectedSteps(t *testing.T) {
+	// A ctx cancelled before Run means the --only pre-flight dependency walk
+	// must stop immediately: no prerequisite Check (no further SSH probes), and
+	// the interruption surfaces through Run's returned error — the pre-flight
+	// error channel — not as a confusing "unmet prerequisites" failure.
+	aChecked := false
+	eng := New(
+		&stepStub{name: "a", satisfied: true, checked: &aChecked},
+		&stepStub{name: "b", requires: []string{"a"}},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	events, err := eng.Run(ctx, &config.Server{}, bssh.NewFakeRunner(), Options{Only: "b"})
+	if err == nil || !strings.Contains(err.Error(), "interrupted") {
+		t.Fatalf("Run() error = %v, want pre-flight refusal mentioning interruption", err)
+	}
+	if events != nil {
+		t.Error("events channel must be nil when pre-flight refuses")
+	}
+	if aChecked {
+		t.Error("no prerequisite Check may run after cancellation")
+	}
+}
+
+func TestEngineOnlyCancelDuringTransitivePrereqCheckStopsWalk(t *testing.T) {
+	// Chain c → b → a. Cancellation lands during a's Check: the walk must stop
+	// before b's Check (no further SSH probes) and return "interrupted" through
+	// Run's pre-flight error — never a misleading "unmet prerequisites".
+	ctx, cancel := context.WithCancel(context.Background())
+	bChecked := false
+	eng := New(
+		&stepStub{name: "a", satisfied: true, onCheck: cancel},
+		&stepStub{name: "b", satisfied: false, requires: []string{"a"}, checked: &bChecked},
+		&stepStub{name: "c", requires: []string{"b"}},
+	)
+	events, err := eng.Run(ctx, &config.Server{}, bssh.NewFakeRunner(), Options{Only: "c"})
+	if err == nil || !strings.Contains(err.Error(), "interrupted") {
+		t.Fatalf("Run() error = %v, want pre-flight refusal mentioning interruption", err)
+	}
+	if strings.Contains(err.Error(), "unmet prerequisites") {
+		t.Errorf("Run() error = %v, must not misreport cancellation as unmet prerequisites", err)
+	}
+	if events != nil {
+		t.Error("events channel must be nil when pre-flight refuses")
+	}
+	if bChecked {
+		t.Error("no further prerequisite Check may run after cancellation")
+	}
+}
+
+func TestEngineOnlyMidRunCancelSkipsUnselectedAndFailsTrailing(t *testing.T) {
+	// Cancellation mid-run under --only: the unselected step must never be
+	// reported as interrupted (the ctx gate sits after the --only skip gate),
+	// and a signal landing during the last selected step still surfaces as the
+	// trailing "pipeline" EventFailed even though all work completed.
+	// The unselected step comes AFTER the target, so the loop reaches it with
+	// the ctx already cancelled — proving the gate ordering, not just timing.
+	ctx, cancel := context.WithCancel(context.Background())
+	eng := New(
+		&stepStub{name: "b", satisfied: true, onCheck: cancel},
+		&stepStub{name: "a", satisfied: true},
+	)
+	events, err := eng.Run(ctx, &config.Server{}, bssh.NewFakeRunner(), Options{Only: "b"})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	evs := collect(events)
+	for _, e := range evs {
+		if e.Step == "a" {
+			t.Errorf("unselected step must emit no events, got %+v", e)
+		}
+	}
+	last := evs[len(evs)-1]
+	if last.Step != "pipeline" || last.Kind != EventFailed {
+		t.Fatalf("expected trailing pipeline EventFailed, got %+v", evs)
+	}
+	if last.Err == nil || !strings.Contains(last.Err.Error(), "interrupted") {
+		t.Errorf("Err = %v, want it to mention interruption", last.Err)
+	}
+}
+
+func TestEngineInterruptDuringLastStepStillFails(t *testing.T) {
+	// A signal landing while the final step is in flight has no next step to
+	// observe the cancelled ctx: the step completes, the loop ends. The run
+	// must still end with a trailing pipeline EventFailed, never exit clean.
+	ctx, cancel := context.WithCancel(context.Background())
+	eng := New(&stepStub{name: "a", satisfied: true, onCheck: cancel})
+	events, err := eng.Run(ctx, &config.Server{}, bssh.NewFakeRunner(), Options{})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	evs := collect(events)
+	if len(evs) == 0 {
+		t.Fatal("expected events, got none")
+	}
+	last := evs[len(evs)-1]
+	if last.Step != "pipeline" || last.Kind != EventFailed {
+		t.Fatalf("expected the run to end with a pipeline EventFailed, got %+v", evs)
+	}
+	if last.Err == nil || !strings.Contains(last.Err.Error(), "interrupted") {
+		t.Errorf("Err = %v, want it to mention interruption", last.Err)
+	}
+	if !hasKind(evs, "a", EventSatisfied) {
+		t.Errorf("the last step itself completed and should report satisfied, got %+v", evs)
 	}
 }
 

@@ -1,12 +1,19 @@
 package ui
 
 import (
+	"errors"
 	"io"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/robsonek/berth/internal/provision"
 )
+
+// ErrInterrupted is returned by Render when the operator interrupts the run
+// (ctrl+c in the TUI, or a bubbletea-level interrupt). A non-nil return makes
+// the CLI exit non-zero instead of reporting a half-finished provision as
+// success.
+var ErrInterrupted = errors.New("interrupted")
 
 // stepModel is the pure, testable state behind the TUI.
 type stepModel struct {
@@ -78,8 +85,12 @@ func NewTUIRenderer(w io.Writer) *TUIRenderer { return &TUIRenderer{w: w} }
 
 // Render consumes events live and returns the terminal failure error, if any.
 func (t *TUIRenderer) Render(events <-chan provision.Event) error {
-	p := tea.NewProgram(teaModel{m: newStepModel(), events: events}, tea.WithOutput(t.w))
+	p := tea.NewProgram(teaModel{m: newStepModel(), events: events},
+		tea.WithOutput(t.w), tea.WithoutSignalHandler())
 	final, err := p.Run()
+	if errors.Is(err, tea.ErrInterrupted) {
+		return ErrInterrupted
+	}
 	if err != nil {
 		return err
 	}
@@ -118,6 +129,9 @@ func (tm teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return tm, tea.Quit
 	case tea.KeyPressMsg:
 		if m.String() == "ctrl+c" {
+			if tm.m.err == nil { // a step failure is more informative than "interrupted"
+				tm.m.err = ErrInterrupted
+			}
 			return tm, tea.Quit
 		}
 	}

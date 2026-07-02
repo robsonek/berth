@@ -44,6 +44,17 @@ func (e *Engine) Run(ctx context.Context, s *config.Server, r bssh.Runner, opt O
 			if opt.Only != "" && step.Name() != opt.Only && !isAlwaysRun(step) {
 				continue
 			}
+			// Interruption: stop before starting another step. Emitted as an
+			// EventFailed so both renderers surface it as the run's error; the
+			// two-error-channels contract is unchanged (Run's returned error
+			// remains --only pre-flight only). Placed after the --only gate so
+			// a skipped step is never reported as interrupted.
+			select {
+			case <-ctx.Done():
+				ch <- Event{Step: step.Name(), Kind: EventFailed, Err: fmt.Errorf("interrupted before %s: %w", step.Name(), ctx.Err())}
+				return
+			default:
+			}
 			ch <- Event{Step: step.Name(), Kind: EventStarted}
 			cr, err := step.Check(ctx, rc, s, r)
 			if err != nil {
@@ -63,6 +74,14 @@ func (e *Engine) Run(ctx context.Context, s *config.Server, r bssh.Runner, opt O
 				return
 			}
 			ch <- Event{Step: step.Name(), Kind: EventApplied, Changes: cr.Changes, Sensitive: cr.Sensitive}
+		}
+		// A signal that lands during the last step has no next step to observe
+		// it. Emit a trailing failure so an interrupted run never exits 0, even
+		// when all remaining work happened to complete.
+		select {
+		case <-ctx.Done():
+			ch <- Event{Step: "pipeline", Kind: EventFailed, Err: fmt.Errorf("interrupted: %w", ctx.Err())}
+		default:
 		}
 	}()
 	return ch, nil
@@ -84,6 +103,11 @@ func (e *Engine) checkDependencies(ctx context.Context, rc RunCtx, s *config.Ser
 	visiting, done := map[string]bool{}, map[string]bool{}
 	var walk func(name string) error
 	walk = func(name string) error {
+		// Stop probing over SSH once the run is cancelled; pre-flight problems
+		// are exactly what Run's returned error is for.
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("interrupted: %w", err)
+		}
 		if done[name] {
 			return nil
 		}
@@ -99,6 +123,13 @@ func (e *Engine) checkDependencies(ctx context.Context, rc RunCtx, s *config.Ser
 				if err := walk(dep); err != nil {
 					return err
 				}
+			}
+			// Re-check after the recursion: a signal that lands during a
+			// transitive prerequisite's Check would otherwise let this node
+			// resume and run its own Check on a cancelled context — surfacing
+			// as "unmet prerequisites" instead of an interruption.
+			if err := ctx.Err(); err != nil {
+				return fmt.Errorf("interrupted: %w", err)
 			}
 			// The target itself need not be satisfied, and an always-run step
 			// (preflight) is excluded from the gate: it reports Satisfied:false
