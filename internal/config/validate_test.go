@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -341,6 +342,44 @@ func TestSystemValidate(t *testing.T) {
 			err := tc.sys.validate()
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("validate() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateCloudflareOnlyLetsEncrypt(t *testing.T) {
+	base := func() *Server {
+		s := validQueueServer()
+		s.Sites[0].SSL = true
+		s.Sites[0].SSLEmail = "ops@example.com"
+		return s
+	}
+	on, off := true, false
+	cases := []struct {
+		name    string
+		mutate  func(*Server)
+		wantErr bool
+	}{
+		{"server-wide cloudflare_only with default letsencrypt", func(s *Server) { s.CloudflareOnly = true }, true},
+		{"per-site override on with explicit letsencrypt", func(s *Server) { s.Sites[0].CloudflareOnly = &on; s.Sites[0].SSLMode = "letsencrypt" }, true},
+		{"cloudflare_only with selfsigned", func(s *Server) { s.CloudflareOnly = true; s.Sites[0].SSLMode = "selfsigned" }, false},
+		{"cloudflare_only without ssl", func(s *Server) { s.CloudflareOnly = true; s.Sites[0].SSL = false; s.Sites[0].SSLEmail = "" }, false},
+		{"per-site override off under server-wide on", func(s *Server) { s.CloudflareOnly = true; s.Sites[0].CloudflareOnly = &off }, false},
+		{"cloudflare_only with default letsencrypt and no email reports the pairing", func(s *Server) { s.CloudflareOnly = true; s.Sites[0].SSLEmail = "" }, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := base()
+			tc.mutate(s)
+			err := s.Validate()
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "cloudflare_only") {
+					t.Fatalf("Validate() = %v, want cloudflare_only pairing error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Validate() = %v, want nil", err)
 			}
 		})
 	}

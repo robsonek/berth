@@ -2,6 +2,7 @@ package wizard
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -228,6 +229,50 @@ func TestRunDaemonSubLoop(t *testing.T) {
 	}
 	if err := a.ToServer().Validate(); err != nil {
 		t.Fatalf("daemon config should validate: %v", err)
+	}
+}
+
+// A per-site cloudflare_only override is collected AFTER the core validation,
+// so only the post-advanced re-validation can catch cloudflare_only+letsencrypt.
+// First attempt: LE site + override "on" -> rejected, site re-prompted from
+// scratch. Second attempt: selfsigned + same override -> valid.
+func TestRunRepromptsSiteWhenOverrideBreaksValidation(t *testing.T) {
+	f := &fakePrompter{
+		serverCore: baseServer,
+		siteCore: []func(int, *SiteAnswers){
+			func(_ int, sa *SiteAnswers) {
+				sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "a.example.com", "/srv/a", "adb", "ausr"
+				sa.SSL, sa.SSLMode, sa.SSLEmail = true, "letsencrypt", "ops@example.com"
+			},
+			func(_ int, sa *SiteAnswers) {
+				sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "a.example.com", "/srv/a", "adb", "ausr"
+				sa.SSL, sa.SSLMode = true, "selfsigned"
+			},
+		},
+		siteOverrides: func(sa *SiteAnswers) { sa.CloudflareOverride = "on" },
+		confirms: []bool{
+			false, // server advanced gate
+			true,  // site advanced (attempt 1)
+			false, // dedicated queue worker? (attempt 1)
+			false, // add a daemon? (attempt 1)
+			true,  // site advanced (attempt 2)
+			false, // dedicated queue worker? (attempt 2)
+			false, // add a daemon? (attempt 2)
+			false, // add another site?
+		},
+	}
+	a, err := run(f)
+	if err != nil {
+		t.Fatalf("run error = %v", err)
+	}
+	if len(f.errors) != 1 || !strings.Contains(f.errors[0].Error(), "cloudflare_only") {
+		t.Fatalf("errors = %v, want exactly one cloudflare_only rejection", f.errors)
+	}
+	if len(a.Sites) != 1 || a.Sites[0].SSLMode != "selfsigned" || a.Sites[0].CloudflareOverride != "on" {
+		t.Fatalf("sites = %+v, want one selfsigned site with the override kept", a.Sites)
+	}
+	if verr := a.ToServer().Validate(); verr != nil {
+		t.Fatalf("assembled server invalid: %v", verr)
 	}
 }
 

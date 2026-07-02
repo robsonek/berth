@@ -124,7 +124,8 @@ sites:                         # one or more
     repository: git@github.com:acme/app.git   # optional — SSH git URL only
     database: { name: app, user: app }        # per-site DB (required with 2+ sites)
     ssl: true
-    ssl_mode: letsencrypt              # letsencrypt (default) | selfsigned
+    ssl_mode: selfsigned               # letsencrypt (default) | selfsigned —
+                                       # cloudflare_only requires selfsigned (or ssl: false)
     ssl_email: admin@example.com       # required with letsencrypt
     http3: false                       # requires ssl: true + nginx.source: nginx
     scheduler: true                    # per-site override of the server default
@@ -279,12 +280,17 @@ logs and fail2ban see the actual client rather than Cloudflare's edge.
 
 **Certificate guidance:** pair a *proxied* `cloudflare_only` site with
 `ssl_mode: selfsigned`. With the A record pointing at Cloudflare, the origin is
-not publicly reachable on its own name, so berth skips Let's Encrypt issuance
-(it warns rather than fails). Use a [Cloudflare Origin
+not publicly reachable on its own name, so a public CA cannot validate the
+domain against the origin; berth rejects the pairing at validation. Use a
+[Cloudflare Origin
 Certificate](https://developers.cloudflare.com/ssl/origin-configuration/origin-ca/)
 (or any self-signed cert) on the origin and set the Cloudflare SSL/TLS mode to
 **Full** so the edge encrypts to the origin without validating its certificate
 against a public CA.
+
+`cloudflare_only` requires `ssl_mode: selfsigned` (or `ssl: false`) —
+validation rejects Let's Encrypt because a proxied DNS record never points at
+the origin.
 
 ## Scheduler, queue workers & daemons
 

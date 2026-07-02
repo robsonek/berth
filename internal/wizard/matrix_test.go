@@ -296,6 +296,26 @@ func TestConfigMatrix(t *testing.T) {
 		mustContain(t, err, "ssl_email is required when ssl is true with letsencrypt")
 	})
 
+	t.Run("ops/cloudflare-letsencrypt-invalid", func(t *testing.T) {
+		a := validSingleSite(t)
+		a.CloudflareOnly = true
+		a.Sites[0].SSL = true
+		a.Sites[0].SSLMode = "letsencrypt"
+		a.Sites[0].SSLEmail = "ops@example.com"
+		err := writeInvalid(t, a)
+		mustContain(t, err, "cloudflare_only")
+	})
+
+	t.Run("ops/cloudflare-selfsigned-valid", func(t *testing.T) {
+		a := validSingleSite(t)
+		a.CloudflareOnly = true
+		a.Sites[0].SSL = true
+		a.Sites[0].SSLMode = "selfsigned"
+		if err := a.ToServer().Validate(); err != nil {
+			t.Fatalf("cloudflare_only + selfsigned must stay valid: %v", err)
+		}
+	})
+
 	t.Run("single-site-selfsigned-no-email", func(t *testing.T) {
 		a := base("selfsigned", "203.0.113.10")
 		a.Sites = []SiteAnswers{{
