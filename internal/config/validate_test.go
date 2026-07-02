@@ -365,6 +365,7 @@ func TestValidateCloudflareOnlyLetsEncrypt(t *testing.T) {
 		{"cloudflare_only with selfsigned", func(s *Server) { s.CloudflareOnly = true; s.Sites[0].SSLMode = "selfsigned" }, false},
 		{"cloudflare_only without ssl", func(s *Server) { s.CloudflareOnly = true; s.Sites[0].SSL = false; s.Sites[0].SSLEmail = "" }, false},
 		{"per-site override off under server-wide on", func(s *Server) { s.CloudflareOnly = true; s.Sites[0].CloudflareOnly = &off }, false},
+		{"cloudflare_only with default letsencrypt and no email reports the pairing", func(s *Server) { s.CloudflareOnly = true; s.Sites[0].SSLEmail = "" }, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

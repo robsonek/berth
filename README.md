@@ -124,7 +124,8 @@ sites:                         # one or more
     repository: git@github.com:acme/app.git   # optional — SSH git URL only
     database: { name: app, user: app }        # per-site DB (required with 2+ sites)
     ssl: true
-    ssl_mode: letsencrypt              # letsencrypt (default) | selfsigned
+    ssl_mode: selfsigned               # letsencrypt (default) | selfsigned —
+                                       # cloudflare_only requires selfsigned (or ssl: false)
     ssl_email: admin@example.com       # required with letsencrypt
     http3: false                       # requires ssl: true + nginx.source: nginx
     scheduler: true                    # per-site override of the server default

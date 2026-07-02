@@ -192,11 +192,14 @@ func (s *Server) Validate() error {
 	inheritLegacyDB := 0
 	for i := range s.Sites {
 		site := s.Sites[i]
-		if err := site.validate(); err != nil {
-			return fmt.Errorf("site %d: %w", i, err)
-		}
+		// Checked before site.validate() so the default-letsencrypt case reports
+		// the cloudflare_only pairing, not a missing ssl_email it would only
+		// need after dropping cloudflare_only anyway.
 		if site.SSL && s.CloudflareOnlyEnabled(site) && site.CertMode() == "letsencrypt" {
 			return fmt.Errorf("site %s: cloudflare_only cannot issue a Let's Encrypt certificate (a proxied DNS record never points at the origin); use ssl_mode: selfsigned (Cloudflare SSL mode %q) or disable cloudflare_only for this site", site.Domain, "Full")
+		}
+		if err := site.validate(); err != nil {
+			return fmt.Errorf("site %d: %w", i, err)
 		}
 		// Per-site database identity (its own block, or the inherited legacy
 		// top-level database.name/user for a lone site).
