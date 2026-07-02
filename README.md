@@ -286,6 +286,10 @@ Certificate](https://developers.cloudflare.com/ssl/origin-configuration/origin-c
 **Full** so the edge encrypts to the origin without validating its certificate
 against a public CA.
 
+`cloudflare_only` requires `ssl_mode: selfsigned` (or `ssl: false`) —
+validation rejects Let's Encrypt because a proxied DNS record never points at
+the origin.
+
 ## Scheduler, queue workers & daemons
 
 berth installs Laravel's scheduler as a per-site cron running `php artisan
