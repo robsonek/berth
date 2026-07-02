@@ -4,7 +4,7 @@
 
 **Goal:** `database.Check` verifies the database and role actually exist (not just that `shared/.env` does), so a provision that failed between the `.env` write and `EnsureUser` heals on the next run; `Apply` seeds `.env` only when absent, so a heal-run never clobbers a healthy site's file.
 
-**Architecture:** Two new read-only `Engine` methods (`DatabaseExists`, `UserExists`) with admin socket/peer auth and false-on-unreachable semantics; `Check` gates on installed+source first, then per site: env → database → user; `Apply` splits per site on `fileExists(.env)`: absent → seed (cache/generated password, fresh APP_KEY), present → never write, password MUST come from the live `.env` (missing → pointed error).
+**Architecture:** `ssh.WriteFile` first becomes genuinely atomic (mktemp in the destination directory + `mv -f` rename — the env-present-means-complete invariant depends on it). Then two new read-only `Engine` methods (`DatabaseExists`, `UserGranted`) with admin socket/peer auth and false-on-unreachable semantics; `Check` gates on installed+source first, then per site: env → database → user+grant; `Apply` splits per site on `fileExists(.env)`: absent → seed (cache/generated password, fresh APP_KEY), present → never write, password MUST come from the live `.env` (missing → pointed error).
 
 **Tech Stack:** Go 1.25, stdlib only, FakeRunner exact-command-string tests.
 
@@ -24,7 +24,121 @@
 
 ---
 
-### Task 1: Engine probes (interface + MariaDB + Postgres)
+### Task 1: WriteFile stages in the destination directory and renames (atomicity prerequisite)
+
+**Files:**
+- Modify: `internal/ssh/client.go` (`installCmd`; add `"path"` import)
+- Test: `internal/ssh/client_test.go` (replace the existing `installCmd` shape tests; keep any behavioral tests that still apply)
+
+**Interfaces:**
+- Produces: unchanged `WriteFile`/`installCmd` signatures; only the generated command changes. Task 4's "an existing .env is complete" invariant depends on this task.
+
+- [ ] **Step 1: Write/replace the failing tests**
+
+In `internal/ssh/client_test.go`, replace the existing exact-string `installCmd` assertions with:
+
+```go
+func TestInstallCmdStagesInDestDirAndRenames(t *testing.T) {
+	cmd, _ := installCmd(FileSpec{Path: "/etc/nginx/app.conf", Owner: "deploy", Group: "www-data", Mode: 0o640}, "/tmp/up.123", false)
+	want := `t=$(mktemp '/etc/nginx/.berth.XXXXXX') && install -o 'deploy' -g 'www-data' -m 640 '/tmp/up.123' "$t" && mv -f "$t" '/etc/nginx/app.conf' && rm -f '/tmp/up.123'`
+	if cmd != want {
+		t.Fatalf("cmd = %q\nwant  %q", cmd, want)
+	}
+}
+
+func TestInstallCmdDefaultsRootAndMode(t *testing.T) {
+	cmd, _ := installCmd(FileSpec{Path: "/etc/f"}, "/tmp/t1", false)
+	want := `t=$(mktemp '/etc/.berth.XXXXXX') && install -o 'root' -g 'root' -m 644 '/tmp/t1' "$t" && mv -f "$t" '/etc/f' && rm -f '/tmp/t1'`
+	if cmd != want {
+		t.Fatalf("cmd = %q\nwant  %q", cmd, want)
+	}
+}
+
+func TestInstallCmdSudoWrapsWholeChain(t *testing.T) {
+	cmd, _ := installCmd(FileSpec{Path: "/etc/f", Sudo: true}, "/tmp/t1", true)
+	if !strings.HasPrefix(cmd, "sudo -n sh -c '") {
+		t.Fatalf("privileged form must wrap the whole chain in sudo -n sh -c, got %q", cmd)
+	}
+	inner := strings.TrimPrefix(cmd, "sudo -n sh -c ")
+	if strings.Contains(inner, " sudo ") {
+		t.Fatalf("no nested sudo expected: %q", cmd)
+	}
+	if !strings.Contains(cmd, "mv -f") || !strings.Contains(cmd, "mktemp") {
+		t.Fatalf("wrapped chain must keep the mktemp+rename shape: %q", cmd)
+	}
+}
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `go test -run 'TestInstallCmd' ./internal/ssh/`
+Expected: FAIL — today's command is `install -o ... <tmp> <dest> && rm -f <tmp>` (a copy into place, no mktemp/rename), and the privileged form is a bare `sudo ` prefix.
+
+- [ ] **Step 3: Implement**
+
+In `internal/ssh/client.go`, add `"path"` to the imports and replace `installCmd`:
+
+```go
+// installCmd builds the privileged install command; all path/owner values are
+// shell-quoted (defence-in-depth on top of config validation). The staged copy
+// is mktemp'd in the DESTINATION directory — unpredictable name (no
+// symlink-plant window in tenant-writable dirs) on the same filesystem — so
+// the final `mv -f` is an atomic rename(2): a failure anywhere in the chain
+// leaves the old destination intact, never a partial file. Because the chain
+// starts with a variable assignment, the privileged form wraps it whole in
+// `sudo -n sh -c`. It is a pure function so it can be unit-tested without an
+// SSH connection.
+func installCmd(f FileSpec, tmp string, useSudo bool) (cmd, tmpOut string) {
+	mode := f.Mode
+	if mode == 0 {
+		mode = 0o644
+	}
+	owner, group := f.Owner, f.Group
+	if owner == "" {
+		owner = "root"
+	}
+	if group == "" {
+		group = owner
+	}
+	cmd = fmt.Sprintf(`t=$(mktemp %s) && install -o %s -g %s -m %o %s "$t" && mv -f "$t" %s && rm -f %s`,
+		shQuote(path.Dir(f.Path)+"/.berth.XXXXXX"),
+		shQuote(owner), shQuote(group), mode.Perm(), shQuote(tmp), shQuote(f.Path), shQuote(tmp))
+	if f.Sudo && useSudo {
+		cmd = "sudo -n sh -c " + shQuote(cmd)
+	}
+	return cmd, tmp
+}
+```
+
+`WriteFile` itself is unchanged (it already runs `installCmd`'s output raw via `exec` and checks the exit code).
+
+- [ ] **Step 4: Run the full suite**
+
+Run: `go test ./... && go vet ./... && gofmt -l .`
+Expected: all PASS (nothing outside internal/ssh asserts the install command shape), vet clean, gofmt silent.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/ssh/client.go internal/ssh/client_test.go
+git commit -m "fix(ssh): make WriteFile atomic via a destination-directory rename
+
+install(1) copies into place, so a connection drop mid-copy could leave a
+partial destination file. The staged copy is now mktemp'd in the
+destination directory (same filesystem, unpredictable name) and moved into
+place with mv -f — an atomic rename that leaves the old file intact on any
+failure. The privileged form wraps the whole chain in sudo -n sh -c,
+aligning installCmd with the sudo -n convention used elsewhere.
+
+Found by the Codex spec/plan review (the database step's
+existing-.env-is-complete invariant depends on it).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 2: Engine probes (interface + MariaDB + Postgres)
 
 **Files:**
 - Modify: `internal/database/engine.go` (interface)
@@ -32,22 +146,43 @@
 - Test: `internal/database/mariadb_test.go`, `internal/database/postgres_test.go` (append)
 
 **Interfaces:**
-- Produces (Tasks 2-3 consume):
+- Produces (Task 3 consumes):
   `DatabaseExists(ctx context.Context, r bssh.Runner, name string) (bool, error)` and
-  `UserExists(ctx context.Context, r bssh.Runner, user string) (bool, error)` on `database.Engine`.
+  `UserGranted(ctx context.Context, r bssh.Runner, user, database string) (bool, error)` on `database.Engine`.
+  `UserGranted` proves EnsureUser ran to its last meaningful statement (grant
+  on MariaDB, ownership on Postgres), not merely CREATE.
 - Exact probe commands (tests stub these verbatim):
-  - MariaDB: `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='<name>'"` and `mysql --protocol=socket -N -e "SELECT 1 FROM mysql.user WHERE User='<user>' AND Host='localhost'"`
-  - Postgres: `sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='<name>'"` and `sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='<user>'"`
+  - MariaDB: `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='<name>'"` and `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='<db>' AND GRANTEE='''<user>''@''localhost''' LIMIT 1"` (GRANTEE stores the literal `'user'@'localhost'`; embedded quotes are doubled in the SQL string literal)
+  - Postgres: `sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='<name>'"` and `sudo -u postgres psql -tAc "SELECT 1 FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE d.datname='<db>' AND r.rolname='<user>'"`
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `internal/database/mariadb_test.go`:
+Append to `internal/database/mariadb_test.go` (the same pattern is mirrored for Postgres below; `errTransport`/`errString` are declared ONCE in the package, in the mariadb file):
 
 ```go
+var errTransport = errString("ssh: broken")
+
+type errString string
+
+func (e errString) Error() string { return string(e) }
+
 func TestMariaDBProbes(t *testing.T) {
+	m := MariaDB{}
 	dbCmd := `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='myapp'"`
-	userCmd := `mysql --protocol=socket -N -e "SELECT 1 FROM mysql.user WHERE User='myapp' AND Host='localhost'"`
-	cases := []struct {
+	grantCmd := `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='myapp' AND GRANTEE='''myapp''@''localhost''' LIMIT 1"`
+	probes := []struct {
+		name string
+		cmd  string
+		call func(r bssh.Runner) (bool, error)
+	}{
+		{"DatabaseExists", dbCmd, func(r bssh.Runner) (bool, error) {
+			return m.DatabaseExists(context.Background(), r, "myapp")
+		}},
+		{"UserGranted", grantCmd, func(r bssh.Runner) (bool, error) {
+			return m.UserGranted(context.Background(), r, "myapp", "myapp")
+		}},
+	}
+	states := []struct {
 		name   string
 		result bssh.Result
 		want   bool
@@ -56,54 +191,51 @@ func TestMariaDBProbes(t *testing.T) {
 		{"absent", bssh.Result{Stdout: ""}, false},
 		{"server unreachable", bssh.Result{ExitCode: 1, Stderr: "can't connect"}, false},
 	}
-	for _, tc := range cases {
-		t.Run("database "+tc.name, func(t *testing.T) {
+	for _, p := range probes {
+		for _, st := range states {
+			t.Run(p.name+" "+st.name, func(t *testing.T) {
+				f := bssh.NewFakeRunner()
+				f.On(p.cmd, st.result)
+				got, err := p.call(f)
+				if err != nil || got != st.want {
+					t.Fatalf("%s = %v, %v; want %v, nil", p.name, got, err, st.want)
+				}
+				if f.Calls()[0].Cmd != p.cmd {
+					t.Fatalf("probe command = %q, want %q", f.Calls()[0].Cmd, p.cmd)
+				}
+			})
+		}
+		t.Run(p.name+" transport error", func(t *testing.T) {
 			f := bssh.NewFakeRunner()
-			f.On(dbCmd, tc.result)
-			got, err := (MariaDB{}).DatabaseExists(context.Background(), f, "myapp")
-			if err != nil || got != tc.want {
-				t.Fatalf("DatabaseExists = %v, %v; want %v, nil", got, err, tc.want)
-			}
-			if f.Calls()[0].Cmd != dbCmd {
-				t.Fatalf("probe command = %q, want %q", f.Calls()[0].Cmd, dbCmd)
-			}
-		})
-		t.Run("user "+tc.name, func(t *testing.T) {
-			f := bssh.NewFakeRunner()
-			f.On(userCmd, tc.result)
-			got, err := (MariaDB{}).UserExists(context.Background(), f, "myapp")
-			if err != nil || got != tc.want {
-				t.Fatalf("UserExists = %v, %v; want %v, nil", got, err, tc.want)
-			}
-			if f.Calls()[0].Cmd != userCmd {
-				t.Fatalf("probe command = %q, want %q", f.Calls()[0].Cmd, userCmd)
+			f.OnError(p.cmd, errTransport)
+			if _, err := p.call(f); err == nil {
+				t.Fatal("transport error must propagate")
 			}
 		})
 	}
 }
-
-func TestMariaDBProbeTransportError(t *testing.T) {
-	f := bssh.NewFakeRunner()
-	f.OnError(`mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='myapp'"`, errTransport)
-	if _, err := (MariaDB{}).DatabaseExists(context.Background(), f, "myapp"); err == nil {
-		t.Fatal("transport error must propagate")
-	}
-}
-
-var errTransport = errString("ssh: broken")
-
-type errString string
-
-func (e errString) Error() string { return string(e) }
 ```
 
-Append to `internal/database/postgres_test.go` (mirror; if an `errString`/`errTransport` helper already exists in the package from the mariadb file, do not redeclare):
+Append to `internal/database/postgres_test.go` (same probes×states×transport matrix — full coverage for both methods on both engines):
 
 ```go
 func TestPostgresProbes(t *testing.T) {
+	p := Postgres{}
 	dbCmd := `sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='myapp'"`
-	userCmd := `sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='myapp'"`
-	cases := []struct {
+	ownerCmd := `sudo -u postgres psql -tAc "SELECT 1 FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE d.datname='myapp' AND r.rolname='myapp'"`
+	probes := []struct {
+		name string
+		cmd  string
+		call func(r bssh.Runner) (bool, error)
+	}{
+		{"DatabaseExists", dbCmd, func(r bssh.Runner) (bool, error) {
+			return p.DatabaseExists(context.Background(), r, "myapp")
+		}},
+		{"UserGranted", ownerCmd, func(r bssh.Runner) (bool, error) {
+			return p.UserGranted(context.Background(), r, "myapp", "myapp")
+		}},
+	}
+	states := []struct {
 		name   string
 		result bssh.Result
 		want   bool
@@ -112,21 +244,25 @@ func TestPostgresProbes(t *testing.T) {
 		{"absent", bssh.Result{Stdout: "\n"}, false},
 		{"server unreachable", bssh.Result{ExitCode: 2, Stderr: "psql: could not connect"}, false},
 	}
-	for _, tc := range cases {
-		t.Run("database "+tc.name, func(t *testing.T) {
+	for _, pr := range probes {
+		for _, st := range states {
+			t.Run(pr.name+" "+st.name, func(t *testing.T) {
+				f := bssh.NewFakeRunner()
+				f.On(pr.cmd, st.result)
+				got, err := pr.call(f)
+				if err != nil || got != st.want {
+					t.Fatalf("%s = %v, %v; want %v, nil", pr.name, got, err, st.want)
+				}
+				if f.Calls()[0].Cmd != pr.cmd {
+					t.Fatalf("probe command = %q, want %q", f.Calls()[0].Cmd, pr.cmd)
+				}
+			})
+		}
+		t.Run(pr.name+" transport error", func(t *testing.T) {
 			f := bssh.NewFakeRunner()
-			f.On(dbCmd, tc.result)
-			got, err := (Postgres{}).DatabaseExists(context.Background(), f, "myapp")
-			if err != nil || got != tc.want {
-				t.Fatalf("DatabaseExists = %v, %v; want %v, nil", got, err, tc.want)
-			}
-		})
-		t.Run("user "+tc.name, func(t *testing.T) {
-			f := bssh.NewFakeRunner()
-			f.On(userCmd, tc.result)
-			got, err := (Postgres{}).UserExists(context.Background(), f, "myapp")
-			if err != nil || got != tc.want {
-				t.Fatalf("UserExists = %v, %v; want %v, nil", got, err, tc.want)
+			f.OnError(pr.cmd, errTransport)
+			if _, err := pr.call(f); err == nil {
+				t.Fatal("transport error must propagate")
 			}
 		})
 	}
@@ -136,7 +272,7 @@ func TestPostgresProbes(t *testing.T) {
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `go test -run 'Probe' ./internal/database/`
-Expected: FAIL to compile — `DatabaseExists`/`UserExists` undefined.
+Expected: FAIL to compile — `DatabaseExists`/`UserGranted` undefined.
 
 - [ ] **Step 3: Implement**
 
@@ -148,9 +284,11 @@ Expected: FAIL to compile — `DatabaseExists`/`UserExists` undefined.
 	// client binary absent) reports false, nil — Check treats "cannot confirm"
 	// as unsatisfied and Apply reconciles loudly; error is transport-only.
 	DatabaseExists(ctx context.Context, r bssh.Runner, name string) (bool, error)
-	// UserExists reports whether the application user/role exists, with the
-	// same read-only, false-on-unreachable semantics as DatabaseExists.
-	UserExists(ctx context.Context, r bssh.Runner, user string) (bool, error)
+	// UserGranted reports whether the application user/role exists AND holds
+	// its grant on (MariaDB) / ownership of (Postgres) the database — proof
+	// that EnsureUser ran to its last meaningful statement, not merely CREATE.
+	// Same read-only, false-on-unreachable semantics as DatabaseExists.
+	UserGranted(ctx context.Context, r bssh.Runner, user, database string) (bool, error)
 ```
 
 `internal/database/mariadb.go` — add (plus `"strings"` import):
@@ -172,9 +310,12 @@ func (MariaDB) DatabaseExists(ctx context.Context, r bssh.Runner, name string) (
 	return probeSQL(ctx, r, "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='"+name+"'")
 }
 
-// UserExists probes mysql.user for the '<user>'@'localhost' account EnsureUser creates.
-func (MariaDB) UserExists(ctx context.Context, r bssh.Runner, user string) (bool, error) {
-	return probeSQL(ctx, r, "SELECT 1 FROM mysql.user WHERE User='"+user+"' AND Host='localhost'")
+// UserGranted probes information_schema for any privilege of
+// '<user>'@'localhost' on the database — present once EnsureUser's GRANT ran.
+// GRANTEE stores the quoted account literal, so the embedded single quotes are
+// doubled inside the SQL string literal.
+func (MariaDB) UserGranted(ctx context.Context, r bssh.Runner, user, database string) (bool, error) {
+	return probeSQL(ctx, r, "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='"+database+"' AND GRANTEE='''"+user+"''@''localhost''' LIMIT 1")
 }
 ```
 
@@ -196,9 +337,10 @@ func (Postgres) DatabaseExists(ctx context.Context, r bssh.Runner, name string) 
 	return probePSQL(ctx, r, "SELECT 1 FROM pg_database WHERE datname='"+name+"'")
 }
 
-// UserExists probes pg_roles for the login role EnsureUser creates.
-func (Postgres) UserExists(ctx context.Context, r bssh.Runner, user string) (bool, error) {
-	return probePSQL(ctx, r, "SELECT 1 FROM pg_roles WHERE rolname='"+user+"'")
+// UserGranted probes ownership: EnsureUser's LAST statement is
+// ALTER DATABASE ... OWNER TO, so a positive probe proves the whole batch ran.
+func (Postgres) UserGranted(ctx context.Context, r bssh.Runner, user, database string) (bool, error) {
+	return probePSQL(ctx, r, "SELECT 1 FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE d.datname='"+database+"' AND r.rolname='"+user+"'")
 }
 ```
 
@@ -211,27 +353,29 @@ Expected: PASS; the build confirms nothing else implements `Engine` (only MariaD
 
 ```bash
 git add internal/database/engine.go internal/database/mariadb.go internal/database/postgres.go internal/database/mariadb_test.go internal/database/postgres_test.go
-git commit -m "feat(database): read-only DatabaseExists/UserExists probes per engine
+git commit -m "feat(database): read-only DatabaseExists/UserGranted probes per engine
 
 Both use the engine's admin transport (MariaDB root over the unix socket,
 Postgres peer auth via sudo -u postgres), inline validated identifiers, and
 report false on a non-zero exit so an unreachable server reads as
-'cannot confirm' rather than an error.
+'cannot confirm' rather than an error. UserGranted checks the grant
+(MariaDB) / database ownership (Postgres), proving EnsureUser ran to its
+last meaningful statement rather than merely CREATE.
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 2: Check probes real state
+### Task 3: Check probes real state
 
 **Files:**
 - Modify: `internal/provision/steps/database.go` (`Check` + `changes`)
 - Test: `internal/provision/steps/database_test.go`
 
 **Interfaces:**
-- Consumes: Task 1's `eng.DatabaseExists` / `eng.UserExists`.
-- Produces: Check unsatisfied-reasons Task 4's live validation greps for: `"database for <domain> missing"`, `"database user for <domain> missing"`.
+- Consumes: Task 2's `eng.DatabaseExists(ctx, r, name)` / `eng.UserGranted(ctx, r, user, database)`.
+- Produces: Check unsatisfied-reasons Task 5's live validation greps for: `"database for <domain> missing"`, `"database user/grant for <domain> missing"`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -239,8 +383,8 @@ Append to `internal/provision/steps/database_test.go` (note: `databaseServer()` 
 
 ```go
 const (
-	mariadbDBProbe   = `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='myapp'"`
-	mariadbUserProbe = `mysql --protocol=socket -N -e "SELECT 1 FROM mysql.user WHERE User='myapp' AND Host='localhost'"`
+	mariadbDBProbe    = `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='myapp'"`
+	mariadbGrantProbe = `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='myapp' AND GRANTEE='''myapp''@''localhost''' LIMIT 1"`
 )
 
 func TestDatabaseCheckUnsatisfiedWhenDatabaseMissing(t *testing.T) {
@@ -261,21 +405,21 @@ func TestDatabaseCheckUnsatisfiedWhenDatabaseMissing(t *testing.T) {
 	}
 }
 
-func TestDatabaseCheckUnsatisfiedWhenUserMissing(t *testing.T) {
+func TestDatabaseCheckUnsatisfiedWhenUserOrGrantMissing(t *testing.T) {
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
 	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
-	f.On(mariadbUserProbe, bssh.Result{Stdout: ""}) // role absent
+	f.On(mariadbGrantProbe, bssh.Result{Stdout: ""}) // role or its grant absent
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cr.Satisfied {
-		t.Fatal("a present database must not satisfy Check when the user is missing")
+		t.Fatal("a present database must not satisfy Check when the user/grant is missing")
 	}
-	if !strings.Contains(cr.Reason, "database user for app.example.com missing") {
+	if !strings.Contains(cr.Reason, "database user/grant for app.example.com missing") {
 		t.Errorf("Reason = %q", cr.Reason)
 	}
 }
@@ -312,7 +456,7 @@ func TestDatabaseCheckSatisfiedDoesNotReseedExistingEnv(t *testing.T) {
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
 	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
-	f.On(mariadbUserProbe, bssh.Result{Stdout: "1\n"})
+	f.On(mariadbGrantProbe, bssh.Result{Stdout: "1\n"})
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -326,7 +470,7 @@ func TestDatabaseCheckSatisfiedDoesNotReseedExistingEnv(t *testing.T) {
 - [ ] **Step 2: Run tests to verify the new ones fail**
 
 Run: `go test -run 'TestDatabaseCheck' ./internal/provision/steps/`
-Expected: `UnsatisfiedWhenDatabaseMissing` and `UnsatisfiedWhenUserMissing` FAIL (Check reports Satisfied today); `SkipsProbesWhenNotInstalled` may already pass (no probes exist yet); the updated reseed test passes.
+Expected: `UnsatisfiedWhenDatabaseMissing` and `UnsatisfiedWhenUserOrGrantMissing` FAIL (Check reports Satisfied today); `SkipsProbesWhenNotInstalled` may already pass (no probes exist yet); the updated reseed test passes.
 
 - [ ] **Step 3: Implement**
 
@@ -376,12 +520,12 @@ func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Serve
 		if !dbExists {
 			return d.unsatisfied(eng, "database for "+site.Domain+" missing"), nil
 		}
-		userExists, err := eng.UserExists(ctx, r, s.SiteDBUser(site))
+		granted, err := eng.UserGranted(ctx, r, s.SiteDBUser(site), s.SiteDBName(site))
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
-		if !userExists {
-			return d.unsatisfied(eng, "database user for "+site.Domain+" missing"), nil
+		if !granted {
+			return d.unsatisfied(eng, "database user/grant for "+site.Domain+" missing"), nil
 		}
 	}
 	return provision.CheckResult{Satisfied: true, Reason: eng.ServerPackage() + " installed (" + s.Database.Source + "); per-site databases, users and credentials present"}, nil
@@ -414,22 +558,22 @@ git commit -m "fix(database): Check probes that the database and user actually e
 .env presence was treated as proof of provisioning, so a run that failed
 between the .env write and EnsureUser left a server every later run
 reported Satisfied and never healed. Check now gates on installed+source,
-then per site verifies .env, database, and user via the engine probes.
+then per site verifies .env, database, and user+grant via the engine probes.
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 3: Apply seeds .env only when absent
+### Task 4: Apply seeds .env only when absent
 
 **Files:**
 - Modify: `internal/provision/steps/database.go` (`Apply`; replace `resolvePassword`/`resolveAppKey` with `passwordFromEnv`/`newPassword`)
 - Test: `internal/provision/steps/database_test.go`
 
 **Interfaces:**
-- Consumes: Task 1's probes are NOT used here; `fileExists`, `seedSharedEnv`, `secret.AppKey`, `secret.Generate`, `reDBPassword`, `dbPasswordKey` all exist.
-- Produces: error text Task 4's tests/live validation rely on: `<envpath> for <domain> exists but has no DB_PASSWORD; add one or remove the file to have berth re-seed it`.
+- Consumes: the engine probes are NOT used here; `fileExists`, `seedSharedEnv`, `secret.AppKey`, `secret.Generate`, `reDBPassword`, `dbPasswordKey` all exist. Task 1's atomic WriteFile underwrites the "existing .env is complete" invariant.
+- Produces: error text Task 5's live validation relies on: `<envpath> for <domain> exists but has no DB_PASSWORD; add one or remove the file to have berth re-seed it`.
 
 - [ ] **Step 1: Adapt and write the failing tests**
 
@@ -441,7 +585,7 @@ In `internal/provision/steps/database_test.go`:
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
 ```
 
-   In `TestDatabaseApplyPostgresFromPGDG` add the same line using that test's own server value. Remove now-dead `grep -m1 '^APP_KEY=' ...` stubs from these tests (resolveAppKey is deleted; a fresh seed always generates).
+   In `TestDatabaseApplyPostgresFromPGDG` add the same line using that test's own server value. Remove now-dead grep stubs from these fresh-path tests — BOTH `grep -m1 '^APP_KEY=' ...` (resolveAppKey is deleted; a fresh seed always generates) AND `grep -m1 '^DB_PASSWORD=' ...` (the fresh path never greps an absent file; leaving the stub would let a regression that still reads the env pass unnoticed).
 
 2. Replace `TestDatabaseApplyReusesExistingPasswordWithoutRotating` with the heal-path test:
 
@@ -622,9 +766,14 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ---
 
-### Task 4: whole-branch verification (controller-run)
+### Task 5: whole-branch verification (controller-run)
 
 **Files:** none (verification only)
+
+Note: the live heal recipe below is explicitly MariaDB-only — the test box
+runs MariaDB, and on Postgres a naive `DROP ROLE` would fail anyway (the app
+role owns the database). The Postgres heal path is pinned by the Task 2 unit
+matrix and the existing live Postgres e2e coverage from Tier-2 iteration 4.
 
 - [ ] **Step 1: Full gate**
 
