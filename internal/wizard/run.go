@@ -22,30 +22,77 @@ func run(p prompter) (Answers, error) {
 	}
 
 	for {
-		sa := SiteAnswers{SchedulerOverride: "inherit", CloudflareOverride: "inherit", BackupsOverride: "inherit"}
-
-		// Collect core fields, resolving HTTP/3↔nginx and validating after each
-		// attempt. Server-level fields are already inline-valid, so a failure here
-		// is site-local or a cross-site duplicate: re-prompt this same site.
+		var sa SiteAnswers
+		// Site-retry loop: core fields AND advanced options (overrides, queue,
+		// daemons) are validated as one unit at the bottom. An override- or
+		// worker-introduced violation (cloudflare_only + letsencrypt, duplicate
+		// supervisor program) re-prompts this site instead of surfacing only at
+		// the final Write().
 		for {
-			if err := p.SiteCore(len(a.Sites), &sa); err != nil {
+			sa = SiteAnswers{SchedulerOverride: "inherit", CloudflareOverride: "inherit", BackupsOverride: "inherit"}
+
+			// Collect core fields, resolving HTTP/3↔nginx and validating after each
+			// attempt. Server-level fields are already inline-valid, so a failure here
+			// is site-local or a cross-site duplicate: re-prompt this same site.
+			for {
+				if err := p.SiteCore(len(a.Sites), &sa); err != nil {
+					return Answers{}, err
+				}
+				if sa.HTTP3 && a.NginxSource == "debian" {
+					sw, err := p.Confirm("HTTP/3 requires the nginx.org package; switch the server's nginx source to nginx.org?")
+					if err != nil {
+						return Answers{}, err
+					}
+					if sw {
+						a.NginxSource = "nginx"
+					} else {
+						sa.HTTP3 = false
+					}
+				}
+				// Shallow copy is safe here: sa has no pointer fields populated yet
+				// (Queue/Daemons are filled only after this validate loop), so cand
+				// shares nothing mutable with sa. If that ordering ever changes, this
+				// copy would alias sa.Queue's pointer — deep-copy then.
+				cand := a
+				cand.Sites = append(append([]SiteAnswers(nil), a.Sites...), sa)
+				if verr := cand.ToServer().Validate(); verr != nil {
+					p.ShowError(verr)
+					continue
+				}
+				break
+			}
+
+			// Optional advanced gate: scheduler override, dedicated queue, daemons.
+			adv, err := p.Confirm("Configure advanced options for this site?")
+			if err != nil {
 				return Answers{}, err
 			}
-			if sa.HTTP3 && a.NginxSource == "debian" {
-				sw, err := p.Confirm("HTTP/3 requires the nginx.org package; switch the server's nginx source to nginx.org?")
+			if adv {
+				if err := p.SiteOverrides(&sa); err != nil {
+					return Answers{}, err
+				}
+				wantQueue, err := p.Confirm("Dedicated queue worker for this site?")
 				if err != nil {
 					return Answers{}, err
 				}
-				if sw {
-					a.NginxSource = "nginx"
-				} else {
-					sa.HTTP3 = false
+				if wantQueue {
+					var q QueueAnswers
+					if err := p.Queue(&q); err != nil {
+						return Answers{}, err
+					}
+					sa.Queue = &q
 				}
+				daemons, err := collectDaemons(p)
+				if err != nil {
+					return Answers{}, err
+				}
+				sa.Daemons = daemons
 			}
-			// Shallow copy is safe here: sa has no pointer fields populated yet
-			// (Queue/Daemons are filled only after this validate loop), so cand
-			// shares nothing mutable with sa. If that ordering ever changes, this
-			// copy would alias sa.Queue's pointer — deep-copy then.
+
+			// Re-validate the fully-assembled site: overrides, queue, and daemons
+			// were collected after the core validation above. The shallow copy is
+			// read-only here — cand aliases sa.Queue/sa.Daemons, but ToServer only
+			// reads them.
 			cand := a
 			cand.Sites = append(append([]SiteAnswers(nil), a.Sites...), sa)
 			if verr := cand.ToServer().Validate(); verr != nil {
@@ -53,33 +100,6 @@ func run(p prompter) (Answers, error) {
 				continue
 			}
 			break
-		}
-
-		// Optional advanced gate: scheduler override, dedicated queue, daemons.
-		adv, err := p.Confirm("Configure advanced options for this site?")
-		if err != nil {
-			return Answers{}, err
-		}
-		if adv {
-			if err := p.SiteOverrides(&sa); err != nil {
-				return Answers{}, err
-			}
-			wantQueue, err := p.Confirm("Dedicated queue worker for this site?")
-			if err != nil {
-				return Answers{}, err
-			}
-			if wantQueue {
-				var q QueueAnswers
-				if err := p.Queue(&q); err != nil {
-					return Answers{}, err
-				}
-				sa.Queue = &q
-			}
-			daemons, err := collectDaemons(p)
-			if err != nil {
-				return Answers{}, err
-			}
-			sa.Daemons = daemons
 		}
 
 		a.Sites = append(a.Sites, sa)
