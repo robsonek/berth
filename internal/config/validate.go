@@ -195,6 +195,9 @@ func (s *Server) Validate() error {
 		if err := site.validate(); err != nil {
 			return fmt.Errorf("site %d: %w", i, err)
 		}
+		if site.SSL && s.CloudflareOnlyEnabled(site) && site.CertMode() == "letsencrypt" {
+			return fmt.Errorf("site %s: cloudflare_only cannot issue a Let's Encrypt certificate (a proxied DNS record never points at the origin); use ssl_mode: selfsigned (Cloudflare SSL mode %q) or disable cloudflare_only for this site", site.Domain, "Full")
+		}
 		// Per-site database identity (its own block, or the inherited legacy
 		// top-level database.name/user for a lone site).
 		if site.Database.Name == "" && site.Database.User == "" {
