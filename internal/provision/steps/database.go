@@ -215,8 +215,10 @@ func (d database) passwordFromEnv(ctx context.Context, r bssh.Runner, site confi
 	return "", fmt.Errorf("%s for %s exists but has no %s; add one or remove the file to have berth re-seed it", env, site.Domain, dbPasswordKey)
 }
 
-// newPassword returns the locally cached password for dbUser (a re-run whose
-// seed crashed before reaching the host) or generates a fresh one.
+// newPassword returns the locally cached password for dbUser or generates a
+// fresh one. The cache hit covers the documented re-seed flow: an operator
+// removes shared/.env to have berth re-seed it, and the password from the
+// prior successful run is reused so the existing role keeps working.
 func newPassword(dbUser string, cache map[string]string) (string, error) {
 	if pw := cache[dbUser]; pw != "" {
 		if !reDBPassword.MatchString(pw) {
