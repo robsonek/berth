@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -55,12 +56,14 @@ func wantTUI(stdoutIsTTY bool, f *provisionFlags) bool {
 }
 
 func runProvision(cmd *cobra.Command, serverPath string, f *provisionFlags) error {
+	ctx, cancel := context.WithCancel(cmd.Context())
+	defer cancel()
 	srv, err := config.Load(serverPath)
 	if err != nil {
 		return err
 	}
 	red := secret.NewRedactor()
-	client, err := bssh.Connect(cmd.Context(), srv, bssh.HostKeyPolicy{
+	client, err := bssh.Connect(ctx, srv, bssh.HostKeyPolicy{
 		Pinned: srv.SSH.Fingerprint, KnownHosts: defaultKnownHosts(),
 		AllowTOFU: ui.IsTTY(os.Stdin), ConfirmTOFU: confirmFingerprint(cmd),
 	})
@@ -70,14 +73,20 @@ func runProvision(cmd *cobra.Command, serverPath string, f *provisionFlags) erro
 	defer client.Close()
 
 	eng := provision.New(steps.Pipeline(srv, red, f.skipSSL)...)
-	events, err := eng.Run(cmd.Context(), srv, client, provision.Options{
+	events, err := eng.Run(ctx, srv, client, provision.Options{
 		DryRun: f.dryRun, Only: f.only, Force: f.force, SSLStaging: f.sslStaging,
 	})
 	if err != nil {
 		return err
 	}
 	r := ui.New(cmd.OutOrStdout(), wantTUI(ui.IsTTY(os.Stdout), f))
-	return r.Render(events)
+	rerr := r.Render(events)
+	// Cancel explicitly BEFORE the deferred client.Close (LIFO would close the
+	// SSH connection first): the engine must not start another step once the
+	// renderer has returned, e.g. after a TUI interrupt. A step already in
+	// flight is not cancelled (ssh.Runner ignores ctx — documented limitation).
+	cancel()
+	return rerr
 }
 
 // defaultKnownHosts returns the conventional path to the user's known_hosts file.
