@@ -147,22 +147,38 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	}
 	for i, site := range s.Sites {
 		dbName, dbUser := s.SiteDBName(site), s.SiteDBUser(site)
-		pw, err := d.resolvePassword(ctx, r, site, dbUser, cache)
+		envExists, err := fileExists(ctx, r, sharedEnvPath(site))
 		if err != nil {
 			return err
+		}
+		var pw string
+		if envExists {
+			// An existing .env is never rewritten: WriteFile is atomic, so a
+			// present file is complete, and rewriting would clobber
+			// operator-added keys and re-derive the positional REDIS_DB index.
+			// The role's password must therefore come from the file the app reads.
+			pw, err = d.passwordFromEnv(ctx, r, site)
+			if err != nil {
+				return err
+			}
+		} else {
+			pw, err = newPassword(dbUser, cache)
+			if err != nil {
+				return err
+			}
+			appKey, err := secret.AppKey()
+			if err != nil {
+				return err
+			}
+			d.redactor.Add(appKey)
+			// Persist FIRST (atomic), so a crash before EnsureUser still leaves a
+			// recoverable secret on the host. i is the site's per-site Redis logical
+			// DB index when Valkey is enabled.
+			if err := d.seedSharedEnv(ctx, r, s, site, i, dbName, dbUser, pw, appKey, driver, host, port, socket); err != nil {
+				return err
+			}
 		}
 		d.redactor.Add(pw)
-		appKey, err := d.resolveAppKey(ctx, r, site)
-		if err != nil {
-			return err
-		}
-		d.redactor.Add(appKey)
-		// Persist FIRST (atomic), so a crash before EnsureUser still leaves a
-		// recoverable secret on the host. i is the site's per-site Redis logical
-		// DB index when Valkey is enabled.
-		if err := d.seedSharedEnv(ctx, r, s, site, i, dbName, dbUser, pw, appKey, driver, host, port, socket); err != nil {
-			return err
-		}
 		if err := eng.EnsureDatabase(ctx, r, dbName); err != nil {
 			return err
 		}
@@ -177,24 +193,31 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	return nil
 }
 
-// resolvePassword returns a site's database password, preferring an existing one
-// (the site's host shared/.env, then the local cache keyed by DB user) and only
-// generating a new one when none exists. A reused password is re-validated.
-func (d database) resolvePassword(ctx context.Context, r bssh.Runner, site config.Site, dbUser string, cache map[string]string) (string, error) {
+// passwordFromEnv reads DB_PASSWORD from a site's existing shared/.env. The
+// file is authoritative once present: a missing value is a hard error, because
+// silently generating a new password would desync the role from the file the
+// app reads. A reused password is re-validated against the allowed charset
+// (defence-in-depth against a tampered env injecting SQL metacharacters).
+func (d database) passwordFromEnv(ctx context.Context, r bssh.Runner, site config.Site) (string, error) {
 	env := sharedEnvPath(site)
 	res, err := r.Run(ctx, "grep -m1 '^"+dbPasswordKey+"=' "+shQuote(env), nil)
 	if err != nil {
 		return "", err
 	}
 	if res.ExitCode == 0 {
-		pw := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(res.Stdout), dbPasswordKey+"="))
-		if pw != "" {
+		if pw := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(res.Stdout), dbPasswordKey+"=")); pw != "" {
 			if !reDBPassword.MatchString(pw) {
 				return "", fmt.Errorf("reused %s from %s is outside the allowed charset; refusing to use it", dbPasswordKey, env)
 			}
 			return pw, nil
 		}
 	}
+	return "", fmt.Errorf("%s for %s exists but has no %s; add one or remove the file to have berth re-seed it", env, site.Domain, dbPasswordKey)
+}
+
+// newPassword returns the locally cached password for dbUser (a re-run whose
+// seed crashed before reaching the host) or generates a fresh one.
+func newPassword(dbUser string, cache map[string]string) (string, error) {
 	if pw := cache[dbUser]; pw != "" {
 		if !reDBPassword.MatchString(pw) {
 			return "", fmt.Errorf("cached password for %s is outside the allowed charset; refusing to use it", dbUser)
@@ -206,24 +229,6 @@ func (d database) resolvePassword(ctx context.Context, r bssh.Runner, site confi
 		return "", fmt.Errorf("generate database password: %w", err)
 	}
 	return pw, nil
-}
-
-// resolveAppKey returns a site's Laravel APP_KEY, preferring one already present
-// in the site's shared/.env (so an operator may pre-seed the real key for a data
-// restore and re-runs never rotate it, which would invalidate encrypted data)
-// and generating a fresh key only when none exists.
-func (d database) resolveAppKey(ctx context.Context, r bssh.Runner, site config.Site) (string, error) {
-	env := sharedEnvPath(site)
-	res, err := r.Run(ctx, "grep -m1 '^"+appKeyKey+"=' "+shQuote(env), nil)
-	if err != nil {
-		return "", err
-	}
-	if res.ExitCode == 0 {
-		if key := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(res.Stdout), appKeyKey+"=")); key != "" {
-			return key, nil
-		}
-	}
-	return secret.AppKey()
 }
 
 // seedSharedEnv renders a site's shared/.env and writes it atomically, owned by
