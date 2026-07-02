@@ -10,12 +10,27 @@ import (
 // contains reports whether substr is within s (small local helper for assertions).
 func contains(s, substr string) bool { return strings.Contains(s, substr) }
 
-func TestInstallCmdSudoAndOwnership(t *testing.T) {
-	cmd, _ := installCmd(FileSpec{Path: "/etc/nginx/sites-available/app", Owner: "root", Group: "root", Mode: 0o644, Sudo: true}, "/tmp/berth.tmp", true)
-	for _, want := range []string{"sudo install", "-o 'root'", "-g 'root'", "-m 644", "'/etc/nginx/sites-available/app'"} {
-		if !contains(cmd, want) {
-			t.Errorf("installCmd missing %q in %q", want, cmd)
-		}
+func TestInstallCmdStagesInDestDirAndRenames(t *testing.T) {
+	cmd, _ := installCmd(FileSpec{Path: "/etc/nginx/app.conf", Owner: "deploy", Group: "www-data", Mode: 0o640}, "/tmp/up.123", false)
+	want := `t=$(mktemp '/etc/nginx/.berth.XXXXXX') && install -o 'deploy' -g 'www-data' -m 640 '/tmp/up.123' "$t" && mv -f "$t" '/etc/nginx/app.conf' && rm -f '/tmp/up.123'`
+	if cmd != want {
+		t.Fatalf("cmd = %q\nwant  %q", cmd, want)
+	}
+}
+
+func TestInstallCmdDefaultsRootAndMode(t *testing.T) {
+	cmd, _ := installCmd(FileSpec{Path: "/etc/f"}, "/tmp/t1", false)
+	want := `t=$(mktemp '/etc/.berth.XXXXXX') && install -o 'root' -g 'root' -m 644 '/tmp/t1' "$t" && mv -f "$t" '/etc/f' && rm -f '/tmp/t1'`
+	if cmd != want {
+		t.Fatalf("cmd = %q\nwant  %q", cmd, want)
+	}
+}
+
+func TestInstallCmdSudoWrapsWholeChain(t *testing.T) {
+	cmd, _ := installCmd(FileSpec{Path: "/etc/f", Sudo: true}, "/tmp/t1", true)
+	inner := `t=$(mktemp '/etc/.berth.XXXXXX') && install -o 'root' -g 'root' -m 644 '/tmp/t1' "$t" && mv -f "$t" '/etc/f' && rm -f '/tmp/t1'`
+	if want := "sudo -n sh -c " + shQuote(inner); cmd != want {
+		t.Fatalf("cmd = %q\nwant  %q", cmd, want)
 	}
 }
 

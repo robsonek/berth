@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path"
 	"strings"
 
 	"github.com/pkg/sftp"
@@ -115,8 +116,14 @@ func (c *Client) WriteFile(ctx context.Context, f FileSpec) error {
 }
 
 // installCmd builds the privileged install command; all path/owner values are
-// shell-quoted (defence-in-depth on top of config validation). It is a pure
-// function so it can be unit-tested without an SSH connection.
+// shell-quoted (defence-in-depth on top of config validation). The staged copy
+// is mktemp'd in the DESTINATION directory — unpredictable name (no
+// symlink-plant window in tenant-writable dirs) on the same filesystem — so
+// the final `mv -f` is an atomic rename(2): a failure anywhere in the chain
+// leaves the old destination intact, never a partial file. Because the chain
+// starts with a variable assignment, the privileged form wraps it whole in
+// `sudo -n sh -c`. It is a pure function so it can be unit-tested without an
+// SSH connection.
 func installCmd(f FileSpec, tmp string, useSudo bool) (cmd, tmpOut string) {
 	mode := f.Mode
 	if mode == 0 {
@@ -129,10 +136,11 @@ func installCmd(f FileSpec, tmp string, useSudo bool) (cmd, tmpOut string) {
 	if group == "" {
 		group = owner
 	}
-	cmd = fmt.Sprintf("install -o %s -g %s -m %o %s %s && rm -f %s",
+	cmd = fmt.Sprintf(`t=$(mktemp %s) && install -o %s -g %s -m %o %s "$t" && mv -f "$t" %s && rm -f %s`,
+		shQuote(path.Dir(f.Path)+"/.berth.XXXXXX"),
 		shQuote(owner), shQuote(group), mode.Perm(), shQuote(tmp), shQuote(f.Path), shQuote(tmp))
 	if f.Sudo && useSudo {
-		cmd = "sudo " + cmd
+		cmd = "sudo -n sh -c " + shQuote(cmd)
 	}
 	return cmd, tmp
 }
