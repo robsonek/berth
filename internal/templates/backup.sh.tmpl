@@ -14,7 +14,7 @@ db_tmp="$(mktemp "{{ .BackupDir }}/.tmp-XXXXXXXX")"
 chmod 0600 "$db_tmp"
 mv "$db_tmp" "{{ .BackupDir }}/{{ .DBName }}-$ts.sql.gz"
 files_tmp="$(mktemp "{{ .BackupDir }}/.tmp-XXXXXXXX")"
-tar -czf "$files_tmp" -C "{{ .DeployPath }}" shared || [ $? -eq 1 ]
+tar --exclude='shared/tmp' -czf "$files_tmp" -C "{{ .DeployPath }}" shared || [ $? -eq 1 ]
 chmod 0600 "$files_tmp"
 mv "$files_tmp" "{{ .BackupDir }}/{{ .Pool }}-files-$ts.tar.gz"
 find "{{ .BackupDir }}" -maxdepth 1 -type f -name '*.gz' -mtime +{{ .RetentionDays }} -delete

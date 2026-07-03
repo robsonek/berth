@@ -24,6 +24,8 @@ type appDirs struct{}
 // write (design §6.4). Each site's directories are owned by that site's OS user
 // for isolation: deploy_path is <user>:www-data mode 0710 (nginx/www-data may
 // traverse to public/, other site users cannot), shared/ is <user>:<user> 0700.
+// shared/tmp backs the site's FPM sys_temp_dir/upload_tmp_dir so PHP never
+// stages uploads or temp files in the world-readable shared /tmp.
 func AppDirs() provision.Step { return appDirs{} }
 
 func (appDirs) Name() string       { return "appdirs" }
@@ -49,6 +51,7 @@ func (a appDirs) Check(ctx context.Context, _ provision.RunCtx, s *config.Server
 		for _, d := range []struct{ path, owner, group string }{
 			{site.DeployPath, user, "www-data"},
 			{site.DeployPath + "/shared", user, user},
+			{site.DeployPath + "/shared/tmp", user, user},
 			{acmeWebroot(site.Domain), "www-data", "www-data"},
 		} {
 			ok, err := dirOwnedBy(ctx, r, d.path, d.owner, d.group)
@@ -65,7 +68,7 @@ func (a appDirs) Check(ctx context.Context, _ provision.RunCtx, s *config.Server
 
 func (appDirs) changes() []string {
 	return []string{
-		"install -d deploy_path (<user>:www-data 0710) + shared (<user> 0700)",
+		"install -d deploy_path (<user>:www-data 0710) + shared and shared/tmp (<user> 0700)",
 		"install -d ACME webroot (owner www-data)",
 	}
 }
@@ -79,6 +82,8 @@ func (appDirs) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 			fmt.Sprintf("install -d -o %s -g www-data -m 0710 %s", user, shQuote(site.DeployPath)),
 			// shared/ holds .env and is private to the site user.
 			fmt.Sprintf("install -d -o %s -g %s -m 0700 %s", user, user, shQuote(site.DeployPath+"/shared")),
+			// shared/tmp backs the pool's sys_temp_dir/upload_tmp_dir (no shared /tmp).
+			fmt.Sprintf("install -d -o %s -g %s -m 0700 %s", user, user, shQuote(site.DeployPath+"/shared/tmp")),
 			// ACME webroot for certbot --webroot.
 			fmt.Sprintf("install -d -o www-data -g www-data -m 0755 %s", shQuote(acmeWebroot(site.Domain))),
 		}

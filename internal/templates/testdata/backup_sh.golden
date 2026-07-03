@@ -15,7 +15,7 @@ mysqldump --protocol=socket --single-transaction --no-tablespaces --routines --e
 chmod 0600 "$db_tmp"
 mv "$db_tmp" "/var/backups/berth/app_example_com/myapp-$ts.sql.gz"
 files_tmp="$(mktemp "/var/backups/berth/app_example_com/.tmp-XXXXXXXX")"
-tar -czf "$files_tmp" -C "/home/deploy/myapp" shared || [ $? -eq 1 ]
+tar --exclude='shared/tmp' -czf "$files_tmp" -C "/home/deploy/myapp" shared || [ $? -eq 1 ]
 chmod 0600 "$files_tmp"
 mv "$files_tmp" "/var/backups/berth/app_example_com/app_example_com-files-$ts.tar.gz"
 find "/var/backups/berth/app_example_com" -maxdepth 1 -type f -name '*.gz' -mtime +7 -delete
