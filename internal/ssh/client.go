@@ -218,16 +218,8 @@ func (c *Client) WriteFile(ctx context.Context, f FileSpec) error {
 	}
 	tmp := strings.TrimSpace(mk.Stdout)
 
-	w, err := c.sftp.OpenFile(tmp, os.O_WRONLY|os.O_TRUNC)
-	if err != nil {
-		return fmt.Errorf("open temp %s: %w", tmp, err)
-	}
-	if _, err := w.Write(f.Content); err != nil {
-		w.Close()
+	if err := c.sftpPut(ctx, tmp, f.Content); err != nil {
 		return err
-	}
-	if err := w.Close(); err != nil { // Close flushes; surface deferred write errors
-		return fmt.Errorf("flush temp %s: %w", tmp, err)
 	}
 
 	// installCmd carries its own sudo when needed, so run it raw via exec.
@@ -238,6 +230,46 @@ func (c *Client) WriteFile(ctx context.Context, f FileSpec) error {
 		return fmt.Errorf("install %s failed: %s", f.Path, r.Stderr)
 	}
 	return nil
+}
+
+// sftpPut uploads content to path over SFTP. The SFTP client has no context
+// support, so the upload runs in a goroutine; on cancellation the UNDERLYING
+// CONNECTION is closed — a non-blocking net-level close that unblocks the
+// in-flight SFTP call. Deliberately not c.sftp.Close(): pkg/sftp's Close can
+// itself block behind the connection mutex / recv goroutine. Losing the whole
+// connection is fine — a cancelled ctx means the run is shutting down, and
+// any later call fails cleanly on the closed connection. The staged temp file
+// may survive on the host (unpredictable mktemp name, 0600 — the same
+// exposure as today's failure paths).
+func (c *Client) sftpPut(ctx context.Context, path string, content []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	done := make(chan error, 1) // buffered: the goroutine never leaks
+	go func() {
+		w, err := c.sftp.OpenFile(path, os.O_WRONLY|os.O_TRUNC)
+		if err != nil {
+			done <- fmt.Errorf("open temp %s: %w", path, err)
+			return
+		}
+		if _, err := w.Write(content); err != nil {
+			w.Close()
+			done <- err
+			return
+		}
+		if err := w.Close(); err != nil { // Close flushes; surface deferred write errors
+			done <- fmt.Errorf("flush temp %s: %w", path, err)
+			return
+		}
+		done <- nil
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		c.conn.Close()
+		return ctx.Err()
+	}
 }
 
 // installCmd builds the privileged install command; all path/owner values are

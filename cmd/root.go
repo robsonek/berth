@@ -31,9 +31,10 @@ func errNotImplemented(what string) error {
 }
 
 // Execute runs the root command and exits non-zero on error. SIGINT/SIGTERM
-// cancel the command context (the engine stops between steps); after the
-// first signal default handling is restored, so a second ctrl+c force-kills
-// a process stuck on a remote command that ignores cancellation.
+// cancel the command context: the ssh layer best-effort-SIGTERMs the
+// in-flight remote command and returns immediately, and the engine stops.
+// After the first signal default handling is restored, so a second ctrl+c
+// force-kills the CLI if anything still refuses to die.
 func Execute() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

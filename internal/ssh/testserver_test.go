@@ -240,6 +240,19 @@ func TestExecCancelReturnsPromptlyAndSignalsTERM(t *testing.T) {
 	}
 }
 
+func TestWriteFilePreCancelledContext(t *testing.T) {
+	srv := startTestServer(t, completeExec("", 0), false)
+	c := dialTest(t, srv)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// nil c.sftp is safe here: the pre-cancelled ctx must short-circuit in
+	// exec("mktemp") before anything touches the SFTP subsystem.
+	err := c.WriteFile(ctx, FileSpec{Path: "/tmp/x", Content: []byte("y")})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
 func TestKeepaliveClosesDeadConnection(t *testing.T) {
 	srv := startTestServer(t, completeExec("", 0), true) // deaf: probes never get a reply
 	conn, err := xssh.Dial("tcp", srv.addr, &xssh.ClientConfig{

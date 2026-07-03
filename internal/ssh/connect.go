@@ -27,6 +27,11 @@ func Connect(ctx context.Context, s *config.Server, policy HostKeyPolicy) (*Clie
 			return c, nil
 		}
 		c.Close()
+		// A probe that failed because ctx was cancelled must not fall through
+		// to a second dial on a dead context (Ctrl-C during the probe).
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 	}
 	// Bootstrap: connect as the configured user (root on a fresh box).
 	return Dial(ctx, addr, clientConfig(s.SSH.User, auth, policy), s.SSH.User != "root")
