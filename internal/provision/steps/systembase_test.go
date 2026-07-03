@@ -139,3 +139,40 @@ func TestSystemBaseApplyInstallsAndConfigures(t *testing.T) {
 		t.Errorf("unexpected FileSpec for %s: %+v", autoUpgradesPath, *auto)
 	}
 }
+
+// stockEnabled is a LOCAL copy of the debconf-written "enabled" bytes (docker-
+// verified against debian:trixie). Deliberately not stockAutoUpgrades[0]: the
+// test must prove the REAL Debian bytes are allowlisted, not that whatever is
+// allowlisted adopts itself.
+const stockEnabled = "APT::Periodic::Update-Package-Lists \"1\";\nAPT::Periodic::Unattended-Upgrade \"1\";\n"
+
+func TestSystemBaseCheckAdoptsStockAutoUpgrades(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	for _, pkg := range basePackages {
+		f.On("dpkg -s "+pkg, bssh.Result{ExitCode: 0})
+	}
+	// The exact debconf-written stock file (no berth marker) ships on
+	// Debian/OVH images; it must be ADOPTED: unsatisfied, no error, no --force.
+	f.On("cat "+shQuote(autoUpgradesPath), bssh.Result{Stdout: stockEnabled, ExitCode: 0})
+	cr, err := SystemBase().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
+	if err != nil {
+		t.Fatalf("the stock image file must be adopted without --force; got %v", err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied (adoption rewrites the managed file on Apply)")
+	}
+}
+
+func TestSystemBaseCheckStillAbortsOnDisabledVariant(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	for _, pkg := range basePackages {
+		f.On("dpkg -s "+pkg, bssh.Result{ExitCode: 0})
+	}
+	// The "0" values are an explicit operator choice (auto-upgrades OFF):
+	// adoption must NOT apply — abort unless --force, like any foreign file.
+	disabled := "APT::Periodic::Update-Package-Lists \"0\";\nAPT::Periodic::Unattended-Upgrade \"0\";\n"
+	f.On("cat "+shQuote(autoUpgradesPath), bssh.Result{Stdout: disabled, ExitCode: 0})
+	if _, err := SystemBase().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f); err == nil || !strings.Contains(err.Error(), "not managed by berth") {
+		t.Fatalf("the disabled variant must keep aborting without --force; got %v", err)
+	}
+}

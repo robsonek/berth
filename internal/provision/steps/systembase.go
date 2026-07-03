@@ -18,10 +18,23 @@ var basePackages = []string{"curl", "git", "rsync", "unzip", "ca-certificates", 
 
 // autoUpgradesPath is the APT Periodic config that actually makes
 // unattended-upgrades run. Without it the apt-daily-upgrade timer applies
-// nothing, so the enabled service is inert. Debian's unattended-upgrades package
-// may ship an unmanaged file here (via debconf); that is reported as unmanaged
-// and aborts unless --force, per the drift policy.
+// nothing, so the enabled service is inert. Debian's unattended-upgrades
+// package may ship an unmanaged file here (via debconf); the known stock
+// "enabled" content is ADOPTED (see stockAutoUpgrades) — anything else is
+// reported as unmanaged and aborts unless --force, per the drift policy.
 const autoUpgradesPath = "/etc/apt/apt.conf.d/20auto-upgrades"
+
+// stockAutoUpgrades lists the exact 20auto-upgrades contents berth adopts
+// (overwrites WITHOUT --force): the file debconf writes for the
+// unattended-upgrades "enable" choice, as shipped by Debian/OVH images
+// (byte-verified against debian:trixie; hit live on the OVH Debian 13.5
+// image). It carries no operator intent beyond "auto-upgrades on" — exactly
+// what berth's managed config enforces. The disabled variant ("0" values) is
+// deliberately NOT listed: that content IS operator intent, so it keeps
+// aborting unless --force, like any other unmanaged file.
+var stockAutoUpgrades = []string{
+	"APT::Periodic::Update-Package-Lists \"1\";\nAPT::Periodic::Unattended-Upgrade \"1\";\n",
+}
 
 // renderAutoUpgrades renders the APT Periodic config (static; '#' marker).
 func renderAutoUpgrades() ([]byte, error) {
@@ -53,7 +66,7 @@ func (systembase) Check(ctx context.Context, rc provision.RunCtx, _ *config.Serv
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	state, err := checkManagedFile(ctx, r, autoUpgradesPath, want)
+	state, err := checkManagedFileAdopt(ctx, r, autoUpgradesPath, want, stockAutoUpgrades)
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
@@ -70,7 +83,7 @@ func (systembase) Check(ctx context.Context, rc provision.RunCtx, _ *config.Serv
 		}, nil
 	}
 	if !fileOK {
-		return provision.CheckResult{Satisfied: false, Reason: "auto-upgrades periodic config not up to date", Changes: changes}, nil
+		return provision.CheckResult{Satisfied: false, Reason: "auto-upgrades periodic config not up to date (a stock image file is adopted automatically)", Changes: changes}, nil
 	}
 	return provision.CheckResult{Satisfied: true, Reason: "base packages installed; auto-upgrades enabled"}, nil
 }
