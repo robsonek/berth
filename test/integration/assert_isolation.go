@@ -29,6 +29,13 @@ func assertMultiSiteIsolation(ctx context.Context, t *testing.T, c *bssh.Client,
 		assertExitZero(ctx, t, c, "fpm socket exists "+a.Domain, "test -S /run/php/berth-"+poolA+".sock")
 		assertExitZero(ctx, t, c, "fpm pool runs as "+userA,
 			fmt.Sprintf("pgrep -u %s -f 'pool %s'", userA, poolA))
+		// The site user must NOT hold the unscoped supervisor grants (`update`
+		// restarts other tenants' changed programs; `reread` is berth's own job
+		// during provisioning, never the deployer's).
+		for _, sub := range []string{"reread", "update"} {
+			assertDenied(ctx, t, c, fmt.Sprintf("%s authorized for supervisorctl %s", userA, sub),
+				fmt.Sprintf("sudo -u %s sudo -n -l /usr/bin/supervisorctl %s", userA, sub))
+		}
 		for _, b := range srv.Sites {
 			if b.Domain == a.Domain {
 				continue
