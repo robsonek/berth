@@ -63,9 +63,10 @@ New helpers, all in tuning.go:
 
 - `parseMariaDBSize(v string) (uint64, error)` — pure function converting the
   value to bytes (no suffix = bytes; `K`/`M`/`G` = 1024-based,
-  case-insensitive — MariaDB accepts lowercase suffixes and literal-Server
-  callers bypass the uppercase-only `reMariaDBSize`, so the parser must not
-  false-reject a value MariaDB would take). Overflow-checked
+  case-insensitive — MariaDB accepts lowercase suffixes, `reMariaDBSize` is
+  itself case-insensitive (`(?i)`), and literal-Server callers bypass that
+  validation entirely, so the parser must not false-reject a value MariaDB
+  would take). Overflow-checked
   (`strconv.ParseUint` + multiplier bound) so an absurd `99999999999G` errors
   instead of wrapping.
 - `hostMemTotalBytes(ctx, r)` — runs the stable command
