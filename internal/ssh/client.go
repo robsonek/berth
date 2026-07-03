@@ -114,18 +114,21 @@ func Dial(ctx context.Context, addr string, cfg *xssh.ClientConfig, useSudo bool
 	}
 }
 
-// Close stops the keepalive loop and shuts down the SFTP subsystem and the
-// underlying connection. The nil guards keep it safe on test-constructed
-// Clients that skipped Dial (which always sets every field); conn is never
-// nil on any constructed Client.
+// Close stops the keepalive loop and shuts down the connection. The
+// connection closes FIRST: pkg/sftp's Close can block behind the conn
+// mutex on a wedged transport, and berth never reuses a Client after
+// Close, so the graceful SFTP shutdown buys nothing — after conn.Close
+// the sftp.Close below returns immediately. Nil guards keep it safe on
+// test-constructed Clients that skipped Dial.
 func (c *Client) Close() error {
 	if c.stopKeepalive != nil {
 		c.stopOnce.Do(func() { close(c.stopKeepalive) })
 	}
+	err := c.conn.Close()
 	if c.sftp != nil {
 		c.sftp.Close()
 	}
-	return c.conn.Close()
+	return err
 }
 
 // Run executes cmd, feeding stdin, and returns stdout/stderr/exit code. When the
@@ -232,7 +235,7 @@ func (c *Client) WriteFile(ctx context.Context, f FileSpec) error {
 	return nil
 }
 
-// sftpPut uploads content to path over SFTP. The SFTP client has no context
+// sftpPut uploads content to remotePath over SFTP. The SFTP client has no context
 // support, so the upload runs in a goroutine; on cancellation the UNDERLYING
 // CONNECTION is closed — a non-blocking net-level close that unblocks the
 // in-flight SFTP call. Deliberately not c.sftp.Close(): pkg/sftp's Close can
@@ -241,15 +244,15 @@ func (c *Client) WriteFile(ctx context.Context, f FileSpec) error {
 // any later call fails cleanly on the closed connection. The staged temp file
 // may survive on the host (unpredictable mktemp name, 0600 — the same
 // exposure as today's failure paths).
-func (c *Client) sftpPut(ctx context.Context, path string, content []byte) error {
+func (c *Client) sftpPut(ctx context.Context, remotePath string, content []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	done := make(chan error, 1) // buffered: the goroutine never leaks
 	go func() {
-		w, err := c.sftp.OpenFile(path, os.O_WRONLY|os.O_TRUNC)
+		w, err := c.sftp.OpenFile(remotePath, os.O_WRONLY|os.O_TRUNC)
 		if err != nil {
-			done <- fmt.Errorf("open temp %s: %w", path, err)
+			done <- fmt.Errorf("open temp %s: %w", remotePath, err)
 			return
 		}
 		if _, err := w.Write(content); err != nil {
@@ -258,7 +261,7 @@ func (c *Client) sftpPut(ctx context.Context, path string, content []byte) error
 			return
 		}
 		if err := w.Close(); err != nil { // Close flushes; surface deferred write errors
-			done <- fmt.Errorf("flush temp %s: %w", path, err)
+			done <- fmt.Errorf("flush temp %s: %w", remotePath, err)
 			return
 		}
 		done <- nil
