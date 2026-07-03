@@ -64,8 +64,11 @@ func hostMemTotalBytes(ctx context.Context, r bssh.Runner) (uint64, error) {
 		return 0, err
 	}
 	out := strings.TrimSpace(res.Stdout)
-	if res.ExitCode != 0 || out == "" {
+	if res.ExitCode != 0 {
 		return 0, fmt.Errorf("cannot determine host RAM: %s", res.Stderr)
+	}
+	if out == "" {
+		return 0, fmt.Errorf("cannot determine host RAM: empty MemTotal from /proc/meminfo")
 	}
 	kb, err := strconv.ParseUint(out, 10, 64)
 	if err != nil {

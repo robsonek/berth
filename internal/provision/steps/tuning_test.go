@@ -544,8 +544,17 @@ func TestOnlyTuningPassesWhenValkeySatisfied(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gate must pass when valkey is satisfied: %v", err)
 	}
-	for range events {
-	} // drain until the pipeline goroutine closes the channel
+	// Per-step failures travel on the event channel, not Run's returned error:
+	// drain fully and pin tuning's terminal event to Planned.
+	planned := false
+	for ev := range events {
+		if ev.Step == "tuning" && ev.Kind == provision.EventPlanned {
+			planned = true
+		}
+	}
+	if !planned {
+		t.Fatal("expected tuning to reach Planned (dry-run, drop-in absent)")
+	}
 }
 
 func TestParseMariaDBSize(t *testing.T) {
@@ -607,6 +616,8 @@ func TestTuningMariaDBBufferPoolGuardBoundaries(t *testing.T) {
 			}
 		} else if err == nil {
 			t.Errorf("pool %s: expected guard error", tc.pool)
+		} else if !strings.Contains(err.Error(), "exceeds") {
+			t.Errorf("pool %s: expected the buffer-pool guard error, got: %v", tc.pool, err)
 		}
 	}
 }
