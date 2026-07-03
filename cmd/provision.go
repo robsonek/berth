@@ -83,8 +83,8 @@ func runProvision(cmd *cobra.Command, serverPath string, f *provisionFlags) erro
 	rerr := r.Render(events)
 	// Cancel explicitly BEFORE the deferred client.Close (LIFO would close the
 	// SSH connection first): the engine must not start another step once the
-	// renderer has returned, e.g. after a TUI interrupt. A step already in
-	// flight is not cancelled (ssh.Runner ignores ctx — documented limitation).
+	// renderer has returned, e.g. after a TUI interrupt. The ssh layer TERMs
+	// and abandons an in-flight remote command on cancellation.
 	cancel()
 	return rerr
 }
