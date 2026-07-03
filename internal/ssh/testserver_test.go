@@ -21,12 +21,24 @@ type execBehavior func(srv *testServer, ch xssh.Channel, reqs <-chan *xssh.Reque
 // context handling. Session channels + exec requests only — deliberately NO
 // SFTP subsystem (spec decision: not worth building for one phase).
 type testServer struct {
-	addr        string
-	signals     chan string   // signal names observed by hanging execs
-	execStarted chan struct{} // one send per ACKed exec request
+	addr            string
+	signals         chan string   // signal names observed by hanging execs
+	execStarted     chan struct{} // one send per ACKed exec request
+	swallowSessions bool          // neither Accept nor Reject channel opens: NewSession blocks forever
 }
 
 func startTestServer(t *testing.T, behavior execBehavior, deaf bool) *testServer {
+	return startTestServerOpts(t, behavior, deaf, false)
+}
+
+// startTestServerSwallowSessions starts a server that swallows every channel
+// open (no Accept, no Reject), so the client's NewSession never returns —
+// exercising exec's pre-session cancellation path.
+func startTestServerSwallowSessions(t *testing.T) *testServer {
+	return startTestServerOpts(t, nil, false, true)
+}
+
+func startTestServerOpts(t *testing.T, behavior execBehavior, deaf, swallowSessions bool) *testServer {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -46,9 +58,10 @@ func startTestServer(t *testing.T, behavior execBehavior, deaf bool) *testServer
 	t.Cleanup(func() { ln.Close() })
 
 	srv := &testServer{
-		addr:        ln.Addr().String(),
-		signals:     make(chan string, 4),
-		execStarted: make(chan struct{}, 4),
+		addr:            ln.Addr().String(),
+		signals:         make(chan string, 4),
+		execStarted:     make(chan struct{}, 4),
+		swallowSessions: swallowSessions,
 	}
 	go func() {
 		for {
@@ -81,6 +94,11 @@ func (s *testServer) handle(c net.Conn, cfg *xssh.ServerConfig, behavior execBeh
 		go xssh.DiscardRequests(globals)
 	}
 	for newCh := range chans {
+		if s.swallowSessions {
+			// Neither Accept nor Reject: the peer stalls channel opens, so the
+			// client's NewSession blocks until its side of the transport closes.
+			continue
+		}
 		if newCh.ChannelType() != "session" {
 			newCh.Reject(xssh.UnknownChannelType, "unsupported")
 			continue
@@ -250,6 +268,77 @@ func TestWriteFilePreCancelledContext(t *testing.T) {
 	err := c.WriteFile(ctx, FileSpec{Path: "/tmp/x", Content: []byte("y")})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
+func TestExecCancelDuringSessionOpen(t *testing.T) {
+	srv := startTestServerSwallowSessions(t)
+	c := dialTest(t, srv)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.exec(ctx, "true", nil)
+		done <- err
+	}()
+	// No ACK handshake exists before a session opens (the server swallows the
+	// open silently), so a short sleep is the only way to let NewSession block.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("exec did not return after cancel during session open")
+	}
+}
+
+func TestDialCancelDuringHandshake(t *testing.T) {
+	// A raw TCP listener that accepts and then never speaks SSH: the TCP
+	// connect succeeds, so only ctx can unblock the handshake.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err == nil {
+			accepted <- c // hold the conn open; the channel keeps it alive
+		}
+	}()
+	t.Cleanup(func() {
+		select {
+		case c := <-accepted:
+			c.Close()
+		default:
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := Dial(ctx, ln.Addr().String(), &xssh.ClientConfig{
+			User:            "t",
+			HostKeyCallback: xssh.InsecureIgnoreHostKey(),
+			Timeout:         5 * time.Second,
+		}, false)
+		done <- err
+	}()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Dial did not return after cancel during handshake")
 	}
 }
 

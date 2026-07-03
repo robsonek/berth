@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path"
 	"strings"
@@ -79,13 +80,47 @@ func keepalive(conn *xssh.Client, stop <-chan struct{}) {
 // Dial opens an SSH connection and SFTP subsystem. The keepalive loop starts
 // before SFTP setup so a transport that dies mid-setup is detected and closed;
 // ctx cancellation during setup closes the connection and returns ctx.Err().
+// The TCP dial and the SSH handshake/auth both honor ctx too — cfg.Timeout
+// covers only the TCP connect, so an SSH-deaf peer would otherwise hang the
+// handshake forever.
 func Dial(ctx context.Context, addr string, cfg *xssh.ClientConfig, useSudo bool) (*Client, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	conn, err := xssh.Dial("tcp", addr, cfg)
+	d := net.Dialer{Timeout: cfg.Timeout}
+	netConn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
+	}
+	type connResult struct {
+		conn *xssh.Client
+		err  error
+	}
+	cr := make(chan connResult, 1) // buffered: the goroutine never leaks
+	go func() {
+		// NewClientConn owns netConn on success; on error it closes it.
+		cc, chans, reqs, err := xssh.NewClientConn(netConn, addr, cfg)
+		if err != nil {
+			cr <- connResult{nil, err}
+			return
+		}
+		cr <- connResult{xssh.NewClient(cc, chans, reqs), nil}
+	}()
+	var conn *xssh.Client
+	select {
+	case r := <-cr:
+		if r.err != nil {
+			return nil, fmt.Errorf("dial %s: %w", addr, r.err)
+		}
+		conn = r.conn
+	case <-ctx.Done():
+		netConn.Close() // unblocks the handshake goroutine; its result is reaped below
+		go func() {
+			if r := <-cr; r.err == nil {
+				r.conn.Close()
+			}
+		}()
+		return nil, ctx.Err()
 	}
 	stop := make(chan struct{})
 	go keepalive(conn, stop)
@@ -162,13 +197,40 @@ func (c *Client) privileged(cmd string) string {
 // then — if the session hasn't unwound within execTeardownBudget — connection
 // close as the escalation. The Client stays usable only on the normal unwind
 // path; a wedged transport costs the whole connection, which is correct.
+// The session open itself (NewSession) runs behind the same goroutine+select,
+// so a peer that stalls channel opens cannot hang exec before the ctx-aware
+// select either; with no session yet to TERM, cancellation there closes the
+// connection and reaps a late-materializing session.
 func (c *Client) exec(ctx context.Context, cmd string, stdin []byte) (Result, error) {
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
-	sess, err := c.conn.NewSession()
-	if err != nil {
-		return Result{}, err
+	type sessResult struct {
+		sess *xssh.Session
+		err  error
+	}
+	sr := make(chan sessResult, 1) // buffered: the goroutine never leaks
+	go func() {
+		s, err := c.conn.NewSession()
+		sr <- sessResult{s, err}
+	}()
+	var sess *xssh.Session
+	select {
+	case r := <-sr:
+		if r.err != nil {
+			return Result{}, r.err
+		}
+		sess = r.sess
+	case <-ctx.Done():
+		// No session yet to TERM: close the connection to unblock the open,
+		// and reap the session if the open wins the race after all.
+		go func() {
+			if r := <-sr; r.err == nil {
+				r.sess.Close()
+			}
+		}()
+		c.conn.Close()
+		return Result{}, ctx.Err()
 	}
 	var out, errb bytes.Buffer
 	sess.Stdout = &out
