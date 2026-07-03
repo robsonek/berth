@@ -336,3 +336,15 @@ func TestHardeningApplyWritesFail2banJail(t *testing.T) {
 		t.Errorf("enable --now must run after -t and before/at reload; test=%d enable=%d reload=%d", idxTest, idxEnable, idxReload)
 	}
 }
+
+func TestRenderFail2banJailZeroValueUsesDefaults(t *testing.T) {
+	got, err := renderFail2banJail(&config.Server{SSH: config.SSH{Port: 22}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"bantime = 1h", "findtime = 10m", "maxretry = 5"} {
+		if !strings.Contains(string(got), want) {
+			t.Errorf("zero-value jail render missing %q:\n%s", want, got)
+		}
+	}
+}

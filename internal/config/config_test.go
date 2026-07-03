@@ -44,8 +44,14 @@ func TestLoadFail2banDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if s.Fail2ban.Bantime != "1h" || s.Fail2ban.Findtime != "10m" || s.Fail2ban.Maxretry != 5 {
-		t.Errorf("fail2ban defaults not applied: %+v", s.Fail2ban)
+	// Defaults live in the *Eff accessors, not in Load(): omitted fields stay
+	// zero in the struct, and the accessors supply 1h/10m/5 at render time.
+	if s.Fail2ban.Bantime != "" || s.Fail2ban.Findtime != "" || s.Fail2ban.Maxretry != 0 {
+		t.Errorf("Load must not inject fail2ban defaults: %+v", s.Fail2ban)
+	}
+	if s.Fail2ban.BantimeEff() != "1h" || s.Fail2ban.FindtimeEff() != "10m" || s.Fail2ban.MaxretryEff() != 5 {
+		t.Errorf("accessor defaults wrong: %q/%q/%d",
+			s.Fail2ban.BantimeEff(), s.Fail2ban.FindtimeEff(), s.Fail2ban.MaxretryEff())
 	}
 }
 

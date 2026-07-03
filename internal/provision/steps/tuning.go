@@ -3,6 +3,9 @@ package steps
 import (
 	"context"
 	"fmt"
+	"math"
+	"strconv"
+	"strings"
 
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
@@ -17,15 +20,104 @@ const (
 	mariadbTuningPath = "/etc/mysql/mariadb.conf.d/99-berth.cnf"
 )
 
-type tuning struct{}
+// mariadbBufferPoolMaxPercent caps innodb_buffer_pool_size at this share of
+// the host's MemTotal. A pool that exceeds physical RAM makes mariadbd fail
+// at startup (the failure is allocation, so no config parser can catch it)
+// and the poison drop-in would fail every subsequent run identically. The
+// threshold is a conservative sanity policy, not a startup guarantee: it
+// ignores cgroup limits and co-resident workload memory.
+const mariadbBufferPoolMaxPercent = 80
+
+const memTotalCmd = `awk '/^MemTotal:/{print $2}' /proc/meminfo`
+
+// parseMariaDBSize converts a MariaDB size value — bare bytes or a K/M/G
+// suffix (1024-based, case-insensitive; MariaDB itself accepts lowercase and
+// literal-Server callers bypass reMariaDBSize validation entirely) — to bytes.
+func parseMariaDBSize(v string) (uint64, error) {
+	num, mult := v, uint64(1)
+	if len(v) > 0 {
+		switch v[len(v)-1] {
+		case 'K', 'k':
+			num, mult = v[:len(v)-1], 1<<10
+		case 'M', 'm':
+			num, mult = v[:len(v)-1], 1<<20
+		case 'G', 'g':
+			num, mult = v[:len(v)-1], 1<<30
+		}
+	}
+	n, err := strconv.ParseUint(num, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("size %q is not a number with an optional K/M/G suffix", v)
+	}
+	if n > math.MaxUint64/mult {
+		return 0, fmt.Errorf("size %q overflows", v)
+	}
+	return n * mult, nil
+}
+
+// hostMemTotalBytes reads the host's MemTotal from /proc/meminfo. An empty or
+// unparsable value is an error, never zero — the guard below must fail loud
+// rather than wave an oversized pool through.
+func hostMemTotalBytes(ctx context.Context, r bssh.Runner) (uint64, error) {
+	res, err := r.Run(ctx, memTotalCmd, nil)
+	if err != nil {
+		return 0, err
+	}
+	out := strings.TrimSpace(res.Stdout)
+	if res.ExitCode != 0 {
+		return 0, fmt.Errorf("cannot determine host RAM: %s", res.Stderr)
+	}
+	if out == "" {
+		return 0, fmt.Errorf("cannot determine host RAM: empty MemTotal from /proc/meminfo")
+	}
+	kb, err := strconv.ParseUint(out, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("cannot determine host RAM: MemTotal %q: %w", out, err)
+	}
+	if kb > math.MaxUint64/1024 {
+		return 0, fmt.Errorf("cannot determine host RAM: MemTotal %q overflows", out)
+	}
+	return kb * 1024, nil
+}
+
+// checkMariaDBBufferPoolFits errors when the configured (or default)
+// innodb_buffer_pool_size exceeds mariadbBufferPoolMaxPercent of host RAM.
+// Overflow-safe: divide before multiplying; the sub-1% truncation is noise.
+func checkMariaDBBufferPoolFits(ctx context.Context, r bssh.Runner, s *config.Server) error {
+	val := s.Tuning.MariaDBBufferPoolEff()
+	pool, err := parseMariaDBSize(val)
+	if err != nil {
+		return fmt.Errorf("tuning.mariadb_innodb_buffer_pool: %w", err)
+	}
+	total, err := hostMemTotalBytes(ctx, r)
+	if err != nil {
+		return err
+	}
+	if pool > total/100*mariadbBufferPoolMaxPercent {
+		return fmt.Errorf("tuning.mariadb_innodb_buffer_pool %s exceeds %d%% of host RAM (MemTotal %d MiB); lower it",
+			val, mariadbBufferPoolMaxPercent, total/(1<<20))
+	}
+	return nil
+}
+
+type tuning struct{ valkey bool }
 
 // Tuning writes managed performance-tuning drop-ins for Valkey (systemd drop-in)
 // and MariaDB (mariadb.conf.d), each gated on whether that service is provisioned.
-// It runs after database so both services are installed.
-func Tuning() provision.Step { return tuning{} }
+// It runs after database so both services are installed. valkey mirrors
+// Server.Valkey: when set, Requires() also names the valkey step so the --only
+// gate refuses to tune a host whose Valkey was never provisioned (full runs are
+// ordered by registration and unaffected).
+func Tuning(valkey bool) provision.Step { return tuning{valkey: valkey} }
 
-func (tuning) Name() string       { return "tuning" }
-func (tuning) Requires() []string { return []string{"database"} }
+func (tuning) Name() string { return "tuning" }
+
+func (t tuning) Requires() []string {
+	if t.valkey {
+		return []string{"database", "valkey"}
+	}
+	return []string{"database"}
+}
 
 func renderValkeyDropIn(s *config.Server) ([]byte, error) {
 	return templates.Render("valkey_dropin.conf.tmpl", struct{ Maxmemory, Policy string }{
@@ -118,6 +210,9 @@ func (tuning) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 		}
 	}
 	if s.Database.Engine == "mariadb" {
+		if err := checkMariaDBBufferPoolFits(ctx, r, s); err != nil {
+			return provision.CheckResult{}, err
+		}
 		want, err := renderMariaDBTuning(s)
 		if err != nil {
 			return provision.CheckResult{}, err
@@ -178,6 +273,9 @@ func (tuning) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 			return err
 		}
 		if !ok {
+			if err := checkMariaDBBufferPoolFits(ctx, r, s); err != nil {
+				return err
+			}
 			if err := r.WriteFile(ctx, bssh.FileSpec{Path: mariadbTuningPath, Content: cfg, Owner: "root", Group: "root", Mode: 0o644, Sudo: true}); err != nil {
 				return fmt.Errorf("write %s: %w", mariadbTuningPath, err)
 			}

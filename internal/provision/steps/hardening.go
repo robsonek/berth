@@ -25,8 +25,8 @@ func renderFail2banJail(s *config.Server) ([]byte, error) {
 		Bantime, Findtime string
 		Maxretry, SSHPort int
 	}{
-		Bantime: s.Fail2ban.Bantime, Findtime: s.Fail2ban.Findtime,
-		Maxretry: s.Fail2ban.Maxretry, SSHPort: s.SSH.Port,
+		Bantime: s.Fail2ban.BantimeEff(), Findtime: s.Fail2ban.FindtimeEff(),
+		Maxretry: s.Fail2ban.MaxretryEff(), SSHPort: s.SSH.Port,
 	})
 }
 

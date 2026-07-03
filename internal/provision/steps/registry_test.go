@@ -109,6 +109,21 @@ func TestPipelineOmitsTuningForPostgresNoValkey(t *testing.T) {
 	}
 }
 
+// TestPipelineTuningRequiresValkeyWhenEnabled pins that Pipeline threads
+// Server.Valkey into the tuning constructor, not just that tuning is present.
+func TestPipelineTuningRequiresValkeyWhenEnabled(t *testing.T) {
+	s := &config.Server{Valkey: true, Database: config.Database{Engine: "postgres"}, Sites: []config.Site{{Domain: "a.example.com"}}}
+	for _, st := range steps.Pipeline(s, nil, true) {
+		if st.Name() == "tuning" {
+			if !contains(st.Requires(), "valkey") {
+				t.Errorf("tuning built by Pipeline(valkey=true) must require valkey; got %v", st.Requires())
+			}
+			return
+		}
+	}
+	t.Fatal("tuning step missing from pipeline")
+}
+
 func TestPipelineTuningAfterDatabase(t *testing.T) {
 	s := &config.Server{Database: config.Database{Engine: "mariadb"}, Sites: []config.Site{{Domain: "a.example.com"}}}
 	names := stepNames(steps.Pipeline(s, nil, true))

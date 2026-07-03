@@ -974,10 +974,10 @@ func TestConfigMatrix(t *testing.T) {
 		// The scenario's intent: an all-empty advanced gate round-trips and relies
 		// on runtime defaults. The genuinely-empty artifact is the YAML on disk: the
 		// fail2ban/tuning keys are omitted (omitempty over an all-zero block), and
-		// the SSH fingerprint is omitted (TOFU). config.Load() then injects the
-		// fail2ban defaults (SetDefault bantime=1h/findtime=10m/maxretry=5) — this is
-		// documented Load behavior, NOT a wizard surprise — so we assert the empty
-		// state on the on-disk YAML, and the validity/nil-scheduler on the loaded srv.
+		// the SSH fingerprint is omitted (TOFU). Loaded fail2ban fields stay zero —
+		// the defaults (1h/10m/5) come from the *Eff accessors at render time, same
+		// as tuning — so we assert the empty state on the on-disk YAML, and the
+		// validity/nil-scheduler on the loaded srv.
 		if strings.Contains(yml, "fail2ban:") {
 			t.Fatalf("YAML should omit fail2ban block:\n%s", yml)
 		}
