@@ -11,8 +11,8 @@ dependency gate then fails mid-Apply; fail2ban defaults live only in `Load()`.
 **1. MariaDB restart without validation.** `tuning.Apply`
 (internal/provision/steps/tuning.go) writes
 `/etc/mysql/mariadb.conf.d/99-berth.cnf` and runs `systemctl restart mariadb`
-with no validation — the only unvalidated reload path in the tree (nginx,
-PHP-FPM, sudoers and fail2ban all validate first). MariaDB has no
+with no validation — the only service-reload path in the tree that does not
+validate first (nginx, PHP-FPM, sudoers and fail2ban all do). MariaDB has no
 `--validate-config` equivalent, and `tuning.mariadb_innodb_buffer_pool` is
 already format-guarded by `reMariaDBSize` (`^[0-9]+[KMG]?$`), so the one
 realistic killer is a value exceeding host RAM: config parsing cannot catch it
@@ -31,11 +31,14 @@ package installed, so a passed gate implies MariaDB is present.
 
 **3. fail2ban defaults live only in `Load()`.**
 `SetDefault("fail2ban.{bantime,findtime,maxretry}")` runs only in
-`config.Load()`. A `Server` built by the wizard's `ToServer()` or as a struct
-literal (tests, integration) renders `bantime = ` / `findtime = ` /
-`maxretry = 0` into jail.local, and the deliberately lenient validator
-(zero/empty skips) hides it. Tuning, Backups and System already solved this
-with defaults in `*Eff()` accessors — fail2ban is the straggler.
+`config.Load()`. A `Server` built by the wizard's `ToServer()` used in-memory
+or as a struct literal (tests, integration) renders `bantime = ` /
+`findtime = ` / `maxretry = 0` into jail.local, and the deliberately lenient
+validator (zero/empty skips) hides it. The normal CLI flow is unaffected
+today (`init` writes YAML, `provision` re-Loads it), so this is a
+latent-footgun + two-sources-of-truth fix, not a live production bug. Tuning,
+Backups and System already solved it with defaults in `*Eff()` accessors —
+fail2ban is the straggler.
 
 ## Decision
 
@@ -59,18 +62,28 @@ with defaults in `*Eff()` accessors — fail2ban is the straggler.
 New helpers, all in tuning.go:
 
 - `parseMariaDBSize(v string) (uint64, error)` — pure function converting the
-  already-format-validated value to bytes (no suffix = bytes; `K`/`M`/`G` =
-  1024-based). Overflow-checked (`strconv.ParseUint` + multiplier bound) so an
-  absurd `99999999999G` errors instead of wrapping.
+  value to bytes (no suffix = bytes; `K`/`M`/`G` = 1024-based,
+  case-insensitive — MariaDB accepts lowercase suffixes and literal-Server
+  callers bypass the uppercase-only `reMariaDBSize`, so the parser must not
+  false-reject a value MariaDB would take). Overflow-checked
+  (`strconv.ParseUint` + multiplier bound) so an absurd `99999999999G` errors
+  instead of wrapping.
 - `hostMemTotalBytes(ctx, r)` — runs the stable command
-  `awk '/^MemTotal:/{print $2}' /proc/meminfo` (kB → bytes). Empty or
-  unparsable output is an error ("cannot determine host RAM"), not zero.
+  `awk '/^MemTotal:/{print $2}' /proc/meminfo` (kB → bytes, overflow-checked).
+  Empty or unparsable output is an error ("cannot determine host RAM"), not
+  zero.
 - `checkMariaDBBufferPoolFits(ctx, r, s)` — errors when
-  `pool > memTotal * mariadbBufferPoolMaxPercent / 100` with
-  `const mariadbBufferPoolMaxPercent = 80` (integer arithmetic; memTotal is
-  real RAM, so the multiplication cannot overflow uint64). The message names
-  the configured value, the 80% limit and the host's MemTotal, e.g.
+  `pool > memTotal/100*mariadbBufferPoolMaxPercent` with
+  `const mariadbBufferPoolMaxPercent = 80` (overflow-safe integer arithmetic:
+  divide before multiplying; the sub-1% truncation is noise at kB scale). The
+  message names the configured value, the 80% limit and the host's MemTotal,
+  e.g.
   `tuning.mariadb_innodb_buffer_pool 2G exceeds 80% of host RAM (MemTotal 1024 MiB)`.
+  The threshold is a conservative sanity policy, not a startup guarantee: it
+  ignores cgroup limits and co-resident workload memory, so a fitting value
+  can still fail on a loaded host and an oversized one might start on a
+  dedicated box. Its job is to catch the clearly-fatal misconfiguration
+  before anything reaches disk.
 
 Placement:
 
@@ -81,6 +94,12 @@ Placement:
 - **Apply** re-runs the guard immediately before the WriteFile+restart pair,
   matching the repo convention that validate-before-reload lives in Apply.
   Costs one extra round-trip only when the MariaDB block actually applies.
+
+Accepted behavior change: a host already running with an over-limit drop-in
+(deployed before this guard existed) will now fail Check on every run and
+block the rest of the pipeline until the operator lowers the value. That is
+the intended fail-loud posture — the alternative (warn and continue) would
+let the next unrelated restart take the database down silently.
 
 Valkey stays unguarded on purpose: `maxmemory` is an eviction limit, not an
 allocation — an oversized value does not prevent valkey from starting.
@@ -140,11 +159,15 @@ dependency name always resolves.
 ## Tests (TDD)
 
 - `steps/tuning_test.go`:
-  - `parseMariaDBSize` unit matrix: bare bytes, `K`, `M`, `G`, overflow →
-    error (pure function, no runner).
-  - Check errors when the pool exceeds 80% of the stubbed MemTotal (exact awk
-    command on FakeRunner); Apply errors likewise BEFORE any write/restart
-    (assert `Writes()` empty and no restart in `Calls()`).
+  - `parseMariaDBSize` unit matrix: bare bytes, `K`, `M`, `G`, lowercase
+    `k`/`m`/`g`, overflow, garbage → error (pure function, no runner).
+  - Guard boundaries against a stubbed MemTotal (exact awk command on
+    FakeRunner): exactly 80% passes, one byte over fails; empty and
+    non-numeric awk output → error.
+  - Check errors when the pool exceeds the limit; Apply errors likewise
+    BEFORE any write/restart (assert `Writes()` empty and no restart in
+    `Calls()`) — including the raised-above-limit case where an old, fitting
+    managed drop-in already exists on disk (no write, no restart).
   - Check/Apply proceed when the pool fits (existing MariaDB-block tests gain
     the MemTotal stub).
   - `TestTuningRequiresDatabase` extended: `Tuning(false)` →
@@ -152,15 +175,21 @@ dependency name always resolves.
   - Existing gating test keeps proving a postgres+no-valkey server touches
     neither block.
 - `steps/registry_test.go`: pipeline still includes tuning exactly when
-  `s.Valkey || engine == mariadb` (construction now passes `s.Valkey`).
+  `s.Valkey || engine == mariadb`, AND the tuning step built by
+  `Pipeline` for a valkey-enabled server reports `valkey` in `Requires()`
+  (construction now passes `s.Valkey`).
+- `internal/provision/engine_test.go` (or equivalent): `--only tuning` with
+  `Tuning(true)` and an unsatisfied fake `valkey` step in the pipeline →
+  pre-flight refusal naming `valkey`.
 - `internal/config/config_test.go`: `TestLoadFail2banDefaults` becomes: Load
   leaves omitted fail2ban fields zero AND the `*Eff()` accessors return
-  `1h`/`10m`/`5`; explicit values pass through untouched.
+  `1h`/`10m`/`5`; explicit values pass through untouched (accessor unit tests
+  in the same style as Tuning/Backups).
 - `internal/wizard/matrix_test.go`: the comment referencing
   `SetDefault` fail2ban defaults is updated (behavioral assertions hold).
 - `steps/hardening_test.go`: unchanged (its servers set explicit fail2ban
   values); one added case renders the jail from a zero-value `Fail2ban` and
   asserts the defaults appear (the exact bug scenario).
-- Verification: `gofmt -l .`, `go vet ./...`, `go test -race ./...`; Codex
-  foreground review of the diff; optional live `--only tuning` sanity on the
-  disposable test box.
+- Verification: `test -z "$(gofmt -l .)"`, `go vet ./...`,
+  `go test -race ./...`; Codex foreground review of the diff; optional live
+  `--only tuning` sanity on the disposable test box.
