@@ -218,12 +218,12 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 // passwordFromEnv reads DB_PASSWORD from a site's existing shared/.env. The
 // file is authoritative once present: a missing value is a hard error, because
 // silently generating a new password would desync the role from the file the
-// app reads. Only trailing whitespace is trimmed off the value — a leading
-// space is NOT laundered away, it fails the charset check just as Check's
-// probe rejects that line (laundering it would make Check unsatisfied forever
-// while Apply "succeeds"). A reused password is re-validated against the
-// allowed charset (defence-in-depth against a tampered env injecting SQL
-// metacharacters).
+// app reads. Only trailing ASCII whitespace (the same set Check's probe
+// accepts) is trimmed off the value — anything else, leading or Unicode, is
+// NOT laundered away: it fails the charset check just as Check's probe rejects
+// that line (laundering it would make Check unsatisfied forever while Apply
+// "succeeds"). A reused password is re-validated against the allowed charset
+// (defence-in-depth against a tampered env injecting SQL metacharacters).
 func (d database) passwordFromEnv(ctx context.Context, r bssh.Runner, site config.Site) (string, error) {
 	env := sharedEnvPath(site)
 	res, err := r.Run(ctx, "grep -m1 '^"+dbPasswordKey+"=' "+shQuote(env), nil)
@@ -231,10 +231,13 @@ func (d database) passwordFromEnv(ctx context.Context, r bssh.Runner, site confi
 		return "", err
 	}
 	if res.ExitCode == 0 {
-		// TrimSpace only strips the line's surrounding newline and trailing
-		// whitespace: grep '^' guarantees the matched line has no leading spaces,
-		// so it cannot eat into the value.
-		line := strings.TrimRight(strings.TrimSpace(res.Stdout), " \t\r")
+		// Trailing trim uses exactly the ASCII set the Check probe's
+		// grep [[:space:]] accepts in the C locale — Unicode whitespace
+		// stays in the value and fails the charset check, matching
+		// Check's rejection (no Check-rejects/Apply-succeeds path).
+		// grep '^DB_PASSWORD=' anchors the line start, so no leading trim
+		// is needed; res.Stdout is exactly the matched line + newline.
+		line := strings.TrimRight(res.Stdout, " \t\n\v\f\r")
 		if pw := strings.TrimPrefix(line, dbPasswordKey+"="); pw != "" && pw != line {
 			if !reDBPassword.MatchString(pw) {
 				return "", fmt.Errorf("reused %s from %s is outside the allowed charset; refusing to use it", dbPasswordKey, env)

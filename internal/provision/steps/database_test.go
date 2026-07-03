@@ -450,6 +450,51 @@ func TestDatabaseApplyRejectsLeadingSpacePassword(t *testing.T) {
 	}
 }
 
+func TestDatabaseApplyRejectsTrailingUnicodeSpacePassword(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env already present
+	// A trailing NBSP (U+00A0) is NOT [[:space:]] to the Check probe's C-locale
+	// grep, so Check rejects this line; trimming it away here would oscillate
+	// forever. It must stay in the value and fail the charset refusal.
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Good123\u00a0\n"})
+	err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "outside the allowed charset") {
+		t.Fatalf("err = %v, want the charset refusal for a trailing-NBSP value", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.HasPrefix(c.Cmd, "mysql") {
+			t.Fatal("no SQL may run when the reused password is rejected")
+		}
+	}
+}
+
+func TestDatabaseApplyAcceptsTrailingASCIIWhitespacePassword(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env already present
+	// A trailing vertical tab IS [[:space:]] to the Check probe (POSIX C-locale
+	// set), so Apply must trim it the same way and reuse the value.
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Good123\v\n"})
+	f.On("mysql --protocol=socket", bssh.Result{})
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var sawEnsureUser bool
+	for _, c := range f.Calls() {
+		if strings.HasPrefix(c.Cmd, "mysql") && strings.Contains(string(c.Stdin), "Good123") {
+			sawEnsureUser = true
+		}
+	}
+	if !sawEnsureUser {
+		t.Fatal("EnsureUser must reuse the trimmed password from the live .env")
+	}
+}
+
 func TestSeedSharedEnvMariaDBUsesSocket(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	d := database{redactor: secret.NewRedactor()}
