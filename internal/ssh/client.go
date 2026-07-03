@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pkg/sftp"
@@ -21,27 +22,111 @@ var execTeardownBudget = 5 * time.Second
 
 // Client is the production Runner over a single SSH connection.
 type Client struct {
-	conn    *xssh.Client
-	sftp    *sftp.Client
-	useSudo bool // true when connected as a non-root account
+	conn          *xssh.Client
+	sftp          *sftp.Client
+	useSudo       bool // true when connected as a non-root account
+	stopKeepalive chan struct{}
+	stopOnce      sync.Once
 }
 
-// Dial opens an SSH connection and SFTP subsystem.
+// Keepalive tuning. Package vars (not consts) so tests can shrink them — the
+// resolveA stub pattern. Three 30s-spaced probes with a 10s reply budget give
+// a worst-case dead-transport detection of ~2 minutes.
+var (
+	keepaliveInterval    = 30 * time.Second
+	keepaliveReplyBudget = 10 * time.Second
+	keepaliveMaxMissed   = 3
+)
+
+// keepalive probes the server with keepalive@openssh.com (the probe OpenSSH's
+// ServerAliveInterval uses; ANY reply — even a failure — proves the transport
+// is live) and closes the connection after keepaliveMaxMissed consecutive
+// silent probes. Closing errors out every in-flight session and SFTP call,
+// which is what unblocks a Run/WriteFile stuck on a half-open TCP connection.
+// SendRequest itself can block forever on such a connection, so each probe
+// gets its own reply budget; blocked probe goroutines (at most maxMissed) are
+// freed when the connection closes.
+func keepalive(conn *xssh.Client, stop <-chan struct{}) {
+	ticker := time.NewTicker(keepaliveInterval)
+	defer ticker.Stop()
+	missed := 0
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			replied := make(chan struct{}, 1)
+			go func() {
+				_, _, _ = conn.SendRequest("keepalive@openssh.com", true, nil)
+				replied <- struct{}{}
+			}()
+			select {
+			case <-replied:
+				missed = 0
+			case <-time.After(keepaliveReplyBudget):
+				missed++
+				if missed >= keepaliveMaxMissed {
+					conn.Close()
+					return
+				}
+			case <-stop:
+				return
+			}
+		}
+	}
+}
+
+// Dial opens an SSH connection and SFTP subsystem. The keepalive loop starts
+// before SFTP setup so a transport that dies mid-setup is detected and closed;
+// ctx cancellation during setup closes the connection and returns ctx.Err().
 func Dial(ctx context.Context, addr string, cfg *xssh.ClientConfig, useSudo bool) (*Client, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	conn, err := xssh.Dial("tcp", addr, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}
-	sc, err := sftp.NewClient(conn)
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("sftp: %w", err)
+	stop := make(chan struct{})
+	go keepalive(conn, stop)
+
+	type sftpResult struct {
+		sc  *sftp.Client
+		err error
 	}
-	return &Client{conn: conn, sftp: sc, useSudo: useSudo}, nil
+	res := make(chan sftpResult, 1) // buffered: the goroutine never leaks
+	go func() {
+		sc, err := sftp.NewClient(conn)
+		res <- sftpResult{sc, err}
+	}()
+	select {
+	case r := <-res:
+		if r.err != nil {
+			close(stop)
+			conn.Close()
+			return nil, fmt.Errorf("sftp: %w", r.err)
+		}
+		return &Client{conn: conn, sftp: r.sc, useSudo: useSudo, stopKeepalive: stop}, nil
+	case <-ctx.Done():
+		close(stop)
+		conn.Close() // unblocks the NewClient goroutine; its result is discarded
+		return nil, ctx.Err()
+	}
 }
 
-// Close shuts down the SFTP subsystem and the underlying connection.
-func (c *Client) Close() error { c.sftp.Close(); return c.conn.Close() }
+// Close stops the keepalive loop and shuts down the SFTP subsystem and the
+// underlying connection. The nil guards keep it safe on test-constructed
+// Clients that skipped Dial (which always sets every field); conn is never
+// nil on any constructed Client.
+func (c *Client) Close() error {
+	if c.stopKeepalive != nil {
+		c.stopOnce.Do(func() { close(c.stopKeepalive) })
+	}
+	if c.sftp != nil {
+		c.sftp.Close()
+	}
+	return c.conn.Close()
+}
 
 // Run executes cmd, feeding stdin, and returns stdout/stderr/exit code. When the
 // connection is to a non-root account (useSudo), the command is run as root via

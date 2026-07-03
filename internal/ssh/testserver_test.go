@@ -239,3 +239,34 @@ func TestExecCancelReturnsPromptlyAndSignalsTERM(t *testing.T) {
 		t.Error("server never observed a signal request — the remote command would keep running")
 	}
 }
+
+func TestKeepaliveClosesDeadConnection(t *testing.T) {
+	srv := startTestServer(t, completeExec("", 0), true) // deaf: probes never get a reply
+	conn, err := xssh.Dial("tcp", srv.addr, &xssh.ClientConfig{
+		User:            "test",
+		HostKeyCallback: xssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	// Shrink the tuning vars (the resolveA stub pattern) and restore after.
+	oldI, oldB, oldM := keepaliveInterval, keepaliveReplyBudget, keepaliveMaxMissed
+	keepaliveInterval, keepaliveReplyBudget, keepaliveMaxMissed = 20*time.Millisecond, 20*time.Millisecond, 2
+	t.Cleanup(func() { keepaliveInterval, keepaliveReplyBudget, keepaliveMaxMissed = oldI, oldB, oldM })
+
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) }) // harmless if keepalive already returned
+	go keepalive(conn, stop)
+
+	waitErr := make(chan error, 1)
+	go func() { waitErr <- conn.Wait() }()
+	select {
+	case <-waitErr:
+		// Connection closed by the keepalive loop — dead transport detected.
+	case <-time.After(3 * time.Second):
+		t.Fatal("keepalive never closed the dead connection")
+	}
+}
