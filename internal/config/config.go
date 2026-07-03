@@ -29,12 +29,44 @@ type Nginx struct {
 
 // Fail2ban holds the tunable knobs for berth's managed jail.local. bantime and
 // findtime are a number optionally suffixed s/m/h/d/w (e.g. "1h", "10m");
-// compound forms like "1h30m" are not supported. Zero/empty values mean
-// "use the default"; defaults are set in Load().
+// compound forms like "1h30m" are not supported. Zero/empty values mean "use
+// the default"; defaults live in the *Eff accessors (NOT in Load() via
+// SetDefault) so wizard ToServer() and literal Server callers that bypass
+// Load() still render valid, non-empty values into jail.local.
 type Fail2ban struct {
 	Bantime  string `mapstructure:"bantime" yaml:"bantime,omitempty"`
 	Findtime string `mapstructure:"findtime" yaml:"findtime,omitempty"`
 	Maxretry int    `mapstructure:"maxretry" yaml:"maxretry,omitempty"`
+}
+
+const (
+	defaultFail2banBantime  = "1h"
+	defaultFail2banFindtime = "10m"
+	defaultFail2banMaxretry = 5
+)
+
+// BantimeEff returns the configured bantime or the default ("1h").
+func (f Fail2ban) BantimeEff() string {
+	if f.Bantime == "" {
+		return defaultFail2banBantime
+	}
+	return f.Bantime
+}
+
+// FindtimeEff returns the configured findtime or the default ("10m").
+func (f Fail2ban) FindtimeEff() string {
+	if f.Findtime == "" {
+		return defaultFail2banFindtime
+	}
+	return f.Findtime
+}
+
+// MaxretryEff returns the configured maxretry or the default (5).
+func (f Fail2ban) MaxretryEff() int {
+	if f.Maxretry <= 0 {
+		return defaultFail2banMaxretry
+	}
+	return f.Maxretry
 }
 
 // Tuning holds optional, conservative performance-tuning overrides applied as
@@ -351,9 +383,6 @@ func Load(path string) (*Server, error) {
 	v.SetDefault("php.source", "auto")
 	v.SetDefault("nginx.source", "debian")
 	v.SetDefault("database.source", "debian")
-	v.SetDefault("fail2ban.bantime", "1h")
-	v.SetDefault("fail2ban.findtime", "10m")
-	v.SetDefault("fail2ban.maxretry", 5)
 	v.SetDefault("scheduler", true)
 
 	if err := v.ReadInConfig(); err != nil {
