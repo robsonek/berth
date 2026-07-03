@@ -7,10 +7,17 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/pkg/sftp"
 	xssh "golang.org/x/crypto/ssh"
 )
+
+// execTeardownBudget bounds the cancel-path session teardown. Signal and Close
+// themselves WRITE to the SSH transport, so on a half-open peer they block; if
+// the session has not unwound within this budget the connection is closed,
+// which force-unblocks everything. Package var so tests could shrink it.
+var execTeardownBudget = 5 * time.Second
 
 // Client is the production Runner over a single SSH connection.
 type Client struct {
@@ -57,25 +64,58 @@ func (c *Client) privileged(cmd string) string {
 // exec runs cmd verbatim over a new SSH session, with no sudo wrapping. WriteFile
 // uses it directly so the temp file is created as the connecting (SFTP) user,
 // while the privileged install carries its own sudo (see installCmd).
+//
+// Cancellation: sess.Run runs in a goroutine; ctx.Done() returns ctx.Err()
+// IMMEDIATELY with a ZERO Result (the session's copy goroutines may still be
+// writing the buffers — reading them would race). Teardown is asynchronous
+// because Signal/Close write to the transport and would block on a half-open
+// peer: best-effort SIGTERM (sshd delivers the signal request via killpg, so
+// sudo/sh/apt all get TERM and apt releases its dpkg lock), session close,
+// then — if the session hasn't unwound within execTeardownBudget — connection
+// close as the escalation. The Client stays usable only on the normal unwind
+// path; a wedged transport costs the whole connection, which is correct.
 func (c *Client) exec(ctx context.Context, cmd string, stdin []byte) (Result, error) {
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
 	sess, err := c.conn.NewSession()
 	if err != nil {
 		return Result{}, err
 	}
-	defer sess.Close()
 	var out, errb bytes.Buffer
 	sess.Stdout = &out
 	sess.Stderr = &errb
 	if stdin != nil {
 		sess.Stdin = bytes.NewReader(stdin)
 	}
-	runErr := sess.Run(cmd)
-	res := Result{Stdout: out.String(), Stderr: errb.String()}
-	if ee, ok := runErr.(*xssh.ExitError); ok {
-		res.ExitCode = ee.ExitStatus()
-		return res, nil // non-zero exit is a signal, not a transport error
+	done := make(chan error, 1) // buffered: the goroutine never leaks
+	go func() { done <- sess.Run(cmd) }()
+	select {
+	case runErr := <-done:
+		sess.Close()
+		res := Result{Stdout: out.String(), Stderr: errb.String()}
+		if ee, ok := runErr.(*xssh.ExitError); ok {
+			res.ExitCode = ee.ExitStatus()
+			return res, nil // non-zero exit is a signal, not a transport error
+		}
+		return res, runErr
+	case <-ctx.Done():
+		go func() {
+			// Signal/Close both WRITE to the transport — on a byte-dead peer
+			// (saturated send buffer) they block too, so they live in their
+			// own goroutine and the budget below covers them as well.
+			go func() {
+				_ = sess.Signal(xssh.SIGTERM)
+				sess.Close()
+			}()
+			select {
+			case <-done: // session unwound: connection stays usable
+			case <-time.After(execTeardownBudget):
+				c.conn.Close() // wedged transport: force-unblock everything, incl. the writes above
+			}
+		}()
+		return Result{}, ctx.Err()
 	}
-	return res, runErr
 }
 
 // WriteFile writes content with ownership/mode via an unpredictable temp file
