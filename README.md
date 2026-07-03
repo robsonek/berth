@@ -410,7 +410,10 @@ and the shared `deploy` user; with multiple sites each site needs its own
 
 Each TLS site uses Let's Encrypt by default; set `ssl_mode: selfsigned` on a site
 to generate a self-signed certificate instead (no public DNS or `ssl_email`
-needed — handy for staging or internal hosts).
+needed — handy for staging or internal hosts). Renewals are automatic: berth
+enables `certbot.timer` and installs a renewal deploy hook that validates and
+reloads nginx after every successful renewal, so the renewed certificate is
+actually served (not just written to disk).
 
 ## Beyond v1
 

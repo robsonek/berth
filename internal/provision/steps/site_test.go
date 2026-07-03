@@ -561,6 +561,7 @@ func TestSiteCheckSatisfiedAfterTLSSwap(t *testing.T) {
 		shQuote("/CN="+site.Domain), shQuote("subjectAltName=DNS:"+site.Domain))
 	fApply.On(openssl, bssh.Result{})
 	fApply.On("chmod 600 "+shQuote(certKeyPath(site)), bssh.Result{})
+	fApply.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 1}) // no lingering hook
 
 	if err := Site().Apply(ctx, provision.RunCtx{}, s, fApply); err != nil {
 		t.Fatalf("site.Apply: %v", err)

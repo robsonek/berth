@@ -55,6 +55,8 @@ func TestTLSCheckSatisfiedWhenValidCertPresent(t *testing.T) {
 		ExitCode: 0,
 		Stdout:   certbotCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour)),
 	})
+	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
+	hookStub(t, f)
 	cr, err := TLS().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -100,6 +102,7 @@ func TestTLSApplyShortCircuitsOnValidCert(t *testing.T) {
 		ExitCode: 0,
 		Stdout:   certbotCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour)),
 	})
+	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
 	// No certbot certonly, install, or reload stubbed: a present valid cert must
 	// short-circuit Apply entirely.
 	if err := TLS().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -123,6 +126,7 @@ func TestTLSApplyUsesWebrootAndIssuesCert(t *testing.T) {
 	f.On("nginx -t", bssh.Result{ExitCode: 0})
 	f.On("systemctl reload nginx", bssh.Result{})
 	f.On("systemctl enable --now certbot.timer", bssh.Result{})
+	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
 
 	if err := TLS().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -158,6 +162,7 @@ func TestTLSApplyHonorsStagingFlag(t *testing.T) {
 	f.On("nginx -t", bssh.Result{ExitCode: 0})
 	f.On("systemctl reload nginx", bssh.Result{})
 	f.On("systemctl enable --now certbot.timer", bssh.Result{})
+	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
 
 	if err := TLS().Apply(context.Background(), provision.RunCtx{SSLStaging: true}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -205,6 +210,7 @@ func TestTLSApplySkipsOnDNSMismatch(t *testing.T) {
 	})
 	f := bssh.NewFakeRunner()
 	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: "No certificates found.\n"})
+	f.On("dpkg -s certbot", bssh.Result{ExitCode: 1}) // never installed: issuance was DNS-skipped
 	// install/certonly are NOT stubbed: a DNS mismatch must skip issuance.
 	if err := TLS().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() should skip (not error) on DNS mismatch; got %v", err)
@@ -212,6 +218,11 @@ func TestTLSApplySkipsOnDNSMismatch(t *testing.T) {
 	for _, c := range f.Calls() {
 		if strings.Contains(c.Cmd, "certonly") {
 			t.Error("certbot must not run when DNS does not point at the host")
+		}
+	}
+	for _, w := range f.Writes() {
+		if w.Path == certbotDeployHookPath {
+			t.Error("hook must not be written on a DNS-skipped box where certbot was never installed")
 		}
 	}
 }
@@ -231,6 +242,7 @@ func TestTLSSelfSignedIssuesWithoutCertbotOrDNS(t *testing.T) {
 	f.On("chmod 600 "+shQuote(certKeyPath(site)), bssh.Result{})
 	f.On("nginx -t", bssh.Result{})
 	f.On("systemctl reload nginx", bssh.Result{})
+	f.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 1}) // no lingering hook
 
 	if err := TLS().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -259,11 +271,150 @@ func TestTLSSelfSignedCertValidUsesOpenssl(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("test -e "+shQuote(certFullchainPath(site)), bssh.Result{ExitCode: 0})
 	f.On(fmt.Sprintf("openssl x509 -checkend %d -noout -in %s", int(certRenewWindow.Seconds()), shQuote(certFullchainPath(site))), bssh.Result{ExitCode: 0})
+	f.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 1}) // no lingering hook
 	cr, err := TLS().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !cr.Satisfied {
 		t.Errorf("self-signed cert valid beyond the window should be satisfied; got %+v", cr)
+	}
+}
+
+// hookStub stubs the deploy-hook `cat` probe with the desired managed content.
+func hookStub(t *testing.T, f *bssh.FakeRunner) {
+	t.Helper()
+	hook, err := renderCertbotDeployHook()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 0, Stdout: string(hook)})
+}
+
+func TestTLSCheckUnsatisfiedWhenDeployHookMissing(t *testing.T) {
+	s := tlsServer()
+	f := bssh.NewFakeRunner()
+	f.On("certbot certificates", bssh.Result{
+		ExitCode: 0,
+		Stdout:   certbotCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour)),
+	})
+	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
+	f.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 1}) // absent
+	cr, err := TLS().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("valid certs but no renewal deploy hook must be unsatisfied (renewals would never reload nginx)")
+	}
+}
+
+func TestTLSCheckAbortsOnForeignDeployHook(t *testing.T) {
+	s := tlsServer()
+	stubs := func() *bssh.FakeRunner {
+		f := bssh.NewFakeRunner()
+		f.On("certbot certificates", bssh.Result{
+			ExitCode: 0,
+			Stdout:   certbotCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour)),
+		})
+		f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
+		f.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 0, Stdout: "service apache2 reload\n"}) // no marker
+		return f
+	}
+	if _, err := TLS().Check(context.Background(), provision.RunCtx{}, s, stubs()); err == nil || !strings.Contains(err.Error(), "not managed by berth") {
+		t.Fatalf("foreign hook must abort without --force; got %v", err)
+	}
+	cr, err := TLS().Check(context.Background(), provision.RunCtx{Force: true}, s, stubs())
+	if err != nil {
+		t.Fatalf("with --force the foreign hook is reported unsatisfied, not an error; got %v", err)
+	}
+	if cr.Satisfied {
+		t.Error("foreign hook under --force must be unsatisfied (Apply overwrites it)")
+	}
+}
+
+func TestTLSApplyWritesDeployHook(t *testing.T) {
+	s := tlsServer()
+	f := bssh.NewFakeRunner()
+	// Valid cert: the per-site loop short-circuits; the hook must be written anyway.
+	f.On("certbot certificates", bssh.Result{
+		ExitCode: 0,
+		Stdout:   certbotCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour)),
+	})
+	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
+	if err := TLS().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var hook *bssh.FileSpec
+	writes := f.Writes()
+	for i := range writes {
+		if writes[i].Path == certbotDeployHookPath {
+			hook = &writes[i]
+		}
+	}
+	if hook == nil {
+		t.Fatal("Apply must write the renewal deploy hook even when all certs are already valid")
+	}
+	if hook.Mode != 0o755 || hook.Owner != "root" || hook.Group != "root" || !hook.Sudo {
+		t.Errorf("hook must be root:root 0755 sudo; got %+v", hook)
+	}
+	body := string(hook.Content)
+	if !strings.HasPrefix(body, managedMarker+"\n") {
+		t.Errorf("hook must start with the managed marker:\n%s", body)
+	}
+	if !strings.Contains(body, "nginx -t\nsystemctl reload nginx\n") {
+		t.Errorf("hook must validate then reload nginx:\n%s", body)
+	}
+	if strings.Contains(body, "pipefail") || strings.Contains(body, "#!") {
+		t.Errorf("hook must be strict POSIX sh with no shebang (marker is byte 0):\n%s", body)
+	}
+}
+
+func TestTLSRemovesLingeringHookWhenNoLetsEncryptSites(t *testing.T) {
+	s := tlsServer()
+	s.Sites[0].SSLMode = "selfsigned"
+	site := s.Sites[0]
+	certStubs := func(f *bssh.FakeRunner) {
+		f.On("test -e "+shQuote(certFullchainPath(site)), bssh.Result{ExitCode: 0})
+		f.On(fmt.Sprintf("openssl x509 -checkend %d -noout -in %s", int(certRenewWindow.Seconds()), shQuote(certFullchainPath(site))), bssh.Result{ExitCode: 0})
+	}
+	lingering := bssh.Result{ExitCode: 0, Stdout: managedMarker + "\nset -eu\nnginx -t\nsystemctl reload nginx\n"}
+
+	// Check: a lingering berth-managed hook with no LE site is drift.
+	f := bssh.NewFakeRunner()
+	certStubs(f)
+	f.On("cat "+shQuote(certbotDeployHookPath), lingering)
+	cr, err := TLS().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("lingering managed hook with no LE site must be unsatisfied (removal intent)")
+	}
+
+	// Apply removes it (guarded by the marker).
+	f2 := bssh.NewFakeRunner()
+	certStubs(f2)
+	f2.On("cat "+shQuote(certbotDeployHookPath), lingering)
+	f2.On("rm -f "+shQuote(certbotDeployHookPath), bssh.Result{})
+	if err := TLS().Apply(context.Background(), provision.RunCtx{}, s, f2); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var removed bool
+	for _, c := range f2.Calls() {
+		if c.Cmd == "rm -f "+shQuote(certbotDeployHookPath) {
+			removed = true
+		}
+	}
+	if !removed {
+		t.Error("Apply must rm the lingering berth-managed hook")
+	}
+
+	// A FOREIGN hook (no marker) is never touched — rm is deliberately unstubbed.
+	f3 := bssh.NewFakeRunner()
+	certStubs(f3)
+	f3.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 0, Stdout: "service apache2 reload\n"})
+	if err := TLS().Apply(context.Background(), provision.RunCtx{}, s, f3); err != nil {
+		t.Fatalf("Apply() must leave a foreign hook alone; got %v", err)
 	}
 }
