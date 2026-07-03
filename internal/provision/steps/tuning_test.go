@@ -183,6 +183,7 @@ func TestTuningCheckMariaDBSatisfiedWhenLoaded(t *testing.T) {
 	srv := mariadbOnlyServer()
 	want, _ := renderMariaDBTuning(srv)
 	f := bssh.NewFakeRunner()
+	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"})
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
 	stubServiceActive(f, mariadbUnit)
 	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
@@ -200,6 +201,7 @@ func TestTuningApplyMariaDBWritesDropInRestarts(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	// Pre-check: cnf absent ⇒ block unsatisfied ⇒ Apply acts on it.
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 1})
+	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"})
 	f.On("systemctl restart mariadb.service", bssh.Result{})
 	if err := Tuning(false).Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -298,6 +300,7 @@ func TestTuningCheckMariaDBUnsatisfiedWhenNotLoaded(t *testing.T) {
 	srv := mariadbOnlyServer()
 	want, _ := renderMariaDBTuning(srv)
 	f := bssh.NewFakeRunner()
+	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"})
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
 	stubServiceActive(f, mariadbUnit)
 	f.On(mariadbLiveness, bssh.Result{ExitCode: 1}) // file newer than last restart
@@ -312,6 +315,7 @@ func TestTuningCheckMariaDBUnsatisfiedWhenNotLoaded(t *testing.T) {
 
 func TestTuningCheckMariaDBUnsatisfiedWhenAbsent(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"})
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 1})
 	cr, err := Tuning(false).Check(context.Background(), provision.RunCtx{}, mariadbOnlyServer(), f)
 	if err != nil {
@@ -340,6 +344,7 @@ func TestTuningCheckCombinedSatisfiedWhenBothLoaded(t *testing.T) {
 	f.On("cat '/etc/systemd/system/valkey-server.service.d/berth.conf'", bssh.Result{ExitCode: 0, Stdout: string(vWant)})
 	stubServiceActive(f, valkeyUnit)
 	f.On(valkeyLiveness, bssh.Result{ExitCode: 0})
+	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"})
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(mWant)})
 	stubServiceActive(f, mariadbUnit)
 	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
@@ -358,6 +363,7 @@ func TestTuningApplyCombinedWritesBothRestartsBoth(t *testing.T) {
 	// Pre-check: both files absent ⇒ both blocks unsatisfied ⇒ Apply acts on both.
 	f.On("cat '/etc/systemd/system/valkey-server.service.d/berth.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 1})
+	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"})
 	f.On("mkdir -p /etc/systemd/system/valkey-server.service.d", bssh.Result{})
 	f.On("systemctl daemon-reload", bssh.Result{})
 	f.On("systemctl restart valkey-server.service", bssh.Result{})
@@ -473,6 +479,7 @@ func TestTuningApplyCombinedOnlyMariaDBDriftedRestartsOnlyMariaDB(t *testing.T) 
 	f.On(valkeyLiveness, bssh.Result{ExitCode: 0})
 	// MariaDB block unsatisfied (cnf absent).
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 1})
+	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"})
 	f.On("systemctl restart mariadb.service", bssh.Result{})
 
 	if err := Tuning(true).Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
@@ -539,4 +546,117 @@ func TestOnlyTuningPassesWhenValkeySatisfied(t *testing.T) {
 	}
 	for range events {
 	} // drain until the pipeline goroutine closes the channel
+}
+
+func TestParseMariaDBSize(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want uint64
+		ok   bool
+	}{
+		{"268435456", 268435456, true}, // bare bytes
+		{"64K", 64 << 10, true},
+		{"256M", 256 << 20, true},
+		{"2G", 2 << 30, true},
+		// MariaDB accepts lowercase suffixes; literal-Server callers bypass
+		// reMariaDBSize validation entirely, so the parser must not false-reject.
+		{"1k", 1 << 10, true},
+		{"256m", 256 << 20, true},
+		{"1g", 1 << 30, true},
+		{"99999999999G", 0, false}, // overflows uint64
+		{"", 0, false},
+		{"G", 0, false},   // suffix without digits
+		{"12Q", 0, false}, // unknown suffix
+		{"12.5M", 0, false},
+	} {
+		got, err := parseMariaDBSize(tc.in)
+		if tc.ok && (err != nil || got != tc.want) {
+			t.Errorf("parseMariaDBSize(%q) = %d, %v; want %d, nil", tc.in, got, err, tc.want)
+		}
+		if !tc.ok && err == nil {
+			t.Errorf("parseMariaDBSize(%q) = %d, nil; want error", tc.in, got)
+		}
+	}
+}
+
+func TestTuningMariaDBBufferPoolGuardBoundaries(t *testing.T) {
+	// MemTotal 1000000 kB = 1024000000 bytes; limit = 1024000000/100*80 =
+	// 819200000. Exactly the limit passes; one byte over errors.
+	for _, tc := range []struct {
+		pool string
+		ok   bool
+	}{
+		{"819200000", true},
+		{"819200001", false},
+	} {
+		srv := mariadbOnlyServer()
+		srv.Tuning.MariaDBBufferPool = tc.pool
+		f := bssh.NewFakeRunner()
+		f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1000000\n"})
+		if tc.ok {
+			// Fitting value: Check proceeds to the normal file probe.
+			f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 1})
+		}
+		cr, err := Tuning(false).Check(context.Background(), provision.RunCtx{}, srv, f)
+		if tc.ok {
+			if err != nil {
+				t.Fatalf("pool %s: unexpected error: %v", tc.pool, err)
+			}
+			if cr.Satisfied {
+				t.Errorf("pool %s: expected unsatisfied (file absent)", tc.pool)
+			}
+		} else if err == nil {
+			t.Errorf("pool %s: expected guard error", tc.pool)
+		}
+	}
+}
+
+func TestTuningMariaDBGuardBadMemTotal(t *testing.T) {
+	for _, out := range []string{"", "banana"} {
+		srv := mariadbOnlyServer()
+		f := bssh.NewFakeRunner()
+		f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: out})
+		if _, err := Tuning(false).Check(context.Background(), provision.RunCtx{}, srv, f); err == nil {
+			t.Errorf("MemTotal output %q: expected error, got nil", out)
+		}
+	}
+}
+
+func TestTuningCheckMariaDBOverLimitErrorsEvenWhenDeployed(t *testing.T) {
+	// Accepted behavior change pinned: a host already running with an
+	// over-limit drop-in fails Check on every run until the value is lowered.
+	// The guard fires before the file is even consulted.
+	srv := mariadbOnlyServer()
+	srv.Tuning.MariaDBBufferPool = "2G"
+	f := bssh.NewFakeRunner()
+	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"}) // 1 GiB
+	if _, err := Tuning(false).Check(context.Background(), provision.RunCtx{}, srv, f); err == nil {
+		t.Fatal("expected guard error for 2G pool on a 1 GiB host")
+	}
+	if calledCmd(f, "cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'") {
+		t.Error("guard must fire before the managed-file probe")
+	}
+}
+
+func TestTuningApplyMariaDBOverLimitNoWriteNoRestart(t *testing.T) {
+	// Config raised above the limit while an old, fitting managed drop-in is
+	// on disk: Apply must error BEFORE any write or restart.
+	srv := mariadbOnlyServer()
+	srv.Tuning.MariaDBBufferPool = "2G"
+	old, err := renderMariaDBTuning(mariadbOnlyServer()) // default 256M content
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(old)})
+	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"}) // 1 GiB
+	if err := Tuning(false).Apply(context.Background(), provision.RunCtx{}, srv, f); err == nil {
+		t.Fatal("expected guard error from Apply")
+	}
+	if len(f.Writes()) != 0 {
+		t.Errorf("Apply must not write anything past a failing guard: %+v", f.Writes())
+	}
+	if calledCmd(f, "systemctl restart mariadb.service") {
+		t.Error("Apply must not restart mariadb past a failing guard")
+	}
 }
