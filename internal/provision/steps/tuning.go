@@ -17,15 +17,24 @@ const (
 	mariadbTuningPath = "/etc/mysql/mariadb.conf.d/99-berth.cnf"
 )
 
-type tuning struct{}
+type tuning struct{ valkey bool }
 
 // Tuning writes managed performance-tuning drop-ins for Valkey (systemd drop-in)
 // and MariaDB (mariadb.conf.d), each gated on whether that service is provisioned.
-// It runs after database so both services are installed.
-func Tuning() provision.Step { return tuning{} }
+// It runs after database so both services are installed. valkey mirrors
+// Server.Valkey: when set, Requires() also names the valkey step so the --only
+// gate refuses to tune a host whose Valkey was never provisioned (full runs are
+// ordered by registration and unaffected).
+func Tuning(valkey bool) provision.Step { return tuning{valkey: valkey} }
 
-func (tuning) Name() string       { return "tuning" }
-func (tuning) Requires() []string { return []string{"database"} }
+func (tuning) Name() string { return "tuning" }
+
+func (t tuning) Requires() []string {
+	if t.valkey {
+		return []string{"database", "valkey"}
+	}
+	return []string{"database"}
+}
 
 func renderValkeyDropIn(s *config.Server) ([]byte, error) {
 	return templates.Render("valkey_dropin.conf.tmpl", struct{ Maxmemory, Policy string }{

@@ -18,9 +18,12 @@ func valkeyOnlyServer() *config.Server {
 	return &config.Server{Valkey: true, Database: config.Database{Engine: "postgres"}}
 }
 
-func TestTuningRequiresDatabase(t *testing.T) {
-	if got := Tuning().Requires(); len(got) != 1 || got[0] != "database" {
-		t.Fatalf("Requires() = %v, want [database]", got)
+func TestTuningRequires(t *testing.T) {
+	if got := Tuning(false).Requires(); len(got) != 1 || got[0] != "database" {
+		t.Fatalf("Tuning(false).Requires() = %v, want [database]", got)
+	}
+	if got := Tuning(true).Requires(); len(got) != 2 || got[0] != "database" || got[1] != "valkey" {
+		t.Fatalf("Tuning(true).Requires() = %v, want [database valkey]", got)
 	}
 }
 
@@ -34,7 +37,7 @@ func TestTuningCheckValkeySatisfiedWhenLoaded(t *testing.T) {
 	f.On("cat '/etc/systemd/system/valkey-server.service.d/berth.conf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
 	stubServiceActive(f, valkeyUnit)
 	f.On(valkeyLiveness, bssh.Result{ExitCode: 0})
-	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
+	cr, err := Tuning(true).Check(context.Background(), provision.RunCtx{}, srv, f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +57,7 @@ func stubServiceActive(f *bssh.FakeRunner, unit string) {
 func TestTuningCheckValkeyUnsatisfiedWhenDropInAbsent(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("cat '/etc/systemd/system/valkey-server.service.d/berth.conf'", bssh.Result{ExitCode: 1})
-	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, valkeyOnlyServer(), f)
+	cr, err := Tuning(true).Check(context.Background(), provision.RunCtx{}, valkeyOnlyServer(), f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +73,7 @@ func TestTuningCheckValkeyUnsatisfiedWhenNotLoaded(t *testing.T) {
 	f.On("cat '/etc/systemd/system/valkey-server.service.d/berth.conf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
 	stubServiceActive(f, valkeyUnit)
 	f.On(valkeyLiveness, bssh.Result{ExitCode: 1}) // file newer than last restart
-	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
+	cr, err := Tuning(true).Check(context.Background(), provision.RunCtx{}, srv, f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +89,7 @@ func TestTuningCheckValkeyUnsatisfiedWhenServiceDown(t *testing.T) {
 	// File is up-to-date, but the unit is stopped: serviceActive fails before liveness.
 	f.On("cat '/etc/systemd/system/valkey-server.service.d/berth.conf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
 	f.On("systemctl is-active "+valkeyUnit, bssh.Result{ExitCode: 1})
-	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
+	cr, err := Tuning(true).Check(context.Background(), provision.RunCtx{}, srv, f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +110,7 @@ func TestTuningCheckValkeyActiveButDisabledStillSatisfied(t *testing.T) {
 	f.On("systemctl is-active "+valkeyUnit, bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled "+valkeyUnit, bssh.Result{ExitCode: 1}) // disabled
 	f.On(valkeyLiveness, bssh.Result{ExitCode: 0})
-	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
+	cr, err := Tuning(true).Check(context.Background(), provision.RunCtx{}, srv, f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +131,7 @@ func TestTuningApplyValkeyWritesDropInReloadsRestarts(t *testing.T) {
 	f.On("mkdir -p /etc/systemd/system/valkey-server.service.d", bssh.Result{})
 	f.On("systemctl daemon-reload", bssh.Result{})
 	f.On("systemctl restart valkey-server.service", bssh.Result{})
-	if err := Tuning().Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
+	if err := Tuning(true).Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 	// drop-in written with the rendered content, root:root 0644.
@@ -183,7 +186,7 @@ func TestTuningCheckMariaDBSatisfiedWhenLoaded(t *testing.T) {
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
 	stubServiceActive(f, mariadbUnit)
 	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
-	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
+	cr, err := Tuning(false).Check(context.Background(), provision.RunCtx{}, srv, f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +201,7 @@ func TestTuningApplyMariaDBWritesDropInRestarts(t *testing.T) {
 	// Pre-check: cnf absent ⇒ block unsatisfied ⇒ Apply acts on it.
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 1})
 	f.On("systemctl restart mariadb.service", bssh.Result{})
-	if err := Tuning().Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
+	if err := Tuning(false).Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 	var found bool
@@ -227,14 +230,14 @@ func TestTuningGatingSkipsAbsentServices(t *testing.T) {
 	// Postgres + no Valkey: Apply must touch nothing (no writes, no calls).
 	srv := &config.Server{Valkey: false, Database: config.Database{Engine: "postgres"}}
 	f := bssh.NewFakeRunner()
-	if err := Tuning().Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
+	if err := Tuning(false).Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 	if len(f.Writes()) != 0 || len(f.Calls()) != 0 {
 		t.Errorf("expected no-op; got writes=%v calls=%v", f.Writes(), f.Calls())
 	}
 	// And Check is trivially satisfied.
-	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
+	cr, err := Tuning(false).Check(context.Background(), provision.RunCtx{}, srv, f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +254,7 @@ func TestTuningCheckValkeyUnmanagedAbortsWithoutForce(t *testing.T) {
 	f.On("cat '/etc/systemd/system/valkey-server.service.d/berth.conf'", bssh.Result{ExitCode: 0, Stdout: unmanaged})
 
 	// Without --force: unmanaged file must abort (unsatisfied + non-nil error).
-	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
+	cr, err := Tuning(true).Check(context.Background(), provision.RunCtx{}, srv, f)
 	if err == nil {
 		t.Error("expected error aborting on unmanaged drop-in without --force")
 	}
@@ -260,7 +263,7 @@ func TestTuningCheckValkeyUnmanagedAbortsWithoutForce(t *testing.T) {
 	}
 
 	// With --force: unsatisfied (will be overwritten), but no error.
-	cr, err = Tuning().Check(context.Background(), provision.RunCtx{Force: true}, srv, f)
+	cr, err = Tuning(true).Check(context.Background(), provision.RunCtx{Force: true}, srv, f)
 	if err != nil {
 		t.Errorf("unexpected error with --force: %v", err)
 	}
@@ -282,7 +285,7 @@ func TestTuningCheckValkeyDriftedUnsatisfied(t *testing.T) {
 	}
 	f := bssh.NewFakeRunner()
 	f.On("cat '/etc/systemd/system/valkey-server.service.d/berth.conf'", bssh.Result{ExitCode: 0, Stdout: drifted})
-	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
+	cr, err := Tuning(true).Check(context.Background(), provision.RunCtx{}, srv, f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +301,7 @@ func TestTuningCheckMariaDBUnsatisfiedWhenNotLoaded(t *testing.T) {
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
 	stubServiceActive(f, mariadbUnit)
 	f.On(mariadbLiveness, bssh.Result{ExitCode: 1}) // file newer than last restart
-	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
+	cr, err := Tuning(false).Check(context.Background(), provision.RunCtx{}, srv, f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +313,7 @@ func TestTuningCheckMariaDBUnsatisfiedWhenNotLoaded(t *testing.T) {
 func TestTuningCheckMariaDBUnsatisfiedWhenAbsent(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 1})
-	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, mariadbOnlyServer(), f)
+	cr, err := Tuning(false).Check(context.Background(), provision.RunCtx{}, mariadbOnlyServer(), f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +343,7 @@ func TestTuningCheckCombinedSatisfiedWhenBothLoaded(t *testing.T) {
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(mWant)})
 	stubServiceActive(f, mariadbUnit)
 	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
-	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
+	cr, err := Tuning(true).Check(context.Background(), provision.RunCtx{}, srv, f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +362,7 @@ func TestTuningApplyCombinedWritesBothRestartsBoth(t *testing.T) {
 	f.On("systemctl daemon-reload", bssh.Result{})
 	f.On("systemctl restart valkey-server.service", bssh.Result{})
 	f.On("systemctl restart mariadb.service", bssh.Result{})
-	if err := Tuning().Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
+	if err := Tuning(true).Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 
@@ -412,7 +415,7 @@ func TestTuningApplyValkeyRestartErrorPropagates(t *testing.T) {
 	f.On("mkdir -p /etc/systemd/system/valkey-server.service.d", bssh.Result{})
 	f.On("systemctl daemon-reload", bssh.Result{})
 	f.On("systemctl restart valkey-server.service", bssh.Result{ExitCode: 1, Stderr: "boom"})
-	if err := Tuning().Apply(context.Background(), provision.RunCtx{}, srv, f); err == nil {
+	if err := Tuning(true).Apply(context.Background(), provision.RunCtx{}, srv, f); err == nil {
 		t.Fatal("expected error when systemctl restart fails")
 	}
 }
@@ -442,7 +445,7 @@ func TestTuningApplyCombinedOnlyValkeyDriftedRestartsOnlyValkey(t *testing.T) {
 	stubServiceActive(f, mariadbUnit)
 	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
 
-	if err := Tuning().Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
+	if err := Tuning(true).Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 
@@ -472,7 +475,7 @@ func TestTuningApplyCombinedOnlyMariaDBDriftedRestartsOnlyMariaDB(t *testing.T) 
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 1})
 	f.On("systemctl restart mariadb.service", bssh.Result{})
 
-	if err := Tuning().Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
+	if err := Tuning(true).Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 
@@ -488,4 +491,52 @@ func TestTuningApplyCombinedOnlyMariaDBDriftedRestartsOnlyMariaDB(t *testing.T) 
 	if calledCmd(f, "systemctl restart "+valkeyUnit) {
 		t.Error("did not expect valkey restarted (block satisfied)")
 	}
+}
+
+// gateStub is a minimal provision.Step for exercising the --only dependency
+// gate against the REAL tuning step: only Name and a fixed Check verdict matter.
+type gateStub struct {
+	name      string
+	satisfied bool
+}
+
+func (s gateStub) Name() string       { return s.name }
+func (s gateStub) Requires() []string { return nil }
+func (s gateStub) Check(context.Context, provision.RunCtx, *config.Server, bssh.Runner) (provision.CheckResult, error) {
+	return provision.CheckResult{Satisfied: s.satisfied, Reason: "stub"}, nil
+}
+func (s gateStub) Apply(context.Context, provision.RunCtx, *config.Server, bssh.Runner) error {
+	return nil
+}
+
+func TestOnlyTuningRefusesWhenValkeyUnsatisfied(t *testing.T) {
+	// valkey: true in config, but the valkey step is unsatisfied (never
+	// provisioned): --only tuning must refuse pre-flight, not fail mid-Apply.
+	eng := provision.New(
+		gateStub{name: "database", satisfied: true},
+		gateStub{name: "valkey", satisfied: false},
+		Tuning(true),
+	)
+	_, err := eng.Run(context.Background(), valkeyOnlyServer(), bssh.NewFakeRunner(), provision.Options{Only: "tuning"})
+	if err == nil || !strings.Contains(err.Error(), "valkey") {
+		t.Fatalf("expected pre-flight refusal naming valkey; got %v", err)
+	}
+}
+
+func TestOnlyTuningPassesWhenValkeySatisfied(t *testing.T) {
+	eng := provision.New(
+		gateStub{name: "database", satisfied: true},
+		gateStub{name: "valkey", satisfied: true},
+		Tuning(true),
+	)
+	f := bssh.NewFakeRunner()
+	// Dry-run stops at Planned, so only tuning's own Check runs: valkey block,
+	// drop-in absent -> unsatisfied -> Planned.
+	f.On("cat '/etc/systemd/system/valkey-server.service.d/berth.conf'", bssh.Result{ExitCode: 1})
+	events, err := eng.Run(context.Background(), valkeyOnlyServer(), f, provision.Options{Only: "tuning", DryRun: true})
+	if err != nil {
+		t.Fatalf("gate must pass when valkey is satisfied: %v", err)
+	}
+	for range events {
+	} // drain until the pipeline goroutine closes the channel
 }
