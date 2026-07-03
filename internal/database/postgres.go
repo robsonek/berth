@@ -74,15 +74,20 @@ func (Postgres) UserGranted(ctx context.Context, r bssh.Runner, user, database s
 	return probePSQL(ctx, r, "SELECT 1 FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE d.datname='"+database+"' AND r.rolname='"+user+"'")
 }
 
-// EnsureUser creates the login role if absent, re-syncs its password, and makes
-// it the owner of the database (so it has full rights, including on the public
-// schema in PostgreSQL 15+). Idempotent.
+// EnsureUser creates the login role if absent, re-syncs its password, revokes
+// PUBLIC's default CONNECT/TEMPORARY on the database (other tenants' roles must
+// not even connect — catalog enumeration, connection-slot exhaustion), and makes
+// the role the owner of the database (so it has full rights, including on the
+// public schema in PostgreSQL 15+). Idempotent. UserGranted probes the ownership
+// set by the LAST statement, so ALTER DATABASE ... OWNER TO must stay last for a
+// positive probe to prove the whole batch ran.
 func (Postgres) EnsureUser(ctx context.Context, r bssh.Runner, user, password, database string) error {
 	// user/database are validated identifiers; password is the alphanumeric value
 	// from secret.Generate, bound in SQL via stdin.
 	sql := fmt.Sprintf(
 		"DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '%[1]s') THEN CREATE ROLE \"%[1]s\" LOGIN PASSWORD '%[3]s'; END IF; END $$;\n"+
 			"ALTER ROLE \"%[1]s\" WITH LOGIN PASSWORD '%[3]s';\n"+
+			"REVOKE CONNECT, TEMPORARY ON DATABASE \"%[2]s\" FROM PUBLIC;\n"+
 			"GRANT ALL PRIVILEGES ON DATABASE \"%[2]s\" TO \"%[1]s\";\n"+
 			"ALTER DATABASE \"%[2]s\" OWNER TO \"%[1]s\";\n",
 		user, database, password)

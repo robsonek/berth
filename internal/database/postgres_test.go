@@ -32,6 +32,27 @@ func TestPostgresEnsureUserUsesStdinNotArgv(t *testing.T) {
 	}
 }
 
+func TestPostgresEnsureUserRevokesPublicConnect(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On(psqlCmd, bssh.Result{})
+	// Distinct user vs database names to catch %[1]s/%[2]s mix-ups.
+	if err := (Postgres{}).EnsureUser(context.Background(), f, "appuser", "s3cr3t", "appdb"); err != nil {
+		t.Fatalf("EnsureUser() error = %v", err)
+	}
+	stdin := string(f.Calls()[0].Stdin)
+	// CONNECT and TEMPORARY are PUBLIC's two default database-level privileges;
+	// revoking both keeps other tenants' roles out of this tenant's database.
+	if !strings.Contains(stdin, `REVOKE CONNECT, TEMPORARY ON DATABASE "appdb" FROM PUBLIC;`) {
+		t.Errorf("EnsureUser must revoke PUBLIC's CONNECT/TEMPORARY on the tenant database; got:\n%s", stdin)
+	}
+	// UserGranted proves the whole batch ran by probing ownership, which is only
+	// sound while ALTER DATABASE ... OWNER TO stays the LAST statement.
+	lines := strings.Split(strings.TrimRight(stdin, "\n"), "\n")
+	if last := lines[len(lines)-1]; last != `ALTER DATABASE "appdb" OWNER TO "appuser";` {
+		t.Errorf("ALTER DATABASE ... OWNER TO must remain the last statement (UserGranted probe invariant); got %q", last)
+	}
+}
+
 func TestPostgresEnsureDatabaseIdempotent(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On(psqlCmd, bssh.Result{})
