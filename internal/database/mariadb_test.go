@@ -49,3 +49,58 @@ func TestMariaDBMetadata(t *testing.T) {
 		t.Errorf("EnvConnection = %q/%q/%q/%q, want mysql/localhost/3306//run/mysqld/mysqld.sock", driver, host, port, socket)
 	}
 }
+
+var errTransport = errString("ssh: broken")
+
+type errString string
+
+func (e errString) Error() string { return string(e) }
+
+func TestMariaDBProbes(t *testing.T) {
+	m := MariaDB{}
+	dbCmd := `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='myapp'"`
+	grantCmd := `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='myapp' AND GRANTEE='''myapp''@''localhost''' LIMIT 1"`
+	probes := []struct {
+		name string
+		cmd  string
+		call func(r bssh.Runner) (bool, error)
+	}{
+		{"DatabaseExists", dbCmd, func(r bssh.Runner) (bool, error) {
+			return m.DatabaseExists(context.Background(), r, "myapp")
+		}},
+		{"UserGranted", grantCmd, func(r bssh.Runner) (bool, error) {
+			return m.UserGranted(context.Background(), r, "myapp", "myapp")
+		}},
+	}
+	states := []struct {
+		name   string
+		result bssh.Result
+		want   bool
+	}{
+		{"present", bssh.Result{Stdout: "1\n"}, true},
+		{"absent", bssh.Result{Stdout: ""}, false},
+		{"server unreachable", bssh.Result{ExitCode: 1, Stderr: "can't connect"}, false},
+	}
+	for _, p := range probes {
+		for _, st := range states {
+			t.Run(p.name+" "+st.name, func(t *testing.T) {
+				f := bssh.NewFakeRunner()
+				f.On(p.cmd, st.result)
+				got, err := p.call(f)
+				if err != nil || got != st.want {
+					t.Fatalf("%s = %v, %v; want %v, nil", p.name, got, err, st.want)
+				}
+				if f.Calls()[0].Cmd != p.cmd {
+					t.Fatalf("probe command = %q, want %q", f.Calls()[0].Cmd, p.cmd)
+				}
+			})
+		}
+		t.Run(p.name+" transport error", func(t *testing.T) {
+			f := bssh.NewFakeRunner()
+			f.OnError(p.cmd, errTransport)
+			if _, err := p.call(f); err == nil {
+				t.Fatal("transport error must propagate")
+			}
+		})
+	}
+}

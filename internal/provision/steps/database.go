@@ -55,6 +55,21 @@ func sharedEnvPath(site config.Site) string {
 	return site.DeployPath + "/shared/.env"
 }
 
+// envCredentialPresent reports whether the FIRST DB_PASSWORD line of a site's
+// shared/.env carries a charset-valid value — the same line passwordFromEnv
+// reads, so Check and Apply always judge the same credential (a valid value on
+// a later duplicate line must not satisfy Check when Apply would read the
+// first). grep -m1 selects that line (a missing file or key yields empty
+// input); the second grep validates it strictly and only its exit code
+// answers (-q), so the secret never enters stdout.
+func envCredentialPresent(ctx context.Context, r bssh.Runner, site config.Site) (bool, error) {
+	res, err := r.Run(ctx, "grep -m1 '^"+dbPasswordKey+"=' "+shQuote(sharedEnvPath(site))+" | grep -Eq '^"+dbPasswordKey+"=[A-Za-z0-9]+[[:space:]]*$'", nil)
+	if err != nil {
+		return false, err
+	}
+	return res.ExitCode == 0, nil
+}
+
 func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
 	eng, err := dbpkg.Get(s.Database.Engine)
 	if err != nil {
@@ -75,36 +90,56 @@ func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Serve
 			}
 		}
 	}
-	// Each site's shared/.env (carrying its credential) must exist.
+	if !installed || !sourceOK {
+		// No server to probe yet (or the wrong source): Apply reconciles.
+		return d.unsatisfied(eng, "database server or configured source not yet provisioned"), nil
+	}
+	// The server is installed: every site needs its credential persisted AND
+	// its database + user actually present. Probing real state (not just the
+	// .env file) lets a re-run heal a provision that failed between the .env
+	// write and EnsureUser.
 	for _, site := range s.Sites {
-		envExists, err := fileExists(ctx, r, sharedEnvPath(site))
+		// The credential must be PRESENT AND VALID in shared/.env, not merely the
+		// file: an operator-preseeded or truncated env without DB_PASSWORD would
+		// otherwise read as converged while the app has no credential. Exit-code
+		// only (-q) so the secret never enters the command output. The pattern
+		// mirrors passwordFromEnv's accept set (alphanumeric, trailing whitespace
+		// tolerated); anything murkier fails here and Apply reports the pointed
+		// error.
+		credOK, err := envCredentialPresent(ctx, r, site)
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
-		if !envExists {
-			return provision.CheckResult{
-				Satisfied: false,
-				Reason:    "credential for " + site.Domain + " not yet persisted",
-				Changes:   d.changes(eng),
-				Sensitive: true,
-			}, nil
+		if !credOK {
+			return d.unsatisfied(eng, "credential for "+site.Domain+" not yet persisted"), nil
+		}
+		dbExists, err := eng.DatabaseExists(ctx, r, s.SiteDBName(site))
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if !dbExists {
+			return d.unsatisfied(eng, "database for "+site.Domain+" missing"), nil
+		}
+		granted, err := eng.UserGranted(ctx, r, s.SiteDBUser(site), s.SiteDBName(site))
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if !granted {
+			return d.unsatisfied(eng, "database user/grant for "+site.Domain+" missing"), nil
 		}
 	}
-	if installed && sourceOK {
-		return provision.CheckResult{Satisfied: true, Reason: eng.ServerPackage() + " installed (" + s.Database.Source + "); per-site credentials persisted"}, nil
-	}
-	return provision.CheckResult{
-		Satisfied: false,
-		Reason:    "database server or configured source not yet provisioned",
-		Changes:   d.changes(eng),
-		Sensitive: true,
-	}, nil
+	return provision.CheckResult{Satisfied: true, Reason: eng.ServerPackage() + " installed (" + s.Database.Source + "); per-site databases, users and credentials present"}, nil
+}
+
+// unsatisfied builds this step's standard not-yet-converged result.
+func (d database) unsatisfied(eng dbpkg.Engine, reason string) provision.CheckResult {
+	return provision.CheckResult{Satisfied: false, Reason: reason, Changes: d.changes(eng), Sensitive: true}
 }
 
 func (database) changes(eng dbpkg.Engine) []string {
 	return []string{
 		"install " + eng.ServerPackage(),
-		"per site: persist DB credential to shared/.env, ensure database + user",
+		"per site: persist DB credential to shared/.env (when absent), ensure database + user",
 	}
 }
 
@@ -134,22 +169,38 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	}
 	for i, site := range s.Sites {
 		dbName, dbUser := s.SiteDBName(site), s.SiteDBUser(site)
-		pw, err := d.resolvePassword(ctx, r, site, dbUser, cache)
+		envExists, err := fileExists(ctx, r, sharedEnvPath(site))
 		if err != nil {
 			return err
+		}
+		var pw string
+		if envExists {
+			// An existing .env is never rewritten: WriteFile is atomic, so a
+			// present file is complete, and rewriting would clobber
+			// operator-added keys and re-derive the positional REDIS_DB index.
+			// The role's password must therefore come from the file the app reads.
+			pw, err = d.passwordFromEnv(ctx, r, site)
+			if err != nil {
+				return err
+			}
+		} else {
+			pw, err = newPassword(dbUser, cache)
+			if err != nil {
+				return err
+			}
+			appKey, err := secret.AppKey()
+			if err != nil {
+				return err
+			}
+			d.redactor.Add(appKey)
+			// Persist FIRST (atomic), so a crash before EnsureUser still leaves a
+			// recoverable secret on the host. i is the site's per-site Redis logical
+			// DB index when Valkey is enabled.
+			if err := d.seedSharedEnv(ctx, r, s, site, i, dbName, dbUser, pw, appKey, driver, host, port, socket); err != nil {
+				return err
+			}
 		}
 		d.redactor.Add(pw)
-		appKey, err := d.resolveAppKey(ctx, r, site)
-		if err != nil {
-			return err
-		}
-		d.redactor.Add(appKey)
-		// Persist FIRST (atomic), so a crash before EnsureUser still leaves a
-		// recoverable secret on the host. i is the site's per-site Redis logical
-		// DB index when Valkey is enabled.
-		if err := d.seedSharedEnv(ctx, r, s, site, i, dbName, dbUser, pw, appKey, driver, host, port, socket); err != nil {
-			return err
-		}
 		if err := eng.EnsureDatabase(ctx, r, dbName); err != nil {
 			return err
 		}
@@ -164,24 +215,44 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	return nil
 }
 
-// resolvePassword returns a site's database password, preferring an existing one
-// (the site's host shared/.env, then the local cache keyed by DB user) and only
-// generating a new one when none exists. A reused password is re-validated.
-func (d database) resolvePassword(ctx context.Context, r bssh.Runner, site config.Site, dbUser string, cache map[string]string) (string, error) {
+// passwordFromEnv reads DB_PASSWORD from a site's existing shared/.env. The
+// file is authoritative once present: a missing value is a hard error, because
+// silently generating a new password would desync the role from the file the
+// app reads. Only trailing ASCII whitespace (the same set Check's probe
+// accepts) is trimmed off the value — anything else, leading or Unicode, is
+// NOT laundered away: it fails the charset check just as Check's probe rejects
+// that line (laundering it would make Check unsatisfied forever while Apply
+// "succeeds"). A reused password is re-validated against the allowed charset
+// (defence-in-depth against a tampered env injecting SQL metacharacters).
+func (d database) passwordFromEnv(ctx context.Context, r bssh.Runner, site config.Site) (string, error) {
 	env := sharedEnvPath(site)
 	res, err := r.Run(ctx, "grep -m1 '^"+dbPasswordKey+"=' "+shQuote(env), nil)
 	if err != nil {
 		return "", err
 	}
 	if res.ExitCode == 0 {
-		pw := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(res.Stdout), dbPasswordKey+"="))
-		if pw != "" {
+		// Trailing trim uses exactly the ASCII set the Check probe's
+		// grep [[:space:]] accepts in the C locale — Unicode whitespace
+		// stays in the value and fails the charset check, matching
+		// Check's rejection (no Check-rejects/Apply-succeeds path).
+		// grep '^DB_PASSWORD=' anchors the line start, so no leading trim
+		// is needed; res.Stdout is exactly the matched line + newline.
+		line := strings.TrimRight(res.Stdout, " \t\n\v\f\r")
+		if pw := strings.TrimPrefix(line, dbPasswordKey+"="); pw != "" && pw != line {
 			if !reDBPassword.MatchString(pw) {
 				return "", fmt.Errorf("reused %s from %s is outside the allowed charset; refusing to use it", dbPasswordKey, env)
 			}
 			return pw, nil
 		}
 	}
+	return "", fmt.Errorf("%s for %s exists but has no %s; add one or remove the file to have berth re-seed it", env, site.Domain, dbPasswordKey)
+}
+
+// newPassword returns the locally cached password for dbUser or generates a
+// fresh one. The cache hit covers the documented re-seed flow: an operator
+// removes shared/.env to have berth re-seed it, and the password from the
+// prior successful run is reused so the existing role keeps working.
+func newPassword(dbUser string, cache map[string]string) (string, error) {
 	if pw := cache[dbUser]; pw != "" {
 		if !reDBPassword.MatchString(pw) {
 			return "", fmt.Errorf("cached password for %s is outside the allowed charset; refusing to use it", dbUser)
@@ -193,24 +264,6 @@ func (d database) resolvePassword(ctx context.Context, r bssh.Runner, site confi
 		return "", fmt.Errorf("generate database password: %w", err)
 	}
 	return pw, nil
-}
-
-// resolveAppKey returns a site's Laravel APP_KEY, preferring one already present
-// in the site's shared/.env (so an operator may pre-seed the real key for a data
-// restore and re-runs never rotate it, which would invalidate encrypted data)
-// and generating a fresh key only when none exists.
-func (d database) resolveAppKey(ctx context.Context, r bssh.Runner, site config.Site) (string, error) {
-	env := sharedEnvPath(site)
-	res, err := r.Run(ctx, "grep -m1 '^"+appKeyKey+"=' "+shQuote(env), nil)
-	if err != nil {
-		return "", err
-	}
-	if res.ExitCode == 0 {
-		if key := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(res.Stdout), appKeyKey+"=")); key != "" {
-			return key, nil
-		}
-	}
-	return secret.AppKey()
 }
 
 // seedSharedEnv renders a site's shared/.env and writes it atomically, owned by

@@ -67,3 +67,52 @@ func TestPostgresMetadata(t *testing.T) {
 		t.Errorf("Get(postgres) = %v, %v", got, err)
 	}
 }
+
+func TestPostgresProbes(t *testing.T) {
+	p := Postgres{}
+	dbCmd := `sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='myapp'"`
+	ownerCmd := `sudo -u postgres psql -tAc "SELECT 1 FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE d.datname='myapp' AND r.rolname='myapp'"`
+	probes := []struct {
+		name string
+		cmd  string
+		call func(r bssh.Runner) (bool, error)
+	}{
+		{"DatabaseExists", dbCmd, func(r bssh.Runner) (bool, error) {
+			return p.DatabaseExists(context.Background(), r, "myapp")
+		}},
+		{"UserGranted", ownerCmd, func(r bssh.Runner) (bool, error) {
+			return p.UserGranted(context.Background(), r, "myapp", "myapp")
+		}},
+	}
+	states := []struct {
+		name   string
+		result bssh.Result
+		want   bool
+	}{
+		{"present", bssh.Result{Stdout: "1\n"}, true},
+		{"absent", bssh.Result{Stdout: "\n"}, false},
+		{"server unreachable", bssh.Result{ExitCode: 2, Stderr: "psql: could not connect"}, false},
+	}
+	for _, pr := range probes {
+		for _, st := range states {
+			t.Run(pr.name+" "+st.name, func(t *testing.T) {
+				f := bssh.NewFakeRunner()
+				f.On(pr.cmd, st.result)
+				got, err := pr.call(f)
+				if err != nil || got != st.want {
+					t.Fatalf("%s = %v, %v; want %v, nil", pr.name, got, err, st.want)
+				}
+				if f.Calls()[0].Cmd != pr.cmd {
+					t.Fatalf("probe command = %q, want %q", f.Calls()[0].Cmd, pr.cmd)
+				}
+			})
+		}
+		t.Run(pr.name+" transport error", func(t *testing.T) {
+			f := bssh.NewFakeRunner()
+			f.OnError(pr.cmd, errTransport)
+			if _, err := pr.call(f); err == nil {
+				t.Fatal("transport error must propagate")
+			}
+		})
+	}
+}
