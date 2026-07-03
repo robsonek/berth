@@ -10,11 +10,33 @@ import (
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
 	bssh "github.com/robsonek/berth/internal/ssh"
+	"github.com/robsonek/berth/internal/templates"
 )
 
 // certRenewWindow is the lead time before expiry within which a certificate is
 // treated as needing renewal.
 const certRenewWindow = 30 * 24 * time.Hour
+
+// certbotDeployHookPath is the global certbot deploy hook. Certbot runs every
+// executable in this directory after EACH successful renewal (of any cert), so
+// one managed script covers all present and future certificates on the host.
+const certbotDeployHookPath = "/etc/letsencrypt/renewal-hooks/deploy/berth-nginx-reload"
+
+// renderCertbotDeployHook renders the static nginx validate-then-reload hook.
+func renderCertbotDeployHook() ([]byte, error) {
+	return templates.Render("certbot_deploy_hook.sh.tmpl", nil)
+}
+
+// anyLetsEncrypt reports whether any site wants a Let's Encrypt certificate —
+// the only cert mode that uses certbot and therefore needs the renewal hook.
+func anyLetsEncrypt(s *config.Server) bool {
+	for _, site := range s.Sites {
+		if site.SSL && site.CertMode() == "letsencrypt" {
+			return true
+		}
+	}
+	return false
+}
 
 // resolveA resolves the A/AAAA records for a host. It is a package-level var so
 // tests can stub DNS without a real lookup; production uses the system resolver.
@@ -32,7 +54,7 @@ func TLS() provision.Step { return tls{} }
 func (tls) Name() string       { return "tls" }
 func (tls) Requires() []string { return []string{"site"} }
 
-func (tls) Check(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
+func (tls) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
 	for _, site := range s.Sites {
 		if !site.SSL {
 			continue
@@ -46,6 +68,49 @@ func (tls) Check(ctx context.Context, _ provision.RunCtx, s *config.Server, r bs
 				Satisfied: false,
 				Reason:    "no valid certificate for " + site.Domain,
 				Changes:   []string{"issue " + site.CertMode() + " certificate for " + site.Domain, "install 443 server block"},
+			}, nil
+		}
+	}
+	// Renewal deploy hook: without it a renewed cert lands on disk while nginx
+	// keeps serving the old one from memory (expired at ~day 90). Same gate as
+	// Apply — anyLetsEncrypt AND certbot installed — so a DNS-skipped box where
+	// certbot never got installed cannot flap between the two.
+	if anyLetsEncrypt(s) {
+		installed, err := pkgInstalled(ctx, r, "certbot")
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if installed {
+			hook, err := renderCertbotDeployHook()
+			if err != nil {
+				return provision.CheckResult{}, err
+			}
+			state, err := checkManagedFile(ctx, r, certbotDeployHookPath, hook)
+			if err != nil {
+				return provision.CheckResult{}, err
+			}
+			ok, err := managedFileSatisfied(state, certbotDeployHookPath, rc.Force)
+			if err != nil {
+				return provision.CheckResult{}, err
+			}
+			if !ok {
+				return provision.CheckResult{
+					Satisfied: false,
+					Reason:    "certbot renewal deploy hook missing or out of date",
+					Changes:   []string{"install certbot renewal deploy hook (nginx validate + reload)"},
+				}, nil
+			}
+		}
+	} else {
+		present, err := managedFilePresent(ctx, r, certbotDeployHookPath)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if present {
+			return provision.CheckResult{
+				Satisfied: false,
+				Reason:    "certbot deploy hook lingers but no site uses Let's Encrypt",
+				Changes:   []string{"remove certbot renewal deploy hook"},
 			}, nil
 		}
 	}
@@ -81,6 +146,40 @@ func (st tls) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 		}
 		if err := st.issue(ctx, rc, s, site, r); err != nil {
 			return err
+		}
+	}
+	// Converge the renewal deploy hook regardless of whether any cert was
+	// (re)issued this run — an already-provisioned LE host must pick it up.
+	if anyLetsEncrypt(s) {
+		installed, err := pkgInstalled(ctx, r, "certbot")
+		if err != nil {
+			return err
+		}
+		if installed {
+			hook, err := renderCertbotDeployHook()
+			if err != nil {
+				return err
+			}
+			if err := r.WriteFile(ctx, bssh.FileSpec{
+				Path: certbotDeployHookPath, Content: hook,
+				Owner: "root", Group: "root", Mode: 0o755, Sudo: true,
+			}); err != nil {
+				return fmt.Errorf("write certbot deploy hook: %w", err)
+			}
+		}
+	} else {
+		// Drift-removal, marker-guarded: never delete a foreign file, even
+		// with --force (same contract as the scheduler cron removal).
+		present, err := managedFilePresent(ctx, r, certbotDeployHookPath)
+		if err != nil {
+			return err
+		}
+		if present {
+			if res, err := r.Run(ctx, "rm -f "+shQuote(certbotDeployHookPath), nil); err != nil {
+				return err
+			} else if res.ExitCode != 0 {
+				return fmt.Errorf("remove certbot deploy hook: %s", res.Stderr)
+			}
 		}
 	}
 	return nil
