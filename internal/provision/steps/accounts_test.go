@@ -164,6 +164,23 @@ func TestSiteSudoersIncludesDaemonPrograms(t *testing.T) {
 	}
 }
 
+func TestSiteSudoersHasNoUnscopedSupervisorGrants(t *testing.T) {
+	s := &config.Server{PHP: config.PHP{Version: "8.4"}, Queue: true,
+		Sites: []config.Site{{Domain: "a.example.com", DeployPath: "/var/www/a", User: "auser"}}}
+	body, err := renderSiteSudoers(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// `supervisorctl update` restarts OTHER tenants' changed programs and
+	// `reread` serves no deployer purpose (berth runs both as root in site.Apply)
+	// — neither may appear in a site user's grants.
+	for _, banned := range []string{"supervisorctl reread", "supervisorctl update"} {
+		if strings.Contains(string(body), banned) {
+			t.Errorf("site sudoers must not grant unscoped %q:\n%s", banned, body)
+		}
+	}
+}
+
 func TestAccountsApplyCreatesUsersAndWritesSudoers(t *testing.T) {
 	s := testServerWithKey(t)
 	f := bssh.NewFakeRunner()

@@ -14,6 +14,8 @@ pm.min_spare_servers = 1
 pm.max_spare_servers = 4
 pm.max_requests = 500
 
-php_admin_value[open_basedir] = {{ .DeployPath }}/current:{{ .DeployPath }}/shared:/tmp
+php_admin_value[open_basedir] = {{ .DeployPath }}/current:{{ .DeployPath }}/shared
+php_admin_value[sys_temp_dir] = {{ .DeployPath }}/shared/tmp
+php_admin_value[upload_tmp_dir] = {{ .DeployPath }}/shared/tmp
 php_admin_value[error_log] = /var/log/php/{{ .PoolName }}-fpm.error.log
 php_admin_flag[log_errors] = on

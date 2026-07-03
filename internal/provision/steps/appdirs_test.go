@@ -32,6 +32,7 @@ func TestAppDirsCheckSatisfiedWhenAllDirsPresentWithOwners(t *testing.T) {
 	// (private); acme webroot www-data:www-data.
 	f.On("stat -c %U:%G "+shQuote("/home/deploy/myapp"), bssh.Result{Stdout: "deploy:www-data\n"})
 	f.On("stat -c %U:%G "+shQuote("/home/deploy/myapp/shared"), bssh.Result{Stdout: "deploy:deploy\n"})
+	f.On("stat -c %U:%G "+shQuote("/home/deploy/myapp/shared/tmp"), bssh.Result{Stdout: "deploy:deploy\n"})
 	f.On("stat -c %U:%G "+shQuote("/var/www/berth-acme/app.example.com"), bssh.Result{Stdout: "www-data:www-data\n"})
 	cr, err := AppDirs().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
@@ -68,11 +69,29 @@ func TestAppDirsCheckUnsatisfiedWhenWrongOwner(t *testing.T) {
 	}
 }
 
+func TestAppDirsCheckUnsatisfiedWhenTmpDirMissing(t *testing.T) {
+	s := appdirsServer()
+	f := bssh.NewFakeRunner()
+	f.On("stat -c %U:%G "+shQuote("/home/deploy/myapp"), bssh.Result{Stdout: "deploy:www-data\n"})
+	f.On("stat -c %U:%G "+shQuote("/home/deploy/myapp/shared"), bssh.Result{Stdout: "deploy:deploy\n"})
+	// shared/tmp backs the pool's sys_temp_dir/upload_tmp_dir; absent here.
+	f.On("stat -c %U:%G "+shQuote("/home/deploy/myapp/shared/tmp"), bssh.Result{ExitCode: 1, Stderr: "No such file or directory"})
+	f.On("stat -c %U:%G "+shQuote("/var/www/berth-acme/app.example.com"), bssh.Result{Stdout: "www-data:www-data\n"})
+	cr, err := AppDirs().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied when shared/tmp is missing")
+	}
+}
+
 func TestAppDirsApplyCreatesDirsWithIsolatingOwners(t *testing.T) {
 	s := appdirsServer()
 	f := bssh.NewFakeRunner()
 	f.On("install -d -o deploy -g www-data -m 0710 '/home/deploy/myapp'", bssh.Result{})
 	f.On("install -d -o deploy -g deploy -m 0700 '/home/deploy/myapp/shared'", bssh.Result{})
+	f.On("install -d -o deploy -g deploy -m 0700 '/home/deploy/myapp/shared/tmp'", bssh.Result{})
 	f.On("install -d -o www-data -g www-data -m 0755 '/var/www/berth-acme/app.example.com'", bssh.Result{})
 	if err := AppDirs().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -81,6 +100,7 @@ func TestAppDirsApplyCreatesDirsWithIsolatingOwners(t *testing.T) {
 	for _, want := range []string{
 		"install -d -o deploy -g www-data -m 0710 '/home/deploy/myapp'",
 		"install -d -o deploy -g deploy -m 0700 '/home/deploy/myapp/shared'",
+		"install -d -o deploy -g deploy -m 0700 '/home/deploy/myapp/shared/tmp'",
 		"install -d -o www-data -g www-data -m 0755 '/var/www/berth-acme/app.example.com'",
 	} {
 		if !strings.Contains(joined, want) {
@@ -99,6 +119,7 @@ func TestAppDirsApplyMultiSitePerUser(t *testing.T) {
 	for _, u := range []struct{ user, path string }{{u1, "/var/www/one"}, {u2, "/var/www/two"}} {
 		f.On("install -d -o "+u.user+" -g www-data -m 0710 '"+u.path+"'", bssh.Result{})
 		f.On("install -d -o "+u.user+" -g "+u.user+" -m 0700 '"+u.path+"/shared'", bssh.Result{})
+		f.On("install -d -o "+u.user+" -g "+u.user+" -m 0700 '"+u.path+"/shared/tmp'", bssh.Result{})
 	}
 	f.On("install -d -o www-data -g www-data -m 0755 '/var/www/berth-acme/one.example.com'", bssh.Result{})
 	f.On("install -d -o www-data -g www-data -m 0755 '/var/www/berth-acme/two.example.com'", bssh.Result{})

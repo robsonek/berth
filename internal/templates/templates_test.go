@@ -4,6 +4,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -229,4 +230,28 @@ func TestRenderBackupCronGolden(t *testing.T) {
 
 func TestRenderBackupLogrotateGolden(t *testing.T) {
 	checkGolden(t, "backup_logrotate.conf.tmpl", "backup_logrotate.golden", nil)
+}
+
+func TestFPMPoolIsolatesTempDirs(t *testing.T) {
+	out, err := RenderINI("fpm_pool.conf.tmpl", struct{ PoolName, User, Socket, DeployPath string }{
+		PoolName: "app_example_com", User: "webuser", Socket: testSocket, DeployPath: "/home/deploy/myapp",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	// The shared /tmp is world-readable across tenants; open_basedir must be
+	// exactly current:shared and PHP's temp/upload staging must live inside
+	// shared/tmp (which appdirs creates 0700 <user>:<user>).
+	if !strings.Contains(s, "php_admin_value[open_basedir] = /home/deploy/myapp/current:/home/deploy/myapp/shared\n") {
+		t.Errorf("open_basedir must be exactly current:shared (no shared /tmp):\n%s", s)
+	}
+	for _, want := range []string{
+		"php_admin_value[sys_temp_dir] = /home/deploy/myapp/shared/tmp",
+		"php_admin_value[upload_tmp_dir] = /home/deploy/myapp/shared/tmp",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("missing %q in pool config:\n%s", want, s)
+		}
+	}
 }

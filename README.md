@@ -222,7 +222,9 @@ reloaded. berth does not deploy code, so after your deployer swaps the release
 symlink it must reload FPM (and restart any running queue worker):
 
 ```php
-// deploy.php (Deployer) — berth grants the site user exactly this reload, nothing more
+// deploy.php (Deployer) — berth grants the site user exactly this reload, nothing more.
+// Note: it reloads the shared per-version FPM master, gracefully recycling every
+// site's pool on the host (FPM has no per-pool reload).
 after('deploy:publish', function () {
     run('sudo systemctl reload php{{php_version}}-fpm'); // clear OPcache -> serve new bytecode
 });
