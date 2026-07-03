@@ -1,0 +1,4 @@
+# managed by berth
+set -eu
+nginx -t
+systemctl reload nginx

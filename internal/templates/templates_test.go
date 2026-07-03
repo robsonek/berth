@@ -232,6 +232,13 @@ func TestRenderBackupLogrotateGolden(t *testing.T) {
 	checkGolden(t, "backup_logrotate.conf.tmpl", "backup_logrotate.golden", nil)
 }
 
+func TestRenderCertbotDeployHookGolden(t *testing.T) {
+	// Static POSIX-sh certbot deploy hook: certbot executes directory hooks via
+	// `sh -c <path>` (ENOEXEC fallback), so no shebang — the managed marker must
+	// stay the first byte — and no bashisms (no pipefail).
+	checkGolden(t, "certbot_deploy_hook.sh.tmpl", "certbot_deploy_hook.golden", nil)
+}
+
 func TestFPMPoolIsolatesTempDirs(t *testing.T) {
 	out, err := RenderINI("fpm_pool.conf.tmpl", struct{ PoolName, User, Socket, DeployPath string }{
 		PoolName: "app_example_com", User: "webuser", Socket: testSocket, DeployPath: "/home/deploy/myapp",
