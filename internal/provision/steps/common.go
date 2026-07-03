@@ -89,12 +89,23 @@ type managedFileState int
 const (
 	fileAbsent    managedFileState = iota // not present
 	fileUnmanaged                         // present but lacks the berth marker
-	fileDrifted                           // managed by berth but content differs
+	fileDrifted                           // Apply should rewrite: managed content differs, or allowlisted stock content is being adopted
 	fileUpToDate                          // managed and content matches
 )
 
 // checkManagedFile reads path and classifies it against the desired content.
 func checkManagedFile(ctx context.Context, r bssh.Runner, path string, desired []byte) (managedFileState, error) {
+	return checkManagedFileAdopt(ctx, r, path, desired, nil)
+}
+
+// checkManagedFileAdopt is checkManagedFile plus an adoption allowlist: an
+// unmanaged file whose EXACT content equals an entry of knownStock classifies
+// as fileDrifted (adoptable — Apply overwrites it without --force) instead of
+// fileUnmanaged. Image-shipped stock files carry no operator intent, so
+// silently replacing them is safe; every other unmanaged content keeps the
+// abort-unless---force contract. Exact-bytes match on purpose: a near-miss is
+// precisely the case where a human should look.
+func checkManagedFileAdopt(ctx context.Context, r bssh.Runner, path string, desired []byte, knownStock []string) (managedFileState, error) {
 	res, err := r.Run(ctx, "cat "+shQuote(path), nil)
 	if err != nil {
 		return fileAbsent, err
@@ -103,6 +114,11 @@ func checkManagedFile(ctx context.Context, r bssh.Runner, path string, desired [
 		return fileAbsent, nil
 	}
 	if !hasManagedMarker(res.Stdout) {
+		for _, stock := range knownStock {
+			if res.Stdout == stock {
+				return fileDrifted, nil // adoptable stock content
+			}
+		}
 		return fileUnmanaged, nil
 	}
 	if contentHash([]byte(res.Stdout)) == contentHash(desired) {
