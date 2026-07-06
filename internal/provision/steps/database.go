@@ -167,7 +167,13 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	if cache == nil {
 		cache = map[string]string{}
 	}
-	for i, site := range s.Sites {
+	var redisUsed map[int]bool
+	if s.Valkey {
+		if redisUsed, err = usedRedisDBs(ctx, r, s); err != nil {
+			return err
+		}
+	}
+	for _, site := range s.Sites {
 		dbName, dbUser := s.SiteDBName(site), s.SiteDBUser(site)
 		envExists, err := fileExists(ctx, r, sharedEnvPath(site))
 		if err != nil {
@@ -177,7 +183,7 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 		if envExists {
 			// An existing .env is never rewritten: WriteFile is atomic, so a
 			// present file is complete, and rewriting would clobber
-			// operator-added keys and re-derive the positional REDIS_DB index.
+			// operator-added keys and the site's persisted REDIS_DB assignment.
 			// The role's password must therefore come from the file the app reads.
 			pw, err = d.passwordFromEnv(ctx, r, site)
 			if err != nil {
@@ -193,10 +199,13 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 				return err
 			}
 			d.redactor.Add(appKey)
+			redisDB := 0
+			if s.Valkey {
+				redisDB = freeRedisDB(redisUsed)
+			}
 			// Persist FIRST (atomic), so a crash before EnsureUser still leaves a
-			// recoverable secret on the host. i is the site's per-site Redis logical
-			// DB index when Valkey is enabled.
-			if err := d.seedSharedEnv(ctx, r, s, site, i, dbName, dbUser, pw, appKey, driver, host, port, socket); err != nil {
+			// recoverable secret on the host.
+			if err := d.seedSharedEnv(ctx, r, s, site, redisDB, dbName, dbUser, pw, appKey, driver, host, port, socket); err != nil {
 				return err
 			}
 		}
@@ -266,9 +275,63 @@ func newPassword(dbUser string, cache map[string]string) (string, error) {
 	return pw, nil
 }
 
+// usedRedisDBs collects the Redis logical-DB indices already persisted in the
+// sites' existing shared/.env files. The live file is authoritative (the same
+// rule passwordFromEnv follows): an index must never be derived from the
+// site's position in the YAML, which shifts when sites are added, removed or
+// reordered — a fresh seed reusing a persisted index would let one tenant's
+// cache:clear (FLUSHDB) wipe another's data. Both REDIS_DB and REDIS_CACHE_DB
+// are reserved (berth seeds them equal, but the operator-editable file may
+// have diverged them). A missing file or key exits non-zero and reserves
+// nothing. An unparsable value is a hard error, not a skip: berth cannot know
+// which logical DB that tenant occupies, so allocating around it risks the
+// very collision this pre-pass prevents.
+func usedRedisDBs(ctx context.Context, r bssh.Runner, s *config.Server) (map[int]bool, error) {
+	used := map[int]bool{}
+	for _, site := range s.Sites {
+		env := sharedEnvPath(site)
+		res, err := r.Run(ctx, "grep -E '^REDIS_(CACHE_)?DB=' "+shQuote(env), nil)
+		if err != nil {
+			return nil, err
+		}
+		if res.ExitCode != 0 {
+			continue
+		}
+		for _, line := range strings.Split(strings.TrimRight(res.Stdout, "\n"), "\n") {
+			key, val, ok := strings.Cut(line, "=")
+			if !ok {
+				continue // unreachable: every matched line contains '='
+			}
+			// Tolerate the .env spellings Laravel reads as a number: ASCII
+			// whitespace padding and one layer of matching quotes.
+			val = strings.Trim(val, " \t\v\f\r")
+			if len(val) >= 2 && (val[0] == '"' || val[0] == '\'') && val[len(val)-1] == val[0] {
+				val = val[1 : len(val)-1]
+			}
+			n, err := strconv.Atoi(val)
+			if err != nil || n < 0 {
+				return nil, fmt.Errorf("%s has an unparsable %s value %q; fix or remove that line so berth can allocate collision-free Redis DB indices", env, key, val)
+			}
+			used[n] = true
+		}
+	}
+	return used, nil
+}
+
+// freeRedisDB returns the lowest non-negative index not yet reserved and
+// reserves it, so multiple sites seeded in one run get distinct indices.
+func freeRedisDB(used map[int]bool) int {
+	n := 0
+	for used[n] {
+		n++
+	}
+	used[n] = true
+	return n
+}
+
 // seedSharedEnv renders a site's shared/.env and writes it atomically, owned by
 // that site's OS user (mode 0600) so other site users cannot read it.
-func (d database) seedSharedEnv(ctx context.Context, r bssh.Runner, s *config.Server, site config.Site, siteIdx int, dbName, dbUser, pw, appKey, driver, host, port, socket string) error {
+func (d database) seedSharedEnv(ctx context.Context, r bssh.Runner, s *config.Server, site config.Site, redisDB int, dbName, dbUser, pw, appKey, driver, host, port, socket string) error {
 	user := s.SiteUser(site)
 	kv := map[string]string{
 		"APP_ENV":       "production",
@@ -289,12 +352,13 @@ func (d database) seedSharedEnv(ctx context.Context, r bssh.Runner, s *config.Se
 	}
 	// When Valkey is provisioned, use it for cache, session and queue (Laravel
 	// otherwise falls back to the database driver). Each site gets its own Redis
-	// logical DB (siteIdx) and a key prefix so one tenant's cache:clear (FLUSHDB)
-	// cannot wipe another's data. Note: cache, session and queue share the site's
-	// DB, so that site's own `cache:clear` also clears its sessions/queue — an
-	// accepted single-tenant trade-off; cross-tenant isolation is preserved.
+	// logical DB (allocated by freeRedisDB against the indices persisted on the
+	// host) and a key prefix so one tenant's cache:clear (FLUSHDB) cannot wipe
+	// another's data. Note: cache, session and queue share the site's DB, so
+	// that site's own `cache:clear` also clears its sessions/queue — an accepted
+	// single-tenant trade-off; cross-tenant isolation is preserved.
 	if s.Valkey {
-		db := strconv.Itoa(siteIdx)
+		db := strconv.Itoa(redisDB)
 		kv["CACHE_STORE"] = "redis"
 		kv["SESSION_DRIVER"] = "redis"
 		kv["QUEUE_CONNECTION"] = "redis"
