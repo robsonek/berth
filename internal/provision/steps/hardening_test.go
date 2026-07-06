@@ -48,6 +48,7 @@ func TestHardeningApplyAllowsBeforeEnableAndGatesBeforeSshd(t *testing.T) {
 	f.On("ufw allow 80,443/tcp", bssh.Result{})
 	f.On("ufw --force enable", bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
+	f.On("sshd -t", bssh.Result{})
 	f.On("systemctl reload ssh", bssh.Result{})
 	f.On("fail2ban-client -t", bssh.Result{})
 	f.On("systemctl enable --now fail2ban", bssh.Result{})
@@ -92,6 +93,63 @@ func TestHardeningApplyAllowsBeforeEnableAndGatesBeforeSshd(t *testing.T) {
 	}
 	if !sshdWriteSeen {
 		t.Error("sshd drop-in not written after a passing gate")
+	}
+}
+
+func TestHardeningApplyValidatesSshdBeforeReload(t *testing.T) {
+	stubGate(t, nil, nil)
+	s := hardeningServer()
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
+	f.On("ufw allow 2222/tcp", bssh.Result{})
+	f.On("ufw allow 80,443/tcp", bssh.Result{})
+	f.On("ufw --force enable", bssh.Result{})
+	f.On("sshd -t", bssh.Result{ExitCode: 0})
+	f.On("sshd -t", bssh.Result{})
+	f.On("systemctl reload ssh", bssh.Result{})
+	f.On("fail2ban-client -t", bssh.Result{})
+	f.On("systemctl enable --now fail2ban", bssh.Result{})
+	f.On("systemctl reload fail2ban", bssh.Result{})
+
+	if err := Hardening().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	idxT, idxReload := -1, -1
+	for i, c := range f.Calls() {
+		switch c.Cmd {
+		case "sshd -t":
+			idxT = i
+		case "systemctl reload ssh":
+			idxReload = i
+		}
+	}
+	if idxT < 0 {
+		t.Fatal("Apply must validate the sshd configuration (sshd -t) after writing the drop-in")
+	}
+	if idxReload < 0 || idxT > idxReload {
+		t.Errorf("sshd -t must run before systemctl reload ssh; calls order t=%d reload=%d", idxT, idxReload)
+	}
+}
+
+func TestHardeningApplyAbortsReloadWhenSshdConfigInvalid(t *testing.T) {
+	stubGate(t, nil, nil)
+	s := hardeningServer()
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
+	f.On("ufw allow 2222/tcp", bssh.Result{})
+	f.On("ufw allow 80,443/tcp", bssh.Result{})
+	f.On("ufw --force enable", bssh.Result{})
+	f.On("sshd -t", bssh.Result{ExitCode: 1, Stderr: "/etc/ssh/sshd_config.d/berth.conf: Bad configuration option"})
+	// systemctl reload ssh intentionally NOT stubbed: it must never run.
+
+	err := Hardening().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "sshd -t") {
+		t.Fatalf("err = %v, want the sshd -t refusal", err)
+	}
+	for _, c := range f.Calls() {
+		if c.Cmd == "systemctl reload ssh" {
+			t.Error("reload ssh must not run after a failed sshd -t")
+		}
 	}
 }
 
@@ -198,6 +256,7 @@ func TestHardeningApplyOpensUDP443WhenHTTP3(t *testing.T) {
 	f.On("ufw allow 443/udp", bssh.Result{})
 	f.On("ufw --force enable", bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
+	f.On("sshd -t", bssh.Result{})
 	f.On("systemctl reload ssh", bssh.Result{})
 	f.On("fail2ban-client -t", bssh.Result{})
 	f.On("systemctl enable --now fail2ban", bssh.Result{})
@@ -296,6 +355,7 @@ func TestHardeningApplyWritesFail2banJail(t *testing.T) {
 	f.On("ufw allow 80,443/tcp", bssh.Result{})
 	f.On("ufw --force enable", bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
+	f.On("sshd -t", bssh.Result{})
 	f.On("systemctl reload ssh", bssh.Result{})
 	f.On("fail2ban-client -t", bssh.Result{})
 	f.On("systemctl enable --now fail2ban", bssh.Result{})

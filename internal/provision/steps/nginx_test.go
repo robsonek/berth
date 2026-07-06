@@ -152,8 +152,7 @@ func TestNginxCheckSourceNginxRequiresRepo(t *testing.T) {
 func TestNginxApplySourceNginxAddsRepoAndBridge(t *testing.T) {
 	s := &config.Server{Nginx: config.Nginx{Source: "nginx"}}
 	f := bssh.NewFakeRunner()
-	f.On("curl -fsSL https://nginx.org/keys/nginx_signing.key | gpg --dearmor --yes -o /usr/share/keyrings/nginx-org.gpg", bssh.Result{})
-	f.On("gpg --show-keys --with-colons /usr/share/keyrings/nginx-org.gpg", bssh.Result{Stdout: "fpr:::::::::8540A6F18833A80E9C1653A42FD21310B49F6B46:\n"})
+	stubRepoKeyTrust(f, "nginx-org", "https://nginx.org/keys/nginx_signing.key", "8540A6F18833A80E9C1653A42FD21310B49F6B46")
 	f.On("apt-get update", bssh.Result{})
 	f.On("apt-get update -o Dir::Etc::sourcelist=sources.list.d/nginx-org.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o APT::Update::Error-Mode=any", bssh.Result{ExitCode: 0})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx", bssh.Result{})

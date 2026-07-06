@@ -18,9 +18,16 @@ var (
 	reLinuxUser    = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 	reFail2banTime = regexp.MustCompile(`^[0-9]+[smhdw]?$`)
 	reDaemonName   = regexp.MustCompile(`^[a-z0-9-]+$`)
-	reValkeyMem    = regexp.MustCompile(`^(?i)[0-9]+(b|kb|mb|gb|k|m|g)?$`)
-	reMariaDBSize  = regexp.MustCompile(`^(?i)[0-9]+[kmg]?$`)
-	reSwapSize     = regexp.MustCompile(`^[1-9][0-9]*[MmGg]$`)
+	// reQueueToken constrains queue.connection / queue.queue: rendered unquoted
+	// into the Supervisor command= line, which supervisord word-splits, so a
+	// space (or shell metachar) would inject extra worker argv tokens. Commas
+	// stay legal (`--queue=high,default` is Laravel's priority-list form), as do
+	// braces (`{default}` — Redis Cluster hash-tagged queue names); supervisord
+	// does not run a shell, so neither expands.
+	reQueueToken  = regexp.MustCompile(`^[A-Za-z0-9_.,{}-]*$`)
+	reValkeyMem   = regexp.MustCompile(`^(?i)[0-9]+(b|kb|mb|gb|k|m|g)?$`)
+	reMariaDBSize = regexp.MustCompile(`^(?i)[0-9]+[kmg]?$`)
+	reSwapSize    = regexp.MustCompile(`^[1-9][0-9]*[MmGg]$`)
 	// reCronSchedule matches exactly five space-separated cron fields over a strict
 	// character class (digits and * , - /). It rejects extra fields, embedded
 	// newlines and any other shell/cron metacharacter — the value is rendered
@@ -394,8 +401,8 @@ func (st *Site) validateQueueDaemons() error {
 		if q.Processes > 64 {
 			return fmt.Errorf("queue.processes %d exceeds the cap of 64", q.Processes)
 		}
-		if hasControlChars(q.Connection) || hasControlChars(q.Queue) {
-			return fmt.Errorf("queue.connection/queue must be single-line (no control characters)")
+		if !reQueueToken.MatchString(q.Connection) || !reQueueToken.MatchString(q.Queue) {
+			return fmt.Errorf("queue.connection/queue may contain only letters, digits and _ . , - (they are word-split on the supervisor command line)")
 		}
 		if q.Driver == "horizon" {
 			if q.Connection != "" || q.Queue != "" || q.Sleep != 0 || q.Tries != 0 || q.Timeout != 0 || q.MaxMemory != 0 {

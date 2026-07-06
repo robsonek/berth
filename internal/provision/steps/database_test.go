@@ -57,6 +57,20 @@ func redisIdxProbe(env string) string {
 	return "grep -E '^REDIS_(CACHE_)?DB=' " + shQuote(env)
 }
 
+// stubRepoKeyTrust stubs apt.EnsureRepo's key-trust command sequence for an
+// upstream repo, ending in a keyring holding exactly the pinned primary key.
+func stubRepoKeyTrust(f *bssh.FakeRunner, name, keyURL, fpr string) {
+	tmpKey, tmpRing := "/run/berth/key-"+name, "/run/berth/keyring-"+name+".gpg"
+	keyring := "/usr/share/keyrings/" + name + ".gpg"
+	f.On("install -d -m 700 /run/berth", bssh.Result{})
+	f.On("curl -fsSL "+keyURL+" -o "+tmpKey, bssh.Result{})
+	f.On("gpg --yes -o "+tmpRing+" --dearmor "+tmpKey, bssh.Result{})
+	f.On("gpg --no-default-keyring --keyring "+tmpRing+" --yes -o "+keyring+" --export "+fpr, bssh.Result{})
+	f.On("gpg --show-keys --with-colons "+keyring,
+		bssh.Result{Stdout: "pub:-:4096:1:0000000000000000:0::-:::scSC::::::23::0:\nfpr:::::::::" + fpr + ":\n"})
+	f.On("rm -f "+tmpKey+" "+tmpRing, bssh.Result{})
+}
+
 func TestDatabaseApplyGeneratesPersistsAndEnsures(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
@@ -572,8 +586,7 @@ func TestDatabaseApplySourceMariaDBAddsRepo(t *testing.T) {
 	s := databaseServer()
 	s.Database.Source = "mariadb"
 	f := bssh.NewFakeRunner()
-	f.On("curl -fsSL https://mariadb.org/mariadb_release_signing_key.asc | gpg --dearmor --yes -o /usr/share/keyrings/mariadb-org.gpg", bssh.Result{})
-	f.On("gpg --show-keys --with-colons /usr/share/keyrings/mariadb-org.gpg", bssh.Result{Stdout: "fpr:::::::::177F4010FE56CA3336300305F1656F24C74CD1D8:\n"})
+	stubRepoKeyTrust(f, "mariadb-org", "https://mariadb.org/mariadb_release_signing_key.asc", "177F4010FE56CA3336300305F1656F24C74CD1D8")
 	f.On("apt-get update", bssh.Result{})
 	f.On("apt-get update -o Dir::Etc::sourcelist=sources.list.d/mariadb-org.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o APT::Update::Error-Mode=any", bssh.Result{ExitCode: 0})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
@@ -608,8 +621,7 @@ func TestDatabaseApplyPostgresFromPGDG(t *testing.T) {
 	s.Database.Engine = "postgres"
 	s.Database.Source = "pgdg"
 	f := bssh.NewFakeRunner()
-	f.On("curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor --yes -o /usr/share/keyrings/pgdg.gpg", bssh.Result{})
-	f.On("gpg --show-keys --with-colons /usr/share/keyrings/pgdg.gpg", bssh.Result{Stdout: "fpr:::::::::B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8:\n"})
+	stubRepoKeyTrust(f, "pgdg", "https://www.postgresql.org/media/keys/ACCC4CF8.asc", "B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8")
 	f.On("apt-get update", bssh.Result{})
 	f.On("apt-get update -o Dir::Etc::sourcelist=sources.list.d/pgdg.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o APT::Update::Error-Mode=any", bssh.Result{ExitCode: 0})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql", bssh.Result{})
