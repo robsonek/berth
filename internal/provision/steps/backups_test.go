@@ -36,6 +36,10 @@ func TestBackupsApplyWritesScriptCronDirAndPrereqs(t *testing.T) {
 	f.On("install -d -o root -g root -m 0755 '"+backupBaseDir+"'", okResult)
 	f.On("install -d -o root -g root -m 0755 '"+backupLogDir+"'", okResult)
 	f.On("install -d -o root -g root -m 0700 '"+backupDir(site.Domain)+"'", okResult)
+	// write-guards: all managed files absent on a fresh box
+	f.On("cat '"+backupLogrotatePath+"'", bssh.Result{ExitCode: 1})
+	f.On("cat '"+backupScriptPath(site.Domain)+"'", bssh.Result{ExitCode: 1})
+	f.On("cat '"+backupCronPath(site.Domain)+"'", bssh.Result{ExitCode: 1})
 	// logrotate fragment validation
 	f.On("logrotate -d '"+backupLogrotatePath+"'", okResult)
 	// script validation
@@ -66,6 +70,33 @@ func TestBackupsApplyWritesScriptCronDirAndPrereqs(t *testing.T) {
 	}
 	if !strings.HasPrefix(string(got[backupScriptPath(site.Domain)].Content), "# managed by berth\nset -euo pipefail") {
 		t.Errorf("script should start with marker then set -euo pipefail")
+	}
+}
+
+func TestBackupsApplyRefusesForeignScript(t *testing.T) {
+	// A pre-existing, hand-written backup script (no berth marker) must not be
+	// clobbered by Apply without --force.
+	s := backupServer()
+	site := s.Sites[0]
+	f := bssh.NewFakeRunner()
+	f.On("systemctl is-active cron", okResult)
+	f.On("systemctl is-enabled cron", okResult)
+	f.On("command -v mysqldump >/dev/null 2>&1", okResult)
+	f.On("install -d -o root -g root -m 0755 '"+backupBaseDir+"'", okResult)
+	f.On("install -d -o root -g root -m 0755 '"+backupLogDir+"'", okResult)
+	f.On("install -d -o root -g root -m 0700 '"+backupDir(site.Domain)+"'", okResult)
+	f.On("cat '"+backupLogrotatePath+"'", bssh.Result{ExitCode: 1}) // absent: written fresh
+	f.On("logrotate -d '"+backupLogrotatePath+"'", okResult)
+	f.On("cat '"+backupScriptPath(site.Domain)+"'", bssh.Result{ExitCode: 0, Stdout: "#!/bin/sh\n# operator's own backup\n"}) // foreign
+
+	err := (backups{}).Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "not managed by berth") {
+		t.Fatalf("err = %v, want the unmanaged-file refusal", err)
+	}
+	for _, w := range f.Writes() {
+		if w.Path == backupScriptPath(site.Domain) {
+			t.Error("a foreign backup script must not be overwritten without --force")
+		}
 	}
 }
 

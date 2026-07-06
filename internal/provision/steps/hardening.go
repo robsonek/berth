@@ -124,7 +124,7 @@ func (hardening) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 	}, nil
 }
 
-func (h hardening) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) error {
+func (h hardening) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
 	// Install the firewall and intrusion-prevention packages first: a minimal
 	// Debian install ships neither ufw nor fail2ban, so the ufw commands below
 	// would otherwise fail with "ufw: not found".
@@ -158,7 +158,7 @@ func (h hardening) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serv
 		return fmt.Errorf("anti-lockout: refusing to harden sshd, berth access not verified: %w", err)
 	}
 
-	if err := r.WriteFile(ctx, bssh.FileSpec{
+	if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
 		Path: sshdDropInPath, Content: []byte(sshdDropInBody),
 		Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
 	}); err != nil {
@@ -184,7 +184,7 @@ func (h hardening) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serv
 	if err != nil {
 		return err
 	}
-	if err := r.WriteFile(ctx, bssh.FileSpec{
+	if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
 		Path: fail2banJailPath, Content: jail, Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
 	}); err != nil {
 		return fmt.Errorf("write %s: %w", fail2banJailPath, err)
