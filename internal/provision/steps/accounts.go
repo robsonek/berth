@@ -171,7 +171,7 @@ func (a accounts) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serv
 	}
 
 	// 2) berth: full NOPASSWD sudo.
-	if err := writeValidatedSudoers(ctx, r, sudoersBerthPath, []byte(sudoersBerthBody)); err != nil {
+	if err := writeValidatedSudoers(ctx, r, rc.Force, sudoersBerthPath, []byte(sudoersBerthBody)); err != nil {
 		return err
 	}
 
@@ -181,14 +181,14 @@ func (a accounts) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serv
 		if err != nil {
 			return fmt.Errorf("render sudoers for %s: %w", site.Domain, err)
 		}
-		if err := writeValidatedSudoers(ctx, r, sudoersPath(s.SiteUser(site)), body); err != nil {
+		if err := writeValidatedSudoers(ctx, r, rc.Force, sudoersPath(s.SiteUser(site)), body); err != nil {
 			return err
 		}
 	}
 
 	// 4) Install the operator key into every account.
 	for _, u := range managedAccounts(s) {
-		if err := installAuthorizedKey(ctx, r, u, want); err != nil {
+		if err := installAuthorizedKey(ctx, r, rc.Force, u, want); err != nil {
 			return err
 		}
 	}
@@ -256,9 +256,10 @@ func userHome(ctx context.Context, r bssh.Runner, user string) (string, error) {
 	return fields[5], nil
 }
 
-// writeValidatedSudoers writes a sudoers drop-in (mode 0440) and validates it.
-func writeValidatedSudoers(ctx context.Context, r bssh.Runner, path string, body []byte) error {
-	if err := r.WriteFile(ctx, bssh.FileSpec{
+// writeValidatedSudoers writes a sudoers drop-in (mode 0440, guarded against
+// clobbering a foreign file) and validates it.
+func writeValidatedSudoers(ctx context.Context, r bssh.Runner, force bool, path string, body []byte) error {
+	if err := writeManagedFile(ctx, r, force, bssh.FileSpec{
 		Path: path, Content: body, Owner: "root", Group: "root", Mode: 0o440, Sudo: true,
 	}); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
@@ -271,15 +272,16 @@ func writeValidatedSudoers(ctx context.Context, r bssh.Runner, path string, body
 	return nil
 }
 
-// installAuthorizedKey creates ~/.ssh and writes the managed authorized_keys.
-func installAuthorizedKey(ctx context.Context, r bssh.Runner, user string, want []byte) error {
+// installAuthorizedKey creates ~/.ssh and writes the managed authorized_keys
+// (guarded: a pre-existing hand-installed file is never clobbered without force).
+func installAuthorizedKey(ctx context.Context, r bssh.Runner, force bool, user string, want []byte) error {
 	sshDir := fmt.Sprintf("/home/%s/.ssh", user)
 	if res, err := r.Run(ctx, fmt.Sprintf("install -d -o %s -g %s -m 700 %s", user, user, shQuote(sshDir)), nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("create %s: %s", sshDir, res.Stderr)
 	}
-	if err := r.WriteFile(ctx, bssh.FileSpec{
+	if err := writeManagedFile(ctx, r, force, bssh.FileSpec{
 		Path: authorizedKeysPath(user), Content: want,
 		Owner: user, Group: user, Mode: 0o600, Sudo: true,
 	}); err != nil {

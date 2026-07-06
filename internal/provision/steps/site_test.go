@@ -69,6 +69,7 @@ func TestSiteApplyValidatesNginxBeforeReload(t *testing.T) {
 func TestSiteApplyAbortsOnNginxTestFailure(t *testing.T) {
 	s := siteServer()
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(nginxAvailablePath("app.example.com")), bssh.Result{ExitCode: 1}) // vhost write-guard: absent
 	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
 	f.On("nginx -t", bssh.Result{ExitCode: 1, Stderr: "invalid config"})
 	f.On("cat "+shQuote(cloudflareConfPath), bssh.Result{ExitCode: 1}) // step-0 cloudflare snippet absent
@@ -78,10 +79,60 @@ func TestSiteApplyAbortsOnNginxTestFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected Apply to abort when nginx -t fails")
 	}
+	var ranNginxT bool
 	for _, c := range f.Calls() {
+		if c.Cmd == "nginx -t" {
+			ranNginxT = true
+		}
 		if c.Cmd == "systemctl reload nginx" {
 			t.Error("reload must not run after a failed nginx -t")
 		}
+	}
+	if !ranNginxT {
+		t.Fatal("Apply must reach and fail at nginx -t (not abort earlier)")
+	}
+}
+
+func TestSiteApplyRefusesForeignVhost(t *testing.T) {
+	// Check's managed-file loop returns unsatisfied at the FIRST conflict, so a
+	// foreign vhost later in the list can reach Apply unclassified; the write
+	// path itself must refuse to clobber a config berth does not manage.
+	s := siteServer()
+	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(nginxAvailablePath("app.example.com")), bssh.Result{ExitCode: 0, Stdout: "server { listen 80; } # hand-written\n"})
+
+	err := Site().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "not managed by berth") {
+		t.Fatalf("err = %v, want the unmanaged-file refusal", err)
+	}
+	for _, w := range f.Writes() {
+		if w.Path == nginxAvailablePath("app.example.com") {
+			t.Error("a foreign vhost must not be overwritten without --force")
+		}
+	}
+}
+
+func TestSiteApplyOverwritesForeignVhostWithForce(t *testing.T) {
+	s := siteServer()
+	f := bssh.NewFakeRunner()
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+	// AFTER stubFPMApply (On overwrites map entries): the vhost is foreign.
+	f.On("cat "+shQuote(nginxAvailablePath("app.example.com")), bssh.Result{ExitCode: 0, Stdout: "server { listen 80; } # hand-written\n"})
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{Force: true}, s, f); err != nil {
+		t.Fatalf("Apply() with --force error = %v", err)
+	}
+	var overwritten bool
+	for _, w := range f.Writes() {
+		if w.Path == nginxAvailablePath("app.example.com") {
+			overwritten = true
+		}
+	}
+	if !overwritten {
+		t.Error("--force must overwrite the foreign vhost")
 	}
 }
 
@@ -516,6 +567,18 @@ func stubFPMApply(s *config.Server, f *bssh.FakeRunner) {
 	f.On("supervisorctl reread", bssh.Result{})
 	f.On("supervisorctl update", bssh.Result{})
 	f.On("cat "+shQuote(cloudflareConfPath), bssh.Result{ExitCode: 1}) // step-0 cloudflare snippet absent
+	// Write-guard reads: every managed file Apply may write is absent by default.
+	// Tests that model a pre-existing file re-stub the specific path AFTER this.
+	f.On("cat "+shQuote(logrotatePath), bssh.Result{ExitCode: 1})
+	for _, site := range s.Sites {
+		f.On("cat "+shQuote(nginxAvailablePath(site.Domain)), bssh.Result{ExitCode: 1})
+		f.On("cat "+shQuote(fpmPoolPath(s.PHP.Version, site.Domain)), bssh.Result{ExitCode: 1})
+		f.On("cat "+shQuote(supervisorProgramPath(site.Domain)), bssh.Result{ExitCode: 1})
+		f.On("cat "+shQuote(cronPath(site.Domain)), bssh.Result{ExitCode: 1})
+		for _, d := range site.Daemons {
+			f.On("cat "+shQuote(daemonProgramPath(site.Domain, d.Name)), bssh.Result{ExitCode: 1})
+		}
+	}
 }
 
 // replayWritesAsReads seeds dst with `cat '<path>'` stubs for every file written

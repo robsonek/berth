@@ -144,6 +144,24 @@ func managedFileSatisfied(state managedFileState, path string, force bool) (sati
 	}
 }
 
+// writeManagedFile enforces the drift policy (§6.5) on the WRITE path, then
+// writes: a pre-existing file at spec.Path that lacks the berth marker is
+// refused unless force. Check normally reports such conflicts first, but its
+// per-file loops return at the FIRST unsatisfied entry, so a foreign file
+// later in the list reaches Apply unclassified — the write path must enforce
+// the abort-unless---force contract itself. Steps write managed configs
+// through this helper, never bare r.WriteFile.
+func writeManagedFile(ctx context.Context, r bssh.Runner, force bool, spec bssh.FileSpec) error {
+	res, err := r.Run(ctx, "cat "+shQuote(spec.Path), nil)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode == 0 && !hasManagedMarker(res.Stdout) && !force {
+		return fmt.Errorf("%s exists but is not managed by berth; re-run with --force to overwrite", spec.Path)
+	}
+	return r.WriteFile(ctx, spec)
+}
+
 // managedFilePresent reports whether a berth-managed file currently exists at
 // path. Used for drift-removal: an absent or unmanaged (non-berth) file is left
 // untouched, so disabling a feature never clobbers a foreign file.

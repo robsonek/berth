@@ -160,7 +160,7 @@ func (st tls) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 			if err != nil {
 				return err
 			}
-			if err := r.WriteFile(ctx, bssh.FileSpec{
+			if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
 				Path: certbotDeployHookPath, Content: hook,
 				Owner: "root", Group: "root", Mode: 0o755, Sudo: true,
 			}); err != nil {
