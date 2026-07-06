@@ -451,7 +451,7 @@ func (site) changes() []string {
 	}
 }
 
-func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) error {
+func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
 	// 0) When cloudflare_only is active, write the global geo/realip snippet BEFORE
 	//    the per-site vhosts so $berth_cloudflare is defined when nginx -t validates a
 	//    guarded vhost. (The disabled-state removal happens AFTER the vhosts are
@@ -462,7 +462,7 @@ func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 		if err != nil {
 			return err
 		}
-		if err := r.WriteFile(ctx, bssh.FileSpec{
+		if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
 			Path: cloudflareConfPath, Content: cf, Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
 		}); err != nil {
 			return fmt.Errorf("write %s: %w", cloudflareConfPath, err)
@@ -475,7 +475,7 @@ func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 		if err != nil {
 			return fmt.Errorf("render nginx config for %s: %w", site.Domain, err)
 		}
-		if err := r.WriteFile(ctx, bssh.FileSpec{
+		if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
 			Path: nginxAvailablePath(site.Domain), Content: conf,
 			Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
 		}); err != nil {
@@ -530,7 +530,7 @@ func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 		if err != nil {
 			return fmt.Errorf("render FPM pool for %s: %w", site.Domain, err)
 		}
-		if err := r.WriteFile(ctx, bssh.FileSpec{
+		if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
 			Path: fpmPoolPath(s.PHP.Version, site.Domain), Content: pool,
 			Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
 		}); err != nil {
@@ -556,7 +556,7 @@ func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 			if err != nil {
 				return fmt.Errorf("render supervisor worker for %s: %w", site.Domain, err)
 			}
-			if err := r.WriteFile(ctx, bssh.FileSpec{
+			if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
 				Path: supervisorProgramPath(site.Domain), Content: worker,
 				Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
 			}); err != nil {
@@ -568,7 +568,7 @@ func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 			if err != nil {
 				return fmt.Errorf("render daemon %s for %s: %w", d.Name, site.Domain, err)
 			}
-			if err := r.WriteFile(ctx, bssh.FileSpec{
+			if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
 				Path: daemonProgramPath(site.Domain, d.Name), Content: body,
 				Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
 			}); err != nil {
@@ -580,7 +580,7 @@ func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 			if err != nil {
 				return fmt.Errorf("render scheduler cron for %s: %w", site.Domain, err)
 			}
-			if err := r.WriteFile(ctx, bssh.FileSpec{
+			if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
 				Path: cronPath(site.Domain), Content: cron,
 				Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
 			}); err != nil {
@@ -664,7 +664,7 @@ func (st site) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 	if err != nil {
 		return err
 	}
-	if err := r.WriteFile(ctx, bssh.FileSpec{
+	if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
 		Path: logrotatePath, Content: lr, Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
 	}); err != nil {
 		return fmt.Errorf("write %s: %w", logrotatePath, err)

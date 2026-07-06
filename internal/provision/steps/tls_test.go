@@ -103,6 +103,7 @@ func TestTLSApplyShortCircuitsOnValidCert(t *testing.T) {
 		Stdout:   certbotCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour)),
 	})
 	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
+	f.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 1}) // hook write-guard: absent
 	// No certbot certonly, install, or reload stubbed: a present valid cert must
 	// short-circuit Apply entirely.
 	if err := TLS().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -127,6 +128,7 @@ func TestTLSApplyUsesWebrootAndIssuesCert(t *testing.T) {
 	f.On("systemctl reload nginx", bssh.Result{})
 	f.On("systemctl enable --now certbot.timer", bssh.Result{})
 	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
+	f.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 1}) // hook write-guard: absent
 
 	if err := TLS().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -163,6 +165,7 @@ func TestTLSApplyHonorsStagingFlag(t *testing.T) {
 	f.On("systemctl reload nginx", bssh.Result{})
 	f.On("systemctl enable --now certbot.timer", bssh.Result{})
 	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
+	f.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 1}) // hook write-guard: absent
 
 	if err := TLS().Apply(context.Background(), provision.RunCtx{SSLStaging: true}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -342,6 +345,7 @@ func TestTLSApplyWritesDeployHook(t *testing.T) {
 		Stdout:   certbotCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour)),
 	})
 	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
+	f.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 1}) // hook write-guard: absent
 	if err := TLS().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
@@ -367,6 +371,49 @@ func TestTLSApplyWritesDeployHook(t *testing.T) {
 	}
 	if strings.Contains(body, "pipefail") || strings.Contains(body, "#!") {
 		t.Errorf("hook must be strict POSIX sh with no shebang (marker is byte 0):\n%s", body)
+	}
+}
+
+func TestTLSApplyRefusesForeignDeployHookWithoutForce(t *testing.T) {
+	// tls.Check returns unsatisfied at the first invalid cert BEFORE classifying
+	// the deploy hook, so Apply's write path must itself refuse to clobber a
+	// foreign (unmanaged) hook unless --force.
+	s := tlsServer()
+	stubs := func() *bssh.FakeRunner {
+		f := bssh.NewFakeRunner()
+		// Valid cert: the per-site loop short-circuits; hook convergence follows.
+		f.On("certbot certificates", bssh.Result{
+			ExitCode: 0,
+			Stdout:   certbotCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour)),
+		})
+		f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
+		f.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 0, Stdout: "service apache2 reload\n"}) // no marker
+		return f
+	}
+
+	f := stubs()
+	err := TLS().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "not managed by berth") {
+		t.Fatalf("err = %v, want the unmanaged-file refusal", err)
+	}
+	for _, w := range f.Writes() {
+		if w.Path == certbotDeployHookPath {
+			t.Error("a foreign deploy hook must not be overwritten without --force")
+		}
+	}
+
+	f2 := stubs()
+	if err := TLS().Apply(context.Background(), provision.RunCtx{Force: true}, s, f2); err != nil {
+		t.Fatalf("Apply() with --force error = %v", err)
+	}
+	var overwritten bool
+	for _, w := range f2.Writes() {
+		if w.Path == certbotDeployHookPath {
+			overwritten = true
+		}
+	}
+	if !overwritten {
+		t.Error("--force must overwrite the foreign deploy hook")
 	}
 }
 

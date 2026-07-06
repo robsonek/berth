@@ -45,7 +45,7 @@ func stubAccountExists(f *bssh.FakeRunner, user string, sudoers, want []byte) {
 
 // stubAccountCreate stubs the mutating commands for creating + configuring an
 // account during Apply (user absent → useradd; home lockdown; sudoers validate;
-// ssh dir).
+// ssh dir; write-guard reads report both managed files absent).
 func stubAccountCreate(f *bssh.FakeRunner, user string) {
 	f.On("id "+user, bssh.Result{ExitCode: 1})
 	f.On("useradd -m -s /bin/bash "+user, bssh.Result{})
@@ -53,6 +53,8 @@ func stubAccountCreate(f *bssh.FakeRunner, user string) {
 	f.On(fmt.Sprintf("install -d -o %s -g %s -m 700 ", user, user)+shQuote(fmt.Sprintf("/home/%s", user)), bssh.Result{})
 	f.On("visudo -cf "+shQuote(sudoersPath(user)), bssh.Result{ExitCode: 0})
 	f.On(fmt.Sprintf("install -d -o %s -g %s -m 700 ", user, user)+shQuote(fmt.Sprintf("/home/%s/.ssh", user)), bssh.Result{})
+	f.On("cat "+shQuote(sudoersPath(user)), bssh.Result{ExitCode: 1})
+	f.On("cat "+shQuote(authorizedKeysPath(user)), bssh.Result{ExitCode: 1})
 }
 
 func TestAccountsRequiresBase(t *testing.T) {
@@ -254,6 +256,55 @@ func TestAccountsApplyMultiSiteIsolatesUsers(t *testing.T) {
 		if _, ok := writes[authorizedKeysPath(u)]; !ok {
 			t.Errorf("authorized_keys for %s not written", u)
 		}
+	}
+}
+
+func TestAccountsApplyRefusesForeignAuthorizedKeys(t *testing.T) {
+	// Check's per-account loop returns unsatisfied at the FIRST conflict, so a
+	// later account's pre-existing authorized_keys may reach Apply unclassified;
+	// the write path itself must refuse to clobber a file berth does not manage.
+	s := testServerWithKey(t)
+	f := bssh.NewFakeRunner()
+	stubAccountCreate(f, "berth")
+	stubAccountCreate(f, "deploy")
+	f.On("cat "+shQuote(sudoersBerthPath), bssh.Result{ExitCode: 1})
+	f.On("cat "+shQuote(sudoersPath("deploy")), bssh.Result{ExitCode: 1})
+	f.On("cat "+shQuote(authorizedKeysPath("berth")), bssh.Result{ExitCode: 1})
+	// deploy already has a hand-installed authorized_keys (no berth marker).
+	f.On("cat "+shQuote(authorizedKeysPath("deploy")), bssh.Result{ExitCode: 0, Stdout: "ssh-rsa AAAAOPERATORMANUALKEY manual@ops\n"})
+
+	err := Accounts().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "not managed by berth") {
+		t.Fatalf("err = %v, want the unmanaged-file refusal", err)
+	}
+	for _, w := range f.Writes() {
+		if w.Path == authorizedKeysPath("deploy") {
+			t.Error("a foreign authorized_keys must not be overwritten without --force")
+		}
+	}
+}
+
+func TestAccountsApplyOverwritesForeignAuthorizedKeysWithForce(t *testing.T) {
+	s := testServerWithKey(t)
+	f := bssh.NewFakeRunner()
+	stubAccountCreate(f, "berth")
+	stubAccountCreate(f, "deploy")
+	f.On("cat "+shQuote(sudoersBerthPath), bssh.Result{ExitCode: 1})
+	f.On("cat "+shQuote(sudoersPath("deploy")), bssh.Result{ExitCode: 1})
+	f.On("cat "+shQuote(authorizedKeysPath("berth")), bssh.Result{ExitCode: 1})
+	f.On("cat "+shQuote(authorizedKeysPath("deploy")), bssh.Result{ExitCode: 0, Stdout: "ssh-rsa AAAAOPERATORMANUALKEY manual@ops\n"})
+
+	if err := Accounts().Apply(context.Background(), provision.RunCtx{Force: true}, s, f); err != nil {
+		t.Fatalf("Apply() with --force error = %v", err)
+	}
+	var overwritten bool
+	for _, w := range f.Writes() {
+		if w.Path == authorizedKeysPath("deploy") {
+			overwritten = true
+		}
+	}
+	if !overwritten {
+		t.Error("--force must overwrite the foreign authorized_keys")
 	}
 }
 
