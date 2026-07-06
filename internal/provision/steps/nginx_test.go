@@ -127,8 +127,9 @@ func TestNginxCheckSourceNginxRequiresRepo(t *testing.T) {
 	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
 	stubDefaultsAbsent(f)
-	// Worker user already reconciled to www-data (so only the repo gates this test).
+	// Worker user reconciled and bridge managed (so only the repo gates this test).
 	f.On("grep -qE '^[[:space:]]*user[[:space:]]+www-data;' "+nginxConfPath, bssh.Result{ExitCode: 0})
+	f.On("cat "+shQuote(nginxBridgePath), bssh.Result{ExitCode: 0, Stdout: string(nginxBridgeContent())})
 	// nginx.org repo not yet registered -> not satisfied even though nginx runs.
 	f.On("test -e "+shQuote(nginxOrgSourceList), bssh.Result{ExitCode: 1})
 	cr, err := Nginx().Check(context.Background(), provision.RunCtx{}, s, f)
@@ -149,6 +150,60 @@ func TestNginxCheckSourceNginxRequiresRepo(t *testing.T) {
 	}
 }
 
+func TestNginxCheckUnsatisfiedWhenBridgeMissingOrForeign(t *testing.T) {
+	// source=nginx: without the conf.d bridge nginx.org's nginx never loads
+	// sites-enabled/, so Check must flag a missing bridge (Apply rewrites it)
+	// and hard-error on a foreign one (abort-unless---force contract).
+	s := &config.Server{Nginx: config.Nginx{Source: "nginx"}}
+	stubs := func(bridge bssh.Result) *bssh.FakeRunner {
+		f := bssh.NewFakeRunner()
+		f.On("dpkg -s nginx", bssh.Result{ExitCode: 0})
+		f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
+		f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
+		stubDefaultsAbsent(f)
+		f.On("grep -qE '^[[:space:]]*user[[:space:]]+www-data;' "+nginxConfPath, bssh.Result{ExitCode: 0})
+		f.On("test -e "+shQuote(nginxOrgSourceList), bssh.Result{ExitCode: 0})
+		f.On("cat "+shQuote(nginxBridgePath), bridge)
+		return f
+	}
+
+	cr, err := Nginx().Check(context.Background(), provision.RunCtx{}, s, stubs(bssh.Result{ExitCode: 1}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("a missing sites bridge must be unsatisfied (site server blocks would never load)")
+	}
+
+	_, err = Nginx().Check(context.Background(), provision.RunCtx{}, s, stubs(bssh.Result{ExitCode: 0, Stdout: "include /srv/legacy/*.conf;\n"}))
+	if err == nil || !strings.Contains(err.Error(), "not managed by berth") {
+		t.Fatalf("err = %v, want the unmanaged-file refusal for a foreign bridge", err)
+	}
+}
+
+func TestNginxApplyRefusesForeignSitesBridge(t *testing.T) {
+	// A hand-written /etc/nginx/conf.d/berth-sites.conf (no marker) must not be
+	// clobbered by Apply without --force.
+	s := &config.Server{Nginx: config.Nginx{Source: "nginx"}}
+	f := bssh.NewFakeRunner()
+	stubRepoKeyTrust(f, "nginx-org", "https://nginx.org/keys/nginx_signing.key", "8540A6F18833A80E9C1653A42FD21310B49F6B46")
+	f.On("apt-get update", bssh.Result{})
+	f.On("apt-get update -o Dir::Etc::sourcelist=sources.list.d/nginx-org.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o APT::Update::Error-Mode=any", bssh.Result{ExitCode: 0})
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx", bssh.Result{})
+	f.On("install -d /etc/nginx/sites-available /etc/nginx/sites-enabled", bssh.Result{})
+	f.On("cat "+shQuote("/etc/nginx/conf.d/berth-sites.conf"), bssh.Result{ExitCode: 0, Stdout: "include /srv/legacy/*.conf;\n"}) // foreign
+
+	err := Nginx().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "not managed by berth") {
+		t.Fatalf("err = %v, want the unmanaged-file refusal", err)
+	}
+	for _, w := range f.Writes() {
+		if w.Path == "/etc/nginx/conf.d/berth-sites.conf" {
+			t.Error("a foreign sites bridge must not be overwritten without --force")
+		}
+	}
+}
+
 func TestNginxApplySourceNginxAddsRepoAndBridge(t *testing.T) {
 	s := &config.Server{Nginx: config.Nginx{Source: "nginx"}}
 	f := bssh.NewFakeRunner()
@@ -157,6 +212,7 @@ func TestNginxApplySourceNginxAddsRepoAndBridge(t *testing.T) {
 	f.On("apt-get update -o Dir::Etc::sourcelist=sources.list.d/nginx-org.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o APT::Update::Error-Mode=any", bssh.Result{ExitCode: 0})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx", bssh.Result{})
 	f.On("install -d /etc/nginx/sites-available /etc/nginx/sites-enabled", bssh.Result{})
+	f.On("cat "+shQuote("/etc/nginx/conf.d/berth-sites.conf"), bssh.Result{ExitCode: 1}) // write-guard: absent
 	f.On("sed -ri 's|^[[:space:]]*user[[:space:]]+[^;]*;|user  www-data;|' "+nginxConfPath, bssh.Result{})
 	f.On("systemctl enable --now nginx", bssh.Result{})
 	stubNginxApplyTail(f)

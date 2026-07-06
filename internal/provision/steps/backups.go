@@ -271,7 +271,7 @@ func (b backups) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 	return provision.CheckResult{Satisfied: false, Reason: "backups not in desired state", Changes: changes}, nil
 }
 
-func (b backups) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) error {
+func (b backups) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
 	eng, err := dbpkg.Get(s.Database.Engine)
 	if err != nil {
 		return err
@@ -293,7 +293,7 @@ func (b backups) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server
 		if err != nil {
 			return err
 		}
-		if err := r.WriteFile(ctx, bssh.FileSpec{Path: backupLogrotatePath, Content: lr, Owner: "root", Group: "root", Mode: 0o644, Sudo: true}); err != nil {
+		if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{Path: backupLogrotatePath, Content: lr, Owner: "root", Group: "root", Mode: 0o644, Sudo: true}); err != nil {
 			return fmt.Errorf("write %s: %w", backupLogrotatePath, err)
 		}
 		// Validate the fragment before trusting the host's logrotate to it (mirrors site.go).
@@ -325,7 +325,7 @@ func (b backups) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server
 		if err != nil {
 			return err
 		}
-		if err := r.WriteFile(ctx, bssh.FileSpec{Path: sp, Content: script, Owner: "root", Group: "root", Mode: 0o755, Sudo: true}); err != nil {
+		if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{Path: sp, Content: script, Owner: "root", Group: "root", Mode: 0o755, Sudo: true}); err != nil {
 			return fmt.Errorf("write %s: %w", sp, err)
 		}
 		// Validate the generated script before trusting cron to run it (mirrors nginx -t).
@@ -336,7 +336,7 @@ func (b backups) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server
 		if err != nil {
 			return err
 		}
-		if err := r.WriteFile(ctx, bssh.FileSpec{Path: cp, Content: cron, Owner: "root", Group: "root", Mode: 0o644, Sudo: true}); err != nil {
+		if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{Path: cp, Content: cron, Owner: "root", Group: "root", Mode: 0o644, Sudo: true}); err != nil {
 			return fmt.Errorf("write %s: %w", cp, err)
 		}
 	}

@@ -48,6 +48,8 @@ func TestHardeningApplyAllowsBeforeEnableAndGatesBeforeSshd(t *testing.T) {
 	f.On("ufw allow 80,443/tcp", bssh.Result{})
 	f.On("ufw --force enable", bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
+	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 1})   // write-guard: absent
+	f.On("cat "+shQuote(fail2banJailPath), bssh.Result{ExitCode: 1}) // write-guard: absent
 	f.On("sshd -t", bssh.Result{})
 	f.On("systemctl reload ssh", bssh.Result{})
 	f.On("fail2ban-client -t", bssh.Result{})
@@ -96,6 +98,34 @@ func TestHardeningApplyAllowsBeforeEnableAndGatesBeforeSshd(t *testing.T) {
 	}
 }
 
+func TestHardeningApplyRefusesForeignSshdDropIn(t *testing.T) {
+	// The write path must refuse to clobber a hand-written sshd drop-in that
+	// berth does not manage (Check's loop can return on an earlier conflict).
+	stubGate(t, nil, nil)
+	s := hardeningServer()
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
+	f.On("ufw allow 2222/tcp", bssh.Result{})
+	f.On("ufw allow 80,443/tcp", bssh.Result{})
+	f.On("ufw --force enable", bssh.Result{})
+	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 0, Stdout: "PermitRootLogin prohibit-password\n"}) // foreign
+
+	err := Hardening().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "not managed by berth") {
+		t.Fatalf("err = %v, want the unmanaged-file refusal", err)
+	}
+	for _, w := range f.Writes() {
+		if w.Path == sshdDropInPath {
+			t.Error("a foreign sshd drop-in must not be overwritten without --force")
+		}
+	}
+	for _, c := range f.Calls() {
+		if c.Cmd == "systemctl reload ssh" {
+			t.Error("reload ssh must not run when the drop-in write was refused")
+		}
+	}
+}
+
 func TestHardeningApplyValidatesSshdBeforeReload(t *testing.T) {
 	stubGate(t, nil, nil)
 	s := hardeningServer()
@@ -105,6 +135,8 @@ func TestHardeningApplyValidatesSshdBeforeReload(t *testing.T) {
 	f.On("ufw allow 80,443/tcp", bssh.Result{})
 	f.On("ufw --force enable", bssh.Result{})
 	f.On("sshd -t", bssh.Result{ExitCode: 0})
+	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 1})   // write-guard: absent
+	f.On("cat "+shQuote(fail2banJailPath), bssh.Result{ExitCode: 1}) // write-guard: absent
 	f.On("sshd -t", bssh.Result{})
 	f.On("systemctl reload ssh", bssh.Result{})
 	f.On("fail2ban-client -t", bssh.Result{})
@@ -139,6 +171,7 @@ func TestHardeningApplyAbortsReloadWhenSshdConfigInvalid(t *testing.T) {
 	f.On("ufw allow 2222/tcp", bssh.Result{})
 	f.On("ufw allow 80,443/tcp", bssh.Result{})
 	f.On("ufw --force enable", bssh.Result{})
+	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 1}) // write-guard: absent
 	f.On("sshd -t", bssh.Result{ExitCode: 1, Stderr: "/etc/ssh/sshd_config.d/berth.conf: Bad configuration option"})
 	// systemctl reload ssh intentionally NOT stubbed: it must never run.
 
@@ -256,6 +289,8 @@ func TestHardeningApplyOpensUDP443WhenHTTP3(t *testing.T) {
 	f.On("ufw allow 443/udp", bssh.Result{})
 	f.On("ufw --force enable", bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
+	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 1})   // write-guard: absent
+	f.On("cat "+shQuote(fail2banJailPath), bssh.Result{ExitCode: 1}) // write-guard: absent
 	f.On("sshd -t", bssh.Result{})
 	f.On("systemctl reload ssh", bssh.Result{})
 	f.On("fail2ban-client -t", bssh.Result{})
@@ -355,6 +390,8 @@ func TestHardeningApplyWritesFail2banJail(t *testing.T) {
 	f.On("ufw allow 80,443/tcp", bssh.Result{})
 	f.On("ufw --force enable", bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
+	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 1})   // write-guard: absent
+	f.On("cat "+shQuote(fail2banJailPath), bssh.Result{ExitCode: 1}) // write-guard: absent
 	f.On("sshd -t", bssh.Result{})
 	f.On("systemctl reload ssh", bssh.Result{})
 	f.On("fail2ban-client -t", bssh.Result{})

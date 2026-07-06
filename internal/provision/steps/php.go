@@ -120,7 +120,7 @@ func (php) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 	return provision.CheckResult{Satisfied: true, Reason: "php" + s.PHP.Version + "-fpm installed; OPcache tuned for production"}, nil
 }
 
-func (php) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) error {
+func (php) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
 	sury, err := useSury(s.PHP)
 	if err != nil {
 		return err
@@ -149,7 +149,7 @@ func (php) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r bs
 	if err != nil {
 		return err
 	}
-	if err := r.WriteFile(ctx, bssh.FileSpec{
+	if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
 		Path: opcacheDropInPath(v), Content: ini, Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
 	}); err != nil {
 		return fmt.Errorf("write OPcache drop-in: %w", err)

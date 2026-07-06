@@ -36,7 +36,16 @@ const (
 	nginxOrgDefaultConf = "/etc/nginx/conf.d/default.conf"
 )
 
-func (nginx) Check(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
+// nginxBridgePath/nginxBridgeContent are the managed conf.d include bridging
+// nginx.org's layout to Debian's sites-enabled/ (single source for Check's
+// drift probe and Apply's write, so they can never disagree).
+const nginxBridgePath = "/etc/nginx/conf.d/berth-sites.conf"
+
+func nginxBridgeContent() []byte {
+	return []byte(managedMarker + "\ninclude /etc/nginx/sites-enabled/*;\n")
+}
+
+func (nginx) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
 	installed, err := pkgInstalled(ctx, r, "nginx")
 	if err != nil {
 		return provision.CheckResult{}, err
@@ -48,7 +57,7 @@ func (nginx) Check(ctx context.Context, _ provision.RunCtx, s *config.Server, r 
 	// When nginx.org is the configured source, its repo must be registered (so a
 	// source switch re-triggers Apply) and its worker user must be reconciled to
 	// www-data (so berth's www-data-based permission model holds).
-	sourceOK, userOK := true, true
+	sourceOK, userOK, bridgeOK := true, true, true
 	if s.Nginx.Source == "nginx" {
 		sourceOK, err = fileExists(ctx, r, nginxOrgSourceList)
 		if err != nil {
@@ -58,13 +67,24 @@ func (nginx) Check(ctx context.Context, _ provision.RunCtx, s *config.Server, r 
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
+		// The sites bridge must be the berth-managed one: without it nginx.org's
+		// nginx never loads sites-enabled/, so a missing/drifted bridge is
+		// unsatisfied drift and a foreign file aborts unless --force.
+		state, err := checkManagedFile(ctx, r, nginxBridgePath, nginxBridgeContent())
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		bridgeOK, err = managedFileSatisfied(state, nginxBridgePath, rc.Force)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
 	}
 	// The stock catch-all sites must be disabled.
 	defaultsDisabled, err := stockDefaultsDisabled(ctx, r)
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	if installed && up && sourceOK && userOK && defaultsDisabled {
+	if installed && up && sourceOK && userOK && bridgeOK && defaultsDisabled {
 		return provision.CheckResult{Satisfied: true, Reason: "nginx installed and running from the " + s.Nginx.Source + " source (worker user www-data); stock default sites disabled"}, nil
 	}
 	return provision.CheckResult{
@@ -98,7 +118,7 @@ func stockDefaultsDisabled(ctx context.Context, r bssh.Runner) (bool, error) {
 	return true, nil
 }
 
-func (nginx) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) error {
+func (nginx) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
 	m := apt.New(r)
 	if s.Nginx.Source == "nginx" {
 		if err := m.EnsureRepo(ctx, apt.NginxOrg()); err != nil {
@@ -109,7 +129,7 @@ func (nginx) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r 
 		return fmt.Errorf("install nginx: %w", err)
 	}
 	if s.Nginx.Source == "nginx" {
-		if err := bridgeNginxSitesLayout(ctx, r); err != nil {
+		if err := bridgeNginxSitesLayout(ctx, r, rc.Force); err != nil {
 			return err
 		}
 		if err := ensureNginxWorkerUser(ctx, r); err != nil {
@@ -159,16 +179,15 @@ func disableStockDefaults(ctx context.Context, r bssh.Runner) error {
 // nginx.conf includes /etc/nginx/conf.d/*.conf but not Debian's sites-enabled/,
 // where berth's site step writes server blocks. It ensures the sites dirs exist
 // and drops a managed conf.d include so those server blocks are loaded.
-func bridgeNginxSitesLayout(ctx context.Context, r bssh.Runner) error {
+func bridgeNginxSitesLayout(ctx context.Context, r bssh.Runner, force bool) error {
 	if res, err := r.Run(ctx, "install -d /etc/nginx/sites-available /etc/nginx/sites-enabled", nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("create nginx sites dirs: %s", res.Stderr)
 	}
-	if err := r.WriteFile(ctx, bssh.FileSpec{
-		Path:    "/etc/nginx/conf.d/berth-sites.conf",
-		Content: []byte(managedMarker + "\ninclude /etc/nginx/sites-enabled/*;\n"),
-		Owner:   "root", Group: "root", Mode: 0o644, Sudo: true,
+	if err := writeManagedFile(ctx, r, force, bssh.FileSpec{
+		Path: nginxBridgePath, Content: nginxBridgeContent(),
+		Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
 	}); err != nil {
 		return fmt.Errorf("write nginx sites bridge: %w", err)
 	}

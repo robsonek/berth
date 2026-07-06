@@ -40,11 +40,32 @@ func phpExtPkgs(v string) []string {
 	return pkgs
 }
 
+func TestPHPApplyRefusesForeignOpcacheDropIn(t *testing.T) {
+	// An operator's own OPcache drop-in (no berth marker) must not be clobbered
+	// by Apply without --force.
+	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
+	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
+	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{ExitCode: 0, Stdout: "opcache.enable=0\n"}) // foreign
+
+	err := PHP().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "not managed by berth") {
+		t.Fatalf("err = %v, want the unmanaged-file refusal", err)
+	}
+	for _, w := range f.Writes() {
+		if w.Path == opcacheDropInPath("8.4") {
+			t.Error("a foreign OPcache drop-in must not be overwritten without --force")
+		}
+	}
+}
+
 func TestPHPApplyWritesOpcacheDropIn(t *testing.T) {
 	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}} // stock -> no Surý repo
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
+	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{ExitCode: 1}) // write-guard: absent
 	f.On("php-fpm8.4 -t", bssh.Result{})
 	f.On("systemctl reload php8.4-fpm", bssh.Result{})
 
