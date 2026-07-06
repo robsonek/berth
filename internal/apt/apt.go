@@ -136,23 +136,81 @@ type Manager struct{ r bssh.Runner }
 
 func New(r bssh.Runner) *Manager { return &Manager{r: r} }
 
-// EnsureRepo installs the signing key, verifies its fingerprint, and writes the
-// source with signed-by. It aborts on a fingerprint mismatch.
+// primaryFingerprints returns the primary-key fingerprints in
+// `gpg --show-keys --with-colons` output: the fpr record immediately following
+// a pub record. Subkey fingerprints (fpr after sub) are ignored — apt's
+// signed-by trust is anchored at primary keys.
+func primaryFingerprints(colons string) []string {
+	var out []string
+	prevPub := false
+	for _, line := range strings.Split(colons, "\n") {
+		fields := strings.Split(line, ":")
+		if fields[0] == "fpr" && prevPub && len(fields) > 9 {
+			out = append(out, fields[9])
+		}
+		prevPub = fields[0] == "pub"
+	}
+	return out
+}
+
+// EnsureRepo installs the signing key, verifies it against the pinned
+// fingerprint, and writes the source with signed-by. The trusted keyring ends
+// up holding EXACTLY the pinned key: signed-by trusts every key in the file,
+// so a multi-key bundle (e.g. MariaDB publishes a rotation key alongside the
+// release key) must not land in it wholesale — an extra key smuggled into the
+// published bundle would otherwise sign Release files unnoticed. A future key
+// rotation therefore fails loud until the pin is updated, by design.
 func (m *Manager) EnsureRepo(ctx context.Context, repo Repo) error {
 	keyring := "/usr/share/keyrings/" + repo.Name + ".gpg"
-	// Fetch the signing key from its published URL and dearmor it into a keyring.
-	dl := fmt.Sprintf("curl -fsSL %s | gpg --dearmor --yes -o %s", repo.KeyURL, keyring)
-	if res, err := m.r.Run(ctx, dl, nil); err != nil {
+	// Temp files live in a root-owned 0700 workdir under /run: predictable names
+	// in world-writable /tmp would let a local user pre-create or symlink them
+	// before root writes through the path.
+	tmpKey := "/run/berth/key-" + repo.Name
+	tmpRing := "/run/berth/keyring-" + repo.Name + ".gpg"
+	if res, err := m.r.Run(ctx, "install -d -m 700 /run/berth", nil); err != nil {
+		return fmt.Errorf("create key workdir for %s: %w", repo.Name, err)
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("create key workdir for %s: %s", repo.Name, res.Stderr)
+	}
+	// Download to a file so curl's exit code surfaces a failed fetch directly.
+	// (Piping into gpg would take gpg's exit code — 0 even on empty stdin — and
+	// the failure would only show up later as a misleading fingerprint error.)
+	if res, err := m.r.Run(ctx, "curl -fsSL "+repo.KeyURL+" -o "+tmpKey, nil); err != nil {
 		return fmt.Errorf("download key for %s: %w", repo.Name, err)
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("download key for %s: %s", repo.Name, res.Stderr)
 	}
+	// Normalize to a binary keyring (handles armored and binary keys alike).
+	if res, err := m.r.Run(ctx, "gpg --yes -o "+tmpRing+" --dearmor "+tmpKey, nil); err != nil {
+		return fmt.Errorf("dearmor key for %s: %w", repo.Name, err)
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("dearmor key for %s: %s", repo.Name, res.Stderr)
+	}
+	// Extract only the pinned key into the trusted keyring.
+	if res, err := m.r.Run(ctx, "gpg --no-default-keyring --keyring "+tmpRing+" --yes -o "+keyring+" --export "+repo.Fingerprint, nil); err != nil {
+		return fmt.Errorf("extract pinned key for %s: %w", repo.Name, err)
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("extract pinned key for %s: %s", repo.Name, res.Stderr)
+	}
+	// Verify the keyring holds exactly the pinned primary key. `--export` of an
+	// absent fingerprint writes nothing, so show-keys failing (or listing no
+	// primary key) means the bundle did not contain the pinned key at all.
 	res, err := m.r.Run(ctx, "gpg --show-keys --with-colons "+keyring, nil)
 	if err != nil {
 		return fmt.Errorf("read key for %s: %w", repo.Name, err)
 	}
-	if !strings.Contains(res.Stdout, repo.Fingerprint) {
-		return fmt.Errorf("repo %s: key fingerprint does not match pinned %s", repo.Name, repo.Fingerprint)
+	prims := primaryFingerprints(res.Stdout)
+	if res.ExitCode != 0 || len(prims) == 0 {
+		return fmt.Errorf("repo %s: pinned key fingerprint %s not found in the downloaded bundle", repo.Name, repo.Fingerprint)
+	}
+	for _, fp := range prims {
+		if fp != repo.Fingerprint {
+			return fmt.Errorf("repo %s: keyring contains unpinned key fingerprint %s (pinned %s)", repo.Name, fp, repo.Fingerprint)
+		}
+	}
+	// Temp cleanup; only a transport error matters (leftover tmp files are inert).
+	if _, err := m.r.Run(ctx, "rm -f "+tmpKey+" "+tmpRing, nil); err != nil {
+		return err
 	}
 	src := fmt.Sprintf("deb [signed-by=%s] %s %s %s\n",
 		keyring, repo.URI, repo.Suite, strings.Join(repo.Components, " "))

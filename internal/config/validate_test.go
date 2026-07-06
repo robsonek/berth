@@ -262,6 +262,33 @@ func TestValidateAcceptsValidQueueAndDaemons(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsRedisClusterHashTagQueue(t *testing.T) {
+	// Redis Cluster requires all of a queue's keys in one slot; Laravel's
+	// documented form is a hash-tagged name like {default}. Braces are inert on
+	// the supervisor command line (no shell, whitespace-only word split).
+	s := validQueueServer()
+	s.Sites[0].Queue = &QueueConfig{Queue: "{default}"}
+	if err := s.Validate(); err != nil {
+		t.Errorf("hash-tagged queue name must validate: %v", err)
+	}
+}
+
+func TestValidateRejectsSpaceInQueueName(t *testing.T) {
+	s := validQueueServer()
+	s.Sites[0].Queue = &QueueConfig{Queue: "high default"}
+	if s.Validate() == nil {
+		t.Error("expected error: a space in queue.queue splits the supervisor command line into extra argv tokens")
+	}
+}
+
+func TestValidateRejectsSpaceInQueueConnection(t *testing.T) {
+	s := validQueueServer()
+	s.Sites[0].Queue = &QueueConfig{Connection: "redis extra"}
+	if s.Validate() == nil {
+		t.Error("expected error: a space in queue.connection splits the supervisor command line into extra argv tokens")
+	}
+}
+
 func TestGitHost(t *testing.T) {
 	for in, want := range map[string]string{
 		"git@github.com:owner/repo.git":        "github.com",

@@ -164,6 +164,14 @@ func (h hardening) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serv
 	}); err != nil {
 		return fmt.Errorf("write %s: %w", sshdDropInPath, err)
 	}
+	// Validate before reloading (same contract as nginx -t / visudo -cf): the
+	// anti-lockout gate above proves access, not config syntax — a bad drop-in
+	// left on disk would break sshd on its next restart/reboot.
+	if res, err := r.Run(ctx, "sshd -t", nil); err != nil {
+		return err
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("sshd -t failed after writing %s, refusing to reload ssh: %s", sshdDropInPath, res.Stderr)
+	}
 	if res, err := r.Run(ctx, "systemctl reload ssh", nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
