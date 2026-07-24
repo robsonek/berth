@@ -34,6 +34,12 @@ var (
 	// treats post_max_size=0 and nginx client_max_body_size 0 as unlimited.
 	rePHPSize  = regexp.MustCompile(`^[1-9][0-9]*[KMGkmg]?$`)
 	reSwapSize = regexp.MustCompile(`^[1-9][0-9]*[MmGg]$`)
+	// reTimezone guards IANA zone names (UTC, Europe/Warsaw, Etc/GMT+8,
+	// America/Argentina/Buenos_Aires — at most three segments). The value
+	// reaches `timedatectl set-timezone` verbatim (config-injection defence);
+	// existence is deliberately NOT validated locally — Windows berth binaries
+	// ship no tzdb, and timedatectl rejects unknown zones loudly on the host.
+	reTimezone = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+){0,2}$`)
 	// reCronSchedule matches exactly five space-separated cron fields over a strict
 	// character class (digits and * , - /). It rejects extra fields, embedded
 	// newlines and any other shell/cron metacharacter — the value is rendered
@@ -345,6 +351,9 @@ func (t Tuning) validate() error {
 func (sy System) validate() error {
 	if sy.Swap != "" && !reSwapSize.MatchString(sy.Swap) {
 		return fmt.Errorf("system.swap %q must be a positive size suffixed M or G (e.g. 512M, 2G)", sy.Swap)
+	}
+	if sy.Timezone != "" && !reTimezone.MatchString(sy.Timezone) {
+		return fmt.Errorf("system.timezone %q must be an IANA zone name like Europe/Warsaw (letters, digits, _ + -, at most two /)", sy.Timezone)
 	}
 	return nil
 }
