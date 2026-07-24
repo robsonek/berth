@@ -150,6 +150,14 @@ system logs.
   exits 0 AND equals the configured zone. Runs live at the next box
   validation.
 
+## 6.1 Codex CODE-review incorporation (post-implementation, gpt-5.6-sol)
+
+| # | Severity | Verdict | Resolution |
+|---|----------|---------|------------|
+| 1 | high | **confirmed** — the v1 `base` step unconditionally ran `timedatectl set-timezone UTC` on every Apply (fire-and-forget; Check never probed it), contradicting "empty = never touch" and creating a no-cron-restart convergence trap for `timezone: UTC` | **UTC set removed from `base` entirely** — `system.timezone` is the sole timezone owner. DELIBERATE BEHAVIOR CHANGE: fresh provisions keep the image's zone unless the knob is set (flagged in the PR body). |
+| 2 | high | accepted — an interruption/transport error between a successful `set-timezone` and the cron phase leaves the new zone with stale cron and a Satisfied next run (no revert was attempted) | Accepted residual, same class as every step's interrupted-Apply caveat (the php step's transport-error precedent): nothing can run on a dead connection, the run errors loudly, and any later zone change or cron restart heals it. |
+| 3 | medium | confirmed — failure messages said "cron restart" for ensure failures, overclaimed "cron still runs the old schedule", and discarded the revert's own stderr | Neutral "ensuring/restarting cron" wording; double-failure message says "may be in effect without a cron restart" and includes the revert's error detail. |
+
 ## 7. Explicitly out of scope (YAGNI)
 
 `php date.timezone` / Laravel `app.timezone`, per-site timezones, tzdata
