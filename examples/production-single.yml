@@ -41,6 +41,9 @@ fail2ban:
 tuning:
   valkey_maxmemory: 512mb
   mariadb_innodb_buffer_pool: 512M
+  mariadb_slow_query_log: true # log queries slower than long_query_time to
+  mariadb_long_query_time: 2   # /var/log/mysql/mariadb-slow.log (default off;
+                               # berth creates the log dir, distro logrotate rotates it)
   php_memory_limit: 512M       # FPM-only; CLI keeps stock -1 for workers/artisan
   php_upload_max: 64M          # max single-file upload; post_max_size and nginx
                                # client_max_body_size are derived slightly larger
@@ -53,11 +56,15 @@ system:
   sysctl: true          # write a conservative web/DB kernel sysctl drop-in
   timezone: Europe/Berlin   # sets the SYSTEM zone (logs, cron) and restarts cron;
                             # omit to leave the image's zone untouched
+  hostname: app.example.com # sets the static hostname + a 127.0.1.1 alias in
+                            # /etc/hosts; omit to leave the image's name untouched
 
 sites:
   - domain: app.example.com
     deploy_path: /var/www/app
-    repository: git@github.com:acme/app.git   # optional — SSH git URL only
+    repository: git@github.com:acme/app.git   # optional — SSH git URL only; berth
+                                               # generates a deploy key for it
+                                               # (print it with `berth site key`)
     ssl: true
     ssl_email: admin@example.com              # required with Let's Encrypt
     http3: true                               # needs ssl + nginx.source: nginx
