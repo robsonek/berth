@@ -104,12 +104,12 @@ func TestParseIntInRangeTrims(t *testing.T) {
 }
 
 func TestOptionalPHPSize(t *testing.T) {
-	for _, ok := range []string{"", "256M", "32m", "1G", "512k", "134217728"} {
+	for _, ok := range []string{"", "256M", "32m", "1G", "512k", "134217728", "64G"} {
 		if err := optionalPHPSize(ok); err != nil {
 			t.Errorf("optionalPHPSize(%q) unexpected error: %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"0", "-1", "08M", "010M", "256MB", "1.5G", "abc", "64M; rm -rf /"} {
+	for _, bad := range []string{"0", "-1", "08M", "010M", "256MB", "1.5G", "abc", "64M; rm -rf /", "65G", "18446744073709551615", "99999999999999999999"} {
 		if err := optionalPHPSize(bad); err == nil {
 			t.Errorf("optionalPHPSize(%q) expected error, got nil", bad)
 		}
