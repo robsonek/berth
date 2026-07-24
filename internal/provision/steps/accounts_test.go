@@ -10,6 +10,7 @@ import (
 
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
+	"github.com/robsonek/berth/internal/secret"
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
 
@@ -57,8 +58,19 @@ func stubAccountCreate(f *bssh.FakeRunner, user string) {
 	f.On("cat "+shQuote(authorizedKeysPath(user)), bssh.Result{ExitCode: 1})
 }
 
+// stubFullApply stubs a complete Apply pass for the single-site test server
+// (berth + deploy created fresh), so break-glass tests can focus on the
+// password commands appended at the end of Apply.
+func stubFullApply(t *testing.T, s *config.Server) *bssh.FakeRunner {
+	t.Helper()
+	f := bssh.NewFakeRunner()
+	stubAccountCreate(f, "berth")
+	stubAccountCreate(f, "deploy")
+	return f
+}
+
 func TestAccountsRequiresBase(t *testing.T) {
-	if got := Accounts().Requires(); len(got) != 1 || got[0] != "base" {
+	if got := Accounts(secret.NewRedactor()).Requires(); len(got) != 1 || got[0] != "base" {
 		t.Fatalf("Requires() = %v, want [base]", got)
 	}
 }
@@ -67,7 +79,7 @@ func TestAccountsCheckUnsatisfiedWhenUserMissing(t *testing.T) {
 	s := testServerWithKey(t)
 	f := bssh.NewFakeRunner()
 	f.On("id berth", bssh.Result{ExitCode: 1}) // berth missing
-	cr, err := Accounts().Check(context.Background(), provision.RunCtx{}, s, f)
+	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +98,8 @@ func TestAccountsCheckSatisfiedWhenAllPresent(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want) // single site -> legacy "deploy"
-	cr, err := Accounts().Check(context.Background(), provision.RunCtx{}, s, f)
+	stubConsoleLocked(f)
+	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +118,7 @@ func TestAccountsCheckUnsatisfiedWhenSudoersDrifted(t *testing.T) {
 	// unsatisfied so a changed program list converges on an already-provisioned host.
 	stale := []byte(managedMarker + "\ndeploy ALL=(root) NOPASSWD: /usr/bin/supervisorctl restart berth-old\\:*\n")
 	stubAccountExists(f, "deploy", stale, want)
-	cr, err := Accounts().Check(context.Background(), provision.RunCtx{}, s, f)
+	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +202,8 @@ func TestAccountsApplyCreatesUsersAndWritesSudoers(t *testing.T) {
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
 
-	if err := Accounts().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+	stubConsoleLocked(f)
+	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 
@@ -235,7 +249,8 @@ func TestAccountsApplyMultiSiteIsolatesUsers(t *testing.T) {
 	stubAccountCreate(f, u1)
 	stubAccountCreate(f, u2)
 
-	if err := Accounts().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+	stubConsoleLocked(f)
+	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 
@@ -273,7 +288,7 @@ func TestAccountsApplyRefusesForeignAuthorizedKeys(t *testing.T) {
 	// deploy already has a hand-installed authorized_keys (no berth marker).
 	f.On("cat "+shQuote(authorizedKeysPath("deploy")), bssh.Result{ExitCode: 0, Stdout: "ssh-rsa AAAAOPERATORMANUALKEY manual@ops\n"})
 
-	err := Accounts().Apply(context.Background(), provision.RunCtx{}, s, f)
+	err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
 	if err == nil || !strings.Contains(err.Error(), "not managed by berth") {
 		t.Fatalf("err = %v, want the unmanaged-file refusal", err)
 	}
@@ -294,7 +309,8 @@ func TestAccountsApplyOverwritesForeignAuthorizedKeysWithForce(t *testing.T) {
 	f.On("cat "+shQuote(authorizedKeysPath("berth")), bssh.Result{ExitCode: 1})
 	f.On("cat "+shQuote(authorizedKeysPath("deploy")), bssh.Result{ExitCode: 0, Stdout: "ssh-rsa AAAAOPERATORMANUALKEY manual@ops\n"})
 
-	if err := Accounts().Apply(context.Background(), provision.RunCtx{Force: true}, s, f); err != nil {
+	stubConsoleLocked(f)
+	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{Force: true}, s, f); err != nil {
 		t.Fatalf("Apply() with --force error = %v", err)
 	}
 	var overwritten bool
@@ -318,7 +334,8 @@ func TestAccountsApplyGeneratesDeployKeyWhenRepository(t *testing.T) {
 	f.On("sudo -u deploy ssh-keygen -t ed25519 -N '' -f '/home/deploy/.ssh/id_ed25519' -C 'deploy@github.com'", bssh.Result{})
 	f.On("sudo -u deploy sh -c 'ssh-keygen -F github.com -f /home/deploy/.ssh/known_hosts >/dev/null 2>&1 || ssh-keyscan github.com >> /home/deploy/.ssh/known_hosts'", bssh.Result{})
 
-	if err := Accounts().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+	stubConsoleLocked(f)
+	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 	joined := strings.Join(callCmds(f), "\n")
@@ -336,7 +353,8 @@ func TestAccountsApplySkipsDeployKeyWithoutRepository(t *testing.T) {
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
 
-	if err := Accounts().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+	stubConsoleLocked(f)
+	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 	for _, c := range f.Calls() {
@@ -397,7 +415,7 @@ func TestAccountsCheckUnsatisfiedWhenDeployKeyMissing(t *testing.T) {
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
 	f.On("test -e '/home/deploy/.ssh/id_ed25519'", bssh.Result{ExitCode: 1}) // key missing
-	cr, err := Accounts().Check(context.Background(), provision.RunCtx{}, s, f)
+	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -421,11 +439,233 @@ func TestAccountsCheckSatisfiedWithDeployKeyPresent(t *testing.T) {
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
 	f.On("test -e '/home/deploy/.ssh/id_ed25519'", bssh.Result{ExitCode: 0})
-	cr, err := Accounts().Check(context.Background(), provision.RunCtx{}, s, f)
+	stubConsoleLocked(f)
+	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !cr.Satisfied {
 		t.Errorf("expected satisfied with the deploy key present; got %+v", cr)
+	}
+}
+
+// stubConsoleLocked stubs the break-glass probe as "locked" (useradd's default
+// state), the satisfied posture for the default break_glass: false.
+func stubConsoleLocked(f *bssh.FakeRunner) {
+	f.On("passwd -S berth", bssh.Result{ExitCode: 0, Stdout: "berth L 07/24/2026 0 99999 7 -1\n"})
+}
+
+func TestAccountsCheckBreakGlassOnPasswordMissingUnsatisfied(t *testing.T) {
+	s := testServerWithKey(t)
+	s.System.BreakGlass = true
+	want := authorizedKeys(testOperatorKey)
+	deploySudoers, err := renderSiteSudoers(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
+	stubAccountExists(f, "deploy", deploySudoers, want)
+	stubConsoleLocked(f)
+	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("break_glass on with a locked berth password must be unsatisfied")
+	}
+}
+
+func TestAccountsCheckBreakGlassOffPasswordSetUnsatisfied(t *testing.T) {
+	// A usable password WITH the local ownership marker (berth set it) must
+	// reconcile back to locked when the knob is off.
+	chdirTemp(t)
+	s := testServerWithKey(t)
+	if err := secret.SaveCache(s.Host, map[string]string{"console:berth": "OwnedPW123"}); err != nil {
+		t.Fatal(err)
+	}
+	want := authorizedKeys(testOperatorKey)
+	deploySudoers, err := renderSiteSudoers(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
+	stubAccountExists(f, "deploy", deploySudoers, want)
+	f.On("passwd -S berth", bssh.Result{ExitCode: 0, Stdout: "berth P 07/24/2026 0 99999 7 -1\n"})
+	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("break_glass off with a usable berth password must be unsatisfied (lock it back)")
+	}
+}
+
+func TestAccountsCheckBreakGlassOffForeignPasswordSatisfied(t *testing.T) {
+	// A usable password WITHOUT the ownership marker is the operator's, not
+	// berth's — the swap-file rule: berth removes only what it created.
+	chdirTemp(t)
+	s := testServerWithKey(t)
+	want := authorizedKeys(testOperatorKey)
+	deploySudoers, err := renderSiteSudoers(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
+	stubAccountExists(f, "deploy", deploySudoers, want)
+	f.On("passwd -S berth", bssh.Result{ExitCode: 0, Stdout: "berth P 07/24/2026 0 99999 7 -1\n"})
+	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("an operator-set password with break_glass off must be left alone; got %+v", cr)
+	}
+	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, stubForeignPasswordApply(t, s)); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+}
+
+// stubForeignPasswordApply stubs a full Apply with a usable but unowned
+// password; the assertion is implicit — an unstubbed `passwd -l berth` would
+// fail the FakeRunner if Apply tried to lock it.
+func stubForeignPasswordApply(t *testing.T, s *config.Server) *bssh.FakeRunner {
+	t.Helper()
+	f := stubFullApply(t, s)
+	f.On("passwd -S berth", bssh.Result{ExitCode: 0, Stdout: "berth P 07/24/2026 0 99999 7 -1\n"})
+	return f
+}
+
+func TestAccountsCheckBreakGlassSatisfiedBothWays(t *testing.T) {
+	want := authorizedKeys(testOperatorKey)
+	for _, tc := range []struct {
+		name   string
+		knob   bool
+		status string
+	}{
+		{"off locked", false, "L"},
+		{"off no password", false, "NP"},
+		{"on usable", true, "P"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := testServerWithKey(t)
+			s.System.BreakGlass = tc.knob
+			deploySudoers, err := renderSiteSudoers(s, s.Sites[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			f := bssh.NewFakeRunner()
+			stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
+			stubAccountExists(f, "deploy", deploySudoers, want)
+			f.On("passwd -S berth", bssh.Result{ExitCode: 0, Stdout: "berth " + tc.status + " 07/24/2026 0 99999 7 -1\n"})
+			cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !cr.Satisfied {
+				t.Errorf("expected satisfied; got %+v", cr)
+			}
+		})
+	}
+}
+
+func TestAccountsApplyBreakGlassSetsPasswordViaStdin(t *testing.T) {
+	chdirTemp(t)
+	s := testServerWithKey(t)
+	s.System.BreakGlass = true
+	f := stubFullApply(t, s)
+	stubConsoleLocked(f)
+	f.On("chpasswd", bssh.Result{})
+	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var pw string
+	for _, c := range f.Calls() {
+		if c.Cmd == "chpasswd" {
+			line := strings.TrimSuffix(string(c.Stdin), "\n")
+			var ok bool
+			if pw, ok = strings.CutPrefix(line, "berth:"); !ok || pw == "" {
+				t.Fatalf("chpasswd stdin has the wrong shape (len %d), want berth:<password>", len(line))
+			}
+		}
+		if strings.Contains(c.Cmd, pw) && pw != "" {
+			t.Errorf("password leaked into a command string: %q", c.Cmd)
+		}
+	}
+	if pw == "" {
+		t.Fatal("chpasswd never ran")
+	}
+	// The credential is persisted locally so the operator can read it.
+	cache, err := secret.LoadCache(s.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cache["console:berth"] != pw {
+		t.Error("console password missing from the local secret cache")
+	}
+}
+
+func TestAccountsApplyBreakGlassReusesCachedPassword(t *testing.T) {
+	chdirTemp(t)
+	s := testServerWithKey(t)
+	s.System.BreakGlass = true
+	if err := secret.SaveCache(s.Host, map[string]string{"console:berth": "CachedPW123"}); err != nil {
+		t.Fatal(err)
+	}
+	f := stubFullApply(t, s)
+	stubConsoleLocked(f)
+	f.On("chpasswd", bssh.Result{})
+	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	for _, c := range f.Calls() {
+		if c.Cmd == "chpasswd" && string(c.Stdin) != "berth:CachedPW123\n" {
+			t.Errorf("cached password must be reused (stdin mismatch, len %d)", len(c.Stdin))
+		}
+	}
+}
+
+func TestAccountsApplyBreakGlassNeverRotatesUsablePassword(t *testing.T) {
+	chdirTemp(t)
+	s := testServerWithKey(t)
+	s.System.BreakGlass = true
+	f := stubFullApply(t, s)
+	f.On("passwd -S berth", bssh.Result{ExitCode: 0, Stdout: "berth P 07/24/2026 0 99999 7 -1\n"})
+	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	for _, c := range f.Calls() {
+		if c.Cmd == "chpasswd" {
+			t.Error("a usable password must never be rotated")
+		}
+	}
+}
+
+func TestAccountsApplyBreakGlassOffLocksOwnedPassword(t *testing.T) {
+	chdirTemp(t)
+	s := testServerWithKey(t)
+	if err := secret.SaveCache(s.Host, map[string]string{"console:berth": "OwnedPW123", "other": "keep"}); err != nil {
+		t.Fatal(err)
+	}
+	f := stubFullApply(t, s)
+	f.On("passwd -S berth", bssh.Result{ExitCode: 0, Stdout: "berth P 07/24/2026 0 99999 7 -1\n"})
+	f.On("passwd -l berth", bssh.Result{})
+	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if !calledCmd(f, "passwd -l berth") {
+		t.Error("break_glass off must lock the berth-set password back")
+	}
+	cache, err := secret.LoadCache(s.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cache["console:berth"] != "" {
+		t.Error("locking must drop the cached plaintext (a stale root credential)")
+	}
+	if cache["other"] != "keep" {
+		t.Error("dropping the marker must not clobber other cached secrets")
 	}
 }

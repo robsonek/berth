@@ -133,6 +133,7 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	assertClientDBAuth(invCtx, t, client, srv)
 	assertDeployKeys(invCtx, t, client, srv)
 	assertSlowQueryLog(invCtx, t, client, srv)
+	assertBreakGlass(invCtx, t, client, srv)
 	// useHTTPS mirrors the test's TLS path: self-signed/LE provisioned => https, else http.
 	assertDeployReload(invCtx, t, client, srv, !skipSSL && anySiteSSL(srv))
 

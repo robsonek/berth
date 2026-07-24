@@ -234,12 +234,17 @@ func (t Tuning) PHPMaxInputVarsEff() int {
 // Values are constants in the step (no SetDefault), so wizard ToServer() and
 // literal-Server callers that bypass Load() need nothing seeded. Unlike Swap,
 // clearing Timezone or Hostname drift-removes nothing — both are plain system
-// state, so empty means "stop managing", never "revert".
+// state, so empty means "stop managing", never "revert". BreakGlass, by
+// contrast, reconciles BOTH ways (the berth account's posture is fully
+// berth-owned): on gives the account a generated console password (cached in
+// .berth/<host>.secrets.json — sshd keeps PasswordAuthentication off, so it
+// works only at the provider's console/VNC), off locks the password again.
 type System struct {
-	Swap     string `mapstructure:"swap"     yaml:"swap,omitempty"`     // e.g. "2G"; empty = no swap
-	Sysctl   bool   `mapstructure:"sysctl"   yaml:"sysctl,omitempty"`   // default false = no sysctl drop-in
-	Timezone string `mapstructure:"timezone" yaml:"timezone,omitempty"` // IANA zone (e.g. Europe/Warsaw); empty = leave untouched
-	Hostname string `mapstructure:"hostname" yaml:"hostname,omitempty"` // static hostname; empty = leave untouched
+	Swap       string `mapstructure:"swap"        yaml:"swap,omitempty"`        // e.g. "2G"; empty = no swap
+	Sysctl     bool   `mapstructure:"sysctl"      yaml:"sysctl,omitempty"`      // default false = no sysctl drop-in
+	Timezone   string `mapstructure:"timezone"    yaml:"timezone,omitempty"`    // IANA zone (e.g. Europe/Warsaw); empty = leave untouched
+	Hostname   string `mapstructure:"hostname"    yaml:"hostname,omitempty"`    // static hostname; empty = leave untouched
+	BreakGlass bool   `mapstructure:"break_glass" yaml:"break_glass,omitempty"` // console password for the berth account; default off = locked
 }
 
 // Backups holds the opt-in scheduled-backup knobs. Enabled is off by default

@@ -122,6 +122,7 @@ func (h *huhPrompter) ServerOps(a *Answers) error {
 			huh.NewInput().Title("Swap file size (e.g. 2G, blank=none)").Value(&a.System.Swap).Validate(optionalSwapSize),
 			huh.NewInput().Title("System timezone (e.g. Europe/Warsaw, blank=leave untouched)").Value(&a.System.Timezone).Validate(optionalTimezone),
 			huh.NewInput().Title("System hostname (blank=leave untouched)").Value(&a.System.Hostname).Validate(optionalSystemHostname),
+			huh.NewConfirm().Title("Break-glass console password for the berth account? (saved to .berth/<name>.secrets.json)").Value(&a.System.BreakGlass),
 			huh.NewConfirm().Title("Apply conservative kernel sysctl tuning?").Value(&a.System.Sysctl),
 			huh.NewConfirm().Title("Cloudflare-only origin lockdown (server default)?").Value(&a.CloudflareOnly),
 		),

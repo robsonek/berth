@@ -7,6 +7,7 @@ import (
 
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
+	"github.com/robsonek/berth/internal/secret"
 	bssh "github.com/robsonek/berth/internal/ssh"
 	"github.com/robsonek/berth/internal/templates"
 )
@@ -14,11 +15,23 @@ import (
 const (
 	sudoersBerthPath = "/etc/sudoers.d/berth"
 	sudoersBerthBody = managedMarker + "\nberth ALL=(ALL) NOPASSWD:ALL\n"
+	// consoleCacheKey is the local secret-cache key for the berth account's
+	// break-glass console password. The colon keeps it out of the SQL-identifier
+	// namespace the database step keys its per-site passwords by.
+	consoleCacheKey = "console:berth"
+	// consolePasswordLen matches the database step's generated-password length.
+	consolePasswordLen = 32
 )
 
-type accounts struct{}
+type accounts struct {
+	redactor *secret.Redactor
+}
 
-func Accounts() provision.Step { return accounts{} }
+// Accounts provisions the berth account plus one OS user per site, their
+// sudoers and authorized_keys, per-site deploy keys, and the opt-in
+// break-glass console password (system.break_glass). It takes the redactor so
+// a generated console password is masked in any logged output.
+func Accounts(red *secret.Redactor) provision.Step { return accounts{redactor: red} }
 
 func (accounts) Name() string       { return "accounts" }
 func (accounts) Requires() []string { return []string{"base"} }
@@ -164,7 +177,66 @@ func (a accounts) Check(ctx context.Context, rc provision.RunCtx, s *config.Serv
 			return provision.CheckResult{Satisfied: false, Reason: "deploy key for " + site.Domain + " missing", Changes: a.changes()}, nil
 		}
 	}
-	return provision.CheckResult{Satisfied: true, Reason: "accounts, sudoers and keys present"}, nil
+	// Break-glass console password: with the knob on, a usable password must
+	// exist. With the knob off, only a password BERTH SET is locked back — the
+	// local cache entry is the ownership marker (the swap-file rule: berth
+	// removes only what it created), so an operator-set password is left alone.
+	usable, err := consolePasswordUsable(ctx, r)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	if s.System.BreakGlass && !usable {
+		return provision.CheckResult{Satisfied: false, Reason: "berth console password not set (break_glass on)", Changes: a.changes()}, nil
+	}
+	if !s.System.BreakGlass && usable {
+		owned, err := consolePasswordOwned(s.Host)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if owned {
+			return provision.CheckResult{Satisfied: false, Reason: "berth-set console password present but break_glass is off", Changes: a.changes()}, nil
+		}
+	}
+	return provision.CheckResult{Satisfied: true, Reason: "accounts, sudoers, keys and console posture in desired state"}, nil
+}
+
+// consolePasswordUsable reports whether the berth account has a usable
+// password: `passwd -S` status field "P". "L" (locked — useradd's default) and
+// "NP" (none) both leave the provider console unusable; anything else —
+// unexpected format, localized output, a different account echoed back — is a
+// hard error rather than a silent guess (a wrong guess either overwrites or
+// blesses a password). Read-only and secret-free (status metadata, never a hash).
+func consolePasswordUsable(ctx context.Context, r bssh.Runner) (bool, error) {
+	res, err := r.Run(ctx, "passwd -S berth", nil)
+	if err != nil {
+		return false, err
+	}
+	if res.ExitCode != 0 {
+		return false, fmt.Errorf("passwd -S berth: %s", res.Stderr)
+	}
+	fields := strings.Fields(res.Stdout)
+	if len(fields) < 2 || fields[0] != "berth" {
+		return false, fmt.Errorf("passwd -S berth: unexpected output %q", strings.TrimSpace(res.Stdout))
+	}
+	switch fields[1] {
+	case "P":
+		return true, nil
+	case "L", "NP":
+		return false, nil
+	}
+	return false, fmt.Errorf("passwd -S berth: unexpected status %q", fields[1])
+}
+
+// consolePasswordOwned reports whether the LOCAL secret cache records a
+// berth-generated console password — the ownership marker for the lock-back
+// direction. A local-file read inside Check is established practice
+// (operatorPublicKey); remote state is untouched.
+func consolePasswordOwned(host string) (bool, error) {
+	cache, err := secret.LoadCache(host)
+	if err != nil {
+		return false, err
+	}
+	return cache[consoleCacheKey] != "", nil
 }
 
 func (a accounts) changes() []string {
@@ -172,6 +244,7 @@ func (a accounts) changes() []string {
 		"create the berth account and one OS user per site",
 		"write /etc/sudoers.d/<account> (berth: full; site users: narrow)",
 		"install operator key into each authorized_keys; per-site deploy keys",
+		"reconcile the berth console password with system.break_glass",
 	}
 }
 
@@ -216,6 +289,73 @@ func (a accounts) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serv
 	for _, site := range s.Sites {
 		if err := a.ensureDeployKey(ctx, s, site, r); err != nil {
 			return err
+		}
+	}
+
+	// 6) Break-glass console password (both directions; mirrors Check). sshd
+	// keeps PasswordAuthentication off (the hardening step), so the password
+	// works only at the provider's console/VNC — and berth's full NOPASSWD
+	// sudo makes it root-equivalent there; that is the point of break-glass.
+	return a.ensureConsolePassword(ctx, s, r)
+}
+
+// ensureConsolePassword reconciles the berth account's console password with
+// system.break_glass. An already-usable password is never rotated (the
+// database step's reuse rule) — berth only sets one when none is usable,
+// reusing the locally cached value so re-seeds keep working. The credential
+// is persisted to the local cache BEFORE chpasswd (crash-safe: a set-but-
+// uncached password would be unreadable by the operator forever) and rides on
+// stdin, never the command string. With the knob off, ONLY a berth-set
+// password (cache marker present) is locked back — lock first, then drop the
+// marker, so a crash in between converges next run (locked = satisfied) with
+// nothing worse than a lingering plaintext for an unusable password; the
+// reverse order could leave berth's password live and unowned forever.
+// Dropping the marker also keeps a stale root-equivalent plaintext out of
+// .berth once it stops working; re-enabling mints a fresh password.
+func (a accounts) ensureConsolePassword(ctx context.Context, s *config.Server, r bssh.Runner) error {
+	usable, err := consolePasswordUsable(ctx, r)
+	if err != nil {
+		return err
+	}
+	if s.System.BreakGlass && !usable {
+		cache, err := secret.LoadCache(s.Host)
+		if err != nil {
+			return fmt.Errorf("load local secret cache: %w", err)
+		}
+		pw := cache[consoleCacheKey]
+		if pw == "" {
+			if pw, err = secret.Generate(consolePasswordLen); err != nil {
+				return fmt.Errorf("generate console password: %w", err)
+			}
+			cache[consoleCacheKey] = pw
+			if err := secret.SaveCache(s.Host, cache); err != nil {
+				return fmt.Errorf("cache console password: %w", err)
+			}
+		}
+		a.redactor.Add(pw)
+		if res, err := r.Run(ctx, "chpasswd", []byte("berth:"+pw+"\n")); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("chpasswd berth: %s", res.Stderr)
+		}
+		return nil
+	}
+	if !s.System.BreakGlass && usable {
+		cache, err := secret.LoadCache(s.Host)
+		if err != nil {
+			return fmt.Errorf("load local secret cache: %w", err)
+		}
+		if cache[consoleCacheKey] == "" {
+			return nil // not berth's password — leave the operator's intent alone
+		}
+		if res, err := r.Run(ctx, "passwd -l berth", nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("lock berth password: %s", res.Stderr)
+		}
+		delete(cache, consoleCacheKey)
+		if err := secret.SaveCache(s.Host, cache); err != nil {
+			return fmt.Errorf("drop cached console password: %w", err)
 		}
 	}
 	return nil
