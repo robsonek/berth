@@ -15,6 +15,7 @@ import (
 const (
 	swapfilePath       = "/swapfile"
 	fstabPath          = "/etc/fstab"
+	hostsPath          = "/etc/hosts"
 	swapSysctlPath     = "/etc/sysctl.d/99-berth-swap.conf"
 	sysctlPath         = "/etc/sysctl.d/99-berth.conf"
 	swappinessProcPath = "/proc/sys/vm/swappiness"
@@ -33,6 +34,13 @@ const (
 	fstabSedAny    = `\|^[[:space:]]*` + swapfilePath + `[[:space:]]|d`
 	fstabSedMarked = `\|^[[:space:]]*` + swapfilePath + `[[:space:]].*` + managedMarker + `[[:space:]]*$|d`
 )
+
+// hostsSedLocalAlias deletes ANY 127.0.1.1 alias line; used before appending
+// berth's marked line. Unlike fstab's swap line this takeover needs no --force:
+// 127.0.1.1 exists solely to alias the local hostname (Debian convention), so
+// once system.hostname is declared any previous alias is stale by definition —
+// leaving it would keep resolving the image's old name next to the new one.
+const hostsSedLocalAlias = `\|^[[:space:]]*127\.0\.1\.1[[:space:]]|d`
 
 // parseSwapBytes converts a validated swap size ("2G", "512M", case-insensitive)
 // to bytes. Units are binary (M = MiB, G = GiB) to match `fallocate -l` and
@@ -85,12 +93,14 @@ func fstabSwapState(content string) (marked, foreign bool) {
 type system struct{}
 
 // System provisions optional host-level OS settings: a swap file (+ vm.swappiness),
-// an opt-in web/DB kernel sysctl drop-in, and an opt-in system timezone. It is
+// an opt-in web/DB kernel sysctl drop-in, an opt-in system timezone, and an
+// opt-in static hostname (with a marked 127.0.1.1 alias in /etc/hosts). It is
 // ALWAYS in the pipeline (ungated) so disabling a knob can drift-remove berth's
 // artifacts, and runs right after base (before php/composer/database) so the swap
-// margin protects provisioning itself. The timezone knob has NO removal branch:
-// a zone is plain system state with no berth artifact — clearing the field stops
-// managing it, never reverts it.
+// margin protects provisioning itself. The timezone and hostname knobs have NO
+// removal branch: both are plain system state — clearing the field stops
+// managing it, never reverts it (the marked alias line stays; it still names
+// the host).
 func System() provision.Step { return system{} }
 
 func (system) Name() string       { return "system" }
@@ -141,10 +151,19 @@ func (system) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 			changes = append(changes, ch...)
 		}
 	}
-	if len(changes) == 0 {
-		return provision.CheckResult{Satisfied: true, Reason: "swap, sysctl & timezone in desired state"}, nil
+	if s.System.Hostname != "" {
+		ok, ch, err := checkHostname(ctx, r, s.System.Hostname)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if !ok {
+			changes = append(changes, ch...)
+		}
 	}
-	return provision.CheckResult{Satisfied: false, Reason: "system (swap/sysctl/timezone) not in desired state", Changes: changes}, nil
+	if len(changes) == 0 {
+		return provision.CheckResult{Satisfied: true, Reason: "swap, sysctl, timezone & hostname in desired state"}, nil
+	}
+	return provision.CheckResult{Satisfied: false, Reason: "system (swap/sysctl/timezone/hostname) not in desired state", Changes: changes}, nil
 }
 
 // catTrim returns the trimmed stdout of `cat <path>` and whether the file was
@@ -401,6 +420,106 @@ func applyTimezone(ctx context.Context, r bssh.Runner, tz string) error {
 	return nil
 }
 
+// hostsHostnameLine is the exact /etc/hosts alias line berth manages for the
+// configured static hostname: FQDN plus its short (first-label) alias, ending
+// with the managed marker as the ownership signal (the fstabSwapLine pattern).
+func hostsHostnameLine(hostname string) string {
+	names := hostname
+	if short, _, ok := strings.Cut(hostname, "."); ok && short != "" {
+		names = hostname + " " + short
+	}
+	return "127.0.1.1 " + names + " " + managedMarker
+}
+
+// hostsAliasConverged reports whether /etc/hosts holds berth's exact marked
+// alias line for hostname EXACTLY once and no other 127.0.1.1 line — the
+// "exactly one" state applyHostname's normalization produces (fstabSwapState's
+// scan style). Requiring the absence of foreign lines matters: a stale alias
+// re-added beside the marked one would keep resolving the image's old name
+// forever if Check accepted it. Comment lines are ignored (a commented-out
+// alias is inert, and the sed leaves it in place too).
+func hostsAliasConverged(content, hostname string) bool {
+	want := hostsHostnameLine(hostname)
+	marked, foreign := 0, false
+	for _, line := range strings.Split(content, "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		fields := strings.Fields(t)
+		if len(fields) == 0 || fields[0] != "127.0.1.1" {
+			continue
+		}
+		if t == want {
+			marked++
+		} else {
+			foreign = true
+		}
+	}
+	return marked == 1 && !foreign
+}
+
+// checkHostname is the read-only predicate for a managed static hostname:
+// satisfied iff `hostnamectl --static` equals the configured name AND berth's
+// marked 127.0.1.1 alias line is present in /etc/hosts (so sudo and other
+// local lookups resolve the name without DNS). Like timezone there is no
+// removal counterpart — clearing the knob stops managing the hostname; the
+// marked alias line stays (it still names the host).
+func checkHostname(ctx context.Context, r bssh.Runner, hostname string) (bool, []string, error) {
+	res, err := r.Run(ctx, "hostnamectl --static", nil)
+	if err != nil {
+		return false, nil, err
+	}
+	if res.ExitCode != 0 {
+		return false, nil, fmt.Errorf("hostnamectl --static: %s", res.Stderr)
+	}
+	var changes []string
+	if strings.TrimSpace(res.Stdout) != hostname {
+		changes = append(changes, "hostnamectl set-hostname "+hostname)
+	}
+	hosts, _, err := catTrim(ctx, r, hostsPath)
+	if err != nil {
+		return false, nil, err
+	}
+	if !hostsAliasConverged(hosts, hostname) {
+		changes = append(changes, "update the 127.0.1.1 alias in "+hostsPath)
+	}
+	if len(changes) == 0 {
+		return true, nil, nil
+	}
+	return false, changes, nil
+}
+
+// applyHostname sets the static hostname and normalizes /etc/hosts to exactly
+// one marked 127.0.1.1 alias line naming it (delete-any + newline-safe append,
+// the applySwap fstab pattern). Re-entrant: each piece is skipped when already
+// converged, so a satisfied hostname is a full no-op.
+func applyHostname(ctx context.Context, r bssh.Runner, hostname string) error {
+	res, err := r.Run(ctx, "hostnamectl --static", nil)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("hostnamectl --static: %s", res.Stderr)
+	}
+	if strings.TrimSpace(res.Stdout) != hostname {
+		if err := runOK(ctx, r, "hostnamectl set-hostname "+shQuote(hostname)); err != nil {
+			return err
+		}
+	}
+	hosts, _, err := catTrim(ctx, r, hostsPath)
+	if err != nil {
+		return err
+	}
+	if hostsAliasConverged(hosts, hostname) {
+		return nil
+	}
+	if err := runOK(ctx, r, "sed -i "+shQuote(hostsSedLocalAlias)+" "+hostsPath); err != nil {
+		return err
+	}
+	return runOK(ctx, r, "printf '\\n%s\\n' "+shQuote(hostsHostnameLine(hostname))+" >> "+hostsPath)
+}
+
 func (system) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
 	if s.System.Swap != "" {
 		if err := applySwap(ctx, rc, r, s.System.Swap); err != nil {
@@ -422,6 +541,11 @@ func (system) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 	}
 	if s.System.Timezone != "" {
 		if err := applyTimezone(ctx, r, s.System.Timezone); err != nil {
+			return err
+		}
+	}
+	if s.System.Hostname != "" {
+		if err := applyHostname(ctx, r, s.System.Hostname); err != nil {
 			return err
 		}
 	}

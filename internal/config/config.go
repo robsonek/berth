@@ -84,6 +84,8 @@ type Tuning struct {
 	ValkeyMaxmemory       string `mapstructure:"valkey_maxmemory" yaml:"valkey_maxmemory,omitempty"`
 	ValkeyMaxmemoryPolicy string `mapstructure:"valkey_maxmemory_policy" yaml:"valkey_maxmemory_policy,omitempty"`
 	MariaDBBufferPool     string `mapstructure:"mariadb_innodb_buffer_pool" yaml:"mariadb_innodb_buffer_pool,omitempty"`
+	MariaDBSlowQueryLog   bool   `mapstructure:"mariadb_slow_query_log" yaml:"mariadb_slow_query_log,omitempty"`
+	MariaDBLongQueryTime  int    `mapstructure:"mariadb_long_query_time" yaml:"mariadb_long_query_time,omitempty"`
 	PHPMemoryLimit        string `mapstructure:"php_memory_limit" yaml:"php_memory_limit,omitempty"`
 	PHPUploadMax          string `mapstructure:"php_upload_max" yaml:"php_upload_max,omitempty"`
 	PHPMaxExecutionTime   int    `mapstructure:"php_max_execution_time" yaml:"php_max_execution_time,omitempty"`
@@ -94,6 +96,7 @@ const (
 	defaultValkeyMaxmemory       = "256mb"
 	defaultValkeyMaxmemoryPolicy = "allkeys-lru"
 	defaultMariaDBBufferPool     = "256M"
+	defaultMariaDBLongQueryTime  = 2
 	defaultPHPMemoryLimit        = "256M"
 	defaultPHPUploadMax          = "32M"
 	defaultPHPMaxExecutionTime   = 30
@@ -133,6 +136,16 @@ func (t Tuning) MariaDBBufferPoolEff() string {
 		return defaultMariaDBBufferPool
 	}
 	return t.MariaDBBufferPool
+}
+
+// MariaDBLongQueryTimeEff returns the slow-query threshold in seconds or the
+// default (2). Non-positive means "unset" (the MaxretryEff precedent). Only
+// rendered when MariaDBSlowQueryLog is true.
+func (t Tuning) MariaDBLongQueryTimeEff() int {
+	if t.MariaDBLongQueryTime <= 0 {
+		return defaultMariaDBLongQueryTime
+	}
+	return t.MariaDBLongQueryTime
 }
 
 // phpSizeBytes converts a PHP ini shorthand size — digits with an optional
@@ -216,16 +229,17 @@ func (t Tuning) PHPMaxInputVarsEff() int {
 }
 
 // System holds optional, opt-in host-level OS provisioning knobs. All default
-// off: an empty Swap, a false Sysctl and an empty Timezone mean berth never
-// touches swap, kernel sysctl or the system timezone. Values are constants in
-// the step (no SetDefault), so wizard ToServer() and literal-Server callers
-// that bypass Load() need nothing seeded. Unlike Swap, clearing Timezone
-// drift-removes nothing — a timezone is plain system state with no berth
-// artifact, so empty means "stop managing", never "revert".
+// off: an empty Swap, a false Sysctl and empty Timezone/Hostname mean berth
+// never touches swap, kernel sysctl, the system timezone or the hostname.
+// Values are constants in the step (no SetDefault), so wizard ToServer() and
+// literal-Server callers that bypass Load() need nothing seeded. Unlike Swap,
+// clearing Timezone or Hostname drift-removes nothing — both are plain system
+// state, so empty means "stop managing", never "revert".
 type System struct {
 	Swap     string `mapstructure:"swap"     yaml:"swap,omitempty"`     // e.g. "2G"; empty = no swap
 	Sysctl   bool   `mapstructure:"sysctl"   yaml:"sysctl,omitempty"`   // default false = no sysctl drop-in
 	Timezone string `mapstructure:"timezone" yaml:"timezone,omitempty"` // IANA zone (e.g. Europe/Warsaw); empty = leave untouched
+	Hostname string `mapstructure:"hostname" yaml:"hostname,omitempty"` // static hostname; empty = leave untouched
 }
 
 // Backups holds the opt-in scheduled-backup knobs. Enabled is off by default

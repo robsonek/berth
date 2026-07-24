@@ -61,6 +61,8 @@ type TuningAnswers struct {
 	ValkeyMaxmemory       string
 	ValkeyMaxmemoryPolicy string
 	MariaDBBufferPool     string
+	MariaDBSlowQueryLog   bool
+	MariaDBLongQueryTime  int
 	PHPMemoryLimit        string
 	PHPUploadMax          string
 	PHPMaxExecutionTime   int
@@ -71,6 +73,7 @@ type SystemAnswers struct {
 	Swap     string // e.g. "2G"; blank = no swap
 	Sysctl   bool
 	Timezone string // IANA zone; blank = leave untouched
+	Hostname string // static hostname; blank = leave untouched
 }
 
 type BackupsAnswers struct {

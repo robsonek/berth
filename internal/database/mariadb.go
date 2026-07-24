@@ -87,3 +87,15 @@ func (MariaDB) EnsureUser(ctx context.Context, r bssh.Runner, user, password, da
 func (MariaDB) DumpCommand(database string) string {
 	return "mysqldump --protocol=socket --single-transaction --no-tablespaces --routines --events " + database
 }
+
+// ClientAuthFileName is the MariaDB per-user option file.
+func (MariaDB) ClientAuthFileName() string { return ".my.cnf" }
+
+// ClientAuthFile puts the credential under [client] (read by mariadb,
+// mariadb-dump and the mysql compatibility names) and pre-selects the site
+// database under [mysql] only — the interactive-client group — because
+// mariadb-dump takes its database as an argument and would reject an unknown
+// 'database' option in [client].
+func (MariaDB) ClientAuthFile(database, user, password string) []byte {
+	return []byte("[client]\nuser = " + user + "\npassword = " + password + "\n\n[mysql]\ndatabase = " + database + "\n")
+}

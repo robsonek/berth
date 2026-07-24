@@ -169,6 +169,16 @@ func optionalTimezone(s string) error {
 	return fmt.Errorf("timezone %q must be an IANA zone name like Europe/Warsaw", s)
 }
 
+// optionalSystemHostname allows blank (leave untouched) or a valid hostname of
+// at most 64 chars (kernel HOST_NAME_MAX); config.Server.Validate stays
+// authoritative.
+func optionalSystemHostname(s string) error {
+	if s == "" || (len(s) <= 64 && reHostname.MatchString(s)) {
+		return nil
+	}
+	return fmt.Errorf("hostname %q must be a valid hostname of at most 64 characters", s)
+}
+
 func optionalCronSchedule(s string) error {
 	if s == "" || reCronSchedule.MatchString(s) {
 		return nil

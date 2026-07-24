@@ -145,6 +145,25 @@ func (a accounts) Check(ctx context.Context, rc provision.RunCtx, s *config.Serv
 			return provision.CheckResult{Satisfied: false, Reason: u + " authorized_keys not up to date", Changes: a.changes()}, nil
 		}
 	}
+	// Per-site deploy keys: Apply's ensureDeployKey generates a key only for
+	// sites with a repository, gated on the private key's existence — probe
+	// exactly that condition so adding repository: to an already-provisioned
+	// site re-triggers Apply (Check/Apply symmetry, the database step's
+	// probe-real-state precedent). known_hosts drift is deliberately not
+	// probed: Apply re-scans the git host whenever it runs anyway.
+	for _, site := range s.Sites {
+		if site.Repository == "" {
+			continue
+		}
+		keyPath := fmt.Sprintf("/home/%s/.ssh/id_ed25519", s.SiteUser(site))
+		ok, err := fileExists(ctx, r, keyPath)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if !ok {
+			return provision.CheckResult{Satisfied: false, Reason: "deploy key for " + site.Domain + " missing", Changes: a.changes()}, nil
+		}
+	}
 	return provision.CheckResult{Satisfied: true, Reason: "accounts, sudoers and keys present"}, nil
 }
 

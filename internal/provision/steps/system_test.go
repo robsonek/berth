@@ -687,3 +687,190 @@ func TestSystemApplyTimezoneCronAndRevertFailureIsHonest(t *testing.T) {
 		t.Errorf("double-failure error must not claim a successful revert: %v", err)
 	}
 }
+
+func TestSystemCheckHostnameMismatchUnsatisfied(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("hostnamectl --static", bssh.Result{ExitCode: 0, Stdout: "debian\n"})
+	f.On("cat '/etc/hosts'", bssh.Result{ExitCode: 0, Stdout: "127.0.0.1 localhost\n127.0.1.1 debian\n"})
+	s := &config.Server{System: config.System{Hostname: "web-1.example.com"}}
+	cr, err := System().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied when the static hostname differs from system.hostname")
+	}
+}
+
+func TestSystemCheckHostnameSatisfied(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("hostnamectl --static", bssh.Result{ExitCode: 0, Stdout: "web-1.example.com\n"})
+	f.On("cat '/etc/hosts'", bssh.Result{ExitCode: 0, Stdout: "127.0.0.1 localhost\n127.0.1.1 web-1.example.com web-1 # managed by berth\n"})
+	s := &config.Server{System: config.System{Hostname: "web-1.example.com"}}
+	cr, err := System().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("expected satisfied when hostname and hosts alias match; got %+v", cr)
+	}
+}
+
+func TestSystemCheckHostnameHostsLineMissingUnsatisfied(t *testing.T) {
+	// Hostname already set but berth's marked alias line absent -> still work to do.
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("hostnamectl --static", bssh.Result{ExitCode: 0, Stdout: "web-1.example.com\n"})
+	f.On("cat '/etc/hosts'", bssh.Result{ExitCode: 0, Stdout: "127.0.0.1 localhost\n127.0.1.1 debian\n"})
+	s := &config.Server{System: config.System{Hostname: "web-1.example.com"}}
+	cr, err := System().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied while the marked 127.0.1.1 alias line is missing")
+	}
+}
+
+func TestSystemHostnameUnsetNeverProbed(t *testing.T) {
+	// Empty knob = berth never reads or writes the hostname on either path.
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	if _, err := System().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f); err != nil {
+		t.Fatal(err)
+	}
+	if err := System().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "hostnamectl") {
+			t.Errorf("unset hostname must not run hostnamectl; ran %q", c.Cmd)
+		}
+	}
+}
+
+func TestSystemApplyHostnameSetsAndRewritesHosts(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("hostnamectl --static", bssh.Result{ExitCode: 0, Stdout: "debian\n"})
+	f.On("hostnamectl set-hostname 'web-1.example.com'", bssh.Result{})
+	// A foreign 127.0.1.1 line (the image's default alias) is replaced WITHOUT --force.
+	f.On("cat '/etc/hosts'", bssh.Result{ExitCode: 0, Stdout: "127.0.0.1 localhost\n127.0.1.1 debian\n"})
+	f.On(`sed -i '\|^[[:space:]]*127\.0\.1\.1[[:space:]]|d' /etc/hosts`, bssh.Result{})
+	f.On("printf '\\n%s\\n' '127.0.1.1 web-1.example.com web-1 # managed by berth' >> /etc/hosts", bssh.Result{})
+	s := &config.Server{System: config.System{Hostname: "web-1.example.com"}}
+	if err := System().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if !calledCmd(f, "hostnamectl set-hostname 'web-1.example.com'") {
+		t.Error("expected hostnamectl set-hostname")
+	}
+	if !calledCmd(f, "printf '\\n%s\\n' '127.0.1.1 web-1.example.com web-1 # managed by berth' >> /etc/hosts") {
+		t.Error("expected the marked 127.0.1.1 alias appended")
+	}
+}
+
+func TestSystemApplyHostnameNoopWhenSatisfied(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("hostnamectl --static", bssh.Result{ExitCode: 0, Stdout: "web-1.example.com\n"})
+	f.On("cat '/etc/hosts'", bssh.Result{ExitCode: 0, Stdout: "127.0.1.1 web-1.example.com web-1 # managed by berth\n"})
+	s := &config.Server{System: config.System{Hostname: "web-1.example.com"}}
+	if err := System().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "set-hostname") || strings.Contains(c.Cmd, `127\.0\.1\.1`) {
+			t.Errorf("satisfied hostname must not mutate; ran %q", c.Cmd)
+		}
+	}
+}
+
+func TestSystemApplyHostnameShortNameNoDot(t *testing.T) {
+	// A single-label hostname gets no short alias (no duplicate token).
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("hostnamectl --static", bssh.Result{ExitCode: 0, Stdout: "debian\n"})
+	f.On("hostnamectl set-hostname 'web1'", bssh.Result{})
+	f.On("cat '/etc/hosts'", bssh.Result{ExitCode: 0, Stdout: "127.0.0.1 localhost\n"})
+	f.On(`sed -i '\|^[[:space:]]*127\.0\.1\.1[[:space:]]|d' /etc/hosts`, bssh.Result{})
+	f.On("printf '\\n%s\\n' '127.0.1.1 web1 # managed by berth' >> /etc/hosts", bssh.Result{})
+	s := &config.Server{System: config.System{Hostname: "web1"}}
+	if err := System().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if !calledCmd(f, "printf '\\n%s\\n' '127.0.1.1 web1 # managed by berth' >> /etc/hosts") {
+		t.Error("expected the single-label alias line appended without a short duplicate")
+	}
+}
+
+func TestSystemCheckHostnameForeignAliasBesideMarkedUnsatisfied(t *testing.T) {
+	// The marked line alone is not enough: a stale foreign 127.0.1.1 alias
+	// (e.g. re-added by another tool) would keep resolving the image's old
+	// name forever if Check accepted it — the takeover must re-trigger.
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("hostnamectl --static", bssh.Result{ExitCode: 0, Stdout: "web-1.example.com\n"})
+	f.On("cat '/etc/hosts'", bssh.Result{ExitCode: 0, Stdout: "127.0.1.1 debian\n127.0.1.1 web-1.example.com web-1 # managed by berth\n"})
+	s := &config.Server{System: config.System{Hostname: "web-1.example.com"}}
+	cr, err := System().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied while a foreign 127.0.1.1 alias sits beside the marked line")
+	}
+}
+
+func TestSystemApplyHostnameNormalizesForeignAliasBesideMarked(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("hostnamectl --static", bssh.Result{ExitCode: 0, Stdout: "web-1.example.com\n"})
+	f.On("cat '/etc/hosts'", bssh.Result{ExitCode: 0, Stdout: "127.0.1.1 debian\n127.0.1.1 web-1.example.com web-1 # managed by berth\n"})
+	f.On(`sed -i '\|^[[:space:]]*127\.0\.1\.1[[:space:]]|d' /etc/hosts`, bssh.Result{})
+	f.On("printf '\\n%s\\n' '127.0.1.1 web-1.example.com web-1 # managed by berth' >> /etc/hosts", bssh.Result{})
+	s := &config.Server{System: config.System{Hostname: "web-1.example.com"}}
+	if err := System().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if !calledCmd(f, `sed -i '\|^[[:space:]]*127\.0\.1\.1[[:space:]]|d' /etc/hosts`) {
+		t.Error("expected the normalization sed when a foreign alias sits beside the marked line")
+	}
+}
+
+func TestSystemCheckHostnameDuplicateMarkedLinesUnsatisfied(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("hostnamectl --static", bssh.Result{ExitCode: 0, Stdout: "web-1.example.com\n"})
+	f.On("cat '/etc/hosts'", bssh.Result{ExitCode: 0, Stdout: "127.0.1.1 web-1.example.com web-1 # managed by berth\n127.0.1.1 web-1.example.com web-1 # managed by berth\n"})
+	s := &config.Server{System: config.System{Hostname: "web-1.example.com"}}
+	cr, err := System().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied on duplicated marked lines (Apply promises exactly one)")
+	}
+}

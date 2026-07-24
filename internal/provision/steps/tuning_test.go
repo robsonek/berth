@@ -671,3 +671,38 @@ func TestTuningApplyMariaDBOverLimitNoWriteNoRestart(t *testing.T) {
 		t.Error("Apply must not restart mariadb past a failing guard")
 	}
 }
+
+func TestRenderMariaDBTuningSlowLog(t *testing.T) {
+	s := &config.Server{Tuning: config.Tuning{MariaDBSlowQueryLog: true, MariaDBLongQueryTime: 5}}
+	b, err := renderMariaDBTuning(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"slow_query_log = 1",
+		"slow_query_log_file = /var/log/mysql/mariadb-slow.log",
+		"long_query_time = 5",
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("enabled slow log render missing %q:\n%s", want, b)
+		}
+	}
+	off, err := renderMariaDBTuning(&config.Server{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(off), "slow_query_log") {
+		t.Errorf("disabled slow log must render nothing slow-log related:\n%s", off)
+	}
+}
+
+func TestRenderMariaDBTuningSlowLogDefaultThreshold(t *testing.T) {
+	s := &config.Server{Tuning: config.Tuning{MariaDBSlowQueryLog: true}}
+	b, err := renderMariaDBTuning(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "long_query_time = 2") {
+		t.Errorf("default threshold must render as 2 s:\n%s", b)
+	}
+}

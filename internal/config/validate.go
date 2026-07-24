@@ -342,6 +342,12 @@ func (t Tuning) validate() error {
 	if t.PHPMaxInputVars > phpMaxInputVarsCeiling {
 		return fmt.Errorf("tuning.php_max_input_vars %d exceeds %d", t.PHPMaxInputVars, phpMaxInputVarsCeiling)
 	}
+	if t.MariaDBLongQueryTime != 0 && (t.MariaDBLongQueryTime < 1 || t.MariaDBLongQueryTime > 86400) {
+		return fmt.Errorf("tuning.mariadb_long_query_time %d out of range (1-86400 s)", t.MariaDBLongQueryTime)
+	}
+	if t.MariaDBLongQueryTime != 0 && !t.MariaDBSlowQueryLog {
+		return fmt.Errorf("tuning.mariadb_long_query_time is set but tuning.mariadb_slow_query_log is false; enable the slow log or remove the threshold")
+	}
 	return nil
 }
 
@@ -356,6 +362,14 @@ func (sy System) validate() error {
 	}
 	if sy.Timezone != "" && !reTimezone.MatchString(sy.Timezone) {
 		return fmt.Errorf("system.timezone %q must be an IANA zone name like Europe/Warsaw (letters, digits, _ + -, at most two /)", sy.Timezone)
+	}
+	if sy.Hostname != "" {
+		if len(sy.Hostname) > 64 {
+			return fmt.Errorf("system.hostname %q exceeds 64 characters (the kernel HOST_NAME_MAX)", sy.Hostname)
+		}
+		if !reHostname.MatchString(sy.Hostname) {
+			return fmt.Errorf("system.hostname %q is not a valid hostname", sy.Hostname)
+		}
 	}
 	return nil
 }

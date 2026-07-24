@@ -310,3 +310,41 @@ func TestRunServerOpsAndSiteOverrides(t *testing.T) {
 		t.Error("site backups should map to *false")
 	}
 }
+
+func TestRunServerAdvancedSlowLogPairingReprompts(t *testing.T) {
+	// A slow-query threshold with the slow log off is a SERVER-level violation;
+	// it must re-prompt ServerAdvanced itself — the site retry loop cannot edit
+	// server fields, so surfacing it there would trap the user forever.
+	calls := 0
+	f := &fakePrompter{
+		serverCore: baseServer,
+		serverAdvanced: func(a *Answers) {
+			calls++
+			if calls == 1 {
+				a.Tuning.MariaDBLongQueryTime = 5 // threshold without the log
+			} else {
+				a.Tuning.MariaDBSlowQueryLog = true // fixed on the re-prompt
+			}
+		},
+		siteCore: []func(int, *SiteAnswers){
+			func(_ int, sa *SiteAnswers) {
+				sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "a.example.com", "/srv/a", "adb", "ausr"
+			},
+		},
+		// confirms: server-advanced? site-advanced? add-another?
+		confirms: []bool{true, false, false},
+	}
+	a, err := run(f)
+	if err != nil {
+		t.Fatalf("run error = %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("ServerAdvanced calls = %d, want 2 (one re-prompt)", calls)
+	}
+	if len(f.errors) != 1 || !strings.Contains(f.errors[0].Error(), "slow query log") {
+		t.Errorf("expected exactly 1 shown pairing error, got %v", f.errors)
+	}
+	if err := a.ToServer().Validate(); err != nil {
+		t.Fatalf("assembled server invalid: %v", err)
+	}
+}

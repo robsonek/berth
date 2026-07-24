@@ -104,3 +104,15 @@ func (Postgres) EnsureUser(ctx context.Context, r bssh.Runner, user, password, d
 func (Postgres) DumpCommand(database string) string {
 	return "sudo -u postgres pg_dump " + database
 }
+
+// ClientAuthFileName is libpq's per-user password file.
+func (Postgres) ClientAuthFileName() string { return ".pgpass" }
+
+// ClientAuthFile emits one full-wildcard match line: the site role exists only
+// for its own database, so scoping host/port adds nothing, and the wildcard
+// keeps psql/pg_dump working over TCP 127.0.0.1 (the .env transport) and any
+// local alias alike. libpq ignores the file unless it is 0600 — the database
+// step writes it with exactly that mode.
+func (Postgres) ClientAuthFile(database, user, password string) []byte {
+	return []byte("*:*:" + database + ":" + user + ":" + password + "\n")
+}

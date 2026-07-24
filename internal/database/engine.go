@@ -46,6 +46,15 @@ type Engine interface {
 	// rendered into the managed backup script and run later from root's cron, so it
 	// must stay passwordless (socket/peer auth, matching this engine's admin SQL).
 	DumpCommand(database string) string
+	// ClientAuthFileName is the name, relative to the site user's home, of this
+	// engine's client-credentials file (MariaDB ~/.my.cnf, Postgres ~/.pgpass).
+	ClientAuthFileName() string
+	// ClientAuthFile renders that file's content for one site's credentials,
+	// letting the site user run the engine's CLI tools (mariadb/mariadb-dump,
+	// psql/pg_dump) without pasting the password. Inputs are pre-validated
+	// (reSQLIdent identifiers, alphanumeric password), so no escaping is
+	// needed. Like DumpCommand it renders only — it never executes anything.
+	ClientAuthFile(database, user, password string) []byte
 }
 
 var registry = map[string]Engine{}

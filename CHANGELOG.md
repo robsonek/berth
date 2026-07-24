@@ -3,6 +3,28 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Added
+
+- **Declarative static hostname** — opt-in `system.hostname`: sets the
+  hostname via `hostnamectl` and maintains a berth-marked `127.0.1.1` alias
+  line in `/etc/hosts` (Debian convention, so sudo resolves the name without
+  DNS). Empty = berth never touches the hostname. Available in `berth init`.
+- **Per-site DB client credentials** — the database step now seeds the site
+  user's `~/.my.cnf` (MariaDB) / `~/.pgpass` (PostgreSQL) alongside
+  `shared/.env` — seed-once, never rewritten — so `mariadb`, `mariadb-dump`,
+  `psql` and `pg_dump` run as the site user without pasting the password.
+  Already-provisioned hosts gain the file on their next apply.
+- **MariaDB slow query log** — opt-in `tuning.mariadb_slow_query_log` with
+  `tuning.mariadb_long_query_time` (default 2 s), rendered into the managed
+  tuning drop-in; logs to `/var/log/mysql/mariadb-slow.log` (a path the
+  distro logrotate already covers). Off by default with a byte-identical
+  render, so existing hosts see no drift. Available in `berth init`.
+- **`berth site key <server> [domain]`** — prints each site's git deploy
+  public key (generated at provision time for sites with `repository:`),
+  ready to paste into the repo host's deploy-key settings. Read-only.
+
 ## [0.12.0] — 2026-07-24
 
 ### Added
