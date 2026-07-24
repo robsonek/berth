@@ -116,6 +116,7 @@ func (h *huhPrompter) ServerOps(a *Answers) error {
 	form := huh.NewForm(
 		huh.NewGroup(
 			huh.NewInput().Title("Swap file size (e.g. 2G, blank=none)").Value(&a.System.Swap).Validate(optionalSwapSize),
+			huh.NewInput().Title("System timezone (e.g. Europe/Warsaw, blank=leave untouched)").Value(&a.System.Timezone).Validate(optionalTimezone),
 			huh.NewConfirm().Title("Apply conservative kernel sysctl tuning?").Value(&a.System.Sysctl),
 			huh.NewConfirm().Title("Cloudflare-only origin lockdown (server default)?").Value(&a.CloudflareOnly),
 		),

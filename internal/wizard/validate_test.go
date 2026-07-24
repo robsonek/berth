@@ -74,6 +74,19 @@ func TestOptionalSwapSize(t *testing.T) {
 	}
 }
 
+func TestOptionalTimezone(t *testing.T) {
+	for _, ok := range []string{"", "UTC", "Europe/Warsaw", "Etc/GMT+8", "America/Argentina/Buenos_Aires"} {
+		if err := optionalTimezone(ok); err != nil {
+			t.Errorf("optionalTimezone(%q) unexpected error: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"Europe/Warsaw; rm -rf /", "../etc/passwd", "Europe Warsaw", "/Europe", "A/B/C/D"} {
+		if err := optionalTimezone(bad); err == nil {
+			t.Errorf("optionalTimezone(%q) expected error, got nil", bad)
+		}
+	}
+}
+
 func TestOptionalCronSchedule(t *testing.T) {
 	for _, ok := range []string{"", "30 3 * * *", "*/15 * * * *", "0 2 * * 0"} {
 		if err := optionalCronSchedule(ok); err != nil {

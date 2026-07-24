@@ -23,7 +23,7 @@ func (a Answers) ToServer() *config.Server {
 			PHPMaxExecutionTime:   a.Tuning.PHPMaxExecutionTime,
 			PHPMaxInputVars:       a.Tuning.PHPMaxInputVars,
 		},
-		System:         config.System{Swap: a.System.Swap, Sysctl: a.System.Sysctl},
+		System:         config.System{Swap: a.System.Swap, Sysctl: a.System.Sysctl, Timezone: a.System.Timezone},
 		CloudflareOnly: a.CloudflareOnly,
 		Backups:        config.Backups{Enabled: a.Backups.Enabled, Retention: a.Backups.RetentionDays, Schedule: a.Backups.Schedule},
 	}
