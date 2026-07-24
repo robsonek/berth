@@ -75,8 +75,11 @@ ssh:
   key: ~/.ssh/id_ed25519       # path to your private SSH key
   fingerprint: ""              # optional host-key pin "SHA256:…"; empty = trust
                                # on first connect (TOFU, confirmed interactively).
-                               # Pin it to defeat MITM — get the value with:
-                               #   ssh-keyscan -t ed25519 HOST | ssh-keygen -lf - | awk '{print $2}'
+                               # Pin it to defeat MITM — list ALL key types with:
+                               #   ssh-keyscan HOST | ssh-keygen -lf -
+                               # and pin the type berth negotiates: the TOFU
+                               # prompt and any mismatch error name it (e.g.
+                               # ecdsa-sha2-nistp256).
 
 php:
   version: "8.5"               # 8.2 | 8.3 | 8.4 | 8.5

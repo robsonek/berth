@@ -14,10 +14,10 @@ import (
 
 // HostKeyPolicy configures how a server's host key is verified.
 type HostKeyPolicy struct {
-	Pinned      string                              // optional "SHA256:..." fingerprint; if set, must match
-	KnownHosts  string                              // path to known_hosts (default ~/.ssh/known_hosts)
-	AllowTOFU   bool                                // prompt + pin on first contact when not pinned/known
-	ConfirmTOFU func(host, fingerprint string) bool // interactive confirm
+	Pinned      string                                       // optional "SHA256:..." fingerprint; if set, must match
+	KnownHosts  string                                       // path to known_hosts (default ~/.ssh/known_hosts)
+	AllowTOFU   bool                                         // prompt + pin on first contact when not pinned/known
+	ConfirmTOFU func(host, fingerprint, keyType string) bool // interactive confirm; keyType is the negotiated algorithm (e.g. ecdsa-sha2-nistp256)
 }
 
 // Fingerprint returns the SHA256 fingerprint of a public key ("SHA256:...").
@@ -34,10 +34,14 @@ func HostKeyChecker(p HostKeyPolicy) xssh.HostKeyCallback {
 	}
 	return func(hostname string, remote net.Addr, key xssh.PublicKey) error {
 		fp := Fingerprint(key)
+		// Every message names the NEGOTIATED key type: a server offers one key
+		// per type, so a pin taken from the wrong `ssh-keyscan` line (e.g. its
+		// ed25519 default when this client negotiates ECDSA) mismatches even
+		// though the server is genuine — the type is what disambiguates.
 		// 1) Explicit pin wins.
 		if p.Pinned != "" {
 			if fp != p.Pinned {
-				return fmt.Errorf("host key fingerprint %s does not match pinned %s", fp, p.Pinned)
+				return fmt.Errorf("host key (%s) fingerprint %s does not match pinned %s — a server has one key per type; compare all with: ssh-keyscan HOST | ssh-keygen -lf -", key.Type(), fp, p.Pinned)
 			}
 			return nil
 		}
@@ -47,15 +51,15 @@ func HostKeyChecker(p HostKeyPolicy) xssh.HostKeyCallback {
 			case err == nil:
 				return nil // recognized host + key
 			case isKnownHostsMismatch(err):
-				return fmt.Errorf("host key mismatch for %s (%s) — refusing (possible MITM)", hostname, fp)
+				return fmt.Errorf("host key mismatch for %s (%s %s) — refusing (possible MITM)", hostname, key.Type(), fp)
 				// default: unknown host → fall through to TOFU
 			}
 		}
 		// 3) TOFU with explicit confirmation, then pin to known_hosts.
-		if p.AllowTOFU && p.ConfirmTOFU != nil && p.ConfirmTOFU(hostname, fp) {
+		if p.AllowTOFU && p.ConfirmTOFU != nil && p.ConfirmTOFU(hostname, fp, key.Type()) {
 			return appendKnownHost(p.KnownHosts, hostname, key)
 		}
-		return fmt.Errorf("unknown host key for %s (%s); pin via ssh.fingerprint or confirm interactively", hostname, fp)
+		return fmt.Errorf("unknown host key for %s (%s %s); pin via ssh.fingerprint or confirm interactively", hostname, key.Type(), fp)
 	}
 }
 

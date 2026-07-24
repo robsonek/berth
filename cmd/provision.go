@@ -99,12 +99,14 @@ func defaultKnownHosts() string {
 }
 
 // confirmFingerprint returns a TOFU confirmation callback that prints the host
-// key fingerprint and reads a y/N answer from stdin.
-func confirmFingerprint(cmd *cobra.Command) func(host, fingerprint string) bool {
-	return func(host, fingerprint string) bool {
+// key type + fingerprint and reads a y/N answer from stdin. Showing the
+// negotiated type matters: this exact fingerprint is what the operator will
+// pin as ssh.fingerprint, and ssh-keyscan prints one line per key type.
+func confirmFingerprint(cmd *cobra.Command) func(host, fingerprint, keyType string) bool {
+	return func(host, fingerprint, keyType string) bool {
 		out := cmd.OutOrStdout()
 		fmt.Fprintf(out, "The authenticity of host %q can't be established.\n", host)
-		fmt.Fprintf(out, "Key fingerprint is %s\n", fingerprint)
+		fmt.Fprintf(out, "Key fingerprint is %s (%s)\n", fingerprint, keyType)
 		fmt.Fprint(out, "Are you sure you want to continue connecting (y/N)? ")
 		reader := bufio.NewReader(cmd.InOrStdin())
 		line, err := reader.ReadString('\n')
