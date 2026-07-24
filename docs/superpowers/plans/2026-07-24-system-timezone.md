@@ -4,7 +4,7 @@
 
 **Goal:** Add an opt-in `system.timezone` knob (empty = berth never touches the zone) applied idempotently by the existing `system` step, with wizard coverage, per spec `docs/superpowers/specs/2026-07-24-system-timezone-design.md`.
 
-**Architecture:** A third gated block in the `system` step next to swap and sysctl, following its `checkX`/`applyX` re-entrant pattern: Check compares `timedatectl show -p Timezone --value` to the configured zone; Apply runs `timedatectl set-timezone` then `systemctl try-restart cron` (cron reads local time at startup and berth's backup cron is wall-clock-sensitive). No default, no `*Eff` accessor, no removal branch (a timezone is system state, not a berth artifact — documented asymmetry vs swap).
+**Architecture:** A third gated block in the `system` step next to swap and sysctl, following its `checkX`/`applyX` re-entrant pattern: Check compares `timedatectl show -p Timezone --value` to the configured zone; Apply captures the previous zone, runs `timedatectl set-timezone` then `systemctl try-restart cron` (cron reads local time at startup and berth's backup cron is wall-clock-sensitive), and on a failed cron restart best-effort **reverts** to the previous zone — otherwise the next run's Check would report Satisfied forever while cron fires on the old schedule (the php step's compensation precedent; Codex HIGH). No default, no `*Eff` accessor, no removal branch (a timezone is system state, not a berth artifact — documented asymmetry vs swap).
 
 **Tech Stack:** Go 1.25, FakeRunner exact-string test doubles.
 
@@ -178,9 +178,10 @@ func TestSystemCheckTimezoneMatchSatisfied(t *testing.T) {
 	}
 }
 
-func TestSystemCheckTimezoneUnsetNeverProbed(t *testing.T) {
-	// Empty knob = berth never touches (or even reads) the zone: an unstubbed
-	// timedatectl would error the FakeRunner, so this passing proves no call.
+func TestSystemTimezoneUnsetNeverProbed(t *testing.T) {
+	// Empty knob = berth never touches (or even reads) the zone on EITHER
+	// path: an unstubbed timedatectl would error the FakeRunner, so Check
+	// succeeding AND Apply succeeding proves neither made the call.
 	f := bssh.NewFakeRunner()
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
@@ -191,6 +192,9 @@ func TestSystemCheckTimezoneUnsetNeverProbed(t *testing.T) {
 	}
 	if !cr.Satisfied {
 		t.Errorf("expected satisfied no-op; got %+v", cr)
+	}
+	if err := System().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
 	}
 	for _, c := range f.Calls() {
 		if strings.Contains(c.Cmd, "timedatectl") {
@@ -211,20 +215,44 @@ func TestSystemApplyTimezoneSetsAndRestartsCron(t *testing.T) {
 	if err := System().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
-	var set, cron bool
+	// Exactly ONE set and ONE cron restart, in that order (counts, not just
+	// presence — duplicate calls must fail this).
+	var set, cron int
 	for _, c := range f.Calls() {
 		switch c.Cmd {
 		case "timedatectl set-timezone 'Europe/Warsaw'":
-			set = true
+			set++
 		case "systemctl try-restart cron":
-			if !set {
+			if set == 0 {
 				t.Error("cron restart must come AFTER set-timezone")
 			}
-			cron = true
+			cron++
 		}
 	}
-	if !set || !cron {
-		t.Errorf("want set-timezone + try-restart cron; got set=%v cron=%v", set, cron)
+	if set != 1 || cron != 1 {
+		t.Errorf("want exactly one set-timezone and one cron restart; got %d and %d", set, cron)
+	}
+}
+
+func TestSystemApplyTimezoneSetFailureAborts(t *testing.T) {
+	// A failed set-timezone surfaces as the step error with NO cron restart
+	// and NO revert (nothing changed): both commands are unstubbed, so any
+	// attempt to run them errors the FakeRunner with a different message.
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("timedatectl show -p Timezone --value", bssh.Result{ExitCode: 0, Stdout: "Etc/UTC\n"})
+	f.On("timedatectl set-timezone 'Europe/Warsaw'", bssh.Result{ExitCode: 1, Stderr: "Failed to set time zone"})
+	s := &config.Server{System: config.System{Timezone: "Europe/Warsaw"}}
+	err := System().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "set-timezone") {
+		t.Fatalf("err = %v, want the set-timezone failure", err)
+	}
+	for _, c := range f.Calls() {
+		if c.Cmd == "systemctl try-restart cron" || c.Cmd == "timedatectl set-timezone 'Etc/UTC'" {
+			t.Errorf("failed set must not restart cron or revert; ran %q", c.Cmd)
+		}
 	}
 }
 
@@ -247,7 +275,11 @@ func TestSystemApplyTimezoneNoopWhenSatisfied(t *testing.T) {
 	}
 }
 
-func TestSystemApplyTimezoneCronRestartFailureAborts(t *testing.T) {
+func TestSystemApplyTimezoneCronFailureRevertsZone(t *testing.T) {
+	// A failed cron restart must surface as the step error AND best-effort
+	// revert the zone: leaving the new zone in place would make the next
+	// run's Check falsely Satisfied while cron still fires on the old
+	// zone's schedule (the php step's compensation precedent).
 	f := bssh.NewFakeRunner()
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
@@ -255,9 +287,20 @@ func TestSystemApplyTimezoneCronRestartFailureAborts(t *testing.T) {
 	f.On("timedatectl show -p Timezone --value", bssh.Result{ExitCode: 0, Stdout: "Etc/UTC\n"})
 	f.On("timedatectl set-timezone 'Europe/Warsaw'", bssh.Result{})
 	f.On("systemctl try-restart cron", bssh.Result{ExitCode: 1, Stderr: "boom"})
+	f.On("timedatectl set-timezone 'Etc/UTC'", bssh.Result{}) // the revert
 	s := &config.Server{System: config.System{Timezone: "Europe/Warsaw"}}
-	if err := System().Apply(context.Background(), provision.RunCtx{}, s, f); err == nil {
-		t.Fatal("expected the cron restart failure to surface as the step error")
+	err := System().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "reverted") {
+		t.Fatalf("err = %v, want the cron failure naming the revert", err)
+	}
+	var reverted bool
+	for _, c := range f.Calls() {
+		if c.Cmd == "timedatectl set-timezone 'Etc/UTC'" {
+			reverted = true
+		}
+	}
+	if !reverted {
+		t.Error("Apply must revert to the previous zone after a failed cron restart")
 	}
 }
 ```
@@ -328,20 +371,35 @@ func checkTimezone(ctx context.Context, r bssh.Runner, tz string) (bool, []strin
 // applyTimezone sets the zone, then restarts cron: cron reads the local time
 // at startup and berth's own backup cron (30 3 * * *) is wall-clock-sensitive,
 // so without the restart the OLD zone's schedule would persist indefinitely.
-// try-restart (not restart) is a no-op when cron isn't running — the step never
-// starts a service it doesn't own. Re-entrant: re-runs checkTimezone first.
+// try-restart (not restart) is a no-op when cron isn't running — the step
+// never starts a service it doesn't own. Re-entrant (a matching zone is a
+// no-op); it probes the current zone itself, rather than via checkTimezone,
+// because the PREVIOUS value is also the compensation target: on a failed
+// cron restart the zone is best-effort reverted — leaving the new zone in
+// place would make the next run's Check falsely Satisfied while cron still
+// fires on the old zone's schedule (the php step's drop-in-removal
+// precedent). The revert result is deliberately ignored: the original
+// failure is what the operator must see.
 func applyTimezone(ctx context.Context, r bssh.Runner, tz string) error {
-	ok, _, err := checkTimezone(ctx, r, tz)
+	res, err := r.Run(ctx, "timedatectl show -p Timezone --value", nil)
 	if err != nil {
 		return err
 	}
-	if ok {
+	if res.ExitCode != 0 {
+		return fmt.Errorf("timedatectl show: %s", res.Stderr)
+	}
+	prev := strings.TrimSpace(res.Stdout)
+	if prev == tz {
 		return nil
 	}
 	if err := runOK(ctx, r, "timedatectl set-timezone "+shQuote(tz)); err != nil {
 		return err
 	}
-	return runOK(ctx, r, "systemctl try-restart cron")
+	if err := runOK(ctx, r, "systemctl try-restart cron"); err != nil {
+		_, _ = r.Run(ctx, "timedatectl set-timezone "+shQuote(prev), nil)
+		return fmt.Errorf("cron restart after the timezone change failed (reverted to %s so the next run retries): %w", prev, err)
+	}
+	return nil
 }
 ```
 
@@ -541,6 +599,9 @@ In `test/integration/assert_system.go`, append inside `assertSwapSysctl` (end of
 		if err != nil {
 			t.Fatalf("timedatectl show: %v", err)
 		}
+		if tz.ExitCode != 0 {
+			t.Fatalf("timedatectl show exit %d: %s", tz.ExitCode, strings.TrimSpace(tz.Stderr))
+		}
 		if got := strings.TrimSpace(tz.Stdout); got != srv.System.Timezone {
 			t.Errorf("system timezone = %q, want %q", got, srv.System.Timezone)
 		}
@@ -579,7 +640,8 @@ Do NOT push. Tell the user the branch `feat/system-timezone` is ready:
 
 ## Self-review notes (already applied)
 
-- Spec coverage: §2 → Task 1; §3 → Task 2; §4 → Task 3; §5 + §6-integration → Task 4. No default/Eff anywhere (spec §2). The no-removal asymmetry is stated in the config doc comment, the step doc comment, and the README block.
-- The unset-path test (`TestSystemCheckTimezoneUnsetNeverProbed`) doubles as the guard that existing system tests (all with empty Timezone) keep passing without new stubs.
+- Spec coverage: §2 → Task 1; §3 (incl. the cron-failure revert compensation) → Task 2; §4 → Task 3; §5 + §6-integration → Task 4. No default/Eff anywhere (spec §2). The no-removal asymmetry is stated in the config doc comment, the step doc comment, and the README block.
+- Codex review incorporated (verdict was RETHINK on the pre-revision plan): HIGH non-convergent cron failure → revert compensation in `applyTimezone` + `TestSystemApplyTimezoneCronFailureRevertsZone`; MEDIUM missing set-failure test → `TestSystemApplyTimezoneSetFailureAborts`; LOW unset-Apply unproven → `TestSystemTimezoneUnsetNeverProbed` covers both paths; LOW occurrence-only ordering assert → exact counts; LOW integration ExitCode → checked.
+- The unset-path test doubles as the guard that existing system tests (all with empty Timezone) keep passing without new stubs.
 - Names consistent across tasks: `Timezone`, `reTimezone` (same literal in config and wizard mirror), `optionalTimezone`, `checkTimezone`, `applyTimezone`.
-- Exact command strings appear identically in implementation and stubs: `timedatectl show -p Timezone --value`, `timedatectl set-timezone 'Europe/Warsaw'`, `systemctl try-restart cron`.
+- Exact command strings appear identically in implementation and stubs: `timedatectl show -p Timezone --value`, `timedatectl set-timezone 'Europe/Warsaw'`, `systemctl try-restart cron`, revert `timedatectl set-timezone 'Etc/UTC'`.

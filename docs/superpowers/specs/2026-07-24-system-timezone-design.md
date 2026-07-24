@@ -68,15 +68,27 @@ A third managed block next to swap and sysctl, gated on
 - **Check (read-only):** `timedatectl show -p Timezone --value`; trimmed
   output equal to the configured value ⇒ satisfied. Empty config ⇒ the block
   is skipped entirely (no remote call).
-- **Apply:** `timedatectl set-timezone <shQuote(tz)>` followed by
-  `systemctl try-restart cron`. The cron restart is the load-bearing detail:
-  cron reads the local time at startup, and berth's own backup cron
+- **Apply:** capture the current zone, `timedatectl set-timezone <shQuote(tz)>`,
+  then `systemctl try-restart cron`. The cron restart is the load-bearing
+  detail: cron reads the local time at startup, and berth's own backup cron
   (`30 3 * * *`) is wall-clock-sensitive — without the restart the old zone's
   schedule would persist indefinitely. `try-restart` (not `restart`) is a
   no-op when cron isn't running, so the step never *starts* a service it
   doesn't own. Both commands run under the client's standard sudo wrapping.
+- **Cron-failure compensation (Codex HIGH):** if the cron restart exits
+  non-zero, Apply best-effort **reverts** to the captured previous zone before
+  returning the error. Without this, the next run's Check would see the new
+  zone already set and report Satisfied forever while cron still fires on the
+  old zone's schedule — the exact falsely-Satisfied class the php step's
+  drop-in-removal compensation closes, solved with the same shape. A failed
+  `set-timezone` needs no compensation (nothing changed). Rejected
+  alternative: an mtime-vs-`ActiveEnterTimestamp` liveness probe in Check
+  (the tuning-step machinery) — one failure-path command beats a per-Check
+  remote probe, and the zone comparison itself already reconciles
+  out-of-band changes.
 - **Convergence:** `set-timezone` atomically updates `/etc/localtime` +
-  `/etc/timezone`; the next Check reads the new value. No liveness gap.
+  `/etc/timezone`; the next Check reads the new value (or, after a
+  compensated failure, the reverted one — and retries both commands).
 - **No foreign-file concerns:** nothing berth-managed is written, so the
   managed-marker machinery is not involved.
 
@@ -108,17 +120,22 @@ system logs.
   `America/Argentina/Buenos_Aires`, `America/Port-au-Prince`; rejects
   `Europe/Warsaw; rm -rf /`, `../etc/passwd`, `Europe Warsaw`, `/Europe`,
   `A/B/C/D`; empty lenient-passes.
-- **system step:** unset ⇒ NO timezone command in `Calls()` (both Check and
-  Apply paths); set + drifted ⇒ Check unsatisfied, Apply runs exactly
-  `timedatectl set-timezone 'Europe/Warsaw'` then
-  `systemctl try-restart cron`; set + matching ⇒ satisfied, Apply skips the
-  block (re-entrant like swap/sysctl); trailing-newline handling of the
-  `show` output.
+- **system step:** unset ⇒ NO timezone command in `Calls()` (**both** Check
+  and Apply paths — Apply asserted too, an unstubbed probe errors the
+  FakeRunner); set + drifted ⇒ Check unsatisfied, Apply runs **exactly one**
+  `timedatectl set-timezone 'Europe/Warsaw'` then **exactly one**
+  `systemctl try-restart cron`, in that order (occurrence counts, not just
+  presence); set + matching ⇒ satisfied, Apply skips the block (re-entrant
+  like swap/sysctl); `set-timezone` failure ⇒ error surfaces, NO cron
+  restart, NO revert; cron-restart failure ⇒ error surfaces AND the revert
+  `set-timezone '<previous>'` runs; trailing-newline handling of the `show`
+  output.
 - **wizard:** `optionalTimezone` accept/reject table; `ToServer` carries the
   field; matrix cases per §4.
 - **integration (same PR, proven pattern):** `assert_system.go` gains a
   timezone assert gated on `srv.System.Timezone != ""` — `timedatectl show`
-  equals the configured zone. Runs live at the next box validation.
+  exits 0 AND equals the configured zone. Runs live at the next box
+  validation.
 
 ## 7. Explicitly out of scope (YAGNI)
 
