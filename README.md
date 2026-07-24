@@ -14,7 +14,8 @@ then the deployer brings the code alongside.
 ## Install
 
 Prebuilt binaries are published for Linux, macOS, and Windows (amd64/arm64) on
-the [Releases](https://github.com/robsonek/berth/releases) page. No runtime is
+the [Releases](https://github.com/robsonek/berth/releases) page — notable
+changes are summarized in [CHANGELOG.md](CHANGELOG.md). No runtime is
 required. Download the archive that matches your OS and architecture, extract
 the `berth` binary, and put it on your `PATH`.
 

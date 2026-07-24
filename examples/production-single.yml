@@ -41,11 +41,18 @@ fail2ban:
 tuning:
   valkey_maxmemory: 512mb
   mariadb_innodb_buffer_pool: 512M
+  php_memory_limit: 512M       # FPM-only; CLI keeps stock -1 for workers/artisan
+  php_upload_max: 64M          # max single-file upload; post_max_size and nginx
+                               # client_max_body_size are derived slightly larger
+  php_max_execution_time: 120  # seconds, 1-300
+  php_max_input_vars: 3000     # large Filament forms can exceed the stock 1000
 
-# Optional host-level OS provisioning (both default off).
+# Optional host-level OS provisioning (all default off).
 system:
   swap: 2G              # create /swapfile (2 GiB) + vm.swappiness=10; omit to leave swap untouched
   sysctl: true          # write a conservative web/DB kernel sysctl drop-in
+  timezone: Europe/Berlin   # sets the SYSTEM zone (logs, cron) and restarts cron;
+                            # omit to leave the image's zone untouched
 
 sites:
   - domain: app.example.com
