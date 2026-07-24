@@ -477,9 +477,13 @@ func TestAccountsCheckBreakGlassOnPasswordMissingUnsatisfied(t *testing.T) {
 }
 
 func TestAccountsCheckBreakGlassOffPasswordSetUnsatisfied(t *testing.T) {
-	// The berth account's posture is fully berth-owned: a usable password with
-	// the knob off must reconcile back to locked.
+	// A usable password WITH the local ownership marker (berth set it) must
+	// reconcile back to locked when the knob is off.
+	chdirTemp(t)
 	s := testServerWithKey(t)
+	if err := secret.SaveCache(s.Host, map[string]string{"console:berth": "OwnedPW123"}); err != nil {
+		t.Fatal(err)
+	}
 	want := authorizedKeys(testOperatorKey)
 	deploySudoers, err := renderSiteSudoers(s, s.Sites[0])
 	if err != nil {
@@ -496,6 +500,42 @@ func TestAccountsCheckBreakGlassOffPasswordSetUnsatisfied(t *testing.T) {
 	if cr.Satisfied {
 		t.Error("break_glass off with a usable berth password must be unsatisfied (lock it back)")
 	}
+}
+
+func TestAccountsCheckBreakGlassOffForeignPasswordSatisfied(t *testing.T) {
+	// A usable password WITHOUT the ownership marker is the operator's, not
+	// berth's — the swap-file rule: berth removes only what it created.
+	chdirTemp(t)
+	s := testServerWithKey(t)
+	want := authorizedKeys(testOperatorKey)
+	deploySudoers, err := renderSiteSudoers(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
+	stubAccountExists(f, "deploy", deploySudoers, want)
+	f.On("passwd -S berth", bssh.Result{ExitCode: 0, Stdout: "berth P 07/24/2026 0 99999 7 -1\n"})
+	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("an operator-set password with break_glass off must be left alone; got %+v", cr)
+	}
+	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, stubForeignPasswordApply(t, s)); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+}
+
+// stubForeignPasswordApply stubs a full Apply with a usable but unowned
+// password; the assertion is implicit — an unstubbed `passwd -l berth` would
+// fail the FakeRunner if Apply tried to lock it.
+func stubForeignPasswordApply(t *testing.T, s *config.Server) *bssh.FakeRunner {
+	t.Helper()
+	f := stubFullApply(t, s)
+	f.On("passwd -S berth", bssh.Result{ExitCode: 0, Stdout: "berth P 07/24/2026 0 99999 7 -1\n"})
+	return f
 }
 
 func TestAccountsCheckBreakGlassSatisfiedBothWays(t *testing.T) {
@@ -547,7 +587,7 @@ func TestAccountsApplyBreakGlassSetsPasswordViaStdin(t *testing.T) {
 			line := strings.TrimSuffix(string(c.Stdin), "\n")
 			var ok bool
 			if pw, ok = strings.CutPrefix(line, "berth:"); !ok || pw == "" {
-				t.Fatalf("chpasswd stdin = %q, want berth:<password>", line)
+				t.Fatalf("chpasswd stdin has the wrong shape (len %d), want berth:<password>", len(line))
 			}
 		}
 		if strings.Contains(c.Cmd, pw) && pw != "" {
@@ -582,7 +622,7 @@ func TestAccountsApplyBreakGlassReusesCachedPassword(t *testing.T) {
 	}
 	for _, c := range f.Calls() {
 		if c.Cmd == "chpasswd" && string(c.Stdin) != "berth:CachedPW123\n" {
-			t.Errorf("cached password must be reused, got stdin %q", c.Stdin)
+			t.Errorf("cached password must be reused (stdin mismatch, len %d)", len(c.Stdin))
 		}
 	}
 }
@@ -603,9 +643,12 @@ func TestAccountsApplyBreakGlassNeverRotatesUsablePassword(t *testing.T) {
 	}
 }
 
-func TestAccountsApplyBreakGlassOffLocksUsablePassword(t *testing.T) {
+func TestAccountsApplyBreakGlassOffLocksOwnedPassword(t *testing.T) {
 	chdirTemp(t)
 	s := testServerWithKey(t)
+	if err := secret.SaveCache(s.Host, map[string]string{"console:berth": "OwnedPW123", "other": "keep"}); err != nil {
+		t.Fatal(err)
+	}
 	f := stubFullApply(t, s)
 	f.On("passwd -S berth", bssh.Result{ExitCode: 0, Stdout: "berth P 07/24/2026 0 99999 7 -1\n"})
 	f.On("passwd -l berth", bssh.Result{})
@@ -613,6 +656,16 @@ func TestAccountsApplyBreakGlassOffLocksUsablePassword(t *testing.T) {
 		t.Fatalf("Apply() error = %v", err)
 	}
 	if !calledCmd(f, "passwd -l berth") {
-		t.Error("break_glass off must lock a usable password back")
+		t.Error("break_glass off must lock the berth-set password back")
+	}
+	cache, err := secret.LoadCache(s.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cache["console:berth"] != "" {
+		t.Error("locking must drop the cached plaintext (a stale root credential)")
+	}
+	if cache["other"] != "keep" {
+		t.Error("dropping the marker must not clobber other cached secrets")
 	}
 }

@@ -51,10 +51,13 @@ func assertClientDBAuth(ctx context.Context, t *testing.T, c *bssh.Client, srv *
 	}
 }
 
-// assertDeployKeys verifies each repository site's deploy key pair (generated
-// by the accounts step) exists and the public half is a printable ed25519 key —
-// what `berth site key` surfaces. Sites without a repository have no managed
-// key by design and are skipped.
+// assertDeployKeys verifies each repository site's deploy key PAIR (generated
+// by the accounts step): the private half is present, owned by the site user
+// and 0600, the public half is a printable ed25519 key (what `berth site key`
+// surfaces), and the two actually match (`ssh-keygen -y` re-derivation) — a
+// pubkey orphaned from its private key would paste fine into the repo host and
+// then never authenticate. Sites without a repository have no managed key by
+// design and are skipped.
 func assertDeployKeys(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server) {
 	t.Helper()
 	for _, site := range srv.Sites {
@@ -62,7 +65,19 @@ func assertDeployKeys(ctx context.Context, t *testing.T, c *bssh.Client, srv *co
 			continue
 		}
 		user := srv.SiteUser(site)
-		pub := "/home/" + user + "/.ssh/id_ed25519.pub"
+		priv := "/home/" + user + "/.ssh/id_ed25519"
+		pub := priv + ".pub"
+		st, err := c.Run(ctx, "stat -c '%U %a' "+priv, nil)
+		if err != nil {
+			t.Fatalf("stat %s: %v", priv, err)
+		}
+		if st.ExitCode != 0 {
+			t.Errorf("%s: deploy private key missing (exit %d)", site.Domain, st.ExitCode)
+			continue
+		}
+		if got, want := strings.TrimSpace(st.Stdout), user+" 600"; got != want {
+			t.Errorf("%s: private key owner/mode = %q, want %q", site.Domain, got, want)
+		}
 		res, err := c.Run(ctx, "cat "+pub, nil)
 		if err != nil {
 			t.Fatalf("cat %s: %v", pub, err)
@@ -71,8 +86,23 @@ func assertDeployKeys(ctx context.Context, t *testing.T, c *bssh.Client, srv *co
 			t.Errorf("%s: deploy key pubkey missing (exit %d)", site.Domain, res.ExitCode)
 			continue
 		}
-		if !strings.HasPrefix(strings.TrimSpace(res.Stdout), "ssh-ed25519 ") {
-			t.Errorf("%s: pubkey is not ed25519: %q", site.Domain, strings.TrimSpace(res.Stdout))
+		pubLine := strings.TrimSpace(res.Stdout)
+		if !strings.HasPrefix(pubLine, "ssh-ed25519 ") {
+			t.Errorf("%s: pubkey is not ed25519: %q", site.Domain, pubLine)
+			continue
+		}
+		derived, err := c.Run(ctx, "ssh-keygen -y -f "+priv, nil)
+		if err != nil {
+			t.Fatalf("ssh-keygen -y %s: %v", priv, err)
+		}
+		if derived.ExitCode != 0 {
+			t.Errorf("%s: private key unreadable/corrupt (ssh-keygen -y exit %d)", site.Domain, derived.ExitCode)
+			continue
+		}
+		// Compare type + blob; the .pub carries an extra comment field.
+		pubFields, derFields := strings.Fields(pubLine), strings.Fields(derived.Stdout)
+		if len(derFields) < 2 || pubFields[0] != derFields[0] || pubFields[1] != derFields[1] {
+			t.Errorf("%s: pubkey does not match the private key", site.Domain)
 		}
 	}
 }

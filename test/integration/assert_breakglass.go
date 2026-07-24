@@ -30,14 +30,22 @@ func assertBreakGlass(ctx context.Context, t *testing.T, c *bssh.Client, srv *co
 		t.Fatalf("passwd -S berth exit %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 	fields := strings.Fields(res.Stdout)
-	if len(fields) < 2 {
+	if len(fields) < 2 || fields[0] != "berth" {
 		t.Fatalf("passwd -S berth: unexpected output %q", strings.TrimSpace(res.Stdout))
 	}
 	status := fields[1]
+	if status != "P" && status != "L" && status != "NP" {
+		t.Fatalf("passwd -S berth: unexpected status %q", status)
+	}
 	if srv.System.BreakGlass {
 		if status != "P" {
 			t.Errorf("break_glass on: berth password status = %q, want P (usable)", status)
 		}
+		// The suite provisions the box itself, so the password on it is
+		// berth-set and MUST be readable from the local cache — that is the
+		// whole point. (An operator-set pre-existing password without a cache
+		// entry is a valid state for the STEP, but not one this suite's own
+		// flow can produce.)
 		cache, err := secret.LoadCache(srv.Host)
 		if err != nil {
 			t.Fatalf("load local secret cache: %v", err)
@@ -47,6 +55,8 @@ func assertBreakGlass(ctx context.Context, t *testing.T, c *bssh.Client, srv *co
 		}
 		return
 	}
+	// Off: the suite's flow means any usable password here would be a berth
+	// leftover the lock-back failed to reconcile.
 	if status == "P" {
 		t.Errorf("break_glass off: berth password status = P, want locked/absent (L or NP)")
 	}

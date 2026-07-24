@@ -180,10 +180,12 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 
 	driver, host, port, socket := eng.EnvConnection()
 	// Accumulate per-site secrets and write the local cache once at the end so
-	// sites do not clobber each other's cached passwords.
-	cache, _ := secret.LoadCache(s.Host)
-	if cache == nil {
-		cache = map[string]string{}
+	// sites do not clobber each other's cached passwords. A cache that cannot
+	// be READ is a hard error, not an empty map — saving over it would clobber
+	// every credential it held (LoadCache treats only never-written as empty).
+	cache, err := secret.LoadCache(s.Host)
+	if err != nil {
+		return fmt.Errorf("load local secret cache: %w", err)
 	}
 	var redisUsed map[int]bool
 	if s.Valkey {

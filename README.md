@@ -312,8 +312,10 @@ which disables root login and password authentication only after verifying the
   it at the console. It never opens a network path — sshd keeps
   `PasswordAuthentication no` — but note the `berth` account has full sudo, so
   treat the cached password as a root credential. Setting the knob back to
-  `false` locks the password again on the next provision; an existing usable
-  password is reused, never rotated.
+  `false` locks the password berth set on the next provision (ownership is
+  tracked via the cache entry, and locking removes the cached plaintext); a
+  password berth did not set is left alone, and an existing usable password
+  is reused, never rotated.
 
 ### Cloudflare origin lockdown (`cloudflare_only:`)
 

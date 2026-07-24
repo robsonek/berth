@@ -13,16 +13,19 @@ Notable changes to berth. Older releases are documented on the
   is down; without it every berth-managed account is locked and only rescue
   mode remains. sshd keeps `PasswordAuthentication no`, so no network login
   path opens; the berth account has full sudo, so treat the cached password
-  as a root credential. Both directions reconcile: turning the knob off locks
-  the password again; an existing usable password is reused, never rotated.
-  Available in `berth init`.
+  as a root credential. Turning the knob off locks back the password berth
+  set (ownership is tracked via the local cache entry, which locking removes;
+  a password berth did not set is left alone), and an existing usable
+  password is reused, never rotated. Available in `berth init`.
 - **Integration coverage for the v0.13 features and break-glass** — the live
   suite now asserts the static hostname + the exactly-one marked `127.0.1.1`
   alias, per-site client DB credentials by actually logging in with no inline
-  credentials, deploy-key presence for repository sites, the slow query log
-  end-to-end (including a marker query landing in the log — the variables
-  alone read ON even on a host hit by the silent-off bug fixed in 0.13.0),
-  and the berth account's console-password posture in both directions.
+  credentials, deploy-key pairs for repository sites (including that the
+  public half re-derives from the private one), the slow query log
+  end-to-end (the variables alone read ON even on a host hit by the
+  silent-off bug fixed in 0.13.0; with a threshold of at most 5 s a marker
+  query must actually land in the log), and the berth account's
+  console-password posture in both directions.
 
 ## [0.13.0] — 2026-07-24
 
