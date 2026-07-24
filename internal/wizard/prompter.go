@@ -79,6 +79,8 @@ func (h *huhPrompter) ServerCore(a *Answers) error {
 
 func (h *huhPrompter) ServerAdvanced(a *Answers) error {
 	maxretry := strconv.Itoa(a.Fail2ban.Maxretry)
+	execTime := strconv.Itoa(a.Tuning.PHPMaxExecutionTime)
+	inputVars := strconv.Itoa(a.Tuning.PHPMaxInputVars)
 	policies := []string{"", "noeviction", "allkeys-lru", "allkeys-lfu", "allkeys-random", "volatile-lru", "volatile-lfu", "volatile-random", "volatile-ttl"}
 	form := huh.NewForm(
 		huh.NewGroup(
@@ -91,6 +93,12 @@ func (h *huhPrompter) ServerAdvanced(a *Answers) error {
 			huh.NewSelect[string]().Title("Valkey eviction policy (blank=default)").Options(huh.NewOptions(policies...)...).Value(&a.Tuning.ValkeyMaxmemoryPolicy),
 			huh.NewInput().Title("MariaDB innodb_buffer_pool (e.g. 256M, blank=default)").Value(&a.Tuning.MariaDBBufferPool).Validate(optionalMariaDBSize),
 		),
+		huh.NewGroup(
+			huh.NewInput().Title("PHP memory_limit (e.g. 256M, blank=default)").Value(&a.Tuning.PHPMemoryLimit).Validate(optionalPHPSize),
+			huh.NewInput().Title("PHP max upload file size, body caps derived (e.g. 32M, blank=default)").Value(&a.Tuning.PHPUploadMax).Validate(optionalPHPSize),
+			huh.NewInput().Title("PHP max_execution_time (1-300 s, blank/0=default)").Value(&execTime).Validate(optionalInt("tuning.php_max_execution_time", 1, 300)),
+			huh.NewInput().Title("PHP max_input_vars (1-1000000, blank/0=default)").Value(&inputVars).Validate(optionalInt("tuning.php_max_input_vars", 1, 1000000)),
+		),
 	)
 	if err := form.Run(); err != nil {
 		return err
@@ -98,6 +106,8 @@ func (h *huhPrompter) ServerAdvanced(a *Answers) error {
 	// Trim-safe like the validator (optionalInt); blank/"0" -> 0 = default, an
 	// accepted " 5 " -> 5 (a raw Atoi would have dropped it to the default).
 	a.Fail2ban.Maxretry, _ = parseIntInRange("fail2ban.maxretry", maxretry, 0, 100)
+	a.Tuning.PHPMaxExecutionTime, _ = parseIntInRange("tuning.php_max_execution_time", execTime, 1, 300)
+	a.Tuning.PHPMaxInputVars, _ = parseIntInRange("tuning.php_max_input_vars", inputVars, 1, 1000000)
 	return nil
 }
 

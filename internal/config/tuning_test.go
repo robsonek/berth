@@ -13,10 +13,25 @@ func TestTuningAccessorsDefaultWhenEmpty(t *testing.T) {
 	if got := tn.MariaDBBufferPoolEff(); got != "256M" {
 		t.Errorf("MariaDBBufferPoolEff() = %q, want 256M", got)
 	}
+	if got := tn.PHPMemoryLimitEff(); got != "256M" {
+		t.Errorf("PHPMemoryLimitEff() = %q, want 256M", got)
+	}
+	if got := tn.PHPUploadMaxEff(); got != "32M" {
+		t.Errorf("PHPUploadMaxEff() = %q, want 32M", got)
+	}
+	if got := tn.PHPMaxExecutionTimeEff(); got != 30 {
+		t.Errorf("PHPMaxExecutionTimeEff() = %d, want 30", got)
+	}
+	if got := tn.PHPMaxInputVarsEff(); got != 1000 {
+		t.Errorf("PHPMaxInputVarsEff() = %d, want 1000", got)
+	}
 }
 
 func TestTuningAccessorsHonorOverrides(t *testing.T) {
-	tn := Tuning{ValkeyMaxmemory: "512mb", ValkeyMaxmemoryPolicy: "volatile-lru", MariaDBBufferPool: "1G"}
+	tn := Tuning{
+		ValkeyMaxmemory: "512mb", ValkeyMaxmemoryPolicy: "volatile-lru", MariaDBBufferPool: "1G",
+		PHPMemoryLimit: "768M", PHPUploadMax: "64M", PHPMaxExecutionTime: 120, PHPMaxInputVars: 5000,
+	}
 	if got := tn.ValkeyMaxmemoryEff(); got != "512mb" {
 		t.Errorf("ValkeyMaxmemoryEff() = %q, want 512mb", got)
 	}
@@ -26,6 +41,63 @@ func TestTuningAccessorsHonorOverrides(t *testing.T) {
 	if got := tn.MariaDBBufferPoolEff(); got != "1G" {
 		t.Errorf("MariaDBBufferPoolEff() = %q, want 1G", got)
 	}
+	if got := tn.PHPMemoryLimitEff(); got != "768M" {
+		t.Errorf("PHPMemoryLimitEff() = %q, want 768M", got)
+	}
+	if got := tn.PHPUploadMaxEff(); got != "64M" {
+		t.Errorf("PHPUploadMaxEff() = %q, want 64M", got)
+	}
+	if got := tn.PHPMaxExecutionTimeEff(); got != 120 {
+		t.Errorf("PHPMaxExecutionTimeEff() = %d, want 120", got)
+	}
+	if got := tn.PHPMaxInputVarsEff(); got != 5000 {
+		t.Errorf("PHPMaxInputVarsEff() = %d, want 5000", got)
+	}
+}
+
+func TestTuningPHPIntAccessorsTreatNonPositiveAsDefault(t *testing.T) {
+	// The Fail2ban.MaxretryEff precedent: <= 0 means "unset", never a literal 0.
+	tn := Tuning{PHPMaxExecutionTime: -5, PHPMaxInputVars: -1}
+	if got := tn.PHPMaxExecutionTimeEff(); got != 30 {
+		t.Errorf("PHPMaxExecutionTimeEff() = %d, want 30", got)
+	}
+	if got := tn.PHPMaxInputVarsEff(); got != 1000 {
+		t.Errorf("PHPMaxInputVarsEff() = %d, want 1000", got)
+	}
+}
+
+func TestPHPSizeBytes(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want uint64
+	}{{"1", 1}, {"512k", 524288}, {"32M", 33554432}, {"1G", 1073741824}, {"134217728", 134217728}} {
+		got, err := phpSizeBytes(c.in)
+		if err != nil || got != c.want {
+			t.Errorf("phpSizeBytes(%q) = %d, %v; want %d", c.in, got, err, c.want)
+		}
+	}
+	for _, bad := range []string{"", "abc", "1.5G", "99999999999999999999G"} {
+		if _, err := phpSizeBytes(bad); err == nil {
+			t.Errorf("phpSizeBytes(%q) expected error, got nil", bad)
+		}
+	}
+}
+
+func TestTuningPHPPostBodyMaxDerivation(t *testing.T) {
+	// bytes(upload) + max(2 MiB, 5%) rendered as an exact byte count — valid
+	// size syntax for both PHP ini shorthand and nginx client_max_body_size.
+	cases := []struct{ upload, want string }{
+		{"", "35651584"},        // default 32M; 5% (1677721) is below the 2 MiB floor
+		{"32M", "35651584"},     // explicit default
+		{"64M", "70464307"},     // 5% headroom (3355443) above the floor
+		{"1G", "1127428915"},    // 1073741824 + 53687091
+		{"garbage", "35651584"}, // literal-Server fallback to the default derivation
+	}
+	for _, c := range cases {
+		if got := (Tuning{PHPUploadMax: c.upload}).PHPPostBodyMaxEff(); got != c.want {
+			t.Errorf("PHPPostBodyMaxEff(upload=%q) = %s, want %s", c.upload, got, c.want)
+		}
+	}
 }
 
 func TestTuningValidateAcceptsEmptyAndValid(t *testing.T) {
@@ -34,6 +106,11 @@ func TestTuningValidateAcceptsEmptyAndValid(t *testing.T) {
 		{ValkeyMaxmemory: "256mb", ValkeyMaxmemoryPolicy: "allkeys-lru", MariaDBBufferPool: "256M"},
 		{ValkeyMaxmemory: "1gb", ValkeyMaxmemoryPolicy: "volatile-ttl", MariaDBBufferPool: "2G"},
 		{ValkeyMaxmemory: "104857600"}, // bare bytes
+		{PHPMemoryLimit: "768M", PHPUploadMax: "1G", PHPMaxExecutionTime: 300, PHPMaxInputVars: 1000000},
+		{PHPMemoryLimit: "134217728"}, // bare bytes
+		{PHPUploadMax: "512k"},        // suffixes are case-insensitive
+		{PHPUploadMax: "64G"},         // exactly the 64 GiB bound is accepted (reject is >)
+		{PHPMaxExecutionTime: -1},     // non-positive = unset, lenient
 	} {
 		if err := tn.validate(); err != nil {
 			t.Errorf("validate(%+v) unexpected error: %v", tn, err)
@@ -48,6 +125,17 @@ func TestTuningValidateRejectsBad(t *testing.T) {
 		{ValkeyMaxmemoryPolicy: "allkeys-bogus"},
 		{MariaDBBufferPool: "256MB"}, // MariaDB uses K/M/G, not MB
 		{MariaDBBufferPool: "big"},
+		{PHPMemoryLimit: "-1"},  // no sign in the grammar: berth never ships unlimited
+		{PHPMemoryLimit: "0"},   // 0 = unlimited in PHP post/upload and nginx body checks
+		{PHPMemoryLimit: "08M"}, // leading zeros: PHP shorthand parses octal, nginx decimal
+		{PHPUploadMax: "010M"},
+		{PHPMemoryLimit: "256MB"},
+		{PHPUploadMax: "1.5G"},
+		{PHPUploadMax: "64M; rm -rf /"},
+		{PHPUploadMax: "65G"},                    // > 64 GiB bound
+		{PHPMemoryLimit: "18446744073709551615"}, // would wrap PHP's int64 parse to -1
+		{PHPMaxExecutionTime: 301},               // opinionated 300 s cap
+		{PHPMaxInputVars: 1000001},               // matches the wizard's domain
 	} {
 		if err := tn.validate(); err == nil {
 			t.Errorf("validate(%+v) expected error, got nil", tn)

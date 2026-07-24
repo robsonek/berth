@@ -105,6 +105,10 @@ tuning:                        # optional — omit any field to keep its default
   valkey_maxmemory: 256mb
   valkey_maxmemory_policy: allkeys-lru   # any Valkey eviction policy
   mariadb_innodb_buffer_pool: 256M
+  php_memory_limit: 256M
+  php_upload_max: 32M          # max single-file upload; body caps derived
+  php_max_execution_time: 30   # seconds, 1-300
+  php_max_input_vars: 1000     # 1-1000000
 
 system:                        # optional host-level OS provisioning — both default off
   swap: 2G                     # default off when absent; positive integer + M / G
@@ -201,6 +205,13 @@ berth applies conservative, managed tuning drop-ins automatically:
   fails writes).
 - **MariaDB** (when `database.engine: mariadb`) — a `mariadb.conf.d` drop-in
   sets `innodb_buffer_pool_size`.
+- **PHP-FPM** (always) — a managed FPM-only `conf.d` drop-in sets
+  `memory_limit`, upload sizing, `max_execution_time`, `max_input_vars` and
+  `expose_php = Off`. The CLI SAPI keeps Debian's stock unlimited values, so
+  queue workers and artisan runs are unaffected. `php_upload_max` is the max
+  single-file size: `post_max_size` and nginx `client_max_body_size` are
+  derived slightly larger (multipart headroom), so a file of exactly that size
+  uploads — note all files in one request share the derived total.
 
 Every value is overridable; omit a field to keep its default:
 
@@ -209,11 +220,18 @@ tuning:
   valkey_maxmemory: 256mb              # default
   valkey_maxmemory_policy: allkeys-lru # default; any Valkey eviction policy
   mariadb_innodb_buffer_pool: 256M     # default
+  php_memory_limit: 256M               # default
+  php_upload_max: 32M                  # default; max single-file upload; body caps derived
+  php_max_execution_time: 30           # default; seconds, 1-300
+  php_max_input_vars: 1000             # default; 1-1000000
 ```
 
 With one shared Valkey for cache, session and queue, `allkeys-lru` can evict
 queued jobs under memory pressure; use `volatile-lru` to evict only keys that
 carry a TTL.
+
+`php_max_execution_time` is capped at 300 s — berth's opinionated bound; work
+that runs longer belongs in queue workers, not web requests.
 
 ### Deploy hook (required with OPcache)
 

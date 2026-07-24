@@ -171,9 +171,12 @@ func renderSiteNginx(ctx context.Context, r bssh.Runner, s *config.Server, site 
 // adds the QUIC listeners + Alt-Svc; QUICReuseport marks the one site that owns
 // the `reuseport` flag on the shared :443 QUIC socket. HSTS is set only for
 // real (non-self-signed) certificates to avoid bricking a domain in browsers.
+// BodyMax becomes client_max_body_size; like HSTS it derives purely from static
+// config (tuning.php_upload_max + headroom), so site re-render and tls swap stay
+// byte-identical.
 type nginxData struct {
-	Domain, DeployPath, ACMEWebroot, Socket, CertPath, KeyPath string
-	HTTP3, QUICReuseport, HSTS, CloudflareOnly                 bool
+	Domain, DeployPath, ACMEWebroot, Socket, CertPath, KeyPath, BodyMax string
+	HTTP3, QUICReuseport, HSTS, CloudflareOnly                          bool
 }
 
 func nginxRenderData(s *config.Server, site config.Site) nginxData {
@@ -191,6 +194,10 @@ func nginxRenderData(s *config.Server, site config.Site) nginxData {
 		// from cert presence, so the site re-render and the tls swap stay
 		// byte-identical.
 		CloudflareOnly: s.CloudflareOnlyEnabled(site),
+		// BodyMax mirrors the FPM drop-in's post_max_size (one derived cap for
+		// the whole upload path); static config only, never remote state, so
+		// the site↔tls byte-identical re-render invariant holds.
+		BodyMax: s.Tuning.PHPPostBodyMaxEff(),
 	}
 }
 

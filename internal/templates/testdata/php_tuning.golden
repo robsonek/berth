@@ -1,0 +1,7 @@
+; managed by berth
+memory_limit = 256M
+upload_max_filesize = 32M
+post_max_size = 35651584
+max_execution_time = 30
+max_input_vars = 1000
+expose_php = Off

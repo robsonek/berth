@@ -45,8 +45,8 @@ func checkGoldenRender(t *testing.T, render func(string, any) ([]byte, error), n
 }
 
 type nginxData struct {
-	Domain, DeployPath, ACMEWebroot, Socket, CertPath, KeyPath string
-	HTTP3, QUICReuseport, HSTS, CloudflareOnly                 bool
+	Domain, DeployPath, ACMEWebroot, Socket, CertPath, KeyPath, BodyMax string
+	HTTP3, QUICReuseport, HSTS, CloudflareOnly                          bool
 }
 
 const testSocket = "/run/php/berth-app_example_com.sock"
@@ -57,6 +57,7 @@ func nginxGoldenData() nginxData {
 		ACMEWebroot: "/var/www/berth-acme/app.example.com", Socket: testSocket,
 		CertPath: "/etc/letsencrypt/live/app.example.com/fullchain.pem",
 		KeyPath:  "/etc/letsencrypt/live/app.example.com/privkey.pem",
+		BodyMax:  "35651584",
 		HSTS:     true,
 	}
 }
@@ -98,6 +99,13 @@ func TestRenderNginxHTTPSCloudflareGolden(t *testing.T) {
 
 func TestRenderPHPOpcacheGolden(t *testing.T) {
 	checkGoldenINI(t, "php_opcache.ini.tmpl", "php_opcache.golden", nil)
+}
+
+func TestRenderPHPTuningGolden(t *testing.T) {
+	checkGoldenINI(t, "php_tuning.ini.tmpl", "php_tuning.golden", struct {
+		MemoryLimit, UploadMax, PostMax string
+		MaxExecutionTime, MaxInputVars  int
+	}{MemoryLimit: "256M", UploadMax: "32M", PostMax: "35651584", MaxExecutionTime: 30, MaxInputVars: 1000})
 }
 
 func TestRenderFPMPoolGolden(t *testing.T) {

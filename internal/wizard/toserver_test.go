@@ -40,3 +40,14 @@ func TestToServerOpsBlocks(t *testing.T) {
 		t.Fatalf("Validate: %v", err)
 	}
 }
+
+func TestToServerCarriesPHPTuning(t *testing.T) {
+	a := Answers{Tuning: TuningAnswers{
+		PHPMemoryLimit: "768M", PHPUploadMax: "64M", PHPMaxExecutionTime: 120, PHPMaxInputVars: 5000,
+	}}
+	s := a.ToServer()
+	if s.Tuning.PHPMemoryLimit != "768M" || s.Tuning.PHPUploadMax != "64M" ||
+		s.Tuning.PHPMaxExecutionTime != 120 || s.Tuning.PHPMaxInputVars != 5000 {
+		t.Errorf("ToServer() dropped php tuning fields: %+v", s.Tuning)
+	}
+}

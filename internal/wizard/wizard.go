@@ -61,6 +61,10 @@ type TuningAnswers struct {
 	ValkeyMaxmemory       string
 	ValkeyMaxmemoryPolicy string
 	MariaDBBufferPool     string
+	PHPMemoryLimit        string
+	PHPUploadMax          string
+	PHPMaxExecutionTime   int
+	PHPMaxInputVars       int
 }
 
 type SystemAnswers struct {

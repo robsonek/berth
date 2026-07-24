@@ -28,6 +28,43 @@ func opcacheDropInPath(ver string) string {
 // renderOpcache renders the production OPcache settings (INI, ';' marker).
 func renderOpcache() ([]byte, error) { return templates.RenderINI("php_opcache.ini.tmpl", nil) }
 
+// phpTuningDropInPath is the FPM-only berth tuning drop-in (memory_limit,
+// upload sizing, execution limits). FPM-only on purpose: the CLI SAPI keeps
+// Debian's stock php.ini (memory_limit=-1, max_execution_time=0), so
+// long-lived queue workers and artisan runs are never capped.
+func phpTuningDropInPath(ver string) string {
+	return "/etc/php/" + ver + "/fpm/conf.d/99-berth-tuning.ini"
+}
+
+// renderPHPTuning renders the FPM tuning drop-in (INI, ';' marker). Values are
+// read only through the Tuning *Eff accessors so literal-Server callers that
+// bypass config.Load still render valid directives. PostMax is the derived
+// request-body cap (upload + multipart headroom, exact bytes) that the site
+// step also renders as nginx client_max_body_size.
+func renderPHPTuning(s *config.Server) ([]byte, error) {
+	return templates.RenderINI("php_tuning.ini.tmpl", struct {
+		MemoryLimit, UploadMax, PostMax string
+		MaxExecutionTime, MaxInputVars  int
+	}{
+		MemoryLimit:      s.Tuning.PHPMemoryLimitEff(),
+		UploadMax:        s.Tuning.PHPUploadMaxEff(),
+		PostMax:          s.Tuning.PHPPostBodyMaxEff(),
+		MaxExecutionTime: s.Tuning.PHPMaxExecutionTimeEff(),
+		MaxInputVars:     s.Tuning.PHPMaxInputVarsEff(),
+	})
+}
+
+// removePHPDropIns best-effort removes both managed FPM drop-ins after a
+// failed validate/reload. The files were written but never loaded; leaving
+// them would make the next run's Check falsely Satisfied (bytes match) while
+// the running master still serves the old config. Removing them keeps disk
+// state honest so the next run re-applies write -> -t -> reload. The result
+// is deliberately ignored: the original failure is what the operator must
+// see, and a box where even rm fails needs attention anyway.
+func removePHPDropIns(ctx context.Context, r bssh.Runner, ver string) {
+	_, _ = r.Run(ctx, "rm -f "+shQuote(opcacheDropInPath(ver))+" "+shQuote(phpTuningDropInPath(ver)), nil)
+}
+
 // phpPDOExt is the PHP PDO extension for a database engine: pgsql for postgres,
 // else mysql. A Postgres app needs pdo_pgsql; installing the wrong one leaves the
 // box unable to connect.
@@ -74,7 +111,12 @@ func useSury(p config.PHP) (bool, error) {
 }
 
 func (php) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
-	changes := []string{"install php" + s.PHP.Version + " + extensions", "write production OPcache drop-in", "ensure " + phpLogDir}
+	changes := []string{
+		"install php" + s.PHP.Version + " + extensions",
+		"write production OPcache drop-in",
+		"write PHP tuning drop-in (memory_limit, upload, limits)",
+		"ensure " + phpLogDir,
+	}
 	res, err := r.Run(ctx, "dpkg -s php"+s.PHP.Version+"-fpm", nil)
 	if err != nil {
 		return provision.CheckResult{}, err
@@ -98,6 +140,23 @@ func (php) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 	if !ok {
 		return provision.CheckResult{Satisfied: false, Reason: "OPcache drop-in not up to date", Changes: changes}, nil
 	}
+	// The FPM tuning drop-in (memory_limit, upload sizing, execution limits)
+	// must be the berth-managed one and up to date.
+	wantTuning, err := renderPHPTuning(s)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	tstate, err := checkManagedFile(ctx, r, phpTuningDropInPath(s.PHP.Version), wantTuning)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	tok, err := managedFileSatisfied(tstate, phpTuningDropInPath(s.PHP.Version), rc.Force)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	if !tok {
+		return provision.CheckResult{Satisfied: false, Reason: "PHP tuning drop-in not up to date", Changes: changes}, nil
+	}
 	// PHP-FPM does not create the parent dir of the per-site error_log
 	// (/var/log/php/<pool>-fpm.error.log); ensure it exists.
 	dir, err := r.Run(ctx, "test -d "+shQuote(phpLogDir), nil)
@@ -117,7 +176,7 @@ func (php) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 	if pdo.ExitCode != 0 {
 		return provision.CheckResult{Satisfied: false, Reason: pdoPkg + " not installed", Changes: changes}, nil
 	}
-	return provision.CheckResult{Satisfied: true, Reason: "php" + s.PHP.Version + "-fpm installed; OPcache tuned for production"}, nil
+	return provision.CheckResult{Satisfied: true, Reason: "php" + s.PHP.Version + "-fpm installed; OPcache and FPM tuning in place"}, nil
 }
 
 func (php) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
@@ -154,15 +213,28 @@ func (php) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 	}); err != nil {
 		return fmt.Errorf("write OPcache drop-in: %w", err)
 	}
+	// FPM tuning (memory_limit, upload sizing, execution limits; FPM SAPI only —
+	// CLI keeps stock unlimited values for workers and artisan).
+	tini, err := renderPHPTuning(s)
+	if err != nil {
+		return err
+	}
+	if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
+		Path: phpTuningDropInPath(v), Content: tini, Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
+	}); err != nil {
+		return fmt.Errorf("write PHP tuning drop-in: %w", err)
+	}
 	if res, err := r.Run(ctx, "php-fpm"+v+" -t", nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
-		return fmt.Errorf("php-fpm%s -t failed after writing OPcache drop-in: %s", v, res.Stderr)
+		removePHPDropIns(ctx, r, v)
+		return fmt.Errorf("php-fpm%s -t failed after writing drop-ins (removed them so the next run re-applies): %s", v, res.Stderr)
 	}
 	if res, err := r.Run(ctx, "systemctl reload php"+v+"-fpm", nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
-		return fmt.Errorf("reload php%s-fpm: %s", v, res.Stderr)
+		removePHPDropIns(ctx, r, v)
+		return fmt.Errorf("reload php%s-fpm failed (removed the drop-ins so the next run re-applies): %s", v, res.Stderr)
 	}
 	return nil
 }

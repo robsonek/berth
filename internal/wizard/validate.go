@@ -2,6 +2,7 @@ package wizard
 
 import (
 	"fmt"
+	"math"
 	"path"
 	"regexp"
 	"strconv"
@@ -89,8 +90,15 @@ var (
 	reFail2banTime = regexp.MustCompile(`^[0-9]+[smhdw]?$`)
 	reValkeyMem    = regexp.MustCompile(`^(?i)[0-9]+(b|kb|mb|gb|k|m|g)?$`)
 	reMariaDBSize  = regexp.MustCompile(`^(?i)[0-9]+[kmg]?$`)
+	rePHPSize      = regexp.MustCompile(`^[1-9][0-9]*[KMGkmg]?$`)
 	reDaemonName   = regexp.MustCompile(`^[a-z0-9-]+$`)
 )
+
+// phpSizeMaxBytes mirrors config's unexported 64 GiB bound on the PHP size
+// knobs, so a server-level answer over the bound is rejected inline — run.go's
+// site-retry loop assumes any late Validate() failure is site-local, and an
+// escape here would loop the operator on a site prompt they cannot fix.
+const phpSizeMaxBytes = 64 << 30
 
 func optionalFail2banTime(s string) error {
 	if s == "" || reFail2banTime.MatchString(s) {
@@ -111,6 +119,29 @@ func optionalMariaDBSize(s string) error {
 		return nil
 	}
 	return fmt.Errorf("%q must be a number optionally suffixed K/M/G", s)
+}
+
+func optionalPHPSize(s string) error {
+	if s == "" {
+		return nil
+	}
+	if !rePHPSize.MatchString(s) {
+		return fmt.Errorf("%q must be a positive number optionally suffixed K/M/G, no leading zeros", s)
+	}
+	num, mult := s, uint64(1)
+	switch s[len(s)-1] {
+	case 'K', 'k':
+		num, mult = s[:len(s)-1], 1<<10
+	case 'M', 'm':
+		num, mult = s[:len(s)-1], 1<<20
+	case 'G', 'g':
+		num, mult = s[:len(s)-1], 1<<30
+	}
+	n, err := strconv.ParseUint(num, 10, 64)
+	if err != nil || n > math.MaxUint64/mult || n*mult > phpSizeMaxBytes {
+		return fmt.Errorf("%q exceeds the 64G bound", s)
+	}
+	return nil
 }
 
 // reSwapSize / reCronSchedule mirror config.reSwapSize / config.reCronSchedule
