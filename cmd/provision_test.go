@@ -1,13 +1,16 @@
 package cmd
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision/steps"
 	"github.com/robsonek/berth/internal/secret"
+	"github.com/spf13/cobra"
 )
 
 func writeValidConfig(t *testing.T) string {
@@ -82,5 +85,30 @@ func TestWantTUIDisabledForDryRunVerboseNoTTY(t *testing.T) {
 				t.Errorf("wantTUI(%v, %+v) = %v, want %v", tc.tty, tc.f, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestConfirmFingerprintPromptNamesKeyType(t *testing.T) {
+	// The printed fingerprint is what the operator pins as ssh.fingerprint;
+	// the key type disambiguates it from ssh-keyscan's other output lines.
+	prompt := func(answer string) (bool, string) {
+		c := &cobra.Command{}
+		var out bytes.Buffer
+		c.SetOut(&out)
+		c.SetIn(strings.NewReader(answer))
+		ok := confirmFingerprint(c)("host:22", "SHA256:abc", "ecdsa-sha2-nistp256")
+		return ok, out.String()
+	}
+	ok, out := prompt("y\n")
+	if !ok {
+		t.Fatal("expected y to confirm")
+	}
+	for _, want := range []string{"SHA256:abc", "ecdsa-sha2-nistp256"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("prompt missing %q; got:\n%s", want, out)
+		}
+	}
+	if ok, _ := prompt("n\n"); ok {
+		t.Error("expected n to refuse")
 	}
 }

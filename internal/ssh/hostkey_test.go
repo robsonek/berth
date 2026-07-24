@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	xssh "golang.org/x/crypto/ssh"
@@ -31,8 +32,18 @@ var testAddr = &net.TCPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 22}
 func TestPinnedFingerprintMismatchFails(t *testing.T) {
 	hk := newTestKey(t)
 	cb := HostKeyChecker(HostKeyPolicy{Pinned: "SHA256:doesnotmatch"})
-	if err := cb("host:22", testAddr, hk); err == nil {
+	err := cb("host:22", testAddr, hk)
+	if err == nil {
 		t.Fatal("expected mismatch error for wrong pinned fingerprint")
+	}
+	// The message must name the presented key's TYPE and the all-types scan:
+	// a server offers one key per type, and a pin taken from the wrong
+	// ssh-keyscan line (e.g. ed25519 when the client selects ECDSA) is the
+	// classic false-mismatch this diagnoses.
+	for _, want := range []string{"ssh-ed25519", Fingerprint(hk), "SHA256:doesnotmatch", "ssh-keyscan"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("mismatch error missing %q; got: %v", want, err)
+		}
 	}
 }
 
@@ -69,8 +80,12 @@ func TestKnownHostsMismatchHardFails(t *testing.T) {
 	cb := HostKeyChecker(HostKeyPolicy{KnownHosts: kh})
 	// A different key for a known host must hard-fail (possible MITM) and never
 	// fall through to TOFU.
-	if err := cb("host:22", testAddr, attacker); err == nil {
+	err := cb("host:22", testAddr, attacker)
+	if err == nil {
 		t.Fatal("expected hard failure on known_hosts key mismatch (MITM)")
+	}
+	if !strings.Contains(err.Error(), "ssh-ed25519") {
+		t.Errorf("MITM error must name the offered key type; got: %v", err)
 	}
 }
 
@@ -78,12 +93,12 @@ func TestUnknownHostTOFUConfirmsAndPins(t *testing.T) {
 	hk := newTestKey(t)
 	dir := t.TempDir()
 	kh := filepath.Join(dir, "known_hosts") // does not exist yet
-	var confirmed string
+	var confirmed, confirmedType string
 	cb := HostKeyChecker(HostKeyPolicy{
 		KnownHosts: kh,
 		AllowTOFU:  true,
-		ConfirmTOFU: func(host, fingerprint string) bool {
-			confirmed = fingerprint
+		ConfirmTOFU: func(host, fingerprint, keyType string) bool {
+			confirmed, confirmedType = fingerprint, keyType
 			return true
 		},
 	})
@@ -92,6 +107,9 @@ func TestUnknownHostTOFUConfirmsAndPins(t *testing.T) {
 	}
 	if confirmed != Fingerprint(hk) {
 		t.Errorf("ConfirmTOFU got fingerprint %q, want %q", confirmed, Fingerprint(hk))
+	}
+	if confirmedType != "ssh-ed25519" {
+		t.Errorf("ConfirmTOFU got key type %q, want ssh-ed25519", confirmedType)
 	}
 	// The host key must have been pinned to known_hosts (0600), so a second
 	// check now succeeds via known_hosts without prompting.
@@ -113,8 +131,12 @@ func TestUnknownHostWithoutTOFUFails(t *testing.T) {
 	dir := t.TempDir()
 	kh := filepath.Join(dir, "known_hosts")
 	cb := HostKeyChecker(HostKeyPolicy{KnownHosts: kh}) // AllowTOFU false
-	if err := cb("host:22", testAddr, hk); err == nil {
+	err := cb("host:22", testAddr, hk)
+	if err == nil {
 		t.Fatal("expected failure for unknown host without TOFU")
+	}
+	if !strings.Contains(err.Error(), "ssh-ed25519") {
+		t.Errorf("unknown-host error must name the offered key type; got: %v", err)
 	}
 }
 
