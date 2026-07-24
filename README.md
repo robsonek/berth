@@ -58,7 +58,7 @@ always safe; `--dry-run` shows what would change.
 
 A server is one YAML file in `servers/<name>.yml`. `berth init` can generate
 **any** of the configs in this README interactively — the advanced sections
-(fail2ban, tuning, swap/sysctl, Cloudflare-only lockdown, and backups, plus
+(fail2ban, tuning, swap/sysctl/timezone, Cloudflare-only lockdown, and backups, plus
 per-site queue/daemons and scheduler/Cloudflare/backups overrides) sit behind
 optional prompts, so the common path stays short — or you can write the file by
 hand. Ready-to-copy
@@ -114,10 +114,16 @@ tuning:                        # optional — omit any field to keep its default
   php_max_execution_time: 30   # seconds, 1-300
   php_max_input_vars: 1000     # 1-1000000
 
-system:                        # optional host-level OS provisioning — both default off
+system:                        # optional host-level OS provisioning — all default off
   swap: 2G                     # default off when absent; positive integer + M / G
                                # (e.g. 512M, 2G) → creates /swapfile + vm.swappiness=10
   sysctl: true                 # default false; writes a conservative web/DB sysctl drop-in
+  timezone: Europe/Warsaw      # default off when absent; sets the SYSTEM zone (logs,
+                               # cron) via timedatectl and restarts cron — berth's cron
+                               # jobs (e.g. the backups schedule) run in local time, so
+                               # changing the zone shifts when they fire. PHP/Laravel
+                               # keep their own timezone settings (date.timezone /
+                               # app.timezone) — this field is about system logs.
 
 backups:                       # optional opt-in local backups — off by default
   enabled: true                # server-wide default (off unless set)
