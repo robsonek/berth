@@ -4,7 +4,9 @@ package config
 import (
 	"fmt"
 	"hash/fnv"
+	"math"
 	"reflect"
+	"strconv"
 	"strings"
 
 	mapstructure "github.com/go-viper/mapstructure/v2"
@@ -75,17 +77,39 @@ func (f Fail2ban) MaxretryEff() int {
 // the accessors (NOT in Load() via SetDefault) so wizard ToServer() and literal
 // Server callers that bypass Load() still render valid, non-empty values — an
 // empty value would otherwise produce a broken directive (e.g. "maxmemory ").
+// PHP fields render into the php step's FPM-only conf.d drop-in; PHPUploadMax
+// is the max single-file size, from which post_max_size and nginx
+// client_max_body_size are derived (PHPPostBodyMaxEff).
 type Tuning struct {
 	ValkeyMaxmemory       string `mapstructure:"valkey_maxmemory" yaml:"valkey_maxmemory,omitempty"`
 	ValkeyMaxmemoryPolicy string `mapstructure:"valkey_maxmemory_policy" yaml:"valkey_maxmemory_policy,omitempty"`
 	MariaDBBufferPool     string `mapstructure:"mariadb_innodb_buffer_pool" yaml:"mariadb_innodb_buffer_pool,omitempty"`
+	PHPMemoryLimit        string `mapstructure:"php_memory_limit" yaml:"php_memory_limit,omitempty"`
+	PHPUploadMax          string `mapstructure:"php_upload_max" yaml:"php_upload_max,omitempty"`
+	PHPMaxExecutionTime   int    `mapstructure:"php_max_execution_time" yaml:"php_max_execution_time,omitempty"`
+	PHPMaxInputVars       int    `mapstructure:"php_max_input_vars" yaml:"php_max_input_vars,omitempty"`
 }
 
 const (
 	defaultValkeyMaxmemory       = "256mb"
 	defaultValkeyMaxmemoryPolicy = "allkeys-lru"
 	defaultMariaDBBufferPool     = "256M"
+	defaultPHPMemoryLimit        = "256M"
+	defaultPHPUploadMax          = "32M"
+	defaultPHPMaxExecutionTime   = 30
+	defaultPHPMaxInputVars       = 1000
 )
+
+// phpSizeMaxBytes bounds the PHP size knobs (64 GiB — far above any sane VPS
+// value). It keeps every accepted value representable in PHP's signed 64-bit
+// ini parser: past that, PHP's shorthand parse wraps to the -1 "unlimited"
+// sentinel, silently removing the limit.
+const phpSizeMaxBytes = 64 << 30
+
+// phpPostHeadroomMinBytes is the minimum multipart-envelope allowance added
+// to php_upload_max when deriving post_max_size / client_max_body_size
+// (boundaries, form fields and metadata all count toward the request body).
+const phpPostHeadroomMinBytes = 2 << 20
 
 // ValkeyMaxmemoryEff returns the configured maxmemory or the conservative default.
 func (t Tuning) ValkeyMaxmemoryEff() string {
@@ -109,6 +133,86 @@ func (t Tuning) MariaDBBufferPoolEff() string {
 		return defaultMariaDBBufferPool
 	}
 	return t.MariaDBBufferPool
+}
+
+// phpSizeBytes converts a PHP ini shorthand size — digits with an optional
+// K/M/G suffix (1024-based, case-insensitive) — to bytes. Inputs are normally
+// pre-guarded by rePHPSize; the error path covers literal-Server callers
+// that bypass validation.
+func phpSizeBytes(v string) (uint64, error) {
+	num, mult := v, uint64(1)
+	if len(v) > 0 {
+		switch v[len(v)-1] {
+		case 'K', 'k':
+			num, mult = v[:len(v)-1], 1<<10
+		case 'M', 'm':
+			num, mult = v[:len(v)-1], 1<<20
+		case 'G', 'g':
+			num, mult = v[:len(v)-1], 1<<30
+		}
+	}
+	n, err := strconv.ParseUint(num, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("size %q is not a number with an optional K/M/G suffix", v)
+	}
+	if n > math.MaxUint64/mult {
+		return 0, fmt.Errorf("size %q overflows", v)
+	}
+	return n * mult, nil
+}
+
+// PHPMemoryLimitEff returns the configured FPM memory_limit or the default.
+func (t Tuning) PHPMemoryLimitEff() string {
+	if t.PHPMemoryLimit == "" {
+		return defaultPHPMemoryLimit
+	}
+	return t.PHPMemoryLimit
+}
+
+// PHPUploadMaxEff returns the configured max single-file upload size or the
+// default. It renders verbatim as upload_max_filesize; the request-body caps
+// (post_max_size, nginx client_max_body_size) derive from it via
+// PHPPostBodyMaxEff so a file of exactly this size fits its multipart envelope.
+func (t Tuning) PHPUploadMaxEff() string {
+	if t.PHPUploadMax == "" {
+		return defaultPHPUploadMax
+	}
+	return t.PHPUploadMax
+}
+
+// PHPPostBodyMaxEff returns the derived request-body cap (post_max_size and
+// nginx client_max_body_size) as an exact byte count — valid size syntax for
+// both PHP ini shorthand and nginx: bytes(upload) + max(2 MiB, 5%).
+// Unparsable or out-of-bound values (possible only for literal-Server callers
+// that bypass validation) fall back to the default derivation, keeping the
+// accessor total and deterministic.
+func (t Tuning) PHPPostBodyMaxEff() string {
+	b, err := phpSizeBytes(t.PHPUploadMaxEff())
+	if err != nil || b == 0 || b > phpSizeMaxBytes {
+		b, _ = phpSizeBytes(defaultPHPUploadMax)
+	}
+	head := b / 20
+	if head < phpPostHeadroomMinBytes {
+		head = phpPostHeadroomMinBytes
+	}
+	return strconv.FormatUint(b+head, 10)
+}
+
+// PHPMaxExecutionTimeEff returns the configured max_execution_time (seconds)
+// or the default. Non-positive means "unset" (the Fail2ban.MaxretryEff precedent).
+func (t Tuning) PHPMaxExecutionTimeEff() int {
+	if t.PHPMaxExecutionTime <= 0 {
+		return defaultPHPMaxExecutionTime
+	}
+	return t.PHPMaxExecutionTime
+}
+
+// PHPMaxInputVarsEff returns the configured max_input_vars or the default.
+func (t Tuning) PHPMaxInputVarsEff() int {
+	if t.PHPMaxInputVars <= 0 {
+		return defaultPHPMaxInputVars
+	}
+	return t.PHPMaxInputVars
 }
 
 // System holds optional, opt-in host-level OS provisioning knobs. Both default
