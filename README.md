@@ -225,8 +225,10 @@ berth applies conservative, managed tuning drop-ins automatically:
 - **MariaDB** (when `database.engine: mariadb`) — a `mariadb.conf.d` drop-in
   sets `innodb_buffer_pool_size`, and opt-in `mariadb_slow_query_log` logs
   queries slower than `mariadb_long_query_time` seconds (default 2) to
-  `/var/log/mysql/mariadb-slow.log` — a path Debian's mariadb packaging
-  already rotates.
+  `/var/log/mysql/mariadb-slow.log`. berth creates `/var/log/mysql` itself
+  (Debian 13 logs to the journal and no longer ships it — a missing directory
+  would silently disable slow logging for the whole server process); the
+  distro logrotate already rotates `/var/log/mysql/*.log`.
 - **PHP-FPM** (always) — a managed FPM-only `conf.d` drop-in sets
   `memory_limit`, upload sizing, `max_execution_time`, `max_input_vars` and
   `expose_php = Off`. The CLI SAPI keeps Debian's stock unlimited values, so

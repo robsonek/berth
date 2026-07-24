@@ -18,9 +18,12 @@ Notable changes to berth. Older releases are documented on the
   Already-provisioned hosts gain the file on their next apply.
 - **MariaDB slow query log** — opt-in `tuning.mariadb_slow_query_log` with
   `tuning.mariadb_long_query_time` (default 2 s), rendered into the managed
-  tuning drop-in; logs to `/var/log/mysql/mariadb-slow.log` (a path the
-  distro logrotate already covers). Off by default with a byte-identical
-  render, so existing hosts see no drift. Available in `berth init`.
+  tuning drop-in; logs to `/var/log/mysql/mariadb-slow.log`. berth creates
+  `/var/log/mysql` itself (Debian 13 logs to the journal and no longer ships
+  the directory; when it is missing at startup mariadbd silently disables
+  slow logging for the whole process) — the distro logrotate already covers
+  `/var/log/mysql/*.log`. Off by default with a byte-identical render, so
+  existing hosts see no drift. Available in `berth init`.
 - **`berth site key <server> [domain]`** — prints each site's git deploy
   public key (generated at provision time for sites with `repository:`),
   ready to paste into the repo host's deploy-key settings. Read-only.

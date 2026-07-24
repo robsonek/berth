@@ -706,3 +706,142 @@ func TestRenderMariaDBTuningSlowLogDefaultThreshold(t *testing.T) {
 		t.Errorf("default threshold must render as 2 s:\n%s", b)
 	}
 }
+
+func mariadbSlowLogServer() *config.Server {
+	return &config.Server{Database: config.Database{Engine: "mariadb"}, Tuning: config.Tuning{MariaDBSlowQueryLog: true}}
+}
+
+func TestRenderMariaDBTuningSlowLogPathConst(t *testing.T) {
+	// mariadbSlowLogPath must mirror slow_query_log_file in the template — the
+	// convergence probe and the rendered config have to point at the same file.
+	b, err := renderMariaDBTuning(mariadbSlowLogServer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "slow_query_log_file = "+mariadbSlowLogPath+"\n") {
+		t.Errorf("template slow_query_log_file diverged from mariadbSlowLogPath (%s):\n%s", mariadbSlowLogPath, b)
+	}
+}
+
+func TestTuningCheckSlowLogFileMissingUnsatisfied(t *testing.T) {
+	// When mariadbd cannot open the slow log at startup (Trixie ships no
+	// /var/log/mysql; a root-owned dir behaves the same) it disables slow
+	// logging for its whole lifetime while the drop-in reads loaded — the
+	// missing log file is the only durable evidence. Check must not read
+	// Satisfied on it.
+	srv := mariadbSlowLogServer()
+	want, _ := renderMariaDBTuning(srv)
+	f := bssh.NewFakeRunner()
+	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"})
+	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
+	stubServiceActive(f, mariadbUnit)
+	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
+	f.On("test -f /var/log/mysql/mariadb-slow.log", bssh.Result{ExitCode: 1}) // logging silently off
+	cr, err := Tuning(false).Check(context.Background(), provision.RunCtx{}, srv, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied while the slow log file is missing with the slow log enabled")
+	}
+}
+
+func TestTuningCheckSlowLogFilePresentSatisfied(t *testing.T) {
+	srv := mariadbSlowLogServer()
+	want, _ := renderMariaDBTuning(srv)
+	f := bssh.NewFakeRunner()
+	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"})
+	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
+	stubServiceActive(f, mariadbUnit)
+	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
+	f.On("test -f /var/log/mysql/mariadb-slow.log", bssh.Result{ExitCode: 0})
+	cr, err := Tuning(false).Check(context.Background(), provision.RunCtx{}, srv, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("expected satisfied; got %+v", cr)
+	}
+}
+
+func TestTuningApplySlowLogEnsuresDirBeforeRestart(t *testing.T) {
+	// The drop-in itself is loaded (checkTuned satisfied) but the log file is
+	// missing: Apply must ensure the directory and THEN restart — mariadbd
+	// disabled slow logging for the process duration, so the dir alone changes
+	// nothing, and a restart before the dir would just fail to open it again.
+	srv := mariadbSlowLogServer()
+	want, _ := renderMariaDBTuning(srv)
+	f := bssh.NewFakeRunner()
+	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"})
+	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
+	stubServiceActive(f, mariadbUnit)
+	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
+	f.On("test -f /var/log/mysql/mariadb-slow.log", bssh.Result{ExitCode: 1})
+	f.On("install -d -m 2750 -o mysql -g adm /var/log/mysql", bssh.Result{})
+	f.On("systemctl restart mariadb.service", bssh.Result{})
+	if err := Tuning(false).Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	installIdx, restartIdx := -1, -1
+	for i, c := range f.Calls() {
+		switch c.Cmd {
+		case "install -d -m 2750 -o mysql -g adm /var/log/mysql":
+			installIdx = i
+		case "systemctl restart mariadb.service":
+			restartIdx = i
+		}
+	}
+	if installIdx == -1 || restartIdx == -1 || installIdx > restartIdx {
+		t.Errorf("want install (idx %d) strictly before restart (idx %d)", installIdx, restartIdx)
+	}
+	for _, w := range f.Writes() {
+		if w.Path == mariadbTuningPath {
+			t.Error("an up-to-date drop-in must not be rewritten")
+		}
+	}
+}
+
+func TestTuningApplySlowLogNoopWhenConverged(t *testing.T) {
+	// Second-Apply convergence: drop-in loaded AND log file present -> no
+	// install, no restart, no write.
+	srv := mariadbSlowLogServer()
+	want, _ := renderMariaDBTuning(srv)
+	f := bssh.NewFakeRunner()
+	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"})
+	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
+	stubServiceActive(f, mariadbUnit)
+	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
+	f.On("test -f /var/log/mysql/mariadb-slow.log", bssh.Result{ExitCode: 0})
+	if err := Tuning(false).Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "install -d") || strings.Contains(c.Cmd, "restart") {
+			t.Errorf("converged slow log must not mutate; ran %q", c.Cmd)
+		}
+	}
+	if len(f.Writes()) != 0 {
+		t.Errorf("converged slow log must not write; wrote %v", f.Writes())
+	}
+}
+
+func TestTuningSlowLogOffNeverProbesFile(t *testing.T) {
+	srv := mariadbOnlyServer()
+	want, _ := renderMariaDBTuning(srv)
+	f := bssh.NewFakeRunner()
+	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"})
+	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
+	stubServiceActive(f, mariadbUnit)
+	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
+	if _, err := Tuning(false).Check(context.Background(), provision.RunCtx{}, srv, f); err != nil {
+		t.Fatal(err)
+	}
+	if err := Tuning(false).Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "/var/log/mysql") {
+			t.Errorf("slow log off must not probe the log path; ran %q", c.Cmd)
+		}
+	}
+}
