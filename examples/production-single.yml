@@ -8,8 +8,9 @@ ssh:
   port: 22
   key: ~/.ssh/id_ed25519
   # Pin the host key to defeat MITM (otherwise berth trusts it on first connect).
-  # Get the value with:
-  #   ssh-keyscan -t ed25519 203.0.113.10 | ssh-keygen -lf - | awk '{print $2}'
+  # List ALL key types (add -p PORT when ssh.port is not 22) and pin the type
+  # berth reports in its TOFU prompt / mismatch errors:
+  #   ssh-keyscan 203.0.113.10 | ssh-keygen -lf -
   # fingerprint: "SHA256:..."
 
 php:

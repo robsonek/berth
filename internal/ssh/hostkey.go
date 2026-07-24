@@ -17,7 +17,7 @@ type HostKeyPolicy struct {
 	Pinned      string                                       // optional "SHA256:..." fingerprint; if set, must match
 	KnownHosts  string                                       // path to known_hosts (default ~/.ssh/known_hosts)
 	AllowTOFU   bool                                         // prompt + pin on first contact when not pinned/known
-	ConfirmTOFU func(host, fingerprint, keyType string) bool // interactive confirm; keyType is the negotiated algorithm (e.g. ecdsa-sha2-nistp256)
+	ConfirmTOFU func(host, fingerprint, keyType string) bool // interactive confirm; keyType is the presented key's type (e.g. ecdsa-sha2-nistp256)
 }
 
 // Fingerprint returns the SHA256 fingerprint of a public key ("SHA256:...").
@@ -34,10 +34,12 @@ func HostKeyChecker(p HostKeyPolicy) xssh.HostKeyCallback {
 	}
 	return func(hostname string, remote net.Addr, key xssh.PublicKey) error {
 		fp := Fingerprint(key)
-		// Every message names the NEGOTIATED key type: a server offers one key
-		// per type, so a pin taken from the wrong `ssh-keyscan` line (e.g. its
-		// ed25519 default when this client negotiates ECDSA) mismatches even
-		// though the server is genuine — the type is what disambiguates.
+		// Every message names the presented key's TYPE (key.Type() — the label
+		// ssh-keyscan/ssh-keygen print per line, e.g. ssh-rsa even when the
+		// signature algorithm negotiated for it is rsa-sha2-*): a server offers
+		// one key per type, so a pin taken from the wrong scan line (e.g. its
+		// ed25519 output when this client selects ECDSA) mismatches even though
+		// the server is genuine — the type is what disambiguates.
 		// 1) Explicit pin wins.
 		if p.Pinned != "" {
 			if fp != p.Pinned {

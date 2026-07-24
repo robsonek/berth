@@ -99,9 +99,9 @@ func defaultKnownHosts() string {
 }
 
 // confirmFingerprint returns a TOFU confirmation callback that prints the host
-// key type + fingerprint and reads a y/N answer from stdin. Showing the
-// negotiated type matters: this exact fingerprint is what the operator will
-// pin as ssh.fingerprint, and ssh-keyscan prints one line per key type.
+// key type + fingerprint and reads a y/N answer from stdin. Showing the key's
+// type matters: this exact fingerprint is what the operator will pin as
+// ssh.fingerprint, and ssh-keyscan prints one line per key type.
 func confirmFingerprint(cmd *cobra.Command) func(host, fingerprint, keyType string) bool {
 	return func(host, fingerprint, keyType string) bool {
 		out := cmd.OutOrStdout()
