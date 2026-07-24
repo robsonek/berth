@@ -57,6 +57,14 @@ func redisIdxProbe(env string) string {
 	return "grep -E '^REDIS_(CACHE_)?DB=' " + shQuote(env)
 }
 
+// stubClientAuthAbsent stubs the per-site client-credentials existence probe
+// as absent (Apply then seeds the file) for every site of s.
+func stubClientAuthAbsent(f *bssh.FakeRunner, s *config.Server, name string) {
+	for _, site := range s.Sites {
+		f.On("test -e "+shQuote("/home/"+s.SiteUser(site)+"/"+name), bssh.Result{ExitCode: 1})
+	}
+}
+
 // stubRepoKeyTrust stubs apt.EnsureRepo's key-trust command sequence for an
 // upstream repo, ending in a keyring holding exactly the pinned primary key.
 func stubRepoKeyTrust(f *bssh.FakeRunner, name, keyURL, fpr string) {
@@ -78,6 +86,7 @@ func TestDatabaseApplyGeneratesPersistsAndEnsures(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
+	stubClientAuthAbsent(f, s, ".my.cnf")
 	f.On("mysql --protocol=socket", bssh.Result{})
 
 	if err := Database(red).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -143,6 +152,7 @@ func TestDatabaseApplySeedsRedisWhenValkey(t *testing.T) {
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
 	f.On("mysql --protocol=socket", bssh.Result{})
 
+	stubClientAuthAbsent(f, s, ".my.cnf")
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
@@ -191,6 +201,7 @@ func TestDatabaseApplyRedisDBSkipsIndicesUsedByExistingEnvs(t *testing.T) {
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(exEnv), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Reused123\n"})
 	f.On("mysql --protocol=socket", bssh.Result{})
 
+	stubClientAuthAbsent(f, s, ".my.cnf")
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
@@ -241,6 +252,7 @@ func TestDatabaseApplyRedisDBFillsLowestGap(t *testing.T) {
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(thirdEnv), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=ReusedC1\n"})
 	f.On("mysql --protocol=socket", bssh.Result{})
 
+	stubClientAuthAbsent(f, s, ".my.cnf")
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
@@ -281,6 +293,7 @@ func TestDatabaseApplyRedisDBReservesDivergedCacheIndex(t *testing.T) {
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(exEnv), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Reused123\n"})
 	f.On("mysql --protocol=socket", bssh.Result{})
 
+	stubClientAuthAbsent(f, s, ".my.cnf")
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
@@ -319,6 +332,7 @@ func TestDatabaseApplyRedisDBReservesQuotedIndex(t *testing.T) {
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(exEnv), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Reused123\n"})
 	f.On("mysql --protocol=socket", bssh.Result{})
 
+	stubClientAuthAbsent(f, s, ".my.cnf")
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
@@ -377,6 +391,7 @@ func TestDatabaseApplyRedisDBDistinctForMultipleFreshSites(t *testing.T) {
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(exEnv), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Reused123\n"})
 	f.On("mysql --protocol=socket", bssh.Result{})
 
+	stubClientAuthAbsent(f, s, ".my.cnf")
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
@@ -400,6 +415,7 @@ func TestDatabaseApplyKeepsDatabaseDriverWithoutValkey(t *testing.T) {
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
 	f.On("mysql --protocol=socket", bssh.Result{})
 
+	stubClientAuthAbsent(f, s, ".my.cnf")
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
@@ -426,6 +442,7 @@ func TestDatabaseApplyHealsFromExistingEnvWithoutRewriting(t *testing.T) {
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Reused123\n"})
 	f.On("mysql --protocol=socket", bssh.Result{})
 
+	stubClientAuthAbsent(f, s, ".my.cnf")
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
@@ -474,6 +491,7 @@ func TestDatabaseCheckSatisfiedDoesNotReseedExistingEnv(t *testing.T) {
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0})
 	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
 	f.On(mariadbGrantProbe, bssh.Result{Stdout: "1\n"})
+	f.On("test -e "+shQuote("/home/deploy/.my.cnf"), bssh.Result{ExitCode: 0}) // client creds already seeded
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -593,6 +611,7 @@ func TestDatabaseApplySourceMariaDBAddsRepo(t *testing.T) {
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
 	f.On("mysql --protocol=socket", bssh.Result{})
 
+	stubClientAuthAbsent(f, s, ".my.cnf")
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
@@ -628,6 +647,7 @@ func TestDatabaseApplyPostgresFromPGDG(t *testing.T) {
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
 	f.On("sudo -u postgres psql -v ON_ERROR_STOP=1", bssh.Result{})
 
+	stubClientAuthAbsent(f, s, ".pgpass")
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
@@ -725,6 +745,7 @@ func TestDatabaseApplyAcceptsTrailingASCIIWhitespacePassword(t *testing.T) {
 	// set), so Apply must trim it the same way and reuse the value.
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Good123\v\n"})
 	f.On("mysql --protocol=socket", bssh.Result{})
+	stubClientAuthAbsent(f, s, ".my.cnf")
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
@@ -772,5 +793,118 @@ func TestSeedSharedEnvPostgresUsesTCPNoSocket(t *testing.T) {
 	}
 	if strings.Contains(env, "DB_SOCKET=") {
 		t.Errorf("postgres .env must NOT set DB_SOCKET; got:\n%s", env)
+	}
+}
+
+func TestDatabaseApplySeedsClientAuthFile(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})   // fresh box: no .env yet
+	f.On("test -e '/home/deploy/.my.cnf'", bssh.Result{ExitCode: 1}) // fresh box: no client creds yet
+	f.On("mysql --protocol=socket", bssh.Result{})
+
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var env, auth *bssh.FileSpec
+	for i := range f.Writes() {
+		switch f.Writes()[i].Path {
+		case envPath(s):
+			env = &f.Writes()[i]
+		case "/home/deploy/.my.cnf":
+			auth = &f.Writes()[i]
+		}
+	}
+	if env == nil || auth == nil {
+		t.Fatalf("expected both shared/.env and ~/.my.cnf written; env=%v auth=%v", env != nil, auth != nil)
+	}
+	if auth.Owner != "deploy" || auth.Group != "deploy" || auth.Mode.Perm() != 0o600 {
+		t.Errorf("~/.my.cnf owner/group/mode = %s/%s/%v, want deploy/deploy/0600", auth.Owner, auth.Group, auth.Mode.Perm())
+	}
+	body := string(auth.Content)
+	if !strings.Contains(body, "[client]") || !strings.Contains(body, "user = myapp") {
+		t.Errorf("~/.my.cnf must carry the [client] credential; got:\n%s", body)
+	}
+	// The credential must be the same one seeded into shared/.env.
+	var envPW string
+	for _, line := range strings.Split(string(env.Content), "\n") {
+		if pw, ok := strings.CutPrefix(line, "DB_PASSWORD="); ok {
+			envPW = pw
+		}
+	}
+	if envPW == "" || !strings.Contains(body, "password = "+envPW) {
+		t.Error("~/.my.cnf must hold the same password as shared/.env")
+	}
+}
+
+func TestDatabaseApplyClientAuthFileNeverRewritten(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env already present
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Reused123\n"})
+	f.On("test -e '/home/deploy/.my.cnf'", bssh.Result{ExitCode: 0}) // already seeded (possibly operator-customized)
+	f.On("mysql --protocol=socket", bssh.Result{})
+
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	for _, w := range f.Writes() {
+		if w.Path == "/home/deploy/.my.cnf" {
+			t.Fatal("an existing ~/.my.cnf must never be rewritten")
+		}
+	}
+}
+
+func TestDatabaseCheckUnsatisfiedWhenClientAuthMissing(t *testing.T) {
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0})
+	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
+	f.On(mariadbGrantProbe, bssh.Result{Stdout: "1\n"})
+	f.On("test -e '/home/deploy/.my.cnf'", bssh.Result{ExitCode: 1}) // creds file missing
+	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Fatal("a missing client-credentials file must not satisfy Check (a crash between EnsureUser and the seed must heal)")
+	}
+	if !strings.Contains(cr.Reason, "client DB credentials") {
+		t.Errorf("Reason = %q", cr.Reason)
+	}
+}
+
+func TestDatabaseApplyPostgresSeedsPgpass(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	s.Database.Engine = "postgres"
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql", bssh.Result{})
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})   // fresh box: no .env yet
+	f.On("test -e '/home/deploy/.pgpass'", bssh.Result{ExitCode: 1}) // fresh box: no client creds yet
+	f.On("sudo -u postgres psql -v ON_ERROR_STOP=1", bssh.Result{})
+
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var auth *bssh.FileSpec
+	for i := range f.Writes() {
+		if f.Writes()[i].Path == "/home/deploy/.pgpass" {
+			auth = &f.Writes()[i]
+		}
+	}
+	if auth == nil {
+		t.Fatal("~/.pgpass was not written")
+	}
+	if auth.Mode.Perm() != 0o600 {
+		t.Errorf("~/.pgpass mode = %v, want 0600 (libpq refuses anything else)", auth.Mode.Perm())
+	}
+	if !strings.HasPrefix(string(auth.Content), "*:*:myapp:myapp:") {
+		t.Errorf("~/.pgpass = %q, want the wildcard db/user line", auth.Content)
 	}
 }

@@ -43,7 +43,8 @@ type database struct {
 }
 
 // Database installs the database server once, then for each site persists the
-// credential to that site's shared/.env and ensures the site's database + user.
+// credential to that site's shared/.env, ensures the site's database + user,
+// and seeds the site user's client-credentials file (~/.my.cnf / ~/.pgpass).
 // It takes the redactor so generated passwords are masked in any logged output.
 func Database(red *secret.Redactor) provision.Step { return database{redactor: red} }
 
@@ -53,6 +54,13 @@ func (database) Requires() []string { return []string{"base", "appdirs"} }
 // sharedEnvPath is the server-side path of a site's shared .env.
 func sharedEnvPath(site config.Site) string {
 	return site.DeployPath + "/shared/.env"
+}
+
+// clientAuthPath is the server-side path of a site user's engine
+// client-credentials file (~/.my.cnf or ~/.pgpass). The /home/<user> layout is
+// the same assumption ensureUser enforces for every managed account.
+func clientAuthPath(s *config.Server, site config.Site, name string) string {
+	return "/home/" + s.SiteUser(site) + "/" + name
 }
 
 // envCredentialPresent reports whether the FIRST DB_PASSWORD line of a site's
@@ -127,6 +135,16 @@ func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Serve
 		if !granted {
 			return d.unsatisfied(eng, "database user/grant for "+site.Domain+" missing"), nil
 		}
+		// Existence only (no content drift): the file bears a secret, so Check
+		// stays exit-code-only, and it is seed-if-absent like shared/.env — an
+		// operator-customized file must keep satisfying Check forever.
+		authOK, err := fileExists(ctx, r, clientAuthPath(s, site, eng.ClientAuthFileName()))
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if !authOK {
+			return d.unsatisfied(eng, "client DB credentials for "+site.Domain+" not yet seeded"), nil
+		}
 	}
 	return provision.CheckResult{Satisfied: true, Reason: eng.ServerPackage() + " installed (" + s.Database.Source + "); per-site databases, users and credentials present"}, nil
 }
@@ -139,7 +157,7 @@ func (d database) unsatisfied(eng dbpkg.Engine, reason string) provision.CheckRe
 func (database) changes(eng dbpkg.Engine) []string {
 	return []string{
 		"install " + eng.ServerPackage(),
-		"per site: persist DB credential to shared/.env (when absent), ensure database + user",
+		"per site: persist DB credential to shared/.env and ~/" + eng.ClientAuthFileName() + " (when absent), ensure database + user",
 	}
 }
 
@@ -215,6 +233,25 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 		}
 		if err := eng.EnsureUser(ctx, r, dbUser, pw, dbName); err != nil {
 			return err
+		}
+		authPath := clientAuthPath(s, site, eng.ClientAuthFileName())
+		authExists, err := fileExists(ctx, r, authPath)
+		if err != nil {
+			return err
+		}
+		if !authExists {
+			// Seed-if-absent, like shared/.env: the password is reused (never
+			// rotated) and the operator may customize the file, so a present
+			// file is never rewritten. Written AFTER EnsureUser so the
+			// credential it holds is live; a crash in between heals on the
+			// next run via Check's existence probe.
+			user := s.SiteUser(site)
+			if err := r.WriteFile(ctx, bssh.FileSpec{
+				Path: authPath, Content: eng.ClientAuthFile(dbName, dbUser, pw),
+				Owner: user, Group: user, Mode: 0o600, Sudo: true,
+			}); err != nil {
+				return fmt.Errorf("write %s: %w", authPath, err)
+			}
 		}
 		cache[dbUser] = pw
 	}
