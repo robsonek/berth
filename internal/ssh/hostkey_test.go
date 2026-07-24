@@ -36,9 +36,9 @@ func TestPinnedFingerprintMismatchFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected mismatch error for wrong pinned fingerprint")
 	}
-	// The message must name the NEGOTIATED key type and the all-types scan:
+	// The message must name the presented key's TYPE and the all-types scan:
 	// a server offers one key per type, and a pin taken from the wrong
-	// ssh-keyscan line (e.g. ed25519 when the client negotiates ECDSA) is the
+	// ssh-keyscan line (e.g. ed25519 when the client selects ECDSA) is the
 	// classic false-mismatch this diagnoses.
 	for _, want := range []string{"ssh-ed25519", Fingerprint(hk), "SHA256:doesnotmatch", "ssh-keyscan"} {
 		if !strings.Contains(err.Error(), want) {
