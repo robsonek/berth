@@ -126,6 +126,7 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	// iter-5: runtime + deploy-reload (#36) and apt provenance (#35).
 	assertRuntime(invCtx, t, client, srv)
 	assertOpcacheEffective(invCtx, t, client, srv)
+	assertPHPTuning(invCtx, t, client, srv)
 	assertAptProvenance(invCtx, t, client, srv)
 	// useHTTPS mirrors the test's TLS path: self-signed/LE provisioned => https, else http.
 	assertDeployReload(invCtx, t, client, srv, !skipSSL && anySiteSSL(srv))
