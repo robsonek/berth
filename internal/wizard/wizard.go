@@ -68,8 +68,9 @@ type TuningAnswers struct {
 }
 
 type SystemAnswers struct {
-	Swap   string // e.g. "2G"; blank = no swap
-	Sysctl bool
+	Swap     string // e.g. "2G"; blank = no swap
+	Sysctl   bool
+	Timezone string // IANA zone; blank = leave untouched
 }
 
 type BackupsAnswers struct {

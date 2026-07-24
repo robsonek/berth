@@ -1467,6 +1467,31 @@ func TestConfigMatrix(t *testing.T) {
 		mustContain(t, err, "swap")
 	})
 
+	t.Run("system-timezone-valid", func(t *testing.T) {
+		a := base("sys-tz", "vps.example.com")
+		a.System = SystemAnswers{Timezone: "Europe/Warsaw"}
+		a.Sites = []SiteAnswers{{
+			Domain: "vps.example.com", DeployPath: "/srv/app", DBName: "appdb", DBUser: "appuser", SchedulerOverride: "inherit",
+		}}
+		srv, raw := writeValid(t, a)
+		if srv.System.Timezone != "Europe/Warsaw" {
+			t.Fatalf("timezone = %q", srv.System.Timezone)
+		}
+		if !strings.Contains(raw, "timezone: Europe/Warsaw") {
+			t.Fatalf("yaml missing timezone:\n%s", raw)
+		}
+	})
+
+	t.Run("system-timezone-injection-invalid", func(t *testing.T) {
+		a := base("sys-tz-bad", "vps.example.com")
+		a.System = SystemAnswers{Timezone: "Europe/Warsaw; rm -rf /"}
+		a.Sites = []SiteAnswers{{
+			Domain: "vps.example.com", DeployPath: "/srv/app", DBName: "appdb", DBUser: "appuser", SchedulerOverride: "inherit",
+		}}
+		err := writeInvalid(t, a)
+		mustContain(t, err, "system.timezone")
+	})
+
 	t.Run("ops/cloudflare server + per-site override", func(t *testing.T) {
 		a := validSingleSite(t)
 		a.CloudflareOnly = true

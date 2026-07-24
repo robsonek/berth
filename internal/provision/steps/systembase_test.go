@@ -108,7 +108,6 @@ func TestSystemBaseCheckUnsatisfiedWhenAutoUpgradesMissing(t *testing.T) {
 func TestSystemBaseApplyInstallsAndConfigures(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(basePackages, " "), bssh.Result{})
-	f.On("timedatectl set-timezone UTC", bssh.Result{})
 	f.On("systemctl enable --now unattended-upgrades", bssh.Result{})
 	if err := SystemBase().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -118,7 +117,7 @@ func TestSystemBaseApplyInstallsAndConfigures(t *testing.T) {
 		saw = append(saw, c.Cmd)
 	}
 	joined := strings.Join(saw, "\n")
-	for _, want := range []string{"apt-get install -y", "timedatectl set-timezone UTC", "systemctl enable --now unattended-upgrades"} {
+	for _, want := range []string{"apt-get install -y", "systemctl enable --now unattended-upgrades"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("Apply did not run %q; calls:\n%s", want, joined)
 		}

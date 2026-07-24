@@ -13,7 +13,8 @@ import (
 
 // assertSwapSysctl verifies the live end state of the system step: when swap is
 // configured, /swapfile is an active swap area and vm.swappiness is 10; when sysctl
-// is enabled, each managed key's running value matches. A no-op when both are off.
+// is enabled, each managed key's running value matches; when a timezone is set,
+// the live system zone matches. A no-op when all three are off.
 func assertSwapSysctl(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server) {
 	t.Helper()
 
@@ -64,6 +65,19 @@ func assertSwapSysctl(ctx context.Context, t *testing.T, c *bssh.Client, srv *co
 			if strings.TrimSpace(res.Stdout) != kv.val {
 				t.Errorf("sysctl %s = %q, want %q", kv.key, strings.TrimSpace(res.Stdout), kv.val)
 			}
+		}
+	}
+
+	if srv.System.Timezone != "" {
+		tz, err := c.Run(ctx, "timedatectl show -p Timezone --value", nil)
+		if err != nil {
+			t.Fatalf("timedatectl show: %v", err)
+		}
+		if tz.ExitCode != 0 {
+			t.Fatalf("timedatectl show exit %d: %s", tz.ExitCode, strings.TrimSpace(tz.Stderr))
+		}
+		if got := strings.TrimSpace(tz.Stdout); got != srv.System.Timezone {
+			t.Errorf("system timezone = %q, want %q", got, srv.System.Timezone)
 		}
 	}
 }

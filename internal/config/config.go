@@ -215,13 +215,17 @@ func (t Tuning) PHPMaxInputVarsEff() int {
 	return t.PHPMaxInputVars
 }
 
-// System holds optional, opt-in host-level OS provisioning knobs. Both default
-// off: an empty Swap and a false Sysctl mean berth never touches swap or kernel
-// sysctl. Values are constants in the step (no SetDefault), so wizard ToServer()
-// and literal-Server callers that bypass Load() need nothing seeded.
+// System holds optional, opt-in host-level OS provisioning knobs. All default
+// off: an empty Swap, a false Sysctl and an empty Timezone mean berth never
+// touches swap, kernel sysctl or the system timezone. Values are constants in
+// the step (no SetDefault), so wizard ToServer() and literal-Server callers
+// that bypass Load() need nothing seeded. Unlike Swap, clearing Timezone
+// drift-removes nothing — a timezone is plain system state with no berth
+// artifact, so empty means "stop managing", never "revert".
 type System struct {
-	Swap   string `mapstructure:"swap"   yaml:"swap,omitempty"`   // e.g. "2G"; empty = no swap
-	Sysctl bool   `mapstructure:"sysctl" yaml:"sysctl,omitempty"` // default false = no sysctl drop-in
+	Swap     string `mapstructure:"swap"     yaml:"swap,omitempty"`     // e.g. "2G"; empty = no swap
+	Sysctl   bool   `mapstructure:"sysctl"   yaml:"sysctl,omitempty"`   // default false = no sysctl drop-in
+	Timezone string `mapstructure:"timezone" yaml:"timezone,omitempty"` // IANA zone (e.g. Europe/Warsaw); empty = leave untouched
 }
 
 // Backups holds the opt-in scheduled-backup knobs. Enabled is off by default

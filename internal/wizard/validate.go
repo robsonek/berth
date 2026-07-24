@@ -144,13 +144,15 @@ func optionalPHPSize(s string) error {
 	return nil
 }
 
-// reSwapSize / reCronSchedule mirror config.reSwapSize / config.reCronSchedule
-// (unexported there) for inline feedback; config.Server.Validate stays authoritative.
+// reSwapSize / reCronSchedule / reTimezone mirror config.reSwapSize /
+// config.reCronSchedule / config.reTimezone (unexported there) for inline
+// feedback; config.Server.Validate stays authoritative.
 // The cron class [0-9*,/-] already excludes newlines (and Go's $ is not multiline),
 // so the regex alone rejects control-char injection — no extra check needed here.
 var (
 	reSwapSize     = regexp.MustCompile(`^[1-9][0-9]*[MmGg]$`)
 	reCronSchedule = regexp.MustCompile(`^[0-9*,/-]+( [0-9*,/-]+){4}$`)
+	reTimezone     = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+){0,2}$`)
 )
 
 func optionalSwapSize(s string) error {
@@ -158,6 +160,13 @@ func optionalSwapSize(s string) error {
 		return nil
 	}
 	return fmt.Errorf("swap %q must be a positive number suffixed M or G (e.g. 2G)", s)
+}
+
+func optionalTimezone(s string) error {
+	if s == "" || reTimezone.MatchString(s) {
+		return nil
+	}
+	return fmt.Errorf("timezone %q must be an IANA zone name like Europe/Warsaw", s)
 }
 
 func optionalCronSchedule(s string) error {

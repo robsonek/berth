@@ -84,10 +84,13 @@ func fstabSwapState(content string) (marked, foreign bool) {
 
 type system struct{}
 
-// System provisions optional host-level OS settings: a swap file (+ vm.swappiness)
-// and an opt-in web/DB kernel sysctl drop-in. It is ALWAYS in the pipeline (ungated)
-// so disabling a knob can drift-remove berth's artifacts, and runs right after base
-// (before php/composer/database) so the swap margin protects provisioning itself.
+// System provisions optional host-level OS settings: a swap file (+ vm.swappiness),
+// an opt-in web/DB kernel sysctl drop-in, and an opt-in system timezone. It is
+// ALWAYS in the pipeline (ungated) so disabling a knob can drift-remove berth's
+// artifacts, and runs right after base (before php/composer/database) so the swap
+// margin protects provisioning itself. The timezone knob has NO removal branch:
+// a zone is plain system state with no berth artifact — clearing the field stops
+// managing it, never reverts it.
 func System() provision.Step { return system{} }
 
 func (system) Name() string       { return "system" }
@@ -129,10 +132,19 @@ func (system) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 			changes = append(changes, ch...)
 		}
 	}
-	if len(changes) == 0 {
-		return provision.CheckResult{Satisfied: true, Reason: "swap & sysctl in desired state"}, nil
+	if s.System.Timezone != "" {
+		ok, ch, err := checkTimezone(ctx, r, s.System.Timezone)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if !ok {
+			changes = append(changes, ch...)
+		}
 	}
-	return provision.CheckResult{Satisfied: false, Reason: "system (swap/sysctl) not in desired state", Changes: changes}, nil
+	if len(changes) == 0 {
+		return provision.CheckResult{Satisfied: true, Reason: "swap, sysctl & timezone in desired state"}, nil
+	}
+	return provision.CheckResult{Satisfied: false, Reason: "system (swap/sysctl/timezone) not in desired state", Changes: changes}, nil
 }
 
 // catTrim returns the trimmed stdout of `cat <path>` and whether the file was
@@ -320,6 +332,75 @@ func checkSysctlRemoval(ctx context.Context, r bssh.Runner) (bool, []string, err
 	return true, nil, nil
 }
 
+// checkTimezone is the read-only predicate for a managed timezone: satisfied
+// iff the host's current zone equals the configured one. There is no removal
+// counterpart — see the System() doc comment.
+func checkTimezone(ctx context.Context, r bssh.Runner, tz string) (bool, []string, error) {
+	res, err := r.Run(ctx, "timedatectl show -p Timezone --value", nil)
+	if err != nil {
+		return false, nil, err
+	}
+	if res.ExitCode != 0 {
+		return false, nil, fmt.Errorf("timedatectl show: %s", res.Stderr)
+	}
+	if strings.TrimSpace(res.Stdout) == tz {
+		return true, nil, nil
+	}
+	return false, []string{"timedatectl set-timezone " + tz + " + restart cron"}, nil
+}
+
+// applyTimezone sets the zone, then restarts cron: cron reads the local time
+// at startup and berth's own backup cron (30 3 * * *) is wall-clock-sensitive,
+// so without the restart the OLD zone's schedule would persist indefinitely.
+// ensureCron first (the backups step's installer, reused): the system step
+// runs early in the pipeline, so on a cron-less image the unit may not exist
+// yet; an ensure failure takes the same revert path as a failed restart.
+// Plain restart (not try-restart): berth ships cron-based features
+// (scheduler, backups), so cron running is part of its promise — try-restart
+// would silently no-op on a cron left STOPPED by a previous half-failed
+// restart. Re-entrant (a matching zone is a no-op); it probes the current
+// zone itself, rather than via checkTimezone, because the PREVIOUS value is
+// also the compensation target: on a failed cron restart the zone is
+// reverted — leaving the new zone in place would make the next run's Check
+// falsely Satisfied while cron still fires on the old zone's schedule (the
+// php step's drop-in-removal precedent). The revert outcome is CHECKED and
+// the error branches honestly; the double-failure residual (falsely
+// Satisfied after a failed revert) is spec-accepted — a box where
+// timedatectl fails twice needs an operator anyway.
+func applyTimezone(ctx context.Context, r bssh.Runner, tz string) error {
+	res, err := r.Run(ctx, "timedatectl show -p Timezone --value", nil)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("timedatectl show: %s", res.Stderr)
+	}
+	prev := strings.TrimSpace(res.Stdout)
+	if prev == tz {
+		return nil
+	}
+	if err := runOK(ctx, r, "timedatectl set-timezone "+shQuote(tz)); err != nil {
+		return err
+	}
+	cronErr := ensureCron(ctx, r)
+	if cronErr == nil {
+		cronErr = runOK(ctx, r, "systemctl restart cron")
+	}
+	if cronErr != nil {
+		if rres, rerr := r.Run(ctx, "timedatectl set-timezone "+shQuote(prev), nil); rerr != nil || rres.ExitCode != 0 {
+			detail := ""
+			if rerr != nil {
+				detail = rerr.Error()
+			} else {
+				detail = strings.TrimSpace(rres.Stderr)
+			}
+			return fmt.Errorf("ensuring/restarting cron after the timezone change failed AND the revert to %s failed (%s) — the new zone may be in effect without a cron restart; fix cron and re-run: %w", prev, detail, cronErr)
+		}
+		return fmt.Errorf("ensuring/restarting cron after the timezone change failed (reverted to %s so the next run retries): %w", prev, cronErr)
+	}
+	return nil
+}
+
 func (system) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
 	if s.System.Swap != "" {
 		if err := applySwap(ctx, rc, r, s.System.Swap); err != nil {
@@ -336,6 +417,11 @@ func (system) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 		}
 	} else {
 		if err := applySysctlRemoval(ctx, r); err != nil {
+			return err
+		}
+	}
+	if s.System.Timezone != "" {
+		if err := applyTimezone(ctx, r, s.System.Timezone); err != nil {
 			return err
 		}
 	}

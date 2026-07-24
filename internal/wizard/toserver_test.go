@@ -41,6 +41,13 @@ func TestToServerOpsBlocks(t *testing.T) {
 	}
 }
 
+func TestToServerCarriesSystemTimezone(t *testing.T) {
+	a := Answers{System: SystemAnswers{Timezone: "Europe/Warsaw"}}
+	if s := a.ToServer(); s.System.Timezone != "Europe/Warsaw" {
+		t.Errorf("ToServer() dropped system.timezone: %+v", s.System)
+	}
+}
+
 func TestToServerCarriesPHPTuning(t *testing.T) {
 	a := Answers{Tuning: TuningAnswers{
 		PHPMemoryLimit: "768M", PHPUploadMax: "64M", PHPMaxExecutionTime: 120, PHPMaxInputVars: 5000,

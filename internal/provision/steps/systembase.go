@@ -43,6 +43,10 @@ func renderAutoUpgrades() ([]byte, error) {
 
 type systembase struct{}
 
+// SystemBase installs the foundational packages, writes the auto-upgrades
+// periodic config and enables unattended-upgrades. Timezone is deliberately
+// NOT touched here: system.timezone owns it (empty = leave the image's zone
+// alone).
 func SystemBase() provision.Step { return systembase{} }
 
 func (systembase) Name() string       { return "base" }
@@ -74,7 +78,7 @@ func (systembase) Check(ctx context.Context, rc provision.RunCtx, _ *config.Serv
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	changes := []string{"timedatectl set-timezone UTC", "enable unattended-upgrades", "write 20auto-upgrades periodic config"}
+	changes := []string{"enable unattended-upgrades", "write 20auto-upgrades periodic config"}
 	if len(missing) > 0 {
 		return provision.CheckResult{
 			Satisfied: false,
@@ -103,7 +107,6 @@ func (systembase) Apply(ctx context.Context, _ provision.RunCtx, _ *config.Serve
 		return fmt.Errorf("write %s: %w", autoUpgradesPath, err)
 	}
 	for _, cmd := range []string{
-		"timedatectl set-timezone UTC",
 		"systemctl enable --now unattended-upgrades",
 	} {
 		res, err := r.Run(ctx, cmd, nil)
