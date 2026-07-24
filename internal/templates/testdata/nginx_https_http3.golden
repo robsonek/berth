@@ -31,7 +31,7 @@ server {
     add_header X-Content-Type-Options "nosniff" always;
     add_header Strict-Transport-Security "max-age=31536000" always;
     add_header Alt-Svc 'h3=":443"; ma=86400' always;
-    client_max_body_size 32m;
+    client_max_body_size 35651584;
 
     ssl_certificate /etc/letsencrypt/live/app.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/app.example.com/privkey.pem;

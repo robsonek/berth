@@ -361,6 +361,32 @@ func TestNginxHTTPSHasTLSTuning(t *testing.T) {
 	}
 }
 
+func TestSiteVhostHonorsUploadMax(t *testing.T) {
+	// The derived request-body cap must reach client_max_body_size in BOTH
+	// vhost renders, so nginx never rejects an upload PHP would accept.
+	s := &config.Server{
+		Tuning: config.Tuning{PHPUploadMax: "64M"},
+		Sites: []config.Site{{
+			Domain: "app.example.com", DeployPath: "/home/deploy/myapp", SSL: true,
+		}},
+	}
+	want := "client_max_body_size " + s.Tuning.PHPPostBodyMaxEff() + ";" // 64M + 5% = 70464307
+	httpBody, err := renderNginxHTTP(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(httpBody), want) {
+		t.Errorf("HTTP vhost missing %q; got:\n%s", want, httpBody)
+	}
+	httpsBody, err := renderNginxHTTPS(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(httpsBody), want) {
+		t.Errorf("HTTPS vhost missing %q; got:\n%s", want, httpsBody)
+	}
+}
+
 func TestSiteHTTPSRenderMatchesTLSSwap(t *testing.T) {
 	// site's cert-aware HTTPS render and the tls step's swap share renderNginxHTTPS,
 	// so they must be byte-identical or `site` re-runs detect endless drift.

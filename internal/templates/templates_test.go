@@ -45,8 +45,8 @@ func checkGoldenRender(t *testing.T, render func(string, any) ([]byte, error), n
 }
 
 type nginxData struct {
-	Domain, DeployPath, ACMEWebroot, Socket, CertPath, KeyPath string
-	HTTP3, QUICReuseport, HSTS, CloudflareOnly                 bool
+	Domain, DeployPath, ACMEWebroot, Socket, CertPath, KeyPath, BodyMax string
+	HTTP3, QUICReuseport, HSTS, CloudflareOnly                          bool
 }
 
 const testSocket = "/run/php/berth-app_example_com.sock"
@@ -57,6 +57,7 @@ func nginxGoldenData() nginxData {
 		ACMEWebroot: "/var/www/berth-acme/app.example.com", Socket: testSocket,
 		CertPath: "/etc/letsencrypt/live/app.example.com/fullchain.pem",
 		KeyPath:  "/etc/letsencrypt/live/app.example.com/privkey.pem",
+		BodyMax:  "35651584",
 		HSTS:     true,
 	}
 }

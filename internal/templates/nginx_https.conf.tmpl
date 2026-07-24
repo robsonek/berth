@@ -41,7 +41,7 @@ server {
 {{- if .HTTP3 }}
     add_header Alt-Svc 'h3=":443"; ma=86400' always;
 {{- end }}
-    client_max_body_size 32m;
+    client_max_body_size {{ .BodyMax }};
 
     ssl_certificate {{ .CertPath }};
     ssl_certificate_key {{ .KeyPath }};

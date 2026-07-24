@@ -8,7 +8,7 @@ server {
     server_tokens off;
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
-    client_max_body_size 32m;
+    client_max_body_size {{ .BodyMax }};
 
     location /.well-known/acme-challenge/ {
         root {{ .ACMEWebroot }};
