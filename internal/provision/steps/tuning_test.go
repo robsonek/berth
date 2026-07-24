@@ -706,3 +706,97 @@ func TestRenderMariaDBTuningSlowLogDefaultThreshold(t *testing.T) {
 		t.Errorf("default threshold must render as 2 s:\n%s", b)
 	}
 }
+
+func mariadbSlowLogServer() *config.Server {
+	return &config.Server{Database: config.Database{Engine: "mariadb"}, Tuning: config.Tuning{MariaDBSlowQueryLog: true}}
+}
+
+func TestTuningCheckSlowLogDirMissingUnsatisfied(t *testing.T) {
+	// Debian 13's mariadb logs to the journal and ships no /var/log/mysql; a
+	// loaded drop-in with the directory missing means mariadbd silently turned
+	// slow logging OFF for its whole lifetime — Check must not read Satisfied.
+	srv := mariadbSlowLogServer()
+	want, _ := renderMariaDBTuning(srv)
+	f := bssh.NewFakeRunner()
+	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"})
+	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
+	stubServiceActive(f, mariadbUnit)
+	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
+	f.On("test -d /var/log/mysql", bssh.Result{ExitCode: 1}) // dir absent
+	cr, err := Tuning(false).Check(context.Background(), provision.RunCtx{}, srv, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied while /var/log/mysql is missing with the slow log enabled")
+	}
+}
+
+func TestTuningCheckSlowLogDirPresentSatisfied(t *testing.T) {
+	srv := mariadbSlowLogServer()
+	want, _ := renderMariaDBTuning(srv)
+	f := bssh.NewFakeRunner()
+	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"})
+	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
+	stubServiceActive(f, mariadbUnit)
+	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
+	f.On("test -d /var/log/mysql", bssh.Result{ExitCode: 0})
+	cr, err := Tuning(false).Check(context.Background(), provision.RunCtx{}, srv, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("expected satisfied; got %+v", cr)
+	}
+}
+
+func TestTuningApplySlowLogCreatesDirAndRestarts(t *testing.T) {
+	// The drop-in itself is loaded (checkTuned satisfied) but the directory is
+	// missing: Apply must create it AND restart — mariadbd disabled slow
+	// logging for the process duration, so a dir alone changes nothing.
+	srv := mariadbSlowLogServer()
+	want, _ := renderMariaDBTuning(srv)
+	f := bssh.NewFakeRunner()
+	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"})
+	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
+	stubServiceActive(f, mariadbUnit)
+	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
+	f.On("test -d /var/log/mysql", bssh.Result{ExitCode: 1})
+	f.On("install -d -m 2750 -o mysql -g adm /var/log/mysql", bssh.Result{})
+	f.On("systemctl restart mariadb.service", bssh.Result{})
+	if err := Tuning(false).Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if !calledCmd(f, "install -d -m 2750 -o mysql -g adm /var/log/mysql") {
+		t.Error("expected the slow-log directory created")
+	}
+	if !calledCmd(f, "systemctl restart mariadb.service") {
+		t.Error("expected a mariadb restart to re-enable the in-process-disabled slow log")
+	}
+	for _, w := range f.Writes() {
+		if w.Path == mariadbTuningPath {
+			t.Error("an up-to-date drop-in must not be rewritten")
+		}
+	}
+}
+
+func TestTuningSlowLogOffNeverProbesDir(t *testing.T) {
+	srv := mariadbOnlyServer()
+	want, _ := renderMariaDBTuning(srv)
+	f := bssh.NewFakeRunner()
+	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"})
+	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
+	stubServiceActive(f, mariadbUnit)
+	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
+	if _, err := Tuning(false).Check(context.Background(), provision.RunCtx{}, srv, f); err != nil {
+		t.Fatal(err)
+	}
+	if err := Tuning(false).Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "test -d /var/log/mysql") {
+			t.Errorf("slow log off must not probe the log dir; ran %q", c.Cmd)
+		}
+	}
+}

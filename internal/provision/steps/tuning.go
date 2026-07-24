@@ -18,6 +18,13 @@ const (
 	valkeyDropInPath  = valkeyDropInDir + "/berth.conf"
 	mariadbUnit       = "mariadb.service"
 	mariadbTuningPath = "/etc/mysql/mariadb.conf.d/99-berth.cnf"
+	// mariadbSlowLogDir hosts the slow query log. Debian 13's mariadb logs to
+	// the journal by default and no longer creates /var/log/mysql, yet its
+	// logrotate still covers /var/log/mysql/*.log (missingok) — so berth
+	// creates the directory (Debian's historical mysql:adm 2750) and rotation
+	// comes for free.
+	mariadbSlowLogDir       = "/var/log/mysql"
+	mariadbSlowLogDirEnsure = "install -d -m 2750 -o mysql -g adm " + mariadbSlowLogDir
 )
 
 // mariadbBufferPoolMaxPercent caps innodb_buffer_pool_size at this share of
@@ -236,6 +243,20 @@ func (tuning) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 		if !ok {
 			changes = append(changes, ch...)
 		}
+		// A loaded drop-in is NOT enough for the slow log: when the target
+		// directory was missing at startup, mariadbd disables slow logging for
+		// its whole lifetime while slow_query_log still reads ON — a failure
+		// the content hash and liveness gate cannot see (found live on a fresh
+		// Trixie box). Probe the directory itself.
+		if s.Tuning.MariaDBSlowQueryLog {
+			dirOK, err := slowLogDirExists(ctx, r)
+			if err != nil {
+				return provision.CheckResult{}, err
+			}
+			if !dirOK {
+				changes = append(changes, "create "+mariadbSlowLogDir+" (slow-log target), restart "+mariadbUnit)
+			}
+		}
 	}
 	if len(changes) == 0 {
 		return provision.CheckResult{Satisfied: true, Reason: "service tuning drop-ins in place and loaded"}, nil
@@ -284,12 +305,30 @@ func (tuning) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 		if err != nil {
 			return err
 		}
-		if !ok {
-			if err := checkMariaDBBufferPoolFits(ctx, r, s); err != nil {
+		dirOK := true
+		if s.Tuning.MariaDBSlowQueryLog {
+			if dirOK, err = slowLogDirExists(ctx, r); err != nil {
 				return err
 			}
-			if err := r.WriteFile(ctx, bssh.FileSpec{Path: mariadbTuningPath, Content: cfg, Owner: "root", Group: "root", Mode: 0o644, Sudo: true}); err != nil {
-				return fmt.Errorf("write %s: %w", mariadbTuningPath, err)
+		}
+		if !ok || !dirOK {
+			// The directory must exist BEFORE the restart, and a restart is
+			// required even when only the directory was missing: mariadbd
+			// turned slow logging off for the whole process lifetime.
+			if !dirOK {
+				if res, err := r.Run(ctx, mariadbSlowLogDirEnsure, nil); err != nil {
+					return err
+				} else if res.ExitCode != 0 {
+					return fmt.Errorf("create %s: %s", mariadbSlowLogDir, res.Stderr)
+				}
+			}
+			if !ok {
+				if err := checkMariaDBBufferPoolFits(ctx, r, s); err != nil {
+					return err
+				}
+				if err := r.WriteFile(ctx, bssh.FileSpec{Path: mariadbTuningPath, Content: cfg, Owner: "root", Group: "root", Mode: 0o644, Sudo: true}); err != nil {
+					return fmt.Errorf("write %s: %w", mariadbTuningPath, err)
+				}
 			}
 			if res, err := r.Run(ctx, "systemctl restart "+mariadbUnit, nil); err != nil {
 				return err
@@ -299,4 +338,14 @@ func (tuning) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 		}
 	}
 	return nil
+}
+
+// slowLogDirExists reports whether the slow-log directory is present (test -d,
+// read-only). See mariadbSlowLogDir for why berth owns its creation.
+func slowLogDirExists(ctx context.Context, r bssh.Runner) (bool, error) {
+	res, err := r.Run(ctx, "test -d "+mariadbSlowLogDir, nil)
+	if err != nil {
+		return false, err
+	}
+	return res.ExitCode == 0, nil
 }
