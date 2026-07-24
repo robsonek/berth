@@ -14,7 +14,9 @@ import (
 // assertSwapSysctl verifies the live end state of the system step: when swap is
 // configured, /swapfile is an active swap area and vm.swappiness is 10; when sysctl
 // is enabled, each managed key's running value matches; when a timezone is set,
-// the live system zone matches. A no-op when all three are off.
+// the live system zone matches; when a hostname is set, the static hostname
+// matches and /etc/hosts holds exactly one 127.0.1.1 alias — berth's marked
+// line. A no-op when all four are off.
 func assertSwapSysctl(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server) {
 	t.Helper()
 
@@ -80,4 +82,39 @@ func assertSwapSysctl(ctx context.Context, t *testing.T, c *bssh.Client, srv *co
 			t.Errorf("system timezone = %q, want %q", got, srv.System.Timezone)
 		}
 	}
+
+	if srv.System.Hostname != "" {
+		hn, err := c.Run(ctx, "hostnamectl --static", nil)
+		if err != nil {
+			t.Fatalf("hostnamectl --static: %v", err)
+		}
+		if hn.ExitCode != 0 {
+			t.Fatalf("hostnamectl --static exit %d: %s", hn.ExitCode, strings.TrimSpace(hn.Stderr))
+		}
+		if got := strings.TrimSpace(hn.Stdout); got != srv.System.Hostname {
+			t.Errorf("static hostname = %q, want %q", got, srv.System.Hostname)
+		}
+		// berth's exact marked alias line is present (-F fixed, -x whole line)...
+		assertExitZero(ctx, t, c, "marked 127.0.1.1 alias present",
+			"grep -Fxq '"+hostsAliasLine(srv.System.Hostname)+"' /etc/hosts")
+		// ...and it is the ONLY 127.0.1.1 line — a foreign alias beside it would
+		// keep resolving the image's old name (the takeover contract).
+		cnt, err := c.Run(ctx, `grep -c '^127\.0\.1\.1[[:space:]]' /etc/hosts`, nil)
+		if err != nil {
+			t.Fatalf("count 127.0.1.1 lines: %v", err)
+		}
+		if got := strings.TrimSpace(cnt.Stdout); got != "1" {
+			t.Errorf("127.0.1.1 alias lines in /etc/hosts = %s, want exactly 1", got)
+		}
+	}
+}
+
+// hostsAliasLine mirrors steps.hostsHostnameLine (unexported): the exact marked
+// /etc/hosts alias line berth manages for the configured static hostname.
+func hostsAliasLine(hostname string) string {
+	names := hostname
+	if short, _, ok := strings.Cut(hostname, "."); ok && short != "" {
+		names = hostname + " " + short
+	}
+	return "127.0.1.1 " + names + " # managed by berth"
 }
