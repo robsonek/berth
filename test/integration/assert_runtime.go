@@ -68,8 +68,9 @@ func assertRuntime(ctx context.Context, t *testing.T, c *bssh.Client, srv *confi
 }
 
 // assertOpcacheEffective verifies OPcache validate_timestamps=0 is effective for the FPM
-// SAPI. php-fpm has no -i and the CLI default SAPI shows the un-overridden value, so the
-// FPM conf.d is loaded explicitly via PHP_INI_SCAN_DIR (verified live).
+// SAPI. The CLI default SAPI shows the un-overridden value, so the FPM conf.d is loaded
+// explicitly via PHP_INI_SCAN_DIR (verified live). `php-fpm -i` works too — the newer
+// assertPHPTuning probes through it — this predates that finding.
 func assertOpcacheEffective(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server) {
 	t.Helper()
 	ver := srv.PHP.Version
