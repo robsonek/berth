@@ -463,3 +463,183 @@ func TestSystemApplySysctlRemoval(t *testing.T) {
 		t.Error("expected the general drop-in removed")
 	}
 }
+
+func TestSystemCheckTimezoneMismatchUnsatisfied(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("timedatectl show -p Timezone --value", bssh.Result{ExitCode: 0, Stdout: "Etc/UTC\n"})
+	s := &config.Server{System: config.System{Timezone: "Europe/Warsaw"}}
+	cr, err := System().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied when the host zone differs from system.timezone")
+	}
+}
+
+func TestSystemCheckTimezoneMatchSatisfied(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("timedatectl show -p Timezone --value", bssh.Result{ExitCode: 0, Stdout: "Europe/Warsaw\n"}) // trailing \n trimmed
+	s := &config.Server{System: config.System{Timezone: "Europe/Warsaw"}}
+	cr, err := System().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("expected satisfied when the host zone matches; got %+v", cr)
+	}
+}
+
+func TestSystemTimezoneUnsetNeverProbed(t *testing.T) {
+	// Empty knob = berth never touches (or even reads) the zone on EITHER
+	// path: an unstubbed timedatectl would error the FakeRunner, so Check
+	// succeeding AND Apply succeeding proves neither made the call.
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	cr, err := System().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("expected satisfied no-op; got %+v", cr)
+	}
+	if err := System().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "timedatectl") {
+			t.Errorf("unset timezone must not run timedatectl; ran %q", c.Cmd)
+		}
+	}
+}
+
+func TestSystemApplyTimezoneSetsAndRestartsCron(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("timedatectl show -p Timezone --value", bssh.Result{ExitCode: 0, Stdout: "Etc/UTC\n"})
+	f.On("timedatectl set-timezone 'Europe/Warsaw'", bssh.Result{})
+	f.On("systemctl restart cron", bssh.Result{})
+	s := &config.Server{System: config.System{Timezone: "Europe/Warsaw"}}
+	if err := System().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	// Exactly ONE set and ONE cron restart, in that order (counts, not just
+	// presence — duplicate calls must fail this).
+	var set, cron int
+	for _, c := range f.Calls() {
+		switch c.Cmd {
+		case "timedatectl set-timezone 'Europe/Warsaw'":
+			set++
+		case "systemctl restart cron":
+			if set == 0 {
+				t.Error("cron restart must come AFTER set-timezone")
+			}
+			cron++
+		}
+	}
+	if set != 1 || cron != 1 {
+		t.Errorf("want exactly one set-timezone and one cron restart; got %d and %d", set, cron)
+	}
+}
+
+func TestSystemApplyTimezoneSetFailureAborts(t *testing.T) {
+	// A failed set-timezone surfaces as the step error with NO cron restart
+	// and NO revert (nothing changed): both commands are unstubbed, so any
+	// attempt to run them errors the FakeRunner with a different message.
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("timedatectl show -p Timezone --value", bssh.Result{ExitCode: 0, Stdout: "Etc/UTC\n"})
+	f.On("timedatectl set-timezone 'Europe/Warsaw'", bssh.Result{ExitCode: 1, Stderr: "Failed to set time zone"})
+	s := &config.Server{System: config.System{Timezone: "Europe/Warsaw"}}
+	err := System().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "set-timezone") {
+		t.Fatalf("err = %v, want the set-timezone failure", err)
+	}
+	for _, c := range f.Calls() {
+		if c.Cmd == "systemctl restart cron" || c.Cmd == "timedatectl set-timezone 'Etc/UTC'" {
+			t.Errorf("failed set must not restart cron or revert; ran %q", c.Cmd)
+		}
+	}
+}
+
+func TestSystemApplyTimezoneNoopWhenSatisfied(t *testing.T) {
+	// Re-entrant like applySwap/applySysctl: a matching zone must neither
+	// set-timezone nor restart cron (unstubbed commands would error).
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("timedatectl show -p Timezone --value", bssh.Result{ExitCode: 0, Stdout: "Europe/Warsaw\n"})
+	s := &config.Server{System: config.System{Timezone: "Europe/Warsaw"}}
+	if err := System().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	for _, c := range f.Calls() {
+		if c.Cmd == "systemctl restart cron" || strings.Contains(c.Cmd, "set-timezone") {
+			t.Errorf("satisfied timezone must be a no-op; ran %q", c.Cmd)
+		}
+	}
+}
+
+func TestSystemApplyTimezoneCronFailureRevertsZone(t *testing.T) {
+	// A failed cron restart must surface as the step error AND best-effort
+	// revert the zone: leaving the new zone in place would make the next
+	// run's Check falsely Satisfied while cron still fires on the old
+	// zone's schedule (the php step's compensation precedent).
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("timedatectl show -p Timezone --value", bssh.Result{ExitCode: 0, Stdout: "Etc/UTC\n"})
+	f.On("timedatectl set-timezone 'Europe/Warsaw'", bssh.Result{})
+	f.On("systemctl restart cron", bssh.Result{ExitCode: 1, Stderr: "boom"})
+	f.On("timedatectl set-timezone 'Etc/UTC'", bssh.Result{}) // the revert
+	s := &config.Server{System: config.System{Timezone: "Europe/Warsaw"}}
+	err := System().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "reverted") {
+		t.Fatalf("err = %v, want the cron failure naming the revert", err)
+	}
+	var reverted bool
+	for _, c := range f.Calls() {
+		if c.Cmd == "timedatectl set-timezone 'Etc/UTC'" {
+			reverted = true
+		}
+	}
+	if !reverted {
+		t.Error("Apply must revert to the previous zone after a failed cron restart")
+	}
+}
+
+func TestSystemApplyTimezoneCronAndRevertFailureIsHonest(t *testing.T) {
+	// When the revert ALSO fails, the error must say so — never claim a
+	// revert that didn't happen (the residual falsely-Satisfied state is
+	// spec-accepted, but only with an honest message pointing at cron).
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("timedatectl show -p Timezone --value", bssh.Result{ExitCode: 0, Stdout: "Etc/UTC\n"})
+	f.On("timedatectl set-timezone 'Europe/Warsaw'", bssh.Result{})
+	f.On("systemctl restart cron", bssh.Result{ExitCode: 1, Stderr: "boom"})
+	f.On("timedatectl set-timezone 'Etc/UTC'", bssh.Result{ExitCode: 1, Stderr: "busy"})
+	s := &config.Server{System: config.System{Timezone: "Europe/Warsaw"}}
+	err := System().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "revert to Etc/UTC failed") {
+		t.Fatalf("err = %v, want the double-failure message naming the failed revert", err)
+	}
+	if strings.Contains(err.Error(), "(reverted") {
+		t.Errorf("double-failure error must not claim a successful revert: %v", err)
+	}
+}
