@@ -4,7 +4,7 @@
 
 **Goal:** Add an opt-in `system.timezone` knob (empty = berth never touches the zone) applied idempotently by the existing `system` step, with wizard coverage, per spec `docs/superpowers/specs/2026-07-24-system-timezone-design.md`.
 
-**Architecture:** A third gated block in the `system` step next to swap and sysctl, following its `checkX`/`applyX` re-entrant pattern: Check compares `timedatectl show -p Timezone --value` to the configured zone; Apply captures the previous zone, runs `timedatectl set-timezone` then `systemctl try-restart cron` (cron reads local time at startup and berth's backup cron is wall-clock-sensitive), and on a failed cron restart best-effort **reverts** to the previous zone — otherwise the next run's Check would report Satisfied forever while cron fires on the old schedule (the php step's compensation precedent; Codex HIGH). No default, no `*Eff` accessor, no removal branch (a timezone is system state, not a berth artifact — documented asymmetry vs swap).
+**Architecture:** A third gated block in the `system` step next to swap and sysctl, following its `checkX`/`applyX` re-entrant pattern: Check compares `timedatectl show -p Timezone --value` to the configured zone; Apply captures the previous zone, runs `timedatectl set-timezone` then `systemctl restart cron` (cron reads local time at startup and berth's backup cron is wall-clock-sensitive; plain `restart` — a `try-restart` would silently no-op on a cron left stopped by a previous half-failure), and on a failed cron restart **reverts** to the previous zone with a CHECKED outcome and an honestly-branched error — otherwise the next run's Check would report Satisfied forever while cron fires on the old schedule (the php step's compensation precedent; Codex HIGH, refined in round 2). No default, no `*Eff` accessor, no removal branch (a timezone is system state, not a berth artifact — documented asymmetry vs swap).
 
 **Tech Stack:** Go 1.25, FakeRunner exact-string test doubles.
 
@@ -15,7 +15,7 @@
 - Every config struct field needs BOTH `mapstructure` and `yaml` tags.
 - Validation is **lenient**: empty string = "don't manage" and passes. The regex, both in config and its wizard mirror, is EXACTLY `^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+){0,2}$` — identical domains on both public config paths (the fingerprint-era lesson: a narrower inline validator traps the operator in the site retry loop; a wider one lets bad values reach validation the loop cannot fix).
 - FakeRunner stubs are **exact command strings**; an unstubbed command returns an error. Baseline stubs for a `System{}` with swap/sysctl off (both Check paths hit them): `cat '/etc/fstab'`, `cat '/etc/sysctl.d/99-berth-swap.conf'` (exit 1), `cat '/etc/sysctl.d/99-berth.conf'` (exit 1).
-- Exact remote commands this feature runs: `timedatectl show -p Timezone --value` (Check, read-only), `timedatectl set-timezone 'Europe/Warsaw'` (shQuote'd value) and `systemctl try-restart cron` (Apply).
+- Exact remote commands this feature runs: `timedatectl show -p Timezone --value` (Check, read-only), `timedatectl set-timezone 'Europe/Warsaw'` (shQuote'd value) and `systemctl restart cron` (Apply).
 - CI runs `go test -race ./...` and `go vet ./...`; format with `gofmt`. The integration package compiles only under `-tags integration`.
 
 ---
@@ -210,7 +210,7 @@ func TestSystemApplyTimezoneSetsAndRestartsCron(t *testing.T) {
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
 	f.On("timedatectl show -p Timezone --value", bssh.Result{ExitCode: 0, Stdout: "Etc/UTC\n"})
 	f.On("timedatectl set-timezone 'Europe/Warsaw'", bssh.Result{})
-	f.On("systemctl try-restart cron", bssh.Result{})
+	f.On("systemctl restart cron", bssh.Result{})
 	s := &config.Server{System: config.System{Timezone: "Europe/Warsaw"}}
 	if err := System().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -222,7 +222,7 @@ func TestSystemApplyTimezoneSetsAndRestartsCron(t *testing.T) {
 		switch c.Cmd {
 		case "timedatectl set-timezone 'Europe/Warsaw'":
 			set++
-		case "systemctl try-restart cron":
+		case "systemctl restart cron":
 			if set == 0 {
 				t.Error("cron restart must come AFTER set-timezone")
 			}
@@ -250,7 +250,7 @@ func TestSystemApplyTimezoneSetFailureAborts(t *testing.T) {
 		t.Fatalf("err = %v, want the set-timezone failure", err)
 	}
 	for _, c := range f.Calls() {
-		if c.Cmd == "systemctl try-restart cron" || c.Cmd == "timedatectl set-timezone 'Etc/UTC'" {
+		if c.Cmd == "systemctl restart cron" || c.Cmd == "timedatectl set-timezone 'Etc/UTC'" {
 			t.Errorf("failed set must not restart cron or revert; ran %q", c.Cmd)
 		}
 	}
@@ -269,7 +269,7 @@ func TestSystemApplyTimezoneNoopWhenSatisfied(t *testing.T) {
 		t.Fatalf("Apply() error = %v", err)
 	}
 	for _, c := range f.Calls() {
-		if c.Cmd == "systemctl try-restart cron" || strings.Contains(c.Cmd, "set-timezone") {
+		if c.Cmd == "systemctl restart cron" || strings.Contains(c.Cmd, "set-timezone") {
 			t.Errorf("satisfied timezone must be a no-op; ran %q", c.Cmd)
 		}
 	}
@@ -286,7 +286,7 @@ func TestSystemApplyTimezoneCronFailureRevertsZone(t *testing.T) {
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
 	f.On("timedatectl show -p Timezone --value", bssh.Result{ExitCode: 0, Stdout: "Etc/UTC\n"})
 	f.On("timedatectl set-timezone 'Europe/Warsaw'", bssh.Result{})
-	f.On("systemctl try-restart cron", bssh.Result{ExitCode: 1, Stderr: "boom"})
+	f.On("systemctl restart cron", bssh.Result{ExitCode: 1, Stderr: "boom"})
 	f.On("timedatectl set-timezone 'Etc/UTC'", bssh.Result{}) // the revert
 	s := &config.Server{System: config.System{Timezone: "Europe/Warsaw"}}
 	err := System().Apply(context.Background(), provision.RunCtx{}, s, f)
@@ -301,6 +301,28 @@ func TestSystemApplyTimezoneCronFailureRevertsZone(t *testing.T) {
 	}
 	if !reverted {
 		t.Error("Apply must revert to the previous zone after a failed cron restart")
+	}
+}
+
+func TestSystemApplyTimezoneCronAndRevertFailureIsHonest(t *testing.T) {
+	// When the revert ALSO fails, the error must say so — never claim a
+	// revert that didn't happen (the residual falsely-Satisfied state is
+	// spec-accepted, but only with an honest message pointing at cron).
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("timedatectl show -p Timezone --value", bssh.Result{ExitCode: 0, Stdout: "Etc/UTC\n"})
+	f.On("timedatectl set-timezone 'Europe/Warsaw'", bssh.Result{})
+	f.On("systemctl restart cron", bssh.Result{ExitCode: 1, Stderr: "boom"})
+	f.On("timedatectl set-timezone 'Etc/UTC'", bssh.Result{ExitCode: 1, Stderr: "busy"})
+	s := &config.Server{System: config.System{Timezone: "Europe/Warsaw"}}
+	err := System().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "revert to Etc/UTC failed") {
+		t.Fatalf("err = %v, want the double-failure message naming the failed revert", err)
+	}
+	if strings.Contains(err.Error(), "(reverted") {
+		t.Errorf("double-failure error must not claim a successful revert: %v", err)
 	}
 }
 ```
@@ -371,15 +393,18 @@ func checkTimezone(ctx context.Context, r bssh.Runner, tz string) (bool, []strin
 // applyTimezone sets the zone, then restarts cron: cron reads the local time
 // at startup and berth's own backup cron (30 3 * * *) is wall-clock-sensitive,
 // so without the restart the OLD zone's schedule would persist indefinitely.
-// try-restart (not restart) is a no-op when cron isn't running — the step
-// never starts a service it doesn't own. Re-entrant (a matching zone is a
-// no-op); it probes the current zone itself, rather than via checkTimezone,
-// because the PREVIOUS value is also the compensation target: on a failed
-// cron restart the zone is best-effort reverted — leaving the new zone in
-// place would make the next run's Check falsely Satisfied while cron still
-// fires on the old zone's schedule (the php step's drop-in-removal
-// precedent). The revert result is deliberately ignored: the original
-// failure is what the operator must see.
+// Plain restart (not try-restart): berth ships cron-based features
+// (scheduler, backups), so cron running is part of its promise — try-restart
+// would silently no-op on a cron left STOPPED by a previous half-failed
+// restart. Re-entrant (a matching zone is a no-op); it probes the current
+// zone itself, rather than via checkTimezone, because the PREVIOUS value is
+// also the compensation target: on a failed cron restart the zone is
+// reverted — leaving the new zone in place would make the next run's Check
+// falsely Satisfied while cron still fires on the old zone's schedule (the
+// php step's drop-in-removal precedent). The revert outcome is CHECKED and
+// the error branches honestly; the double-failure residual (falsely
+// Satisfied after a failed revert) is spec-accepted — a box where
+// timedatectl fails twice needs an operator anyway.
 func applyTimezone(ctx context.Context, r bssh.Runner, tz string) error {
 	res, err := r.Run(ctx, "timedatectl show -p Timezone --value", nil)
 	if err != nil {
@@ -395,8 +420,10 @@ func applyTimezone(ctx context.Context, r bssh.Runner, tz string) error {
 	if err := runOK(ctx, r, "timedatectl set-timezone "+shQuote(tz)); err != nil {
 		return err
 	}
-	if err := runOK(ctx, r, "systemctl try-restart cron"); err != nil {
-		_, _ = r.Run(ctx, "timedatectl set-timezone "+shQuote(prev), nil)
+	if err := runOK(ctx, r, "systemctl restart cron"); err != nil {
+		if rres, rerr := r.Run(ctx, "timedatectl set-timezone "+shQuote(prev), nil); rerr != nil || rres.ExitCode != 0 {
+			return fmt.Errorf("cron restart after the timezone change failed AND the revert to %s failed — the new zone is applied but cron still runs the old schedule; restart cron manually or re-run: %w", prev, err)
+		}
 		return fmt.Errorf("cron restart after the timezone change failed (reverted to %s so the next run retries): %w", prev, err)
 	}
 	return nil
@@ -641,7 +668,7 @@ Do NOT push. Tell the user the branch `feat/system-timezone` is ready:
 ## Self-review notes (already applied)
 
 - Spec coverage: §2 → Task 1; §3 (incl. the cron-failure revert compensation) → Task 2; §4 → Task 3; §5 + §6-integration → Task 4. No default/Eff anywhere (spec §2). The no-removal asymmetry is stated in the config doc comment, the step doc comment, and the README block.
-- Codex review incorporated (verdict was RETHINK on the pre-revision plan): HIGH non-convergent cron failure → revert compensation in `applyTimezone` + `TestSystemApplyTimezoneCronFailureRevertsZone`; MEDIUM missing set-failure test → `TestSystemApplyTimezoneSetFailureAborts`; LOW unset-Apply unproven → `TestSystemTimezoneUnsetNeverProbed` covers both paths; LOW occurrence-only ordering assert → exact counts; LOW integration ExitCode → checked.
+- Codex review incorporated over two rounds (RETHINK → FIX-FIRST → this revision): HIGH non-convergent cron failure → revert compensation with a CHECKED outcome and honestly-branched error (`TestSystemApplyTimezoneCronFailureRevertsZone` + `TestSystemApplyTimezoneCronAndRevertFailureIsHonest`); round-2 NEW hole (try-restart no-ops on a cron left stopped by a half-failure) → plain `systemctl restart cron`, justified by berth owning cron-based features; MEDIUM missing set-failure test → `TestSystemApplyTimezoneSetFailureAborts`; LOW unset-Apply unproven → `TestSystemTimezoneUnsetNeverProbed` covers both paths; LOW occurrence-only ordering assert → exact counts; LOW integration ExitCode → checked. Accepted residual: double failure (cron restart + revert both fail) leaves falsely-Satisfied state with an explicit operator-facing message — spec §3.
 - The unset-path test doubles as the guard that existing system tests (all with empty Timezone) keep passing without new stubs.
 - Names consistent across tasks: `Timezone`, `reTimezone` (same literal in config and wizard mirror), `optionalTimezone`, `checkTimezone`, `applyTimezone`.
-- Exact command strings appear identically in implementation and stubs: `timedatectl show -p Timezone --value`, `timedatectl set-timezone 'Europe/Warsaw'`, `systemctl try-restart cron`, revert `timedatectl set-timezone 'Etc/UTC'`.
+- Exact command strings appear identically in implementation and stubs: `timedatectl show -p Timezone --value`, `timedatectl set-timezone 'Europe/Warsaw'`, `systemctl restart cron`, revert `timedatectl set-timezone 'Etc/UTC'`.

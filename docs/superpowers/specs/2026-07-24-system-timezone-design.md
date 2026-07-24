@@ -69,22 +69,33 @@ A third managed block next to swap and sysctl, gated on
   output equal to the configured value ⇒ satisfied. Empty config ⇒ the block
   is skipped entirely (no remote call).
 - **Apply:** capture the current zone, `timedatectl set-timezone <shQuote(tz)>`,
-  then `systemctl try-restart cron`. The cron restart is the load-bearing
-  detail: cron reads the local time at startup, and berth's own backup cron
+  then `systemctl restart cron`. The cron restart is the load-bearing detail:
+  cron reads the local time at startup, and berth's own backup cron
   (`30 3 * * *`) is wall-clock-sensitive — without the restart the old zone's
-  schedule would persist indefinitely. `try-restart` (not `restart`) is a
-  no-op when cron isn't running, so the step never *starts* a service it
-  doesn't own. Both commands run under the client's standard sudo wrapping.
-- **Cron-failure compensation (Codex HIGH):** if the cron restart exits
-  non-zero, Apply best-effort **reverts** to the captured previous zone before
-  returning the error. Without this, the next run's Check would see the new
-  zone already set and report Satisfied forever while cron still fires on the
-  old zone's schedule — the exact falsely-Satisfied class the php step's
-  drop-in-removal compensation closes, solved with the same shape. A failed
+  schedule would persist indefinitely. Plain `restart` (not `try-restart`,
+  which the first draft used): berth ships cron-based features (scheduler,
+  backups), so cron running is part of its promise — and `try-restart` would
+  silently no-op on a cron left STOPPED by a previous half-failed restart,
+  green-lighting a box whose scheduler is dead (Codex round-2 finding). A
+  truly absent/masked cron makes `restart` fail loudly and the zone reverts.
+  Both commands run under the client's standard sudo wrapping.
+- **Cron-failure compensation (Codex HIGH, round 2 refined):** if the cron
+  restart exits non-zero, Apply **reverts** to the captured previous zone
+  before returning the error. Without this, the next run's Check would see
+  the new zone already set and report Satisfied forever while cron still
+  fires on the old zone's schedule — the exact falsely-Satisfied class the
+  php step's drop-in-removal compensation closes, solved with the same shape.
+  The revert's outcome is CHECKED and the error message branches honestly:
+  "reverted … the next run retries" on success, versus an explicit
+  "revert failed too — the zone is applied but cron still runs the old
+  schedule; restart cron manually or re-run" on a double failure (never claim
+  a revert that didn't happen). The double-failure residual (falsely
+  Satisfied after it) is accepted and documented — a box where even
+  `timedatectl` fails twice needs an operator anyway. A failed
   `set-timezone` needs no compensation (nothing changed). Rejected
   alternative: an mtime-vs-`ActiveEnterTimestamp` liveness probe in Check
-  (the tuning-step machinery) — one failure-path command beats a per-Check
-  remote probe, and the zone comparison itself already reconciles
+  (the tuning-step machinery) — a per-Check remote probe for a
+  failure-path-only scenario, and the zone comparison already reconciles
   out-of-band changes.
 - **Convergence:** `set-timezone` atomically updates `/etc/localtime` +
   `/etc/timezone`; the next Check reads the new value (or, after a
@@ -124,12 +135,14 @@ system logs.
   and Apply paths — Apply asserted too, an unstubbed probe errors the
   FakeRunner); set + drifted ⇒ Check unsatisfied, Apply runs **exactly one**
   `timedatectl set-timezone 'Europe/Warsaw'` then **exactly one**
-  `systemctl try-restart cron`, in that order (occurrence counts, not just
+  `systemctl restart cron`, in that order (occurrence counts, not just
   presence); set + matching ⇒ satisfied, Apply skips the block (re-entrant
   like swap/sysctl); `set-timezone` failure ⇒ error surfaces, NO cron
-  restart, NO revert; cron-restart failure ⇒ error surfaces AND the revert
-  `set-timezone '<previous>'` runs; trailing-newline handling of the `show`
-  output.
+  restart, NO revert; cron-restart failure ⇒ error surfaces, names the
+  successful revert, AND the revert `set-timezone '<previous>'` runs;
+  cron-restart failure + revert failure ⇒ error explicitly says the revert
+  failed and cron needs manual attention (never claims "reverted");
+  trailing-newline handling of the `show` output.
 - **wizard:** `optionalTimezone` accept/reject table; `ToServer` carries the
   field; matrix cases per §4.
 - **integration (same PR, proven pattern):** `assert_system.go` gains a
