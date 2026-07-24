@@ -1033,13 +1033,20 @@ func TestConfigMatrix(t *testing.T) {
 	t.Run("tuning-all-fields-set-valid", func(t *testing.T) {
 		a := base("adv-tune", "vps.example.com")
 		a.Valkey = true
-		a.Tuning = TuningAnswers{ValkeyMaxmemory: "256mb", ValkeyMaxmemoryPolicy: "allkeys-lru", MariaDBBufferPool: "512M"}
+		a.Tuning = TuningAnswers{
+			ValkeyMaxmemory: "256mb", ValkeyMaxmemoryPolicy: "allkeys-lru", MariaDBBufferPool: "512M",
+			PHPMemoryLimit: "768M", PHPUploadMax: "64M", PHPMaxExecutionTime: 120, PHPMaxInputVars: 5000,
+		}
 		a.Sites = []SiteAnswers{{
 			Domain: "vps.example.com", DeployPath: "/srv/app", DBName: "appdb", DBUser: "appuser", SchedulerOverride: "inherit",
 		}}
 		srv, _ := writeValid(t, a)
 		if srv.Tuning.ValkeyMaxmemory != "256mb" || srv.Tuning.ValkeyMaxmemoryPolicy != "allkeys-lru" || srv.Tuning.MariaDBBufferPool != "512M" || !srv.Valkey {
 			t.Fatalf("tuning = %+v valkey=%v", srv.Tuning, srv.Valkey)
+		}
+		if srv.Tuning.PHPMemoryLimit != "768M" || srv.Tuning.PHPUploadMax != "64M" ||
+			srv.Tuning.PHPMaxExecutionTime != 120 || srv.Tuning.PHPMaxInputVars != 5000 {
+			t.Fatalf("php tuning = %+v", srv.Tuning)
 		}
 	})
 
@@ -1062,6 +1069,16 @@ func TestConfigMatrix(t *testing.T) {
 		}}
 		err := writeInvalid(t, a)
 		mustContain(t, err, "mariadb_innodb_buffer_pool")
+	})
+
+	t.Run("tuning-bad-php-upload-invalid", func(t *testing.T) {
+		a := base("adv-tune-php", "vps.example.com")
+		a.Tuning = TuningAnswers{PHPUploadMax: "08M"} // octal trap: PHP would read 8 MiB, nginx 8 decimal MB
+		a.Sites = []SiteAnswers{{
+			Domain: "vps.example.com", DeployPath: "/srv/app", DBName: "appdb", DBUser: "appuser", SchedulerOverride: "inherit",
+		}}
+		err := writeInvalid(t, a)
+		mustContain(t, err, "php_upload_max")
 	})
 
 	t.Run("fingerprint-valid-32-byte-present", func(t *testing.T) {

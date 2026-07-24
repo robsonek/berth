@@ -89,6 +89,7 @@ var (
 	reFail2banTime = regexp.MustCompile(`^[0-9]+[smhdw]?$`)
 	reValkeyMem    = regexp.MustCompile(`^(?i)[0-9]+(b|kb|mb|gb|k|m|g)?$`)
 	reMariaDBSize  = regexp.MustCompile(`^(?i)[0-9]+[kmg]?$`)
+	rePHPSize      = regexp.MustCompile(`^[1-9][0-9]*[KMGkmg]?$`)
 	reDaemonName   = regexp.MustCompile(`^[a-z0-9-]+$`)
 )
 
@@ -111,6 +112,13 @@ func optionalMariaDBSize(s string) error {
 		return nil
 	}
 	return fmt.Errorf("%q must be a number optionally suffixed K/M/G", s)
+}
+
+func optionalPHPSize(s string) error {
+	if s == "" || rePHPSize.MatchString(s) {
+		return nil
+	}
+	return fmt.Errorf("%q must be a positive number optionally suffixed K/M/G, no leading zeros", s)
 }
 
 // reSwapSize / reCronSchedule mirror config.reSwapSize / config.reCronSchedule
