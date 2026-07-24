@@ -388,9 +388,15 @@ func applyTimezone(ctx context.Context, r bssh.Runner, tz string) error {
 	}
 	if cronErr != nil {
 		if rres, rerr := r.Run(ctx, "timedatectl set-timezone "+shQuote(prev), nil); rerr != nil || rres.ExitCode != 0 {
-			return fmt.Errorf("cron restart after the timezone change failed AND the revert to %s failed — the new zone is applied but cron still runs the old schedule; restart cron manually or re-run: %w", prev, cronErr)
+			detail := ""
+			if rerr != nil {
+				detail = rerr.Error()
+			} else {
+				detail = strings.TrimSpace(rres.Stderr)
+			}
+			return fmt.Errorf("ensuring/restarting cron after the timezone change failed AND the revert to %s failed (%s) — the new zone may be in effect without a cron restart; fix cron and re-run: %w", prev, detail, cronErr)
 		}
-		return fmt.Errorf("cron restart after the timezone change failed (reverted to %s so the next run retries): %w", prev, cronErr)
+		return fmt.Errorf("ensuring/restarting cron after the timezone change failed (reverted to %s so the next run retries): %w", prev, cronErr)
 	}
 	return nil
 }

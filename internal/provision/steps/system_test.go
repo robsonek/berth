@@ -680,6 +680,9 @@ func TestSystemApplyTimezoneCronAndRevertFailureIsHonest(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "revert to Etc/UTC failed") {
 		t.Fatalf("err = %v, want the double-failure message naming the failed revert", err)
 	}
+	if !strings.Contains(err.Error(), "busy") {
+		t.Errorf("double-failure error must carry the revert's own stderr detail: %v", err)
+	}
 	if strings.Contains(err.Error(), "(reverted") {
 		t.Errorf("double-failure error must not claim a successful revert: %v", err)
 	}
