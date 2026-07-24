@@ -100,6 +100,13 @@ func TestRenderPHPOpcacheGolden(t *testing.T) {
 	checkGoldenINI(t, "php_opcache.ini.tmpl", "php_opcache.golden", nil)
 }
 
+func TestRenderPHPTuningGolden(t *testing.T) {
+	checkGoldenINI(t, "php_tuning.ini.tmpl", "php_tuning.golden", struct {
+		MemoryLimit, UploadMax, PostMax string
+		MaxExecutionTime, MaxInputVars  int
+	}{MemoryLimit: "256M", UploadMax: "32M", PostMax: "35651584", MaxExecutionTime: 30, MaxInputVars: 1000})
+}
+
 func TestRenderFPMPoolGolden(t *testing.T) {
 	checkGoldenINI(t, "fpm_pool.conf.tmpl", "fpm_pool.golden", struct{ PoolName, User, Socket, DeployPath string }{
 		PoolName: "app_example_com", User: "webuser", Socket: testSocket, DeployPath: "/home/deploy/myapp",
