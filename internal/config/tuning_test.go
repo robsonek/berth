@@ -142,3 +142,36 @@ func TestTuningValidateRejectsBad(t *testing.T) {
 		}
 	}
 }
+
+func TestTuningValidateSlowQueryLog(t *testing.T) {
+	for _, tn := range []Tuning{
+		{MariaDBSlowQueryLog: true},
+		{MariaDBSlowQueryLog: true, MariaDBLongQueryTime: 5},
+		{MariaDBSlowQueryLog: true, MariaDBLongQueryTime: 86400},
+	} {
+		if err := tn.validate(); err != nil {
+			t.Errorf("validate(%+v) unexpected error: %v", tn, err)
+		}
+	}
+	for _, tn := range []Tuning{
+		{MariaDBLongQueryTime: 5},                             // threshold without the log = silently-ignored knob
+		{MariaDBSlowQueryLog: true, MariaDBLongQueryTime: -1}, // negative
+		{MariaDBSlowQueryLog: true, MariaDBLongQueryTime: 86401},
+	} {
+		if err := tn.validate(); err == nil {
+			t.Errorf("validate(%+v) expected error, got nil", tn)
+		}
+	}
+}
+
+func TestTuningMariaDBLongQueryTimeEff(t *testing.T) {
+	if got := (Tuning{}).MariaDBLongQueryTimeEff(); got != 2 {
+		t.Errorf("default long_query_time = %d, want 2", got)
+	}
+	if got := (Tuning{MariaDBLongQueryTime: -3}).MariaDBLongQueryTimeEff(); got != 2 {
+		t.Errorf("non-positive long_query_time = %d, want the default 2", got)
+	}
+	if got := (Tuning{MariaDBLongQueryTime: 10}).MariaDBLongQueryTimeEff(); got != 10 {
+		t.Errorf("explicit long_query_time = %d, want 10", got)
+	}
+}
