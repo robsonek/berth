@@ -126,9 +126,21 @@ func renderValkeyDropIn(s *config.Server) ([]byte, error) {
 	})
 }
 
+// renderMariaDBTuning renders the managed mariadb.conf.d drop-in. The slow-log
+// block is conditional so the default render stays byte-identical to the
+// pre-slow-log output (no drift/restart on existing hosts). The log file sits
+// in /var/log/mysql, the directory Debian's mariadb packaging already
+// logrotates, so no berth logrotate entry is needed; the new settings load on
+// the restart Apply already performs (checkTuned's liveness gate covers it).
 func renderMariaDBTuning(s *config.Server) ([]byte, error) {
-	return templates.Render("mariadb_tuning.cnf.tmpl", struct{ BufferPool string }{
-		BufferPool: s.Tuning.MariaDBBufferPoolEff(),
+	return templates.Render("mariadb_tuning.cnf.tmpl", struct {
+		BufferPool    string
+		SlowQueryLog  bool
+		LongQueryTime int
+	}{
+		BufferPool:    s.Tuning.MariaDBBufferPoolEff(),
+		SlowQueryLog:  s.Tuning.MariaDBSlowQueryLog,
+		LongQueryTime: s.Tuning.MariaDBLongQueryTimeEff(),
 	})
 }
 

@@ -195,9 +195,19 @@ func TestRenderValkeyDropInGolden(t *testing.T) {
 }
 
 func TestRenderMariaDBTuningGolden(t *testing.T) {
-	checkGolden(t, "mariadb_tuning.cnf.tmpl", "mariadb_tuning.golden", struct{ BufferPool string }{
-		BufferPool: "256M",
-	})
+	checkGolden(t, "mariadb_tuning.cnf.tmpl", "mariadb_tuning.golden", struct {
+		BufferPool    string
+		SlowQueryLog  bool
+		LongQueryTime int
+	}{BufferPool: "256M"})
+}
+
+func TestRenderMariaDBTuningSlowLogGolden(t *testing.T) {
+	checkGolden(t, "mariadb_tuning.cnf.tmpl", "mariadb_tuning_slowlog.golden", struct {
+		BufferPool    string
+		SlowQueryLog  bool
+		LongQueryTime int
+	}{BufferPool: "256M", SlowQueryLog: true, LongQueryTime: 2})
 }
 
 func TestRenderCloudflareGolden(t *testing.T) {
