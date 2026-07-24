@@ -348,6 +348,8 @@ func (t Tuning) validate() error {
 // validate guards the system knobs. Empty Swap / false Sysctl mean "off" and pass.
 // A non-empty Swap must be a positive integer suffixed M (MiB) or G (GiB); the value
 // reaches `fallocate -l` verbatim, so reject anything else (config-injection defence).
+// A non-empty Timezone must match reTimezone; the value reaches timedatectl
+// set-timezone verbatim.
 func (sy System) validate() error {
 	if sy.Swap != "" && !reSwapSize.MatchString(sy.Swap) {
 		return fmt.Errorf("system.swap %q must be a positive size suffixed M or G (e.g. 512M, 2G)", sy.Swap)

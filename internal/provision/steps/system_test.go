@@ -528,6 +528,9 @@ func TestSystemApplyTimezoneSetsAndRestartsCron(t *testing.T) {
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
 	f.On("timedatectl show -p Timezone --value", bssh.Result{ExitCode: 0, Stdout: "Etc/UTC\n"})
 	f.On("timedatectl set-timezone 'Europe/Warsaw'", bssh.Result{})
+	// ensureCron pre-check: cron already active+enabled -> no install.
+	f.On("systemctl is-active cron", bssh.Result{})
+	f.On("systemctl is-enabled cron", bssh.Result{})
 	f.On("systemctl restart cron", bssh.Result{})
 	s := &config.Server{System: config.System{Timezone: "Europe/Warsaw"}}
 	if err := System().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -549,6 +552,38 @@ func TestSystemApplyTimezoneSetsAndRestartsCron(t *testing.T) {
 	}
 	if set != 1 || cron != 1 {
 		t.Errorf("want exactly one set-timezone and one cron restart; got %d and %d", set, cron)
+	}
+}
+
+func TestSystemApplyTimezoneInstallsCronWhenAbsent(t *testing.T) {
+	// The system step runs early in the pipeline (backups — berth's only other
+	// cron installer — runs near the end), so on a cron-less image applyTimezone
+	// must install+enable cron itself before restarting it, or the step fails on
+	// every run even when the same config would install cron later.
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("timedatectl show -p Timezone --value", bssh.Result{ExitCode: 0, Stdout: "Etc/UTC\n"})
+	f.On("timedatectl set-timezone 'Europe/Warsaw'", bssh.Result{})
+	// ensureCron pre-check: the unit does not exist -> install + enable.
+	f.On("systemctl is-active cron", bssh.Result{ExitCode: 4, Stderr: "inactive"})
+	f.On("systemctl is-enabled cron", bssh.Result{ExitCode: 1})
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y cron", bssh.Result{})
+	f.On("systemctl enable --now cron", bssh.Result{})
+	f.On("systemctl restart cron", bssh.Result{})
+	s := &config.Server{System: config.System{Timezone: "Europe/Warsaw"}}
+	if err := System().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	install := cmdIndex(f, "DEBIAN_FRONTEND=noninteractive apt-get install -y cron")
+	enable := cmdIndex(f, "systemctl enable --now cron")
+	restart := cmdIndex(f, "systemctl restart cron")
+	if install < 0 || enable < 0 || restart < 0 {
+		t.Fatalf("missing cron install/enable/restart; calls=%v", f.Calls())
+	}
+	if !(install < restart && enable < restart) {
+		t.Errorf("cron must be installed (idx %d) and enabled (idx %d) BEFORE the restart (idx %d)", install, enable, restart)
 	}
 }
 
@@ -604,6 +639,9 @@ func TestSystemApplyTimezoneCronFailureRevertsZone(t *testing.T) {
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
 	f.On("timedatectl show -p Timezone --value", bssh.Result{ExitCode: 0, Stdout: "Etc/UTC\n"})
 	f.On("timedatectl set-timezone 'Europe/Warsaw'", bssh.Result{})
+	// ensureCron pre-check: cron already active+enabled -> no install.
+	f.On("systemctl is-active cron", bssh.Result{})
+	f.On("systemctl is-enabled cron", bssh.Result{})
 	f.On("systemctl restart cron", bssh.Result{ExitCode: 1, Stderr: "boom"})
 	f.On("timedatectl set-timezone 'Etc/UTC'", bssh.Result{}) // the revert
 	s := &config.Server{System: config.System{Timezone: "Europe/Warsaw"}}
@@ -632,6 +670,9 @@ func TestSystemApplyTimezoneCronAndRevertFailureIsHonest(t *testing.T) {
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
 	f.On("timedatectl show -p Timezone --value", bssh.Result{ExitCode: 0, Stdout: "Etc/UTC\n"})
 	f.On("timedatectl set-timezone 'Europe/Warsaw'", bssh.Result{})
+	// ensureCron pre-check: cron already active+enabled -> no install.
+	f.On("systemctl is-active cron", bssh.Result{})
+	f.On("systemctl is-enabled cron", bssh.Result{})
 	f.On("systemctl restart cron", bssh.Result{ExitCode: 1, Stderr: "boom"})
 	f.On("timedatectl set-timezone 'Etc/UTC'", bssh.Result{ExitCode: 1, Stderr: "busy"})
 	s := &config.Server{System: config.System{Timezone: "Europe/Warsaw"}}

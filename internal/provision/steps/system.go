@@ -352,6 +352,9 @@ func checkTimezone(ctx context.Context, r bssh.Runner, tz string) (bool, []strin
 // applyTimezone sets the zone, then restarts cron: cron reads the local time
 // at startup and berth's own backup cron (30 3 * * *) is wall-clock-sensitive,
 // so without the restart the OLD zone's schedule would persist indefinitely.
+// ensureCron first (the backups step's installer, reused): the system step
+// runs early in the pipeline, so on a cron-less image the unit may not exist
+// yet; an ensure failure takes the same revert path as a failed restart.
 // Plain restart (not try-restart): berth ships cron-based features
 // (scheduler, backups), so cron running is part of its promise — try-restart
 // would silently no-op on a cron left STOPPED by a previous half-failed
@@ -379,11 +382,15 @@ func applyTimezone(ctx context.Context, r bssh.Runner, tz string) error {
 	if err := runOK(ctx, r, "timedatectl set-timezone "+shQuote(tz)); err != nil {
 		return err
 	}
-	if err := runOK(ctx, r, "systemctl restart cron"); err != nil {
+	cronErr := ensureCron(ctx, r)
+	if cronErr == nil {
+		cronErr = runOK(ctx, r, "systemctl restart cron")
+	}
+	if cronErr != nil {
 		if rres, rerr := r.Run(ctx, "timedatectl set-timezone "+shQuote(prev), nil); rerr != nil || rres.ExitCode != 0 {
-			return fmt.Errorf("cron restart after the timezone change failed AND the revert to %s failed — the new zone is applied but cron still runs the old schedule; restart cron manually or re-run: %w", prev, err)
+			return fmt.Errorf("cron restart after the timezone change failed AND the revert to %s failed — the new zone is applied but cron still runs the old schedule; restart cron manually or re-run: %w", prev, cronErr)
 		}
-		return fmt.Errorf("cron restart after the timezone change failed (reverted to %s so the next run retries): %w", prev, err)
+		return fmt.Errorf("cron restart after the timezone change failed (reverted to %s so the next run retries): %w", prev, cronErr)
 	}
 	return nil
 }

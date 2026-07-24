@@ -8,7 +8,7 @@ func run(p prompter) (Answers, error) {
 	if err := p.ServerCore(&a); err != nil {
 		return Answers{}, err
 	}
-	adv, err := p.Confirm("Configure advanced server options (fail2ban, tuning, swap/sysctl, Cloudflare, backups)?")
+	adv, err := p.Confirm("Configure advanced server options (fail2ban, tuning, swap/sysctl/timezone, Cloudflare, backups)?")
 	if err != nil {
 		return Answers{}, err
 	}
