@@ -35,6 +35,7 @@ On Windows, download the `.zip` archive for your architecture, extract
 berth init                            # interactive wizard → servers/<name>.yml
 berth provision servers/<name>.yml    # provision the server (idempotent)
 berth provision servers/<name>.yml --dry-run   # preview changes only
+berth site key servers/<name>.yml [domain]     # print each site's git deploy public key
 ```
 
 ## Highlights
@@ -110,6 +111,8 @@ tuning:                        # optional — omit any field to keep its default
   valkey_maxmemory: 256mb
   valkey_maxmemory_policy: allkeys-lru   # any Valkey eviction policy
   mariadb_innodb_buffer_pool: 256M
+  mariadb_slow_query_log: true # default off; log queries slower than the threshold
+  mariadb_long_query_time: 2   # seconds (default 2); needs the slow log on
   php_memory_limit: 256M
   php_upload_max: 32M          # max single-file upload; body caps derived
   php_max_execution_time: 30   # seconds, 1-300
@@ -125,6 +128,9 @@ system:                        # optional host-level OS provisioning — all def
                                # changing the zone shifts when they fire. PHP/Laravel
                                # keep their own timezone settings (date.timezone /
                                # app.timezone) — this field is about system logs.
+  hostname: web-1.example.com  # default off when absent; sets the static hostname
+                               # (hostnamectl) and keeps a 127.0.1.1 alias line in
+                               # /etc/hosts so sudo resolves the name without DNS
 
 backups:                       # optional opt-in local backups — off by default
   enabled: true                # server-wide default (off unless set)
@@ -136,7 +142,9 @@ sites:                         # one or more
     deploy_path: /var/www/app          # required — absolute path
     user: app                          # optional — derived from the domain when
                                        # omitted (a lone site keeps the "deploy" user)
-    repository: git@github.com:acme/app.git   # optional — SSH git URL only
+    repository: git@github.com:acme/app.git   # optional — SSH git URL only; berth
+                                       # generates a per-site deploy key for it
+                                       # (print it with `berth site key`)
     database: { name: app, user: app }        # per-site DB (required with 2+ sites)
     ssl: true
     ssl_mode: selfsigned               # letsencrypt (default) | selfsigned —
@@ -215,7 +223,10 @@ berth applies conservative, managed tuning drop-ins automatically:
   full (Debian's default is `noeviction` with no `maxmemory`, so a full cache
   fails writes).
 - **MariaDB** (when `database.engine: mariadb`) — a `mariadb.conf.d` drop-in
-  sets `innodb_buffer_pool_size`.
+  sets `innodb_buffer_pool_size`, and opt-in `mariadb_slow_query_log` logs
+  queries slower than `mariadb_long_query_time` seconds (default 2) to
+  `/var/log/mysql/mariadb-slow.log` — a path Debian's mariadb packaging
+  already rotates.
 - **PHP-FPM** (always) — a managed FPM-only `conf.d` drop-in sets
   `memory_limit`, upload sizing, `max_execution_time`, `max_input_vars` and
   `expose_php = Off`. The CLI SAPI keeps Debian's stock unlimited values, so
@@ -231,6 +242,8 @@ tuning:
   valkey_maxmemory: 256mb              # default
   valkey_maxmemory_policy: allkeys-lru # default; any Valkey eviction policy
   mariadb_innodb_buffer_pool: 256M     # default
+  mariadb_slow_query_log: false        # default; opt-in slow query log
+  mariadb_long_query_time: 2           # default; seconds, needs the slow log on
   php_memory_limit: 256M               # default
   php_upload_max: 32M                  # default; max single-file upload; body caps derived
   php_max_execution_time: 30           # default; seconds, 1-300
@@ -413,7 +426,11 @@ List several `sites:` to host multiple domains on one server. Each site runs
 under its **own dedicated OS user**, so a compromise of one site cannot read
 another's files (its `deploy_path` is owned by that user, traversable only by
 nginx; its PHP-FPM pool, queue worker and cron all run as that user), and each
-site gets **its own database + user**:
+site gets **its own database + user**. Alongside the seeded `shared/.env`,
+berth also seeds the site user's DB client-credentials file — `~/.my.cnf`
+(MariaDB) or `~/.pgpass` (PostgreSQL), `0600`, written once and never
+rewritten — so `mariadb`, `mariadb-dump`, `psql` and `pg_dump` run as that
+user without pasting the password:
 
 ```yaml
 database:
