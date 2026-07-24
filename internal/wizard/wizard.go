@@ -70,10 +70,11 @@ type TuningAnswers struct {
 }
 
 type SystemAnswers struct {
-	Swap     string // e.g. "2G"; blank = no swap
-	Sysctl   bool
-	Timezone string // IANA zone; blank = leave untouched
-	Hostname string // static hostname; blank = leave untouched
+	Swap       string // e.g. "2G"; blank = no swap
+	Sysctl     bool
+	Timezone   string // IANA zone; blank = leave untouched
+	Hostname   string // static hostname; blank = leave untouched
+	BreakGlass bool   // console password for the berth account; default off
 }
 
 type BackupsAnswers struct {

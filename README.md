@@ -131,6 +131,10 @@ system:                        # optional host-level OS provisioning — all def
   hostname: web-1.example.com  # default off when absent; sets the static hostname
                                # (hostnamectl) and keeps a 127.0.1.1 alias line in
                                # /etc/hosts so sudo resolves the name without DNS
+  break_glass: true            # default off; give the berth account a console
+                               # password (saved to .berth/<name>.secrets.json) for
+                               # provider console/VNC access when SSH is down —
+                               # sshd keeps password logins disabled either way
 
 backups:                       # optional opt-in local backups — off by default
   enabled: true                # server-wide default (off unless set)
@@ -300,6 +304,16 @@ which disables root login and password authentication only after verifying the
 - **Log rotation** — per-site PHP-FPM and Supervisor program (queue worker +
   daemon) logs are rotated so they never fill the disk.
 - **Firewall** — `ufw` allows only SSH and 80/443 (plus UDP/443 with HTTP/3).
+- **Break-glass console access** (`system.break_glass`, opt-in) — every berth
+  account is created with a locked password, which makes the provider's
+  console/VNC useless when SSH is down (only rescue mode remains). Setting
+  `break_glass: true` gives the `berth` account a generated password, stored
+  locally in `.berth/<name>.secrets.json` (0600, gitignored) so you can type
+  it at the console. It never opens a network path — sshd keeps
+  `PasswordAuthentication no` — but note the `berth` account has full sudo, so
+  treat the cached password as a root credential. Setting the knob back to
+  `false` locks the password again on the next provision; an existing usable
+  password is reused, never rotated.
 
 ### Cloudflare origin lockdown (`cloudflare_only:`)
 

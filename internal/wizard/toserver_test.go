@@ -73,3 +73,10 @@ func TestToServerCarriesMariaDBSlowLog(t *testing.T) {
 		t.Errorf("ToServer() dropped the MariaDB slow-log knobs: %+v", s.Tuning)
 	}
 }
+
+func TestToServerCarriesBreakGlass(t *testing.T) {
+	a := Answers{System: SystemAnswers{BreakGlass: true}}
+	if s := a.ToServer(); !s.System.BreakGlass {
+		t.Errorf("ToServer() dropped system.break_glass: %+v", s.System)
+	}
+}
