@@ -137,3 +137,13 @@ func TestPostgresProbes(t *testing.T) {
 		})
 	}
 }
+
+func TestPostgresClientAuthFile(t *testing.T) {
+	if got := (Postgres{}).ClientAuthFileName(); got != ".pgpass" {
+		t.Errorf("ClientAuthFileName = %q, want .pgpass", got)
+	}
+	got := string(Postgres{}.ClientAuthFile("app_db", "app_user", "s3cretPW"))
+	if got != "*:*:app_db:app_user:s3cretPW\n" {
+		t.Errorf("ClientAuthFile = %q", got)
+	}
+}

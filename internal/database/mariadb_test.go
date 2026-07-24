@@ -104,3 +104,14 @@ func TestMariaDBProbes(t *testing.T) {
 		})
 	}
 }
+
+func TestMariaDBClientAuthFile(t *testing.T) {
+	if got := (MariaDB{}).ClientAuthFileName(); got != ".my.cnf" {
+		t.Errorf("ClientAuthFileName = %q, want .my.cnf", got)
+	}
+	got := string(MariaDB{}.ClientAuthFile("app_db", "app_user", "s3cretPW"))
+	want := "[client]\nuser = app_user\npassword = s3cretPW\n\n[mysql]\ndatabase = app_db\n"
+	if got != want {
+		t.Errorf("ClientAuthFile:\n%q\nwant:\n%q", got, want)
+	}
+}
