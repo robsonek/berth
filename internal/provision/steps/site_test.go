@@ -370,7 +370,7 @@ func TestSiteVhostHonorsUploadMax(t *testing.T) {
 			Domain: "app.example.com", DeployPath: "/home/deploy/myapp", SSL: true,
 		}},
 	}
-	want := "client_max_body_size " + s.Tuning.PHPPostBodyMaxEff() + ";" // 64M + 5% = 70464307
+	want := "client_max_body_size " + s.Tuning.PHPPostBodyMaxEff() + ";" // 64M + 5% (floored) = 70464307
 	httpBody, err := renderNginxHTTP(s, s.Sites[0])
 	if err != nil {
 		t.Fatal(err)

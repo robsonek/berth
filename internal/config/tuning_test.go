@@ -109,6 +109,7 @@ func TestTuningValidateAcceptsEmptyAndValid(t *testing.T) {
 		{PHPMemoryLimit: "768M", PHPUploadMax: "1G", PHPMaxExecutionTime: 300, PHPMaxInputVars: 1000000},
 		{PHPMemoryLimit: "134217728"}, // bare bytes
 		{PHPUploadMax: "512k"},        // suffixes are case-insensitive
+		{PHPUploadMax: "64G"},         // exactly the 64 GiB bound is accepted (reject is >)
 		{PHPMaxExecutionTime: -1},     // non-positive = unset, lenient
 	} {
 		if err := tn.validate(); err != nil {
