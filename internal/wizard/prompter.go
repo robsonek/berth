@@ -81,6 +81,7 @@ func (h *huhPrompter) ServerAdvanced(a *Answers) error {
 	maxretry := strconv.Itoa(a.Fail2ban.Maxretry)
 	execTime := strconv.Itoa(a.Tuning.PHPMaxExecutionTime)
 	inputVars := strconv.Itoa(a.Tuning.PHPMaxInputVars)
+	longQuery := strconv.Itoa(a.Tuning.MariaDBLongQueryTime)
 	policies := []string{"", "noeviction", "allkeys-lru", "allkeys-lfu", "allkeys-random", "volatile-lru", "volatile-lfu", "volatile-random", "volatile-ttl"}
 	form := huh.NewForm(
 		huh.NewGroup(
@@ -92,6 +93,8 @@ func (h *huhPrompter) ServerAdvanced(a *Answers) error {
 			huh.NewInput().Title("Valkey maxmemory (e.g. 256mb, blank=default)").Value(&a.Tuning.ValkeyMaxmemory).Validate(optionalValkeyMem),
 			huh.NewSelect[string]().Title("Valkey eviction policy (blank=default)").Options(huh.NewOptions(policies...)...).Value(&a.Tuning.ValkeyMaxmemoryPolicy),
 			huh.NewInput().Title("MariaDB innodb_buffer_pool (e.g. 256M, blank=default)").Value(&a.Tuning.MariaDBBufferPool).Validate(optionalMariaDBSize),
+			huh.NewConfirm().Title("MariaDB slow query log?").Value(&a.Tuning.MariaDBSlowQueryLog),
+			huh.NewInput().Title("MariaDB long_query_time (1-86400 s, blank/0=default 2; needs the slow log on)").Value(&longQuery).Validate(optionalInt("tuning.mariadb_long_query_time", 1, 86400)),
 		),
 		huh.NewGroup(
 			huh.NewInput().Title("PHP memory_limit (e.g. 256M, blank=default)").Value(&a.Tuning.PHPMemoryLimit).Validate(optionalPHPSize),
@@ -108,6 +111,7 @@ func (h *huhPrompter) ServerAdvanced(a *Answers) error {
 	a.Fail2ban.Maxretry, _ = parseIntInRange("fail2ban.maxretry", maxretry, 0, 100)
 	a.Tuning.PHPMaxExecutionTime, _ = parseIntInRange("tuning.php_max_execution_time", execTime, 1, 300)
 	a.Tuning.PHPMaxInputVars, _ = parseIntInRange("tuning.php_max_input_vars", inputVars, 1, 1000000)
+	a.Tuning.MariaDBLongQueryTime, _ = parseIntInRange("tuning.mariadb_long_query_time", longQuery, 1, 86400)
 	return nil
 }
 
@@ -117,6 +121,7 @@ func (h *huhPrompter) ServerOps(a *Answers) error {
 		huh.NewGroup(
 			huh.NewInput().Title("Swap file size (e.g. 2G, blank=none)").Value(&a.System.Swap).Validate(optionalSwapSize),
 			huh.NewInput().Title("System timezone (e.g. Europe/Warsaw, blank=leave untouched)").Value(&a.System.Timezone).Validate(optionalTimezone),
+			huh.NewInput().Title("System hostname (blank=leave untouched)").Value(&a.System.Hostname).Validate(optionalSystemHostname),
 			huh.NewConfirm().Title("Apply conservative kernel sysctl tuning?").Value(&a.System.Sysctl),
 			huh.NewConfirm().Title("Cloudflare-only origin lockdown (server default)?").Value(&a.CloudflareOnly),
 		),

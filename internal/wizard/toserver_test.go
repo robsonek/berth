@@ -58,3 +58,18 @@ func TestToServerCarriesPHPTuning(t *testing.T) {
 		t.Errorf("ToServer() dropped php tuning fields: %+v", s.Tuning)
 	}
 }
+
+func TestToServerCarriesSystemHostname(t *testing.T) {
+	a := Answers{System: SystemAnswers{Hostname: "web-1.example.com"}}
+	if s := a.ToServer(); s.System.Hostname != "web-1.example.com" {
+		t.Errorf("ToServer() dropped system.hostname: %+v", s.System)
+	}
+}
+
+func TestToServerCarriesMariaDBSlowLog(t *testing.T) {
+	a := Answers{Tuning: TuningAnswers{MariaDBSlowQueryLog: true, MariaDBLongQueryTime: 5}}
+	s := a.ToServer()
+	if !s.Tuning.MariaDBSlowQueryLog || s.Tuning.MariaDBLongQueryTime != 5 {
+		t.Errorf("ToServer() dropped the MariaDB slow-log knobs: %+v", s.Tuning)
+	}
+}

@@ -1,6 +1,9 @@
 package wizard
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseIntInRange(t *testing.T) {
 	cases := []struct {
@@ -125,6 +128,23 @@ func TestOptionalPHPSize(t *testing.T) {
 	for _, bad := range []string{"0", "-1", "08M", "010M", "256MB", "1.5G", "abc", "64M; rm -rf /", "65G", "18446744073709551615", "99999999999999999999"} {
 		if err := optionalPHPSize(bad); err == nil {
 			t.Errorf("optionalPHPSize(%q) expected error, got nil", bad)
+		}
+	}
+}
+
+func TestOptionalSystemHostname(t *testing.T) {
+	for _, ok := range []string{"", "web1", "web-1.example.com"} {
+		if err := optionalSystemHostname(ok); err != nil {
+			t.Errorf("optionalSystemHostname(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{
+		"bad host",
+		"-x.example.com",
+		strings.Repeat("a", 32) + "." + strings.Repeat("b", 32), // 65 chars, over HOST_NAME_MAX
+	} {
+		if err := optionalSystemHostname(bad); err == nil {
+			t.Errorf("optionalSystemHostname(%q) = nil, want error", bad)
 		}
 	}
 }
