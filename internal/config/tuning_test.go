@@ -106,6 +106,10 @@ func TestTuningValidateAcceptsEmptyAndValid(t *testing.T) {
 		{ValkeyMaxmemory: "256mb", ValkeyMaxmemoryPolicy: "allkeys-lru", MariaDBBufferPool: "256M"},
 		{ValkeyMaxmemory: "1gb", ValkeyMaxmemoryPolicy: "volatile-ttl", MariaDBBufferPool: "2G"},
 		{ValkeyMaxmemory: "104857600"}, // bare bytes
+		{PHPMemoryLimit: "768M", PHPUploadMax: "1G", PHPMaxExecutionTime: 300, PHPMaxInputVars: 1000000},
+		{PHPMemoryLimit: "134217728"}, // bare bytes
+		{PHPUploadMax: "512k"},        // suffixes are case-insensitive
+		{PHPMaxExecutionTime: -1},     // non-positive = unset, lenient
 	} {
 		if err := tn.validate(); err != nil {
 			t.Errorf("validate(%+v) unexpected error: %v", tn, err)
@@ -120,6 +124,17 @@ func TestTuningValidateRejectsBad(t *testing.T) {
 		{ValkeyMaxmemoryPolicy: "allkeys-bogus"},
 		{MariaDBBufferPool: "256MB"}, // MariaDB uses K/M/G, not MB
 		{MariaDBBufferPool: "big"},
+		{PHPMemoryLimit: "-1"},  // no sign in the grammar: berth never ships unlimited
+		{PHPMemoryLimit: "0"},   // 0 = unlimited in PHP post/upload and nginx body checks
+		{PHPMemoryLimit: "08M"}, // leading zeros: PHP shorthand parses octal, nginx decimal
+		{PHPUploadMax: "010M"},
+		{PHPMemoryLimit: "256MB"},
+		{PHPUploadMax: "1.5G"},
+		{PHPUploadMax: "64M; rm -rf /"},
+		{PHPUploadMax: "65G"},                    // > 64 GiB bound
+		{PHPMemoryLimit: "18446744073709551615"}, // would wrap PHP's int64 parse to -1
+		{PHPMaxExecutionTime: 301},               // opinionated 300 s cap
+		{PHPMaxInputVars: 1000001},               // matches the wizard's domain
 	} {
 		if err := tn.validate(); err == nil {
 			t.Errorf("validate(%+v) expected error, got nil", tn)

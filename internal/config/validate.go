@@ -27,7 +27,13 @@ var (
 	reQueueToken  = regexp.MustCompile(`^[A-Za-z0-9_.,{}-]*$`)
 	reValkeyMem   = regexp.MustCompile(`^(?i)[0-9]+(b|kb|mb|gb|k|m|g)?$`)
 	reMariaDBSize = regexp.MustCompile(`^(?i)[0-9]+[kmg]?$`)
-	reSwapSize    = regexp.MustCompile(`^[1-9][0-9]*[MmGg]$`)
+	// rePHPSize guards PHP ini shorthand sizes: positive digits + optional
+	// K/M/G, NO leading zeros (PHP's shorthand parser reads 010M as octal
+	// while nginx reads decimal — the two sides would diverge) and no sign
+	// (so -1/unlimited is unrepresentable). "0" is likewise rejected: PHP
+	// treats post_max_size=0 and nginx client_max_body_size 0 as unlimited.
+	rePHPSize  = regexp.MustCompile(`^[1-9][0-9]*[KMGkmg]?$`)
+	reSwapSize = regexp.MustCompile(`^[1-9][0-9]*[MmGg]$`)
 	// reCronSchedule matches exactly five space-separated cron fields over a strict
 	// character class (digits and * , - /). It rejects extra fields, embedded
 	// newlines and any other shell/cron metacharacter — the value is rendered
@@ -273,6 +279,34 @@ func (s *Server) Validate() error {
 	return nil
 }
 
+// phpMaxExecutionCeiling caps tuning.php_max_execution_time at 300 s — an
+// opinionated sanity bound (long-running work belongs in queue workers), the
+// same domain the wizard input enforces. Note it is NOT a wall-clock pact
+// with nginx: fastcgi_read_timeout 300 is a between-reads timeout and PHP's
+// limit excludes I/O wait.
+const phpMaxExecutionCeiling = 300
+
+// phpMaxInputVarsCeiling caps tuning.php_max_input_vars, matching the wizard
+// input's domain so both public config paths accept the same values.
+const phpMaxInputVarsCeiling = 1000000
+
+// validatePHPSize guards a PHP ini shorthand size knob: grammar first, then a
+// parse-and-bound check so accepted values can never overflow PHP's signed
+// 64-bit ini parser into the -1 "unlimited" sentinel.
+func validatePHPSize(field, v string) error {
+	if !rePHPSize.MatchString(v) {
+		return fmt.Errorf("%s %q must be a positive number optionally suffixed K/M/G, no leading zeros (e.g. 256M)", field, v)
+	}
+	b, err := phpSizeBytes(v)
+	if err != nil {
+		return fmt.Errorf("%s %q: %v", field, v, err)
+	}
+	if b > phpSizeMaxBytes {
+		return fmt.Errorf("%s %q exceeds the 64G bound", field, v)
+	}
+	return nil
+}
+
 // validate checks the tuning knobs that reach a config / unit file. Empty values
 // mean "use the default" and pass; non-empty values are format-/allow-list-guarded
 // (config-injection defence — the values are rendered verbatim into config files).
@@ -285,6 +319,22 @@ func (t Tuning) validate() error {
 	}
 	if t.MariaDBBufferPool != "" && !reMariaDBSize.MatchString(t.MariaDBBufferPool) {
 		return fmt.Errorf("tuning.mariadb_innodb_buffer_pool %q must be a number optionally suffixed K/M/G (e.g. 256M)", t.MariaDBBufferPool)
+	}
+	if t.PHPMemoryLimit != "" {
+		if err := validatePHPSize("tuning.php_memory_limit", t.PHPMemoryLimit); err != nil {
+			return err
+		}
+	}
+	if t.PHPUploadMax != "" {
+		if err := validatePHPSize("tuning.php_upload_max", t.PHPUploadMax); err != nil {
+			return err
+		}
+	}
+	if t.PHPMaxExecutionTime > phpMaxExecutionCeiling {
+		return fmt.Errorf("tuning.php_max_execution_time %d exceeds the %d s cap (long-running work belongs in queue workers)", t.PHPMaxExecutionTime, phpMaxExecutionCeiling)
+	}
+	if t.PHPMaxInputVars > phpMaxInputVarsCeiling {
+		return fmt.Errorf("tuning.php_max_input_vars %d exceeds %d", t.PHPMaxInputVars, phpMaxInputVarsCeiling)
 	}
 	return nil
 }
