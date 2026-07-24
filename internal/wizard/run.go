@@ -13,8 +13,22 @@ func run(p prompter) (Answers, error) {
 		return Answers{}, err
 	}
 	if adv {
-		if err := p.ServerAdvanced(&a); err != nil {
-			return Answers{}, err
+		// ServerAdvanced must leave the server-level fields valid ON THEIR OWN:
+		// the site loop below re-prompts only the site on a validation failure,
+		// so a server-level violation surfacing there would trap the user.
+		// Inline validators cover each field; this loop covers the one
+		// cross-field rule — a slow-query threshold with the slow log off
+		// (mirror of config's pairing rule; config.Server.Validate stays
+		// authoritative).
+		for {
+			if err := p.ServerAdvanced(&a); err != nil {
+				return Answers{}, err
+			}
+			if a.Tuning.MariaDBLongQueryTime > 0 && !a.Tuning.MariaDBSlowQueryLog {
+				p.ShowError(fmt.Errorf("mariadb_long_query_time is set but the slow query log is off; enable it or clear the threshold"))
+				continue
+			}
+			break
 		}
 		if err := p.ServerOps(&a); err != nil {
 			return Answers{}, err

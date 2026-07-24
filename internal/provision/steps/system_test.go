@@ -819,3 +819,58 @@ func TestSystemApplyHostnameShortNameNoDot(t *testing.T) {
 		t.Error("expected the single-label alias line appended without a short duplicate")
 	}
 }
+
+func TestSystemCheckHostnameForeignAliasBesideMarkedUnsatisfied(t *testing.T) {
+	// The marked line alone is not enough: a stale foreign 127.0.1.1 alias
+	// (e.g. re-added by another tool) would keep resolving the image's old
+	// name forever if Check accepted it — the takeover must re-trigger.
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("hostnamectl --static", bssh.Result{ExitCode: 0, Stdout: "web-1.example.com\n"})
+	f.On("cat '/etc/hosts'", bssh.Result{ExitCode: 0, Stdout: "127.0.1.1 debian\n127.0.1.1 web-1.example.com web-1 # managed by berth\n"})
+	s := &config.Server{System: config.System{Hostname: "web-1.example.com"}}
+	cr, err := System().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied while a foreign 127.0.1.1 alias sits beside the marked line")
+	}
+}
+
+func TestSystemApplyHostnameNormalizesForeignAliasBesideMarked(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("hostnamectl --static", bssh.Result{ExitCode: 0, Stdout: "web-1.example.com\n"})
+	f.On("cat '/etc/hosts'", bssh.Result{ExitCode: 0, Stdout: "127.0.1.1 debian\n127.0.1.1 web-1.example.com web-1 # managed by berth\n"})
+	f.On(`sed -i '\|^[[:space:]]*127\.0\.1\.1[[:space:]]|d' /etc/hosts`, bssh.Result{})
+	f.On("printf '\\n%s\\n' '127.0.1.1 web-1.example.com web-1 # managed by berth' >> /etc/hosts", bssh.Result{})
+	s := &config.Server{System: config.System{Hostname: "web-1.example.com"}}
+	if err := System().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if !calledCmd(f, `sed -i '\|^[[:space:]]*127\.0\.1\.1[[:space:]]|d' /etc/hosts`) {
+		t.Error("expected the normalization sed when a foreign alias sits beside the marked line")
+	}
+}
+
+func TestSystemCheckHostnameDuplicateMarkedLinesUnsatisfied(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("hostnamectl --static", bssh.Result{ExitCode: 0, Stdout: "web-1.example.com\n"})
+	f.On("cat '/etc/hosts'", bssh.Result{ExitCode: 0, Stdout: "127.0.1.1 web-1.example.com web-1 # managed by berth\n127.0.1.1 web-1.example.com web-1 # managed by berth\n"})
+	s := &config.Server{System: config.System{Hostname: "web-1.example.com"}}
+	cr, err := System().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied on duplicated marked lines (Apply promises exactly one)")
+	}
+}

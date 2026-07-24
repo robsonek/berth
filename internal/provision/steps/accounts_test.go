@@ -381,3 +381,51 @@ func callCmds(f *bssh.FakeRunner) []string {
 	}
 	return out
 }
+
+func TestAccountsCheckUnsatisfiedWhenDeployKeyMissing(t *testing.T) {
+	// Adding repository: to an already-provisioned site must re-trigger Apply
+	// (which owns ensureDeployKey) — otherwise the key is never generated and
+	// `berth site key`'s "run provision first" advice loops forever.
+	s := testServerWithKey(t)
+	s.Sites[0].Repository = "git@github.com:owner/repo.git"
+	want := authorizedKeys(testOperatorKey)
+	deploySudoers, err := renderSiteSudoers(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
+	stubAccountExists(f, "deploy", deploySudoers, want)
+	f.On("test -e '/home/deploy/.ssh/id_ed25519'", bssh.Result{ExitCode: 1}) // key missing
+	cr, err := Accounts().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied while a repository site's deploy key is missing")
+	}
+	if !strings.Contains(cr.Reason, "deploy key") {
+		t.Errorf("Reason = %q", cr.Reason)
+	}
+}
+
+func TestAccountsCheckSatisfiedWithDeployKeyPresent(t *testing.T) {
+	s := testServerWithKey(t)
+	s.Sites[0].Repository = "git@github.com:owner/repo.git"
+	want := authorizedKeys(testOperatorKey)
+	deploySudoers, err := renderSiteSudoers(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
+	stubAccountExists(f, "deploy", deploySudoers, want)
+	f.On("test -e '/home/deploy/.ssh/id_ed25519'", bssh.Result{ExitCode: 0})
+	cr, err := Accounts().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("expected satisfied with the deploy key present; got %+v", cr)
+	}
+}

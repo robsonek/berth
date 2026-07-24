@@ -431,16 +431,32 @@ func hostsHostnameLine(hostname string) string {
 	return "127.0.1.1 " + names + " " + managedMarker
 }
 
-// hostsAliasPresent reports whether berth's exact marked alias line for
-// hostname is present (whitespace-trimmed match, like fstabSwapState).
-func hostsAliasPresent(content, hostname string) bool {
+// hostsAliasConverged reports whether /etc/hosts holds berth's exact marked
+// alias line for hostname EXACTLY once and no other 127.0.1.1 line — the
+// "exactly one" state applyHostname's normalization produces (fstabSwapState's
+// scan style). Requiring the absence of foreign lines matters: a stale alias
+// re-added beside the marked one would keep resolving the image's old name
+// forever if Check accepted it. Comment lines are ignored (a commented-out
+// alias is inert, and the sed leaves it in place too).
+func hostsAliasConverged(content, hostname string) bool {
 	want := hostsHostnameLine(hostname)
+	marked, foreign := 0, false
 	for _, line := range strings.Split(content, "\n") {
-		if strings.TrimSpace(line) == want {
-			return true
+		t := strings.TrimSpace(line)
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		fields := strings.Fields(t)
+		if len(fields) == 0 || fields[0] != "127.0.1.1" {
+			continue
+		}
+		if t == want {
+			marked++
+		} else {
+			foreign = true
 		}
 	}
-	return false
+	return marked == 1 && !foreign
 }
 
 // checkHostname is the read-only predicate for a managed static hostname:
@@ -465,7 +481,7 @@ func checkHostname(ctx context.Context, r bssh.Runner, hostname string) (bool, [
 	if err != nil {
 		return false, nil, err
 	}
-	if !hostsAliasPresent(hosts, hostname) {
+	if !hostsAliasConverged(hosts, hostname) {
 		changes = append(changes, "update the 127.0.1.1 alias in "+hostsPath)
 	}
 	if len(changes) == 0 {
@@ -495,7 +511,7 @@ func applyHostname(ctx context.Context, r bssh.Runner, hostname string) error {
 	if err != nil {
 		return err
 	}
-	if hostsAliasPresent(hosts, hostname) {
+	if hostsAliasConverged(hosts, hostname) {
 		return nil
 	}
 	if err := runOK(ctx, r, "sed -i "+shQuote(hostsSedLocalAlias)+" "+hostsPath); err != nil {
