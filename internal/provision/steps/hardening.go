@@ -296,6 +296,18 @@ func (h hardening) Apply(ctx context.Context, rc provision.RunCtx, s *config.Ser
 	}); err != nil {
 		return fmt.Errorf("write %s: %w", sshdDropInPath, err)
 	}
+	// Migrate the pre-rename drop-in away. Guarded: only a berth-managed file
+	// is removed; a foreign file at that path is left in place (any global
+	// directive it sets is caught by the effective gate below).
+	if present, err := managedFilePresent(ctx, r, sshdDropInLegacyPath); err != nil {
+		return err
+	} else if present {
+		if res, err := r.Run(ctx, "rm -f "+shQuote(sshdDropInLegacyPath), nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("remove legacy %s: %s", sshdDropInLegacyPath, res.Stderr)
+		}
+	}
 	// Validate before reloading (same contract as nginx -t / visudo -cf): the
 	// anti-lockout gate above proves access, not config syntax — a bad drop-in
 	// left on disk would break sshd on its next restart/reboot.
@@ -303,6 +315,17 @@ func (h hardening) Apply(ctx context.Context, rc provision.RunCtx, s *config.Ser
 		return err
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("sshd -t failed after writing %s, refusing to reload ssh: %s", sshdDropInPath, res.Stderr)
+	}
+	// Effective gate: valid syntax is not enough — sshd keeps the FIRST value
+	// per directive, so a drop-in sorting before ours can override it. Refuse
+	// to reload (and fail the step) rather than report a hardening that the
+	// config sshd loads does not contain. Same helper as Check, including the
+	// SSHD_OPTS fail-closed rule.
+	if missing, err := sshdEffective(ctx, r); err != nil {
+		return err
+	} else if len(missing) > 0 {
+		return fmt.Errorf("sshd effective config still lacks %q after writing %s — another file wins first-match (%s); refusing to reload ssh",
+			strings.Join(missing, ", "), sshdDropInPath, sshdConflictSources(ctx, r))
 	}
 	if res, err := r.Run(ctx, "systemctl reload ssh", nil); err != nil {
 		return err
