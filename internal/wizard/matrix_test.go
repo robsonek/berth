@@ -579,7 +579,7 @@ func TestConfigMatrix(t *testing.T) {
 		}
 	})
 
-	t.Run("valkey-17-sites-over-cap", func(t *testing.T) {
+	t.Run("valkey-17-sites-allowed", func(t *testing.T) {
 		a := base("valkey17", "203.0.113.15")
 		a.Valkey = true
 		for k := 0; k < 17; k++ {
@@ -589,9 +589,10 @@ func TestConfigMatrix(t *testing.T) {
 				DBName: "db_s" + n, DBUser: "usr_s" + n, SchedulerOverride: "inherit",
 			})
 		}
-		err := writeInvalid(t, a)
-		mustContain(t, err, "valkey: true supports at most 16 sites")
-		mustContain(t, err, "got 17")
+		srv, _ := writeValid(t, a)
+		if len(srv.Sites) != 17 || !srv.Valkey {
+			t.Fatalf("sites=%d valkey=%v", len(srv.Sites), srv.Valkey)
+		}
 	})
 
 	t.Run("no-valkey-17-sites-allowed", func(t *testing.T) {
@@ -654,43 +655,7 @@ func TestConfigMatrix(t *testing.T) {
 		mustContain(t, err, "is not a valid SQL identifier")
 	})
 
-	// ===================== RUN-path valkey cap / re-prompt =====================
-
-	t.Run("run-valkey-16-cap-breaks-loop", func(t *testing.T) {
-		cores := make([]func(int, *SiteAnswers), 16)
-		for i := range cores {
-			cores[i] = func(j int, sa *SiteAnswers) {
-				n := strconv.Itoa(j)
-				sa.Domain, sa.DeployPath = "s"+n+".example.com", "/srv/s"+n
-				sa.DBName, sa.DBUser = "db_s"+n, "usr_s"+n
-			}
-		}
-		confirms := []bool{false} // server-advanced?
-		for i := 0; i < 16; i++ {
-			confirms = append(confirms, false) // site-advanced?
-			if i < 15 {
-				confirms = append(confirms, true) // add another?
-			}
-		}
-		f := &fakePrompter{
-			serverCore: func(a *Answers) { baseServer(a); a.Valkey = true },
-			siteCore:   cores,
-			confirms:   confirms,
-		}
-		a, err := run(f)
-		if err != nil {
-			t.Fatalf("run error = %v", err)
-		}
-		if len(a.Sites) != 16 {
-			t.Fatalf("want 16 sites, got %d", len(a.Sites))
-		}
-		if len(f.errors) != 1 {
-			t.Fatalf("want exactly 1 cap note, got %v", f.errors)
-		}
-		if verr := a.ToServer().Validate(); verr != nil {
-			t.Fatalf("16-site valkey should validate: %v", verr)
-		}
-	})
+	// ===================== RUN-path re-prompt =====================
 
 	t.Run("run-multisite-dup-osuser-reprompts-same-site", func(t *testing.T) {
 		f := &fakePrompter{
@@ -1313,21 +1278,6 @@ func TestConfigMatrix(t *testing.T) {
 		mustContain(t, err, `os user "www-data" is reserved by the system`)
 	})
 
-	t.Run("answers-valkey-17-sites", func(t *testing.T) {
-		a := base("valkey17", "203.0.113.10")
-		a.Valkey = true
-		for k := 0; k < 17; k++ {
-			n := strconv.Itoa(k)
-			a.Sites = append(a.Sites, SiteAnswers{
-				Domain: "s" + n + ".example.com", DeployPath: "/srv/" + n,
-				User: "user" + n, DBName: "d" + n, DBUser: "u" + n, SchedulerOverride: "inherit",
-			})
-		}
-		err := writeInvalid(t, a)
-		mustContain(t, err, "valkey: true supports at most 16 sites")
-		mustContain(t, err, "got 17")
-	})
-
 	// ===================== RUN-path duplicate / http3 (extra set) =====================
 
 	t.Run("run-http3-accept-switches-nginx-valid", func(t *testing.T) {
@@ -1407,42 +1357,6 @@ func TestConfigMatrix(t *testing.T) {
 		}
 		if len(f.errors) != 1 {
 			t.Fatalf("want exactly 1 error, got %v", f.errors)
-		}
-	})
-
-	t.Run("run-valkey-gated-at-16th-no-add-another", func(t *testing.T) {
-		cores := make([]func(int, *SiteAnswers), 16)
-		for i := range cores {
-			cores[i] = func(j int, sa *SiteAnswers) {
-				n := strconv.Itoa(j)
-				sa.Domain, sa.DeployPath = "s"+n+".example.com", "/srv/"+n
-				sa.DBName, sa.DBUser, sa.User = "d"+n, "u"+n, "user"+n
-			}
-		}
-		confirms := []bool{false}
-		for i := 0; i < 16; i++ {
-			confirms = append(confirms, false)
-			if i < 15 {
-				confirms = append(confirms, true)
-			}
-		}
-		f := &fakePrompter{
-			serverCore: func(a *Answers) { baseServer(a); a.Valkey = true },
-			siteCore:   cores,
-			confirms:   confirms,
-		}
-		a, err := run(f)
-		if err != nil {
-			t.Fatalf("run error = %v", err)
-		}
-		if len(a.Sites) != 16 {
-			t.Fatalf("want 16 sites, got %d", len(a.Sites))
-		}
-		if len(f.errors) != 1 {
-			t.Fatalf("want exactly 1 cap note, got %v", f.errors)
-		}
-		if verr := a.ToServer().Validate(); verr != nil {
-			t.Fatalf("validate = %v", verr)
 		}
 	})
 

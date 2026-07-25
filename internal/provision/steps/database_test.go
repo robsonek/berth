@@ -52,11 +52,6 @@ func envPath(s *config.Server) string {
 	return s.Sites[0].DeployPath + "/shared/.env"
 }
 
-// redisIdxProbe is the Redis-index pre-pass command Apply runs per site.
-func redisIdxProbe(env string) string {
-	return "grep -E '^REDIS_(CACHE_)?DB=' " + shQuote(env)
-}
-
 // stubClientAuthAbsent stubs the per-site client-credentials existence probe
 // as absent (Apply then seeds the file) for every site of s.
 func stubClientAuthAbsent(f *bssh.FakeRunner, s *config.Server, name string) {
@@ -148,7 +143,6 @@ func TestDatabaseApplySeedsRedisWhenValkey(t *testing.T) {
 	s.Valkey = true
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
-	f.On(redisIdxProbe(envPath(s)), bssh.Result{ExitCode: 2})      // index pre-pass: no .env yet
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
 	f.On("mysql --protocol=socket", bssh.Result{})
 
@@ -167,243 +161,17 @@ func TestDatabaseApplySeedsRedisWhenValkey(t *testing.T) {
 	}
 	body := string(env.Content)
 	for _, want := range []string{
-		"CACHE_STORE=redis", "SESSION_DRIVER=redis", "QUEUE_CONNECTION=redis",
-		"REDIS_CLIENT=phpredis", "REDIS_DB=0", "REDIS_CACHE_DB=0", "REDIS_PREFIX=app_example_com_",
+		"CACHE_DRIVER=redis\n", "CACHE_STORE=redis\n", "SESSION_DRIVER=redis\n", "QUEUE_CONNECTION=redis\n",
+		"REDIS_CLIENT=phpredis\n",
+		"REDIS_HOST=/run/berth-valkey/app_example_com/valkey.sock\n",
+		"REDIS_PORT=0\n", "REDIS_DB=0\n", "REDIS_CACHE_DB=1\n",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("with Valkey, shared/.env must contain %q; got:\n%s", want, body)
 		}
 	}
-}
-
-func TestDatabaseApplyRedisDBSkipsIndicesUsedByExistingEnvs(t *testing.T) {
-	chdirTemp(t)
-	// A site prepended BEFORE an already-provisioned one: the fresh site's Redis
-	// logical DB must skip the index persisted in the existing site's .env.
-	// Positional allocation would hand out 0 here, colliding with the existing
-	// tenant and letting its neighbour's cache:clear (FLUSHDB) wipe it.
-	s := databaseServer()
-	s.Valkey = true
-	existing := s.Sites[0]
-	fresh := config.Site{Domain: "new.example.com", DeployPath: "/srv/new", SSL: true}
-	s.Sites = []config.Site{fresh, existing}
-	newEnv := "/srv/new/shared/.env"
-	exEnv := existing.DeployPath + "/shared/.env"
-
-	f := bssh.NewFakeRunner()
-	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
-	// Index pre-pass: the fresh site has no .env yet (grep exits 2 on a missing
-	// file), the existing site's .env persists REDIS_DB=0.
-	f.On(redisIdxProbe(newEnv), bssh.Result{ExitCode: 2})
-	f.On(redisIdxProbe(exEnv), bssh.Result{ExitCode: 0, Stdout: "REDIS_DB=0\nREDIS_CACHE_DB=0\n"})
-	f.On("test -e "+shQuote(newEnv), bssh.Result{ExitCode: 1}) // fresh: gets seeded
-	f.On("test -e "+shQuote(exEnv), bssh.Result{ExitCode: 0})  // existing: never rewritten
-	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(exEnv), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Reused123\n"})
-	f.On("mysql --protocol=socket", bssh.Result{})
-
-	stubClientAuthAbsent(f, s, ".my.cnf")
-	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
-		t.Fatalf("Apply() error = %v", err)
-	}
-	var body string
-	for _, w := range f.Writes() {
-		if w.Path == newEnv {
-			body = string(w.Content)
-		}
-	}
-	if body == "" {
-		t.Fatal("fresh site's shared/.env was not written")
-	}
-	if strings.Contains(body, "\nREDIS_DB=0\n") {
-		t.Errorf("fresh site must not reuse Redis DB 0 already held by %s; got:\n%s", existing.Domain, body)
-	}
-	for _, want := range []string{"\nREDIS_DB=1\n", "\nREDIS_CACHE_DB=1\n"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("fresh site's .env must contain %q (lowest free index); got:\n%s", strings.TrimSpace(want), body)
-		}
-	}
-}
-
-func TestDatabaseApplyRedisDBFillsLowestGap(t *testing.T) {
-	chdirTemp(t)
-	// Existing sites persist indices 0 and 2 (e.g. a middle site was removed);
-	// a fresh site PREPENDED to the list must take the lowest free index, 1.
-	// (Prepended so the old positional allocator — which would hand out 0 —
-	// cannot pass this test.)
-	s := databaseServer()
-	s.Valkey = true
-	first := s.Sites[0]
-	third := config.Site{Domain: "c.example.com", DeployPath: "/srv/c", SSL: true}
-	fresh := config.Site{Domain: "new.example.com", DeployPath: "/srv/new", SSL: true}
-	s.Sites = []config.Site{fresh, first, third}
-	firstEnv := first.DeployPath + "/shared/.env"
-	thirdEnv := "/srv/c/shared/.env"
-	newEnv := "/srv/new/shared/.env"
-
-	f := bssh.NewFakeRunner()
-	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
-	f.On(redisIdxProbe(firstEnv), bssh.Result{ExitCode: 0, Stdout: "REDIS_DB=0\nREDIS_CACHE_DB=0\n"})
-	f.On(redisIdxProbe(thirdEnv), bssh.Result{ExitCode: 0, Stdout: "REDIS_DB=2\nREDIS_CACHE_DB=2\n"})
-	f.On(redisIdxProbe(newEnv), bssh.Result{ExitCode: 2})
-	f.On("test -e "+shQuote(firstEnv), bssh.Result{ExitCode: 0})
-	f.On("test -e "+shQuote(thirdEnv), bssh.Result{ExitCode: 0})
-	f.On("test -e "+shQuote(newEnv), bssh.Result{ExitCode: 1})
-	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(firstEnv), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=ReusedA1\n"})
-	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(thirdEnv), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=ReusedC1\n"})
-	f.On("mysql --protocol=socket", bssh.Result{})
-
-	stubClientAuthAbsent(f, s, ".my.cnf")
-	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
-		t.Fatalf("Apply() error = %v", err)
-	}
-	var body string
-	for _, w := range f.Writes() {
-		if w.Path == newEnv {
-			body = string(w.Content)
-		}
-	}
-	if body == "" {
-		t.Fatal("fresh site's shared/.env was not written")
-	}
-	if !strings.Contains(body, "\nREDIS_DB=1\n") || !strings.Contains(body, "\nREDIS_CACHE_DB=1\n") {
-		t.Errorf("fresh site must fill the lowest gap (1); got:\n%s", body)
-	}
-}
-
-func TestDatabaseApplyRedisDBReservesDivergedCacheIndex(t *testing.T) {
-	chdirTemp(t)
-	// The live .env is operator-editable: REDIS_CACHE_DB may have been pointed
-	// at a different logical DB than REDIS_DB. Both are occupied and both must
-	// be reserved — a fresh site landing on the diverged cache index would be
-	// wiped by that tenant's cache:clear.
-	s := databaseServer()
-	s.Valkey = true
-	existing := s.Sites[0]
-	fresh := config.Site{Domain: "new.example.com", DeployPath: "/srv/new", SSL: true}
-	s.Sites = []config.Site{fresh, existing}
-	newEnv := "/srv/new/shared/.env"
-	exEnv := existing.DeployPath + "/shared/.env"
-
-	f := bssh.NewFakeRunner()
-	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
-	f.On(redisIdxProbe(newEnv), bssh.Result{ExitCode: 2})
-	f.On(redisIdxProbe(exEnv), bssh.Result{ExitCode: 0, Stdout: "REDIS_CACHE_DB=0\nREDIS_DB=5\n"})
-	f.On("test -e "+shQuote(newEnv), bssh.Result{ExitCode: 1})
-	f.On("test -e "+shQuote(exEnv), bssh.Result{ExitCode: 0})
-	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(exEnv), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Reused123\n"})
-	f.On("mysql --protocol=socket", bssh.Result{})
-
-	stubClientAuthAbsent(f, s, ".my.cnf")
-	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
-		t.Fatalf("Apply() error = %v", err)
-	}
-	var body string
-	for _, w := range f.Writes() {
-		if w.Path == newEnv {
-			body = string(w.Content)
-		}
-	}
-	if body == "" {
-		t.Fatal("fresh site's shared/.env was not written")
-	}
-	if !strings.Contains(body, "\nREDIS_DB=1\n") {
-		t.Errorf("fresh site must skip both 0 (diverged REDIS_CACHE_DB) and 5 (REDIS_DB); got:\n%s", body)
-	}
-}
-
-func TestDatabaseApplyRedisDBReservesQuotedIndex(t *testing.T) {
-	chdirTemp(t)
-	// `REDIS_DB="0"` is a legal .env spelling Laravel reads as 0; the index is
-	// occupied and must be reserved, not silently skipped as unparsable.
-	s := databaseServer()
-	s.Valkey = true
-	existing := s.Sites[0]
-	fresh := config.Site{Domain: "new.example.com", DeployPath: "/srv/new", SSL: true}
-	s.Sites = []config.Site{fresh, existing}
-	newEnv := "/srv/new/shared/.env"
-	exEnv := existing.DeployPath + "/shared/.env"
-
-	f := bssh.NewFakeRunner()
-	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
-	f.On(redisIdxProbe(newEnv), bssh.Result{ExitCode: 2})
-	f.On(redisIdxProbe(exEnv), bssh.Result{ExitCode: 0, Stdout: "REDIS_DB=\"0\"\nREDIS_CACHE_DB=\"0\"\n"})
-	f.On("test -e "+shQuote(newEnv), bssh.Result{ExitCode: 1})
-	f.On("test -e "+shQuote(exEnv), bssh.Result{ExitCode: 0})
-	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(exEnv), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Reused123\n"})
-	f.On("mysql --protocol=socket", bssh.Result{})
-
-	stubClientAuthAbsent(f, s, ".my.cnf")
-	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
-		t.Fatalf("Apply() error = %v", err)
-	}
-	var body string
-	for _, w := range f.Writes() {
-		if w.Path == newEnv {
-			body = string(w.Content)
-		}
-	}
-	if body == "" {
-		t.Fatal("fresh site's shared/.env was not written")
-	}
-	if !strings.Contains(body, "\nREDIS_DB=1\n") {
-		t.Errorf("fresh site must treat quoted \"0\" as occupied and take 1; got:\n%s", body)
-	}
-}
-
-func TestDatabaseApplyRedisDBFailsOnUnparsableIndex(t *testing.T) {
-	chdirTemp(t)
-	// An unparsable REDIS_DB in an authoritative .env must fail loudly: berth
-	// cannot know which logical DB that tenant occupies, so silently allocating
-	// around it risks the very collision this mechanism prevents.
-	s := databaseServer()
-	s.Valkey = true
-	f := bssh.NewFakeRunner()
-	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
-	f.On(redisIdxProbe(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "REDIS_DB=whoops\n"})
-	err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
-	if err == nil || !strings.Contains(err.Error(), "unparsable REDIS_DB") {
-		t.Fatalf("err = %v, want a pointed unparsable-REDIS_DB error", err)
-	}
-}
-
-func TestDatabaseApplyRedisDBDistinctForMultipleFreshSites(t *testing.T) {
-	chdirTemp(t)
-	// Two sites seeded in one run around an existing tenant holding 0: they
-	// must get distinct free indices (1 and 2), not their slice positions
-	// (0 and 2 — position 0 would collide with the existing tenant).
-	s := databaseServer()
-	s.Valkey = true
-	existing := s.Sites[0]
-	freshX := config.Site{Domain: "x.example.com", DeployPath: "/srv/x", SSL: true}
-	freshY := config.Site{Domain: "y.example.com", DeployPath: "/srv/y", SSL: true}
-	s.Sites = []config.Site{freshX, existing, freshY}
-	xEnv, yEnv := "/srv/x/shared/.env", "/srv/y/shared/.env"
-	exEnv := existing.DeployPath + "/shared/.env"
-
-	f := bssh.NewFakeRunner()
-	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
-	f.On(redisIdxProbe(xEnv), bssh.Result{ExitCode: 2})
-	f.On(redisIdxProbe(yEnv), bssh.Result{ExitCode: 2})
-	f.On(redisIdxProbe(exEnv), bssh.Result{ExitCode: 0, Stdout: "REDIS_DB=0\nREDIS_CACHE_DB=0\n"})
-	f.On("test -e "+shQuote(xEnv), bssh.Result{ExitCode: 1})
-	f.On("test -e "+shQuote(yEnv), bssh.Result{ExitCode: 1})
-	f.On("test -e "+shQuote(exEnv), bssh.Result{ExitCode: 0})
-	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(exEnv), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Reused123\n"})
-	f.On("mysql --protocol=socket", bssh.Result{})
-
-	stubClientAuthAbsent(f, s, ".my.cnf")
-	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
-		t.Fatalf("Apply() error = %v", err)
-	}
-	got := map[string]string{}
-	for _, w := range f.Writes() {
-		got[w.Path] = string(w.Content)
-	}
-	if !strings.Contains(got[xEnv], "\nREDIS_DB=1\n") {
-		t.Errorf("first fresh site must take 1 (0 is held by the existing tenant); got:\n%s", got[xEnv])
-	}
-	if !strings.Contains(got[yEnv], "\nREDIS_DB=2\n") {
-		t.Errorf("second fresh site must take the next free index 2; got:\n%s", got[yEnv])
+	if strings.Contains(body, "REDIS_PREFIX") {
+		t.Errorf("REDIS_PREFIX must not be seeded for a private per-site instance; got:\n%s", body)
 	}
 }
 
@@ -766,7 +534,7 @@ func TestSeedSharedEnvMariaDBUsesSocket(t *testing.T) {
 	eng, _ := dbpkg.Get("mariadb")
 	driver, host, port, socket := eng.EnvConnection()
 	s := &config.Server{Database: config.Database{Engine: "mariadb"}, Sites: []config.Site{{Domain: "x.example.com", DeployPath: "/srv/x"}}}
-	if err := d.seedSharedEnv(context.Background(), f, s, s.Sites[0], 0, "db", "u", "pw", "appkey", driver, host, port, socket); err != nil {
+	if err := d.seedSharedEnv(context.Background(), f, s, s.Sites[0], "db", "u", "pw", "appkey", driver, host, port, socket); err != nil {
 		t.Fatal(err)
 	}
 	env := string(f.Writes()[0].Content)
@@ -784,7 +552,7 @@ func TestSeedSharedEnvPostgresUsesTCPNoSocket(t *testing.T) {
 	eng, _ := dbpkg.Get("postgres")
 	driver, host, port, socket := eng.EnvConnection()
 	s := &config.Server{Database: config.Database{Engine: "postgres"}, Sites: []config.Site{{Domain: "x.example.com", DeployPath: "/srv/x"}}}
-	if err := d.seedSharedEnv(context.Background(), f, s, s.Sites[0], 0, "db", "u", "pw", "appkey", driver, host, port, socket); err != nil {
+	if err := d.seedSharedEnv(context.Background(), f, s, s.Sites[0], "db", "u", "pw", "appkey", driver, host, port, socket); err != nil {
 		t.Fatal(err)
 	}
 	env := string(f.Writes()[0].Content)
@@ -793,6 +561,41 @@ func TestSeedSharedEnvPostgresUsesTCPNoSocket(t *testing.T) {
 	}
 	if strings.Contains(env, "DB_SOCKET=") {
 		t.Errorf("postgres .env must NOT set DB_SOCKET; got:\n%s", env)
+	}
+}
+
+func TestSeedSharedEnvUsesPerSiteSocket(t *testing.T) {
+	s := &config.Server{
+		Valkey: true,
+		Sites:  []config.Site{{Domain: "app.example.com", User: "tenant1", DeployPath: "/var/www/app"}},
+	}
+	f := bssh.NewFakeRunner()
+	d := database{redactor: secret.NewRedactor()}
+	if err := d.seedSharedEnv(context.Background(), f, s, s.Sites[0],
+		"appdb", "appuser", "pw123", "base64:key", "mysql", "127.0.0.1", "3306", "/run/mysqld/mysqld.sock"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Writes()) != 1 {
+		t.Fatalf("expected exactly one write, got %d", len(f.Writes()))
+	}
+	env := string(f.Writes()[0].Content)
+	for _, want := range []string{
+		"REDIS_CLIENT=phpredis\n",
+		"REDIS_HOST=/run/berth-valkey/app_example_com/valkey.sock\n",
+		"REDIS_PORT=0\n",
+		"REDIS_DB=0\n",
+		"REDIS_CACHE_DB=1\n",
+		"CACHE_DRIVER=redis\n", // Laravel 10 reads CACHE_DRIVER...
+		"CACHE_STORE=redis\n",  // ...Laravel 11/12 read CACHE_STORE
+		"SESSION_DRIVER=redis\n",
+		"QUEUE_CONNECTION=redis\n",
+	} {
+		if !strings.Contains(env, want) {
+			t.Errorf(".env missing %q:\n%s", want, env)
+		}
+	}
+	if strings.Contains(env, "REDIS_PREFIX") {
+		t.Error("REDIS_PREFIX must not be seeded for a private per-site instance")
 	}
 }
 

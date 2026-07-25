@@ -97,7 +97,6 @@ database:
   # name / user: legacy single-site only — multi-site sites carry their own block
 
 valkey: false                  # install Valkey as the cache/session/queue backend
-                               # (multi-site is capped at 16 sites — one logical DB each)
 queue: false                   # server-wide default: a queue:work worker on every site
 scheduler: true                # install the Laravel scheduler cron (per site)
 cloudflare_only: false         # opt-in: refuse non-Cloudflare requests (per site)

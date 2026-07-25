@@ -118,12 +118,6 @@ func run(p prompter) (Answers, error) {
 
 		a.Sites = append(a.Sites, sa)
 
-		// Valkey caps multi-site at 16 logical Redis DBs — whole-config state that
-		// re-prompting a site cannot fix, so gate the "add another?" offer.
-		if a.Valkey && len(a.Sites) >= 16 {
-			p.ShowError(fmt.Errorf("valkey caps multi-site at 16 sites (one Redis logical DB each); stopping at 16"))
-			break
-		}
 		more, err := p.Confirm("Add another site?")
 		if err != nil {
 			return Answers{}, err
