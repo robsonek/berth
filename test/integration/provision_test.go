@@ -30,7 +30,9 @@ import (
 // BERTH_TEST_SKIP_SSL=false (it needs real public DNS).
 //
 // End state asserted (design §9):
-//   - `systemctl is-active nginx php{ver}-fpm mariadb valkey-server` all "active"
+//   - `systemctl is-active nginx php{ver}-fpm mariadb` all "active"; with Valkey
+//     enabled, every per-site berth-valkey-<pool> instance is active and the
+//     stock valkey-server is inactive
 //   - `nginx -t` exits 0
 //   - `mysql --protocol=socket -e 'SELECT 1'` exits 0
 //   - HTTP GET / returns a response (502 is acceptable pre-deploy: no app yet)
@@ -120,6 +122,7 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	assertMultiSiteIsolation(invCtx, t, client, srv)
 	assertDBAuth(invCtx, t, client, srv)
 	assertHardeningEndState(invCtx, t, client, srv)
+	assertValkeyIsolation(invCtx, t, client, srv)
 	assertSwapSysctl(invCtx, t, client, srv)
 	assertBackups(invCtx, t, client, srv)
 
@@ -199,9 +202,6 @@ func assertServicesActive(ctx context.Context, t *testing.T, c *bssh.Client, srv
 		fmt.Sprintf("php%s-fpm", srv.PHP.Version),
 		dbServiceName(srv.Database.Engine),
 	}
-	if srv.Valkey {
-		units = append(units, "valkey-server")
-	}
 	for _, unit := range units {
 		res, err := c.Run(ctx, "systemctl is-active "+unit, nil)
 		if err != nil {
@@ -210,6 +210,20 @@ func assertServicesActive(ctx context.Context, t *testing.T, c *bssh.Client, srv
 		if got := strings.TrimSpace(res.Stdout); got != "active" {
 			t.Errorf("service %s: is-active = %q (exit %d, stderr %q), want \"active\"",
 				unit, got, res.ExitCode, strings.TrimSpace(res.Stderr))
+		}
+	}
+	// Valkey runs as one instance per site; the stock shared service must be off.
+	if srv.Valkey {
+		stock, err := c.Run(ctx, "systemctl is-active valkey-server", nil)
+		if err != nil {
+			t.Fatalf("probe stock valkey-server: %v", err)
+		}
+		if stock.ExitCode == 0 {
+			t.Error("stock valkey-server must be inactive: per-site instances replace it")
+		}
+		for _, site := range srv.Sites {
+			unit := "berth-valkey-" + config.PoolName(site.Domain) + ".service"
+			assertExitZero(ctx, t, c, "valkey instance "+site.Domain, "sudo systemctl is-active "+unit)
 		}
 	}
 }
