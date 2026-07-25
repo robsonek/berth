@@ -188,8 +188,11 @@ func TestRenderLogrotateGolden(t *testing.T) {
 	checkGolden(t, "logrotate.conf.tmpl", "logrotate.golden", nil)
 }
 
-func TestRenderValkeyDropInGolden(t *testing.T) {
-	checkGolden(t, "valkey_dropin.conf.tmpl", "valkey_dropin.golden", struct{ Maxmemory, Policy string }{
+func TestRenderBerthValkeyServiceGolden(t *testing.T) {
+	checkGolden(t, "berth_valkey.service.tmpl", "berth_valkey.service.golden", struct {
+		Domain, User, Pool, Maxmemory, Policy string
+	}{
+		Domain: "app.example.com", User: "webuser", Pool: "app_example_com",
 		Maxmemory: "256mb", Policy: "allkeys-lru",
 	})
 }

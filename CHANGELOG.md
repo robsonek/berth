@@ -21,6 +21,20 @@ Notable changes to berth. Older releases are documented on the
   whose first line merely starts with the marker (e.g.
   `# managed by berth-backup`) is no longer treated as berth-managed, so it
   can neither be overwritten without `--force` nor removed by drift cleanup.
+- **Valkey is now one instance per site** — the shared, unauthenticated
+  `valkey-server` on 127.0.0.1:6379 (a cross-tenant hole: logical DBs have no
+  access control) is replaced by per-site instances running as each site's OS
+  user, reachable only via a unix socket in a 0700 directory, with no TCP
+  listener. The stock `valkey-server.service` is disabled, the legacy tuning
+  drop-in migrated away, and instances for removed sites are swept (their
+  `/var/lib/berth-valkey/<pool>` data directories are left in place —
+  cache-class data, remove manually if desired). Fresh
+  `.env` seeds point `REDIS_HOST` at the socket (`REDIS_PORT=0`, cache in its
+  own logical DB); `REDIS_DB` allocation and `REDIS_PREFIX` are gone. The
+  `tuning.valkey_maxmemory*` knobs now cap each instance. **Existing hosts:**
+  the stock service gets disabled on the next provision, but `shared/.env` is
+  seed-if-absent and never rewritten — update each site's `REDIS_*` values to
+  the new socket manually (or remove `.env` to re-seed) before re-running.
 
 ## [0.14.0] — 2026-07-24
 

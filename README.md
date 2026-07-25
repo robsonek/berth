@@ -96,8 +96,7 @@ database:
   source: debian               # debian | mariadb (MariaDB) | pgdg (PostgreSQL)
   # name / user: legacy single-site only — multi-site sites carry their own block
 
-valkey: false                  # install Valkey as the cache/session/queue backend
-                               # (multi-site is capped at 16 sites — one logical DB each)
+valkey: false                  # one Valkey instance per site (cache/session/queue)
 queue: false                   # server-wide default: a queue:work worker on every site
 scheduler: true                # install the Laravel scheduler cron (per site)
 cloudflare_only: false         # opt-in: refuse non-Cloudflare requests (per site)
@@ -207,12 +206,17 @@ berth tunes the host for production Laravel out of the box:
 - **OPcache** is configured for production (`opcache.validate_timestamps=0`, with
   sized memory / interned-strings / accelerated-files). FPM SAPI only, so
   long-running CLI workers never serve stale bytecode.
-- **Valkey** (when `valkey: true`) is wired as the cache, session and queue
-  backend in the seeded `.env`, each site isolated on its own Redis logical
-  database. Without Valkey the app keeps the database driver. This wiring is
-  written when berth first creates a site's `shared/.env`, so enable `valkey`
-  before the initial provision (flipping it on later does not rewrite an
-  existing `.env` — remove it or re-seed by hand).
+- **Valkey (Redis-compatible), one instance per site** — with `valkey: true`
+  every site gets its own Valkey instance running as that site's OS user,
+  reachable only through a unix socket in a directory owned by that user
+  (no TCP listener at all). Tenant isolation is enforced by the OS, not by
+  passwords or key prefixes; `artisan cache:clear` flushes only that site's
+  own cache DB. The `tuning.valkey_maxmemory` / `tuning.valkey_maxmemory_policy`
+  knobs apply per instance. Valkey is wired as the cache, session and queue
+  backend when berth first seeds a site's `shared/.env` (without Valkey the
+  app keeps the database driver), so enable `valkey` before the initial
+  provision — flipping it on later does not rewrite an existing `.env`;
+  remove it or re-seed by hand.
 - **HTTP/3 (QUIC)** is available per site with `http3: true` (requires `ssl` and
   `nginx.source: nginx`); berth also opens UDP/443.
 - nginx serves fingerprinted Vite assets under `/build/assets/` with a one-year
@@ -220,12 +224,12 @@ berth tunes the host for production Laravel out of the box:
 
 ### Service tuning (`tuning:`)
 
-berth applies conservative, managed tuning drop-ins automatically:
+berth applies conservative, managed tuning automatically:
 
-- **Valkey** (when `valkey: true`) — a systemd drop-in sets `maxmemory` and
-  `maxmemory-policy` so the cache evicts instead of returning OOM errors once
-  full (Debian's default is `noeviction` with no `maxmemory`, so a full cache
-  fails writes).
+- **Valkey** (when `valkey: true`) — every per-site instance is started with
+  `maxmemory` and `maxmemory-policy` so its cache evicts instead of returning
+  OOM errors once full (Valkey's default is `noeviction` with no `maxmemory`,
+  so a full cache fails writes). The limits apply to each instance separately.
 - **MariaDB** (when `database.engine: mariadb`) — a `mariadb.conf.d` drop-in
   sets `innodb_buffer_pool_size`, and opt-in `mariadb_slow_query_log` logs
   queries slower than `mariadb_long_query_time` seconds (default 2) to
@@ -256,9 +260,9 @@ tuning:
   php_max_input_vars: 1000             # default; 1-1000000
 ```
 
-With one shared Valkey for cache, session and queue, `allkeys-lru` can evict
-queued jobs under memory pressure; use `volatile-lru` to evict only keys that
-carry a TTL.
+Each site's Valkey instance serves its cache, session and queue together, so
+`allkeys-lru` can evict queued jobs under memory pressure; use `volatile-lru`
+to evict only keys that carry a TTL.
 
 `php_max_execution_time` is capped at 300 s — berth's opinionated bound; work
 that runs longer belongs in queue workers, not web requests.

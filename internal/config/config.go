@@ -71,8 +71,10 @@ func (f Fail2ban) MaxretryEff() int {
 	return f.Maxretry
 }
 
-// Tuning holds optional, conservative performance-tuning overrides applied as
-// managed drop-ins (Valkey systemd drop-in; MariaDB mariadb.conf.d). Empty fields
+// Tuning holds optional, conservative performance-tuning overrides. The Valkey
+// knobs render into the per-site instance units (`berth-valkey-<pool>.service`;
+// the cap is per instance), the MariaDB ones into a managed mariadb.conf.d
+// drop-in. Empty fields
 // fall back to the defaults returned by the *Eff accessors. The defaults live in
 // the accessors (NOT in Load() via SetDefault) so wizard ToServer() and literal
 // Server callers that bypass Load() still render valid, non-empty values — an

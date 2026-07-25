@@ -19,8 +19,8 @@ func Pipeline(s *config.Server, red *secret.Redactor, skipSSL bool) []provision.
 		steps = append(steps, Supervisor())
 	}
 	steps = append(steps, AppDirs(), Database(red))
-	if s.Valkey || s.Database.Engine == "mariadb" {
-		steps = append(steps, Tuning(s.Valkey))
+	if s.Database.Engine == "mariadb" {
+		steps = append(steps, Tuning())
 	}
 	steps = append(steps, Site(), Backups())
 	if !skipSSL && anySiteSSL(s) {

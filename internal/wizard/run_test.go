@@ -1,7 +1,6 @@
 package wizard
 
 import (
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -165,42 +164,6 @@ func TestRunHTTP3AcceptSwitchesNginx(t *testing.T) {
 	}
 	if a.NginxSource != "nginx" || !a.Sites[0].HTTP3 {
 		t.Errorf("expected nginx switched + http3 kept: nginx=%q http3=%v", a.NginxSource, a.Sites[0].HTTP3)
-	}
-}
-
-func TestRunValkeyCapsAtSixteen(t *testing.T) {
-	makeSite := func(i int, sa *SiteAnswers) {
-		n := strconv.Itoa(i)
-		sa.Domain, sa.DeployPath = "s"+n+".example.com", "/srv/"+n
-		sa.DBName, sa.DBUser = "d"+n, "u"+n
-		sa.User = "user" + n // explicit, distinct, avoids derived-name edge cases
-	}
-	cores := make([]func(int, *SiteAnswers), 16)
-	for i := range cores {
-		cores[i] = makeSite
-	}
-	// confirms: srv-adv? then per site: site-adv?(false) add-another?(true) — but the
-	// 16th site never gets an "add another?" (gated), so 1 + (15*2 + 1) = 32 confirms.
-	confirms := []bool{false}
-	for i := 0; i < 16; i++ {
-		confirms = append(confirms, false) // site-advanced?
-		if i < 15 {
-			confirms = append(confirms, true) // add another?
-		}
-	}
-	f := &fakePrompter{serverCore: func(a *Answers) { baseServer(a); a.Valkey = true }, siteCore: cores, confirms: confirms}
-	a, err := run(f)
-	if err != nil {
-		t.Fatalf("run error = %v", err)
-	}
-	if len(a.Sites) != 16 {
-		t.Fatalf("expected 16 sites (capped), got %d", len(a.Sites))
-	}
-	if err := a.ToServer().Validate(); err != nil {
-		t.Fatalf("16-site valkey config should validate: %v", err)
-	}
-	if len(f.errors) != 1 {
-		t.Errorf("expected the cap note once, got %v", f.errors)
 	}
 }
 
