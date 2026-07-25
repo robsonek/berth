@@ -197,8 +197,8 @@ func (hardening) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 
 	// A berth-managed drop-in at the legacy (pre-00 rename) path must be
 	// migrated away. A foreign file there is left alone: it is not ours to
-	// delete, and any global directive it sets is caught by the effective
-	// probe below.
+	// delete, and any of the protected directives it sets is caught by the
+	// effective probe below.
 	legacyPresent, err := managedFilePresent(ctx, r, sshdDropInLegacyPath)
 	if err != nil {
 		return provision.CheckResult{}, err
@@ -251,6 +251,7 @@ func (hardening) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 			"install fail2ban",
 			"write managed fail2ban jail (sshd port-bound, recidive)",
 			"disable root login, password and kbd-interactive auth (after anti-lockout gate)",
+			"remove legacy sshd drop-in (when present)",
 			"verify the directives win in the effective sshd config (sshd -T)",
 		},
 	}, nil
@@ -297,8 +298,8 @@ func (h hardening) Apply(ctx context.Context, rc provision.RunCtx, s *config.Ser
 		return fmt.Errorf("write %s: %w", sshdDropInPath, err)
 	}
 	// Migrate the pre-rename drop-in away. Guarded: only a berth-managed file
-	// is removed; a foreign file at that path is left in place (any global
-	// directive it sets is caught by the effective gate below).
+	// is removed; a foreign file at that path is left in place (any of the
+	// protected directives it sets is caught by the effective gate below).
 	if present, err := managedFilePresent(ctx, r, sshdDropInLegacyPath); err != nil {
 		return err
 	} else if present {

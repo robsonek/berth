@@ -550,6 +550,31 @@ func TestHardeningCheckFailsClosedOnSshdOpts(t *testing.T) {
 	}
 }
 
+func TestSshdOptsValue(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty input", "", ""},
+		{"empty double-quoted value", `SSHD_OPTS=""`, ""},
+		{"double-quoted options", `SSHD_OPTS="-o PasswordAuthentication=yes"`, "-o PasswordAuthentication=yes"},
+		{"single-quoted value", `SSHD_OPTS='-4'`, "-4"},
+		{"unquoted value", `SSHD_OPTS=-4`, "-4"},
+		{"last assignment wins", "SSHD_OPTS=\"-4\"\nSSHD_OPTS=\"-6\"", "-6"},
+		{"leading whitespace tolerated", `  SSHD_OPTS="-4"`, "-4"},
+		{"commented-out assignment ignored", `#SSHD_OPTS=x`, ""},
+		{"whitespace-only value", `SSHD_OPTS="   "`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sshdOptsValue(tt.in); got != tt.want {
+				t.Errorf("sshdOptsValue(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHardeningCheckErrorsWhenSshdDumpFails(t *testing.T) {
 	// A broken foreign config berth cannot converge: fail loud, not unsatisfied.
 	f := bssh.NewFakeRunner()
@@ -587,10 +612,34 @@ func TestHardeningCheckUnsatisfiedWhenLegacyDropInPresent(t *testing.T) {
 	}
 }
 
+func TestHardeningCheckFreshHostGatesEffectiveProbeOff(t *testing.T) {
+	// A fresh host (berth's drop-in absent) must report reconcilable drift,
+	// not probe the effective config: cloud-init images ship drop-ins that
+	// re-enable password auth, so an ungated sshd -T would hard-error every
+	// first provision instead of letting Apply converge berth's file first.
+	f := bssh.NewFakeRunner()
+	stubCheckGreenBase(f)
+	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 1})       // fresh: drop-in absent
+	f.On("cat "+shQuote(sshdDropInLegacyPath), bssh.Result{ExitCode: 1}) // no legacy file either
+
+	cr, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied on a fresh host (drop-in absent)")
+	}
+	for _, c := range f.Calls() {
+		if c.Cmd == "sshd -T" || c.Cmd == sshdOptsProbe {
+			t.Error("the effective probe must be gated off while berth's own drop-in is not converged")
+		}
+	}
+}
+
 func TestHardeningCheckIgnoresForeignLegacyDropIn(t *testing.T) {
-	// A foreign file at the legacy path is NOT berth's to delete, and any
-	// GLOBAL directive it sets is caught by the effective probe (Match-scoped
-	// content is out of contract). It must not block Satisfied.
+	// A foreign file at the legacy path is NOT berth's to delete, and any of
+	// the protected directives it sets is caught by the effective probe
+	// (Match-scoped content is out of contract). It must not block Satisfied.
 	f := bssh.NewFakeRunner()
 	stubCheckGreenBase(f)
 	f.On("cat "+shQuote(sshdDropInLegacyPath), bssh.Result{ExitCode: 0, Stdout: "# operator notes\n"})
