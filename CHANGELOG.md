@@ -3,6 +3,52 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Changed
+
+- **`deploy_path` validation is stricter** — the path must now be canonical
+  (no trailing slash, no `.`/`..` segments), at least two components deep, and
+  outside system trees: under `/var` only a subdirectory of `/var/www` is
+  allowed, and `/home` is rejected outright. Two sites may no longer nest one
+  `deploy_path` inside another. Previously `deploy_path: /etc` validated and
+  the root-run `install -d` handed the tenant ownership of the existing
+  directory (a path to full compromise); a `/home/<user>/…` path additionally
+  could never be served (nginx cannot traverse the `0700` home) and let the
+  tenant symlink-swap the directory to root. Conventional layouts
+  (`/var/www/<domain>`, `/srv/…`, `/opt/…`) are unaffected.
+- **`appdirs` refuses a symlinked deploy target** — before creating a site's
+  directories, berth now verifies that no component of the deploy tree or the
+  ACME webroot is a symlink. Without this, migrating a `deploy_path` to a
+  descendant of the site's own prior (tenant-owned) directory let a tenant plant
+  a symlink that root's `install -d` would follow and chown, reaching root. The
+  path validation cannot catch this (the new path is valid and the old one has
+  left the config), so the guard is a runtime check.
+
+### Fixed
+
+- **Switching `database.engine` now fails loudly instead of reporting green**
+  — when a site's seeded `shared/.env` carries a `DB_CONNECTION` that disagrees
+  with the configured engine (or, on an existing `.env`, lacks the key
+  entirely), both Check and Apply refuse with a pointed error before installing
+  anything: the app would otherwise keep talking to the old engine while
+  backups dump the empty new one. `--force` does not override; migrate the data
+  and update the env, or revert the engine.
+- **A staging certificate no longer survives production runs** — the TEST_CERT
+  annotation in `certbot certificates` is now honored: a run without
+  `--ssl-staging` that finds a staging certificate re-issues it against the
+  production CA (explicit `--server` + `--force-renewal`) instead of reporting
+  "valid certificates present" forever. Issuance pins `--cert-name <domain>` so
+  the correct lineage is read and written. A staging run never replaces a
+  production certificate, and a staging replacement blocked by a DNS mismatch
+  fails loudly rather than drifting.
+- **`certbot.timer` is now verified and enabled on every Let's Encrypt run** —
+  previously the renewal timer was enabled only right after issuing a
+  certificate, so a run that left an existing certificate untouched (e.g. a
+  near-expiry production certificate under `--ssl-staging`) could report success
+  while automatic renewal was disabled. Check now reports the inactive timer and
+  Apply enables it whenever certbot is installed.
+
 ## [0.15.0] — 2026-07-25
 
 ### Changed

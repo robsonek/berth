@@ -23,7 +23,7 @@ php: {version: "8.5", source: auto}
 database: {engine: mariadb, name: myapp, user: myapp}
 valkey: true
 sites:
-  - {domain: app.example.com, deploy_path: /home/deploy/myapp}
+  - {domain: app.example.com, deploy_path: /var/www/app}
 `
 	if err := os.WriteFile(p, []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)

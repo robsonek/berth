@@ -23,6 +23,9 @@ func upstreamSourceList(repo apt.Repo) string {
 // dbPasswordKey is the .env key under which the database password lives.
 const dbPasswordKey = "DB_PASSWORD"
 
+// dbConnectionKey is the .env key naming the Laravel database driver.
+const dbConnectionKey = "DB_CONNECTION"
+
 // appKeyKey is the .env key under which Laravel's application encryption key
 // lives. berth seeds one so a Laravel app boots after its first deploy without
 // manual intervention.
@@ -77,10 +80,74 @@ func envCredentialPresent(ctx context.Context, r bssh.Runner, site config.Site) 
 	return res.ExitCode == 0, nil
 }
 
+// envDBConnection reads the first DB_CONNECTION line of a site's shared/.env.
+// The caller must have confirmed the file exists (assertEnvEngineMatch does).
+// hasKey is false only when the file has no DB_CONNECTION line (grep exit 1);
+// a grep exit >= 2 (unreadable input, I/O error) is a hard error rather than
+// silent absence. Unlike the DB_PASSWORD probes the value is not a secret, so
+// it may be read into memory and echoed in error messages. Only trailing ASCII
+// whitespace is trimmed (the exact set passwordFromEnv uses); no quote
+// stripping — the comparison downstream is strict and raw.
+func envDBConnection(ctx context.Context, r bssh.Runner, site config.Site) (string, bool, error) {
+	res, err := r.Run(ctx, "grep -m1 '^"+dbConnectionKey+"=' "+shQuote(sharedEnvPath(site)), nil)
+	if err != nil {
+		return "", false, err
+	}
+	switch res.ExitCode {
+	case 0:
+		line := strings.TrimRight(strings.SplitN(res.Stdout, "\n", 2)[0], " \t\n\v\f\r")
+		return strings.TrimPrefix(line, dbConnectionKey+"="), true, nil
+	case 1:
+		return "", false, nil // no DB_CONNECTION line
+	default:
+		return "", false, fmt.Errorf("probe %s in %s: %s", dbConnectionKey, sharedEnvPath(site), res.Stderr)
+	}
+}
+
+// assertEnvEngineMatch fails loudly when a site's shared/.env disagrees with
+// the configured database engine. A fresh box (no .env) is fine: the seed will
+// be consistent. An existing .env must carry a DB_CONNECTION matching the
+// engine's driver — its absence, or a different driver, is a hard error,
+// because .env is seed-if-absent and never rewritten, so a mismatch would
+// leave the app on the old engine while backups dump the empty new one and the
+// run still reports green. Deliberately NOT overridable by --force: the only
+// safe fixes are migrating the data and updating the env, or reverting config.
+func assertEnvEngineMatch(ctx context.Context, r bssh.Runner, s *config.Server, site config.Site, driver string) error {
+	exists, err := fileExists(ctx, r, sharedEnvPath(site))
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	val, hasKey, err := envDBConnection(ctx, r, site)
+	if err != nil {
+		return err
+	}
+	if !hasKey {
+		return fmt.Errorf("shared/.env for %s exists but has no %s; berth always seeds it, so its absence leaves the app's effective database engine unknown — set %s=%s (matching database.engine %s) or remove %s to have berth re-seed it",
+			site.Domain, dbConnectionKey, dbConnectionKey, driver, s.Database.Engine, sharedEnvPath(site))
+	}
+	if val != driver {
+		return fmt.Errorf("shared/.env for %s has %s=%s but database.engine %s seeds %s=%s: the app keeps talking to the old engine while backups would dump the empty new one; migrate the data and update %s, or revert database.engine (--force does not override this check)",
+			site.Domain, dbConnectionKey, val, s.Database.Engine, dbConnectionKey, driver, sharedEnvPath(site))
+	}
+	return nil
+}
+
 func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
 	eng, err := dbpkg.Get(s.Database.Engine)
 	if err != nil {
 		return provision.CheckResult{}, err
+	}
+	// Engine/env conflict is checked FIRST — before the installed probe —
+	// because an engine switch makes Check early-return on the missing new
+	// server package and never reach the per-site probes otherwise.
+	driver, _, _, _ := eng.EnvConnection()
+	for _, site := range s.Sites {
+		if err := assertEnvEngineMatch(ctx, r, s, site, driver); err != nil {
+			return provision.CheckResult{}, err
+		}
 	}
 	installed, err := pkgInstalled(ctx, r, eng.ServerPackage())
 	if err != nil {
@@ -165,6 +232,14 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	if err != nil {
 		return err
 	}
+	driver, host, port, socket := eng.EnvConnection()
+	// Pre-scan every site BEFORE touching apt/repos/SQL: an engine switch must
+	// abort before the new server is even installed.
+	for _, site := range s.Sites {
+		if err := assertEnvEngineMatch(ctx, r, s, site, driver); err != nil {
+			return err
+		}
+	}
 	// Install the server once (optionally from its producer repo).
 	if s.Database.Source != "debian" {
 		if repo, ok := eng.UpstreamRepo(); ok {
@@ -177,7 +252,6 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 		return fmt.Errorf("install %s: %w", eng.ServerPackage(), err)
 	}
 
-	driver, host, port, socket := eng.EnvConnection()
 	// Accumulate per-site secrets and write the local cache once at the end so
 	// sites do not clobber each other's cached passwords. A cache that cannot
 	// be READ is a hard error, not an empty map — saving over it would clobber

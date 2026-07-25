@@ -28,6 +28,8 @@ func TestAppDirsRequiresAccounts(t *testing.T) {
 func TestAppDirsCheckSatisfiedWhenAllDirsPresentWithOwners(t *testing.T) {
 	s := appdirsServer() // single site -> user "deploy"
 	f := bssh.NewFakeRunner()
+	f.On(noSymlinkCmd("/home/deploy/myapp/shared/tmp"), bssh.Result{ExitCode: 0})
+	f.On(noSymlinkCmd(acmeWebroot("app.example.com")), bssh.Result{ExitCode: 0})
 	// deploy_path owned deploy:www-data (nginx can traverse); shared deploy:deploy
 	// (private); acme webroot www-data:www-data.
 	f.On("stat -c %U:%G "+shQuote("/home/deploy/myapp"), bssh.Result{Stdout: "deploy:www-data\n"})
@@ -46,6 +48,8 @@ func TestAppDirsCheckSatisfiedWhenAllDirsPresentWithOwners(t *testing.T) {
 func TestAppDirsCheckUnsatisfiedWhenDirMissing(t *testing.T) {
 	s := appdirsServer()
 	f := bssh.NewFakeRunner()
+	f.On(noSymlinkCmd("/home/deploy/myapp/shared/tmp"), bssh.Result{ExitCode: 0})
+	f.On(noSymlinkCmd(acmeWebroot("app.example.com")), bssh.Result{ExitCode: 0})
 	f.On("stat -c %U:%G "+shQuote("/home/deploy/myapp"), bssh.Result{ExitCode: 1, Stderr: "No such file or directory"})
 	cr, err := AppDirs().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
@@ -59,6 +63,8 @@ func TestAppDirsCheckUnsatisfiedWhenDirMissing(t *testing.T) {
 func TestAppDirsCheckUnsatisfiedWhenWrongOwner(t *testing.T) {
 	s := appdirsServer()
 	f := bssh.NewFakeRunner()
+	f.On(noSymlinkCmd("/home/deploy/myapp/shared/tmp"), bssh.Result{ExitCode: 0})
+	f.On(noSymlinkCmd(acmeWebroot("app.example.com")), bssh.Result{ExitCode: 0})
 	f.On("stat -c %U:%G "+shQuote("/home/deploy/myapp"), bssh.Result{Stdout: "root:root\n"})
 	cr, err := AppDirs().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
@@ -72,6 +78,8 @@ func TestAppDirsCheckUnsatisfiedWhenWrongOwner(t *testing.T) {
 func TestAppDirsCheckUnsatisfiedWhenTmpDirMissing(t *testing.T) {
 	s := appdirsServer()
 	f := bssh.NewFakeRunner()
+	f.On(noSymlinkCmd("/home/deploy/myapp/shared/tmp"), bssh.Result{ExitCode: 0})
+	f.On(noSymlinkCmd(acmeWebroot("app.example.com")), bssh.Result{ExitCode: 0})
 	f.On("stat -c %U:%G "+shQuote("/home/deploy/myapp"), bssh.Result{Stdout: "deploy:www-data\n"})
 	f.On("stat -c %U:%G "+shQuote("/home/deploy/myapp/shared"), bssh.Result{Stdout: "deploy:deploy\n"})
 	// shared/tmp backs the pool's sys_temp_dir/upload_tmp_dir; absent here.
@@ -89,6 +97,8 @@ func TestAppDirsCheckUnsatisfiedWhenTmpDirMissing(t *testing.T) {
 func TestAppDirsApplyCreatesDirsWithIsolatingOwners(t *testing.T) {
 	s := appdirsServer()
 	f := bssh.NewFakeRunner()
+	f.On(noSymlinkCmd("/home/deploy/myapp/shared/tmp"), bssh.Result{ExitCode: 0})
+	f.On(noSymlinkCmd(acmeWebroot("app.example.com")), bssh.Result{ExitCode: 0})
 	f.On("install -d -o deploy -g www-data -m 0710 '/home/deploy/myapp'", bssh.Result{})
 	f.On("install -d -o deploy -g deploy -m 0700 '/home/deploy/myapp/shared'", bssh.Result{})
 	f.On("install -d -o deploy -g deploy -m 0700 '/home/deploy/myapp/shared/tmp'", bssh.Result{})
@@ -109,6 +119,47 @@ func TestAppDirsApplyCreatesDirsWithIsolatingOwners(t *testing.T) {
 	}
 }
 
+func TestAppDirsApplyRefusesSymlinkInDeployTree(t *testing.T) {
+	s := appdirsServer()
+	site := s.Sites[0]
+	symCmd := noSymlinkCmd(site.DeployPath + "/shared/tmp")
+	f := bssh.NewFakeRunner()
+	f.On(symCmd, bssh.Result{ExitCode: 1}) // a component is a symlink
+	err := AppDirs().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Apply() = %v, want a refusal naming the symlink", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.HasPrefix(c.Cmd, "install -d") {
+			t.Errorf("no install -d may run once a symlink is detected; ran %q", c.Cmd)
+		}
+	}
+}
+
+func TestAppDirsCheckErrorsOnSymlinkInDeployTree(t *testing.T) {
+	s := appdirsServer()
+	site := s.Sites[0]
+	f := bssh.NewFakeRunner()
+	f.On(noSymlinkCmd(site.DeployPath+"/shared/tmp"), bssh.Result{ExitCode: 1})
+	_, err := AppDirs().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Check() = %v, want a hard error on a symlinked deploy component", err)
+	}
+}
+
+// noSymlinkCmd mirrors the production command builder so the exact FakeRunner
+// stub matches. Keep it in lockstep with noSymlinkInPath.
+func noSymlinkCmd(p string) string {
+	parts := strings.Split(strings.TrimPrefix(p, "/"), "/")
+	cur := ""
+	var tests []string
+	for _, part := range parts {
+		cur += "/" + part
+		tests = append(tests, "test ! -L "+shQuote(cur))
+	}
+	return strings.Join(tests, " && ")
+}
+
 func TestAppDirsApplyMultiSitePerUser(t *testing.T) {
 	s := &config.Server{Sites: []config.Site{
 		{Domain: "one.example.com", DeployPath: "/var/www/one"},
@@ -117,10 +168,13 @@ func TestAppDirsApplyMultiSitePerUser(t *testing.T) {
 	u1, u2 := s.SiteUser(s.Sites[0]), s.SiteUser(s.Sites[1])
 	f := bssh.NewFakeRunner()
 	for _, u := range []struct{ user, path string }{{u1, "/var/www/one"}, {u2, "/var/www/two"}} {
+		f.On(noSymlinkCmd(u.path+"/shared/tmp"), bssh.Result{ExitCode: 0})
 		f.On("install -d -o "+u.user+" -g www-data -m 0710 '"+u.path+"'", bssh.Result{})
 		f.On("install -d -o "+u.user+" -g "+u.user+" -m 0700 '"+u.path+"/shared'", bssh.Result{})
 		f.On("install -d -o "+u.user+" -g "+u.user+" -m 0700 '"+u.path+"/shared/tmp'", bssh.Result{})
 	}
+	f.On(noSymlinkCmd(acmeWebroot("one.example.com")), bssh.Result{ExitCode: 0})
+	f.On(noSymlinkCmd(acmeWebroot("two.example.com")), bssh.Result{ExitCode: 0})
 	f.On("install -d -o www-data -g www-data -m 0755 '/var/www/berth-acme/one.example.com'", bssh.Result{})
 	f.On("install -d -o www-data -g www-data -m 0755 '/var/www/berth-acme/two.example.com'", bssh.Result{})
 	if err := AppDirs().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {

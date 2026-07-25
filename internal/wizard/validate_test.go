@@ -64,6 +64,19 @@ func TestInlineValidators(t *testing.T) {
 	}
 }
 
+func TestValidDeployPathMatchesConfigRules(t *testing.T) {
+	// The wizard field validator must refuse exactly what config.Load refuses,
+	// so the operator learns at the field, not at the final ToServer error.
+	for _, bad := range []string{"/etc/nginx", "/home/deploy/app", "/var/www/app/", "/app", "/var/www", "/var/lib/app"} {
+		if err := validDeployPath(bad); err == nil {
+			t.Errorf("validDeployPath(%q) = nil, want error", bad)
+		}
+	}
+	if err := validDeployPath("/var/www/app"); err != nil {
+		t.Errorf("validDeployPath(/var/www/app) = %v, want nil", err)
+	}
+}
+
 func TestOptionalSwapSize(t *testing.T) {
 	for _, ok := range []string{"", "2G", "512M", "1g", "16m"} {
 		if err := optionalSwapSize(ok); err != nil {

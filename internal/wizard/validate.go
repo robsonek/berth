@@ -3,10 +3,11 @@ package wizard
 import (
 	"fmt"
 	"math"
-	"path"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/robsonek/berth/internal/config"
 )
 
 // parseIntInRange parses s as an int in [lo, hi]. Used both as a huh input
@@ -59,10 +60,9 @@ func validSQLIdent(field string) func(string) error {
 }
 
 func validDeployPath(s string) error {
-	if !path.IsAbs(s) || strings.ContainsAny(s, " ;&|$`\n\t") {
-		return fmt.Errorf("deploy path %q must be absolute without shell metacharacters", s)
-	}
-	return nil
+	// Delegate to the config rule so the wizard refuses exactly what
+	// config.Load would refuse (system trees, /home, unclean or shallow paths).
+	return config.ValidateDeployPath(s)
 }
 
 // validTLSEmail requires a valid address only when ssl is on with letsencrypt.

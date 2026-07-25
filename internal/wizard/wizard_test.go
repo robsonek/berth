@@ -13,7 +13,7 @@ func validSingle() Answers {
 	a.Name = "example"
 	a.Host = "203.0.113.10"
 	a.Sites = []SiteAnswers{{
-		Domain: "app.example.com", DeployPath: "/home/deploy/myapp",
+		Domain: "app.example.com", DeployPath: "/var/www/app",
 		DBName: "myapp", DBUser: "myapp", SchedulerOverride: "inherit",
 	}}
 	return a

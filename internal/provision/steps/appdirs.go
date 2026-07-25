@@ -43,8 +43,50 @@ func dirOwnedBy(ctx context.Context, r bssh.Runner, path, owner, group string) (
 	return strings.TrimSpace(res.Stdout) == owner+":"+group, nil
 }
 
+// noSymlinkInPath reports whether NEITHER path p NOR any of its ancestors is a
+// symlink. berth's root-run `install -d` follows a directory symlink to its
+// target and applies ownership there, so a tenant who owns an ancestor of p
+// (e.g. their own prior deploy_path after a migration) could plant a symlink to
+// redirect the chown at /etc. It checks every prefix from the first component
+// under / down to p; a non-existent component is simply "not a symlink" and
+// passes, so a fresh path is created normally.
+func noSymlinkInPath(ctx context.Context, r bssh.Runner, p string) (bool, error) {
+	parts := strings.Split(strings.TrimPrefix(p, "/"), "/")
+	cur := ""
+	var tests []string
+	for _, part := range parts {
+		cur += "/" + part
+		tests = append(tests, "test ! -L "+shQuote(cur))
+	}
+	res, err := r.Run(ctx, strings.Join(tests, " && "), nil)
+	if err != nil {
+		return false, err
+	}
+	return res.ExitCode == 0, nil
+}
+
+// assertNoSymlinkTargets fails loudly if any component of a site's deploy tree
+// or its ACME webroot is a symlink (see noSymlinkInPath). Checking the deepest
+// deploy target covers deploy_path, shared and shared/tmp and all their
+// ancestors in one probe.
+func assertNoSymlinkTargets(ctx context.Context, r bssh.Runner, s *config.Server, site config.Site) error {
+	for _, p := range []string{site.DeployPath + "/shared/tmp", acmeWebroot(site.Domain)} {
+		ok, err := noSymlinkInPath(ctx, r, p)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("refusing to create directories for %s: a component of %s is a symlink; a tenant may have planted it so root's install -d chowns the target — remove the symlink (or the stale directory) before re-running", site.Domain, p)
+		}
+	}
+	return nil
+}
+
 func (a appDirs) Check(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
 	for _, site := range s.Sites {
+		if err := assertNoSymlinkTargets(ctx, r, s, site); err != nil {
+			return provision.CheckResult{}, err
+		}
 		user := s.SiteUser(site)
 		// deploy_path owned by the site user, group www-data (so nginx can reach
 		// public/); shared/ private to the site user.
@@ -75,6 +117,9 @@ func (appDirs) changes() []string {
 
 func (appDirs) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) error {
 	for _, site := range s.Sites {
+		if err := assertNoSymlinkTargets(ctx, r, s, site); err != nil {
+			return err
+		}
 		user := s.SiteUser(site)
 		// deploy_path: site user owns it, group www-data + mode 0710 lets nginx
 		// traverse to public/ while other site users cannot enter.
