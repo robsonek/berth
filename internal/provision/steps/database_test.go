@@ -25,11 +25,14 @@ func databaseServer() *config.Server {
 	}
 }
 
-// chdirTemp moves into a throwaway working directory so the local secrets cache
-// (.berth/) is created under a temp dir, not the repo.
+// chdirTemp isolates the local secret cache under a throwaway HOME (the cache
+// lives at $HOME/.berth; Go reads USERPROFILE on Windows) and a throwaway
+// working directory.
 func chdirTemp(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
 	old, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
