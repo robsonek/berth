@@ -30,7 +30,10 @@ Notable changes to berth. Older releases are documented on the
   re-seed-after-`.env`-loss flow depend on this), and the lock stops two
   concurrent runs against the same host from lost-updating it. **There is no
   automatic migration:** an old `./.berth/` is simply ignored — berth re-seeds,
-  reusing secrets from each host's live `shared/.env`.
+  reusing secrets from each host's live `shared/.env`. A console password set
+  by a pre-move berth loses its ownership marker with the old cache, so
+  `break_glass: false` will leave it untouched — lock it manually with
+  `passwd -l berth` if needed.
 
 ### Fixed
 
@@ -61,7 +64,9 @@ Notable changes to berth. Older releases are documented on the
   install got no protection and a lost `.env` re-seeded with a NEW key,
   silently and permanently breaking decryption of encrypted-at-rest data. It is
   now read from the `.env` when present, recovered-or-generated when absent, and
-  cached beside the password.
+  cached beside the password. The `database` step also verifies the local cache
+  holds each site's credentials and APP_KEY backup and backfills them on
+  existing installations.
 - **The break-glass console password is validated before `chpasswd`** — a
   tampered cache value with a newline could otherwise inject a second `chpasswd`
   record and overwrite root's password.
