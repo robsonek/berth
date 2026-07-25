@@ -371,6 +371,48 @@ func TestValkeyApplyHealsWedgedInstance(t *testing.T) {
 	}
 }
 
+func TestValkeyApplyReloadsStaleManagerCache(t *testing.T) {
+	// Crash window: a previous run wrote the unit but died before its
+	// daemon-reload. On this run nothing on disk changes, yet NeedDaemonReload
+	// is "yes" — restart alone re-runs the manager's CACHED definition, so
+	// Apply must daemon-reload first or the step never converges.
+	s := valkeyServer()
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})
+	f.On("systemctl disable --now valkey-server.service", bssh.Result{})
+	f.On("cat "+shQuote(valkeyDropInPath), bssh.Result{ExitCode: 1})
+	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0, Stdout: valkeyUnitPath("app.example.com") + "\n"})
+	want, _ := renderValkeyUnit(s, s.Sites[0])
+	f.On("cat "+shQuote(valkeyUnitPath("app.example.com")), bssh.Result{ExitCode: 0, Stdout: string(want)}) // up to date
+	f.On("systemctl enable --now "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
+	f.On(valkeyLoadedCmd("app.example.com"), bssh.Result{ExitCode: 0})
+	f.On(valkeyCacheFreshCmd("app.example.com"), bssh.Result{ExitCode: 0, Stdout: "yes\n"}) // stale cache
+	f.On("systemctl daemon-reload", bssh.Result{})
+	f.On("systemctl restart "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
+	f.On(valkeyPingCmd("tenant1", "app.example.com"), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
+
+	if err := Valkey().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	reloads, restarts, reloadIdx, restartIdx := 0, 0, -1, -1
+	for i, c := range f.Calls() {
+		switch c.Cmd {
+		case "systemctl daemon-reload":
+			reloads++
+			reloadIdx = i
+		case "systemctl restart " + valkeyInstanceUnit("app.example.com"):
+			restarts++
+			restartIdx = i
+		}
+	}
+	if reloads != 1 || restarts != 1 {
+		t.Fatalf("expected exactly one daemon-reload and one restart, got %d and %d", reloads, restarts)
+	}
+	if reloadIdx > restartIdx {
+		t.Errorf("daemon-reload (idx %d) must precede the restart (idx %d)", reloadIdx, restartIdx)
+	}
+}
+
 func TestValkeyApplyFailsLoudWhenInstanceStaysDead(t *testing.T) {
 	s := valkeyServer()
 	f := bssh.NewFakeRunner()

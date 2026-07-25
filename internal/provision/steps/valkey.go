@@ -333,6 +333,15 @@ func (valkey) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 				return err
 			}
 			if !loaded || !fresh {
+				// restart alone re-runs the manager's CACHED unit definition —
+				// it never re-reads the file — so without a daemon-reload here
+				// NeedDaemonReload would stay "yes" forever (Check permanently
+				// unsatisfied, one useless restart per Apply).
+				if res, err := r.Run(ctx, "systemctl daemon-reload", nil); err != nil {
+					return err
+				} else if res.ExitCode != 0 {
+					return fmt.Errorf("daemon-reload before restarting stale %s: %s", unit, res.Stderr)
+				}
 				if err := restartValkey(ctx, r, unit); err != nil {
 					return err
 				}
