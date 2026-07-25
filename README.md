@@ -485,7 +485,10 @@ to generate a self-signed certificate instead (no public DNS or `ssl_email`
 needed — handy for staging or internal hosts). Renewals are automatic: berth
 enables `certbot.timer` and installs a renewal deploy hook that validates and
 reloads nginx after every successful renewal, so the renewed certificate is
-actually served (not just written to disk).
+actually served (not just written to disk). Provisioning with `--ssl-staging`
+issues certificates against the Let's Encrypt staging CA; a later run without
+the flag detects the staging certificate and automatically re-issues it
+against production.
 
 ## Beyond v1
 
