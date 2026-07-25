@@ -213,6 +213,7 @@ func TestDatabaseApplyHealsFromExistingEnvWithoutRewriting(t *testing.T) {
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env already present
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Reused123\n"})
+	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // absent -> not backfilled
 	f.On("mysql --protocol=socket", bssh.Result{})
 
 	stubClientAuthAbsent(f, s, ".my.cnf")
@@ -532,6 +533,7 @@ func TestDatabaseApplyAcceptsTrailingASCIIWhitespacePassword(t *testing.T) {
 	// A trailing vertical tab IS [[:space:]] to the Check probe (POSIX C-locale
 	// set), so Apply must trim it the same way and reuse the value.
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Good123\v\n"})
+	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // absent -> not backfilled
 	f.On("mysql --protocol=socket", bssh.Result{})
 	stubClientAuthAbsent(f, s, ".my.cnf")
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -670,7 +672,8 @@ func TestDatabaseApplyClientAuthFileNeverRewritten(t *testing.T) {
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env already present
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Reused123\n"})
-	f.On("test -e '/home/deploy/.my.cnf'", bssh.Result{ExitCode: 0}) // already seeded (possibly operator-customized)
+	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // absent -> not backfilled
+	f.On("test -e '/home/deploy/.my.cnf'", bssh.Result{ExitCode: 0})            // already seeded (possibly operator-customized)
 	f.On("mysql --protocol=socket", bssh.Result{})
 
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -847,6 +850,111 @@ func TestDatabaseCheckPassesWhenDBConnectionMatchesOrFileAbsent(t *testing.T) {
 				t.Error("expected unsatisfied (server not installed), not an error")
 			}
 		})
+	}
+}
+
+func TestDatabaseApplyRecoversAppKeyFromCache(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	const wantKey = "base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	dbUser := s.SiteDBUser(s.Sites[0])
+	if err := secret.SaveCache(s.Host, map[string]string{dbUser: "cachedpw", "appkey:" + dbUser: wantKey}); err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // no .env -> re-seed path
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
+	stubClientAuthAbsent(f, s, ".my.cnf")
+	f.On("mysql --protocol=socket", bssh.Result{})
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var env *bssh.FileSpec
+	for i := range f.Writes() {
+		if f.Writes()[i].Path == envPath(s) {
+			env = &f.Writes()[i]
+		}
+	}
+	if env == nil || !strings.Contains(string(env.Content), "APP_KEY="+wantKey) {
+		t.Errorf("re-seeded .env must reuse the cached APP_KEY %q", wantKey)
+	}
+}
+
+func TestDatabaseApplyCachesGeneratedAppKey(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
+	stubClientAuthAbsent(f, s, ".my.cnf")
+	f.On("mysql --protocol=socket", bssh.Result{})
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	cache, err := secret.LoadCache(s.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cache["appkey:"+s.SiteDBUser(s.Sites[0])]; !strings.HasPrefix(got, "base64:") {
+		t.Errorf("a freshly generated APP_KEY must be cached; got %q", got)
+	}
+}
+
+func TestDatabaseApplyBackfillsAppKeyFromExistingEnv(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	const envKey = "base64:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=existingpw\n"})
+	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "APP_KEY=" + envKey + "\n"})
+	f.On("test -e "+shQuote("/home/deploy/.my.cnf"), bssh.Result{ExitCode: 0}) // client creds present
+	f.On("mysql --protocol=socket", bssh.Result{})
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	cache, err := secret.LoadCache(s.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cache["appkey:"+s.SiteDBUser(s.Sites[0])] != envKey {
+		t.Errorf("an existing .env APP_KEY must be backfilled into the cache; got %q", cache["appkey:"+s.SiteDBUser(s.Sites[0])])
+	}
+}
+
+func TestDatabaseApplyRejectsMalformedEnvAppKey(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=existingpw\n"})
+	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "APP_KEY=base64:short\n"})
+	err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("Apply() = %v, want a malformed-APP_KEY refusal", err)
+	}
+}
+
+func TestDatabaseApplyRejectsMalformedCachedAppKey(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	dbUser := s.SiteDBUser(s.Sites[0])
+	if err := secret.SaveCache(s.Host, map[string]string{"appkey:" + dbUser: "base64:tampered"}); err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
+	err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("Apply() = %v, want a malformed-cached-APP_KEY refusal", err)
 	}
 }
 
