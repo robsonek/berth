@@ -38,6 +38,7 @@ func stubValkeyCheckGreen(f *bssh.FakeRunner, s *config.Server) {
 	f.On("systemctl is-enabled "+valkeyInstanceUnit(site.Domain), bssh.Result{ExitCode: 0})
 	f.On(valkeyLoadedCmd(site.Domain), bssh.Result{ExitCode: 0})
 	f.On(valkeyCacheFreshCmd(site.Domain), bssh.Result{ExitCode: 0, Stdout: "no\n"})
+	f.On(valkeyExecCmd(valkeyInstanceUnit(site.Domain)), bssh.Result{ExitCode: 0})
 	f.On(valkeyPingCmd("tenant1", site.Domain), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
 	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0, Stdout: valkeyUnitPath(site.Domain) + "\n"})
 }
@@ -225,6 +226,7 @@ func TestRenderValkeyUnit(t *testing.T) {
 		"Type=notify",
 		"--supervised systemd",
 		"Restart=always",
+		"TimeoutStopSec=infinity",
 		"WantedBy=multi-user.target",
 	} {
 		if !strings.Contains(body, want) {
@@ -246,6 +248,7 @@ func TestValkeyApplyConvergesFreshFleet(t *testing.T) {
 	// Fresh unit -> no restart; the post-enable liveness/heal probes run:
 	f.On(valkeyLoadedCmd("app.example.com"), bssh.Result{ExitCode: 0})
 	f.On(valkeyCacheFreshCmd("app.example.com"), bssh.Result{ExitCode: 0, Stdout: "no\n"})
+	f.On(valkeyExecCmd(valkeyInstanceUnit("app.example.com")), bssh.Result{ExitCode: 0})
 	f.On(valkeyPingCmd("tenant1", "app.example.com"), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
 
 	if err := Valkey().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -347,6 +350,7 @@ func TestValkeyApplyHealsWedgedInstance(t *testing.T) {
 	f.On("systemctl enable --now "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
 	f.On(valkeyLoadedCmd("app.example.com"), bssh.Result{ExitCode: 0})
 	f.On(valkeyCacheFreshCmd("app.example.com"), bssh.Result{ExitCode: 0, Stdout: "no\n"})
+	f.On(valkeyExecCmd(valkeyInstanceUnit("app.example.com")), bssh.Result{ExitCode: 0})
 	f.OnSeq(valkeyPingCmd("tenant1", "app.example.com"),
 		bssh.Result{ExitCode: 1, Stderr: "Connection refused"},
 		bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
@@ -388,6 +392,7 @@ func TestValkeyApplyReloadsStaleManagerCache(t *testing.T) {
 	f.On("systemctl enable --now "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
 	f.On(valkeyLoadedCmd("app.example.com"), bssh.Result{ExitCode: 0})
 	f.On(valkeyCacheFreshCmd("app.example.com"), bssh.Result{ExitCode: 0, Stdout: "yes\n"}) // stale cache
+	f.On(valkeyExecCmd(valkeyInstanceUnit("app.example.com")), bssh.Result{ExitCode: 0})
 	f.On("systemctl daemon-reload", bssh.Result{})
 	f.On("systemctl restart "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
 	f.On(valkeyPingCmd("tenant1", "app.example.com"), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
@@ -426,6 +431,7 @@ func TestValkeyApplyFailsLoudWhenInstanceStaysDead(t *testing.T) {
 	f.On("systemctl enable --now "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
 	f.On(valkeyLoadedCmd("app.example.com"), bssh.Result{ExitCode: 0})
 	f.On(valkeyCacheFreshCmd("app.example.com"), bssh.Result{ExitCode: 0, Stdout: "no\n"})
+	f.On(valkeyExecCmd(valkeyInstanceUnit("app.example.com")), bssh.Result{ExitCode: 0})
 	f.On(valkeyPingCmd("tenant1", "app.example.com"), bssh.Result{ExitCode: 1, Stderr: "Connection refused"})
 	f.On("systemctl restart "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
 
@@ -463,6 +469,7 @@ func TestValkeyApplySweepsOrphanAndLegacyDropIn(t *testing.T) {
 	f.On("systemctl enable --now "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
 	f.On(valkeyLoadedCmd("app.example.com"), bssh.Result{ExitCode: 0})
 	f.On(valkeyCacheFreshCmd("app.example.com"), bssh.Result{ExitCode: 0, Stdout: "no\n"})
+	f.On(valkeyExecCmd(valkeyInstanceUnit("app.example.com")), bssh.Result{ExitCode: 0})
 	f.On(valkeyPingCmd("tenant1", "app.example.com"), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
 
 	if err := Valkey().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -496,6 +503,7 @@ func TestValkeyApplyLeavesForeignOrphanUnit(t *testing.T) {
 	f.On("systemctl enable --now "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
 	f.On(valkeyLoadedCmd("app.example.com"), bssh.Result{ExitCode: 0})
 	f.On(valkeyCacheFreshCmd("app.example.com"), bssh.Result{ExitCode: 0, Stdout: "no\n"})
+	f.On(valkeyExecCmd(valkeyInstanceUnit("app.example.com")), bssh.Result{ExitCode: 0})
 	f.On(valkeyPingCmd("tenant1", "app.example.com"), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
 
 	if err := Valkey().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -505,5 +513,56 @@ func TestValkeyApplyLeavesForeignOrphanUnit(t *testing.T) {
 		if c.Cmd == "rm -f "+shQuote(orphan) || c.Cmd == "systemctl disable --now berth-valkey-foreign_example_com.service" {
 			t.Error("a foreign file matching the glob must never be disabled or removed")
 		}
+	}
+}
+
+func TestValkeyCheckUnsatisfiedWhenBinaryUpgraded(t *testing.T) {
+	s := valkeyServer()
+	f := bssh.NewFakeRunner()
+	stubValkeyCheckGreen(f, s)
+	// Binary replaced under the running process (unattended-upgrades).
+	f.On(valkeyExecCmd(valkeyInstanceUnit("app.example.com")), bssh.Result{ExitCode: 1})
+	cr, err := Valkey().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied when the running instance executes a replaced (deleted) binary")
+	}
+}
+
+func TestValkeyApplyRestartsStaleBinary(t *testing.T) {
+	s := valkeyServer()
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})
+	f.On("systemctl disable --now valkey-server.service", bssh.Result{})
+	f.On("cat "+shQuote(valkeyDropInPath), bssh.Result{ExitCode: 1})
+	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0, Stdout: valkeyUnitPath("app.example.com") + "\n"})
+	want, _ := renderValkeyUnit(s, s.Sites[0])
+	f.On("cat "+shQuote(valkeyUnitPath("app.example.com")), bssh.Result{ExitCode: 0, Stdout: string(want)}) // up to date
+	f.On("systemctl enable --now "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
+	f.On(valkeyLoadedCmd("app.example.com"), bssh.Result{ExitCode: 0}) // cache/loaded green
+	f.On(valkeyCacheFreshCmd("app.example.com"), bssh.Result{ExitCode: 0, Stdout: "no\n"})
+	f.On(valkeyExecCmd(valkeyInstanceUnit("app.example.com")), bssh.Result{ExitCode: 1}) // binary stale
+	f.On("systemctl restart "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
+	f.On(valkeyPingCmd("tenant1", "app.example.com"), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
+
+	if err := Valkey().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var restarts, reloads int
+	for _, c := range f.Calls() {
+		switch c.Cmd {
+		case "systemctl restart " + valkeyInstanceUnit("app.example.com"):
+			restarts++
+		case "systemctl daemon-reload":
+			reloads++
+		}
+	}
+	if restarts != 1 {
+		t.Errorf("expected one restart for the stale binary, got %d", restarts)
+	}
+	if reloads != 0 {
+		t.Errorf("a stale binary needs no daemon-reload (unit file unchanged), got %d", reloads)
 	}
 }

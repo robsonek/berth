@@ -13,6 +13,7 @@ StateDirectory=berth-valkey/app_example_com
 StateDirectoryMode=0700
 ExecStart=/usr/bin/valkey-server --port 0 --unixsocket /run/berth-valkey/app_example_com/valkey.sock --unixsocketperm 600 --dir /var/lib/berth-valkey/app_example_com --maxmemory 256mb --maxmemory-policy allkeys-lru --supervised systemd --daemonize no
 Restart=always
+TimeoutStopSec=infinity
 
 [Install]
 WantedBy=multi-user.target

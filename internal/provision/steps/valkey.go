@@ -39,6 +39,29 @@ func valkeySocketPath(domain string) string {
 }
 func valkeyDataDir(domain string) string { return valkeyStateBase + "/" + poolName(domain) }
 
+// valkeyBinary is the path the instance units exec; probed for staleness after
+// unattended-upgrades replace the file under a running process.
+const valkeyBinary = "/usr/bin/valkey-server"
+
+// valkeyExecCmd probes whether unit's running process still executes the
+// CURRENT valkey binary: it compares the inode the process's /proc/<pid>/exe
+// resolves to (stat -L follows to the possibly-deleted inode) against the
+// on-disk binary's inode. A mismatch means the binary was replaced (e.g. by
+// unattended-upgrades) under a running process — the stock unit gets a
+// postinst restart, ours do not, so Check must catch it.
+func valkeyExecCmd(unit string) string {
+	return `p="$(systemctl show -p MainPID --value ` + unit + `)"; [ "$(stat -Lc %i /proc/$p/exe 2>/dev/null)" = "$(stat -c %i ` + valkeyBinary + ` 2>/dev/null)" ]`
+}
+
+// valkeyExecCurrent reports whether unit's process runs the current binary.
+func valkeyExecCurrent(ctx context.Context, r bssh.Runner, unit string) (bool, error) {
+	res, err := r.Run(ctx, valkeyExecCmd(unit), nil)
+	if err != nil {
+		return false, err
+	}
+	return res.ExitCode == 0, nil
+}
+
 // renderValkeyUnit renders one site's managed instance unit. All configuration
 // travels as ExecStart args on purpose: nothing here is secret, and it keeps
 // the unit the single managed artifact per site. The maxmemory knobs are the
@@ -156,9 +179,13 @@ func (valkey) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 		}
 		// Liveness beyond "active": the running process must actually use the
 		// on-disk unit (crash between write and restart leaves stale ExecStart
-		// args running — the same window checkTuned closes for MariaDB), and
-		// the daemon must answer over the socket AS the site user.
+		// args running — the same window checkTuned closes for MariaDB), it
+		// must execute the CURRENT binary (unattended-upgrades replaces the
+		// file under the running process; only the stock unit gets a postinst
+		// restart), and the daemon must answer over the socket AS the site
+		// user.
 		loaded, fresh, pong := false, false, false
+		execFresh := false
 		if unitOK && up {
 			if loaded, err = serviceConfigLoaded(ctx, r, valkeyInstanceUnit(site.Domain), valkeyUnitPath(site.Domain)); err != nil {
 				return provision.CheckResult{}, err
@@ -166,11 +193,14 @@ func (valkey) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 			if fresh, err = unitCacheFresh(ctx, r, valkeyInstanceUnit(site.Domain)); err != nil {
 				return provision.CheckResult{}, err
 			}
+			if execFresh, err = valkeyExecCurrent(ctx, r, valkeyInstanceUnit(site.Domain)); err != nil {
+				return provision.CheckResult{}, err
+			}
 			if pong, err = valkeyPong(ctx, r, s.SiteUser(site), site.Domain); err != nil {
 				return provision.CheckResult{}, err
 			}
 		}
-		ok = ok && unitOK && up && loaded && fresh && pong
+		ok = ok && unitOK && up && loaded && fresh && execFresh && pong
 	}
 
 	// Orphans: only berth-MANAGED units count (mirror Apply's guard) — a
@@ -339,15 +369,20 @@ func (valkey) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 			if err != nil {
 				return err
 			}
-			if !loaded || !fresh {
-				// restart alone re-runs the manager's CACHED unit definition —
-				// it never re-reads the file — so without a daemon-reload here
-				// NeedDaemonReload would stay "yes" forever (Check permanently
-				// unsatisfied, one useless restart per Apply).
-				if res, err := r.Run(ctx, "systemctl daemon-reload", nil); err != nil {
-					return err
-				} else if res.ExitCode != 0 {
-					return fmt.Errorf("daemon-reload before restarting stale %s: %s", unit, res.Stderr)
+			execFresh, err := valkeyExecCurrent(ctx, r, unit)
+			if err != nil {
+				return err
+			}
+			if !loaded || !fresh || !execFresh {
+				// A stale manager cache needs a daemon-reload before the
+				// restart (restart alone re-runs the cached definition); a
+				// stale binary just needs the restart (unit file unchanged).
+				if !loaded || !fresh {
+					if res, err := r.Run(ctx, "systemctl daemon-reload", nil); err != nil {
+						return err
+					} else if res.ExitCode != 0 {
+						return fmt.Errorf("daemon-reload before restarting stale %s: %s", unit, res.Stderr)
+					}
 				}
 				if err := restartValkey(ctx, r, unit); err != nil {
 					return err

@@ -12,6 +12,7 @@ StateDirectory=berth-valkey/{{ .Pool }}
 StateDirectoryMode=0700
 ExecStart=/usr/bin/valkey-server --port 0 --unixsocket /run/berth-valkey/{{ .Pool }}/valkey.sock --unixsocketperm 600 --dir /var/lib/berth-valkey/{{ .Pool }} --maxmemory {{ .Maxmemory }} --maxmemory-policy {{ .Policy }} --supervised systemd --daemonize no
 Restart=always
+TimeoutStopSec=infinity
 
 [Install]
 WantedBy=multi-user.target
