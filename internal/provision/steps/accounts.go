@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/robsonek/berth/internal/config"
@@ -22,6 +23,12 @@ const (
 	// consolePasswordLen matches the database step's generated-password length.
 	consolePasswordLen = 32
 )
+
+// reConsolePassword matches secret.Generate's alphanumeric charset (identical to
+// the database step's reDBPassword). A cached console password is re-validated
+// against it before chpasswd, so a tampered cache cannot inject a newline — and
+// thus a second chpasswd record (e.g. overwriting root's password).
+var reConsolePassword = regexp.MustCompile(`^[A-Za-z0-9]+$`)
 
 type accounts struct {
 	redactor *secret.Redactor
@@ -311,13 +318,18 @@ func (a accounts) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serv
 // nothing worse than a lingering plaintext for an unusable password; the
 // reverse order could leave berth's password live and unowned forever.
 // Dropping the marker also keeps a stale root-equivalent plaintext out of
-// .berth once it stops working; re-enabling mints a fresh password.
+// ~/.berth once it stops working; re-enabling mints a fresh password.
 func (a accounts) ensureConsolePassword(ctx context.Context, s *config.Server, r bssh.Runner) error {
 	usable, err := consolePasswordUsable(ctx, r)
 	if err != nil {
 		return err
 	}
 	if s.System.BreakGlass && !usable {
+		release, err := secret.LockCache(s.Host)
+		if err != nil {
+			return fmt.Errorf("lock local secret cache: %w", err)
+		}
+		defer release()
 		cache, err := secret.LoadCache(s.Host)
 		if err != nil {
 			return fmt.Errorf("load local secret cache: %w", err)
@@ -328,9 +340,16 @@ func (a accounts) ensureConsolePassword(ctx context.Context, s *config.Server, r
 				return fmt.Errorf("generate console password: %w", err)
 			}
 			cache[consoleCacheKey] = pw
+			// Persist BEFORE chpasswd: a set-but-uncached password would be
+			// unrecoverable by the operator.
 			if err := secret.SaveCache(s.Host, cache); err != nil {
 				return fmt.Errorf("cache console password: %w", err)
 			}
+		}
+		// Validate before feeding chpasswd via stdin: a tampered cache value
+		// with a newline would inject a second chpasswd record (e.g. root:…).
+		if !reConsolePassword.MatchString(pw) {
+			return fmt.Errorf("console password from local cache is outside the allowed charset; refusing to use it")
 		}
 		a.redactor.Add(pw)
 		if res, err := r.Run(ctx, "chpasswd", []byte("berth:"+pw+"\n")); err != nil {
@@ -341,6 +360,11 @@ func (a accounts) ensureConsolePassword(ctx context.Context, s *config.Server, r
 		return nil
 	}
 	if !s.System.BreakGlass && usable {
+		release, err := secret.LockCache(s.Host)
+		if err != nil {
+			return fmt.Errorf("lock local secret cache: %w", err)
+		}
+		defer release()
 		cache, err := secret.LoadCache(s.Host)
 		if err != nil {
 			return fmt.Errorf("load local secret cache: %w", err)

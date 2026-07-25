@@ -627,6 +627,27 @@ func TestAccountsApplyBreakGlassReusesCachedPassword(t *testing.T) {
 	}
 }
 
+func TestAccountsApplyBreakGlassRefusesTamperedConsolePassword(t *testing.T) {
+	chdirTemp(t)
+	s := testServerWithKey(t)
+	s.System.BreakGlass = true
+	if err := secret.SaveCache(s.Host, map[string]string{"console:berth": "good\nroot:evil"}); err != nil {
+		t.Fatal(err)
+	}
+	f := stubFullApply(t, s)
+	stubConsoleLocked(f) // berth console not usable -> the set-password branch runs
+	// chpasswd deliberately NOT stubbed: the guard must refuse before running it.
+	err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "charset") {
+		t.Fatalf("Apply() = %v, want a refusal to use the tampered cached console password", err)
+	}
+	for _, c := range f.Calls() {
+		if c.Cmd == "chpasswd" {
+			t.Error("chpasswd must not run with a cache value outside the allowed charset")
+		}
+	}
+}
+
 func TestAccountsApplyBreakGlassNeverRotatesUsablePassword(t *testing.T) {
 	chdirTemp(t)
 	s := testServerWithKey(t)
