@@ -23,9 +23,14 @@ const (
 	managedMarkerINI = "; managed by berth"
 )
 
-// hasManagedMarker reports whether content begins with either marker variant.
+// hasManagedMarker reports whether the FIRST LINE of content is exactly one
+// of the marker variants. Exact-line on purpose: the marker guards
+// destructive paths (overwrite-without---force, drift-removal rm), and a
+// prefix match would accept a foreign tool's "# managed by berth-backup"
+// as berth's own file.
 func hasManagedMarker(content string) bool {
-	return strings.HasPrefix(content, managedMarker) || strings.HasPrefix(content, managedMarkerINI)
+	line, _, _ := strings.Cut(content, "\n")
+	return line == managedMarker || line == managedMarkerINI
 }
 
 // contentHash returns the hex SHA-256 of b; used to detect out-of-band drift in

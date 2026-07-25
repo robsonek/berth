@@ -282,8 +282,12 @@ after('deploy:publish', function () {
 ## Security & hardening
 
 Every provision hardens the host (in addition to the anti-lockout SSH drop-in,
-which disables root login and password authentication only after verifying the
-`berth` admin account can connect with a key and sudo):
+which disables root login, password and keyboard-interactive authentication
+only after verifying the `berth` admin account can connect with a key and
+sudo — and berth verifies via `sshd -T` that these global directives win in
+the configuration sshd loads, so an image drop-in such as cloud-init's cannot
+silently re-enable password logins; operator-added `Match` blocks are out of
+scope):
 
 - **Automatic security updates** — the APT periodic config is written so
   `unattended-upgrades` actually applies updates (the package alone is inert

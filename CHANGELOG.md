@@ -3,6 +3,25 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Changed
+
+- **sshd hardening now enforces the effective configuration** — the managed
+  drop-in moved to `/etc/ssh/sshd_config.d/00-berth.conf` so it wins OpenSSH's
+  first-value-wins ordering against image drop-ins (e.g. cloud-init's
+  `50-cloud-init.conf` re-enabling password auth), it additionally sets
+  `KbdInteractiveAuthentication no`, and both Check and Apply verify via
+  `sshd -T` that the global directives win in the configuration sshd loads —
+  a foreign override fails the run loudly naming candidate files, as does a
+  non-empty `SSHD_OPTS` in `/etc/default/ssh` (command-line options would
+  bypass what berth verifies; `Match` blocks are out of scope). The legacy
+  `berth.conf` drop-in is migrated away automatically.
+- **Managed-file detection requires the exact marker line** — a foreign file
+  whose first line merely starts with the marker (e.g.
+  `# managed by berth-backup`) is no longer treated as berth-managed, so it
+  can neither be overwritten without `--force` nor removed by drift cleanup.
+
 ## [0.14.0] — 2026-07-24
 
 ### Added
