@@ -112,6 +112,20 @@ func (tls) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 					Changes:   []string{"install certbot renewal deploy hook (nginx validate + reload)"},
 				}, nil
 			}
+			// The renewal timer must actually be running, or a cert left
+			// untouched (e.g. a near-expiry production cert under --ssl-staging,
+			// which we deliberately do not reissue) will silently expire.
+			active, err := r.Run(ctx, "systemctl is-active certbot.timer", nil)
+			if err != nil {
+				return provision.CheckResult{}, err
+			}
+			if strings.TrimSpace(active.Stdout) != "active" {
+				return provision.CheckResult{
+					Satisfied: false,
+					Reason:    "certbot.timer is not active; automatic Let's Encrypt renewal is disabled",
+					Changes:   []string{"enable certbot.timer"},
+				}, nil
+			}
 		}
 	} else {
 		present, err := managedFilePresent(ctx, r, certbotDeployHookPath)
@@ -189,6 +203,13 @@ func (st tls) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 				Owner: "root", Group: "root", Mode: 0o755, Sudo: true,
 			}); err != nil {
 				return fmt.Errorf("write certbot deploy hook: %w", err)
+			}
+			// Ensure automatic renewal is running even when no cert was issued
+			// this run (issue() only reaches this for a freshly issued cert).
+			if res, err := r.Run(ctx, "systemctl enable --now certbot.timer", nil); err != nil {
+				return err
+			} else if res.ExitCode != 0 {
+				return fmt.Errorf("enable certbot.timer: %s", res.Stderr)
 			}
 		}
 	} else {

@@ -67,6 +67,7 @@ func TestTLSCheckSatisfiedWhenValidCertPresent(t *testing.T) {
 	})
 	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
 	hookStub(t, f)
+	f.On("systemctl is-active certbot.timer", bssh.Result{ExitCode: 0, Stdout: "active\n"})
 	cr, err := TLS().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -114,6 +115,7 @@ func TestTLSApplyShortCircuitsOnValidCert(t *testing.T) {
 	})
 	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 1}) // hook write-guard: absent
+	f.On("systemctl enable --now certbot.timer", bssh.Result{ExitCode: 0})
 	// No certbot certonly, install, or reload stubbed: a present valid cert must
 	// short-circuit Apply entirely.
 	if err := TLS().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -268,6 +270,7 @@ func TestTLSCheckAcceptsStagingCertUnderStagingRun(t *testing.T) {
 	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: certbotStagingCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour))})
 	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
 	hookStub(t, f)
+	f.On("systemctl is-active certbot.timer", bssh.Result{ExitCode: 0, Stdout: "active\n"})
 	cr, err := TLS().Check(context.Background(), provision.RunCtx{SSLStaging: true}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -326,6 +329,7 @@ func TestTLSApplyLeavesProductionCertUnderStagingRun(t *testing.T) {
 			f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: certbotCertsOutput(s.Sites[0].Domain, expiry)})
 			f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
 			f.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 1})
+			f.On("systemctl enable --now certbot.timer", bssh.Result{ExitCode: 0})
 			if err := TLS().Apply(context.Background(), provision.RunCtx{SSLStaging: true}, s, f); err != nil {
 				t.Fatalf("Apply() error = %v", err)
 			}
@@ -553,6 +557,7 @@ func TestTLSApplyWritesDeployHook(t *testing.T) {
 	})
 	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 1}) // hook write-guard: absent
+	f.On("systemctl enable --now certbot.timer", bssh.Result{ExitCode: 0})
 	if err := TLS().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
@@ -581,6 +586,54 @@ func TestTLSApplyWritesDeployHook(t *testing.T) {
 	}
 }
 
+func TestTLSCheckUnsatisfiedWhenCertbotTimerInactive(t *testing.T) {
+	s := tlsServer()
+	f := bssh.NewFakeRunner()
+	// A valid production cert exists (per-site loop short-circuits)...
+	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: certbotCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour))})
+	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
+	hookStub(t, f) // deploy hook present and current
+	f.On("systemctl is-active certbot.timer", bssh.Result{ExitCode: 3, Stdout: "inactive\n"})
+	cr, err := TLS().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("Check must be unsatisfied when certbot.timer is not active")
+	}
+	if !strings.Contains(cr.Reason, "certbot.timer") {
+		t.Errorf("Reason %q should name certbot.timer", cr.Reason)
+	}
+}
+
+func TestTLSApplyEnablesCertbotTimerWithoutIssuing(t *testing.T) {
+	s := tlsServer()
+	f := bssh.NewFakeRunner()
+	// Valid cert -> per-site loop short-circuits, no certonly this run.
+	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: certbotCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour))})
+	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
+	f.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 1}) // hook write-guard: absent
+	f.On("systemctl enable --now certbot.timer", bssh.Result{ExitCode: 0})
+	if err := TLS().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var sawEnable, sawCertonly bool
+	for _, c := range f.Calls() {
+		if c.Cmd == "systemctl enable --now certbot.timer" {
+			sawEnable = true
+		}
+		if strings.Contains(c.Cmd, "certonly") {
+			sawCertonly = true
+		}
+	}
+	if !sawEnable {
+		t.Error("Apply must enable certbot.timer even when no certificate is issued")
+	}
+	if sawCertonly {
+		t.Error("no certonly should run for a valid cert")
+	}
+}
+
 func TestTLSApplyRefusesForeignDeployHookWithoutForce(t *testing.T) {
 	// tls.Check returns unsatisfied at the first invalid cert BEFORE classifying
 	// the deploy hook, so Apply's write path must itself refuse to clobber a
@@ -595,6 +648,8 @@ func TestTLSApplyRefusesForeignDeployHookWithoutForce(t *testing.T) {
 		})
 		f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
 		f.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 0, Stdout: "service apache2 reload\n"}) // no marker
+		// Reached only on the --force path (the refusal aborts before the timer).
+		f.On("systemctl enable --now certbot.timer", bssh.Result{ExitCode: 0})
 		return f
 	}
 

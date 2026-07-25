@@ -17,6 +17,13 @@ Notable changes to berth. Older releases are documented on the
   could never be served (nginx cannot traverse the `0700` home) and let the
   tenant symlink-swap the directory to root. Conventional layouts
   (`/var/www/<domain>`, `/srv/…`, `/opt/…`) are unaffected.
+- **`appdirs` refuses a symlinked deploy target** — before creating a site's
+  directories, berth now verifies that no component of the deploy tree or the
+  ACME webroot is a symlink. Without this, migrating a `deploy_path` to a
+  descendant of the site's own prior (tenant-owned) directory let a tenant plant
+  a symlink that root's `install -d` would follow and chown, reaching root. The
+  path validation cannot catch this (the new path is valid and the old one has
+  left the config), so the guard is a runtime check.
 
 ### Fixed
 
@@ -35,6 +42,12 @@ Notable changes to berth. Older releases are documented on the
   the correct lineage is read and written. A staging run never replaces a
   production certificate, and a staging replacement blocked by a DNS mismatch
   fails loudly rather than drifting.
+- **`certbot.timer` is now verified and enabled on every Let's Encrypt run** —
+  previously the renewal timer was enabled only right after issuing a
+  certificate, so a run that left an existing certificate untouched (e.g. a
+  near-expiry production certificate under `--ssl-staging`) could report success
+  while automatic renewal was disabled. Check now reports the inactive timer and
+  Apply enables it whenever certbot is installed.
 
 ## [0.15.0] — 2026-07-25
 
