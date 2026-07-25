@@ -24,6 +24,100 @@ const (
 	fail2banJailPath     = "/etc/fail2ban/jail.local"
 )
 
+// sshdEffectiveWant lists the directives (exactly as sshd -T prints them:
+// lowercase key, single space, value) that must hold in the EFFECTIVE global
+// configuration. Byte-comparing berth's own drop-in is not enough: sshd
+// keeps the FIRST value it parses per directive, so a drop-in sorting
+// earlier can override berth's file while its bytes stay perfect.
+// Contract: global directives only — Match blocks are not evaluated
+// (sshd -T without -C), by design; see the README wording.
+var sshdEffectiveWant = []string{
+	"permitrootlogin no",
+	"passwordauthentication no",
+	"kbdinteractiveauthentication no",
+}
+
+// sshdOptsProbe reads any SSHD_OPTS assignment from /etc/default/ssh.
+// Debian's ssh.service starts `sshd -D $SSHD_OPTS` (EnvironmentFile), and
+// command-line options override every config file — so a non-empty value
+// means `sshd -T` cannot reproduce the daemon's effective view and berth
+// must fail closed. grep -s: a missing file exits non-zero with no output,
+// which parses as "unset".
+const sshdOptsProbe = `grep -hs '^[[:space:]]*SSHD_OPTS=' /etc/default/ssh`
+
+// sshdOptsValue extracts the value of the LAST SSHD_OPTS assignment (later
+// assignments win for both shell sourcing and systemd's EnvironmentFile),
+// stripping surrounding quotes and whitespace. Empty string = unset.
+func sshdOptsValue(out string) string {
+	val := ""
+	for _, line := range strings.Split(out, "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "SSHD_OPTS="); ok {
+			val = strings.Trim(strings.TrimSpace(rest), `"'`)
+		}
+	}
+	return strings.TrimSpace(val)
+}
+
+// sshdEffective verifies the effective global sshd configuration: it fails
+// closed on a non-empty SSHD_OPTS, then dumps the config (sshd -T) and
+// returns which required directives are missing. A non-zero sshd -T exit is
+// an error: the config is broken in a way berth does not own.
+func sshdEffective(ctx context.Context, r bssh.Runner) (missing []string, err error) {
+	opts, err := r.Run(ctx, sshdOptsProbe, nil)
+	if err != nil {
+		return nil, err
+	}
+	if v := sshdOptsValue(opts.Stdout); v != "" {
+		return nil, fmt.Errorf("cannot verify the effective sshd config: /etc/default/ssh sets SSHD_OPTS=%q, and sshd command-line options override sshd_config; clear it (or move it into a config drop-in) and re-run", v)
+	}
+	res, err := r.Run(ctx, "sshd -T", nil)
+	if err != nil {
+		return nil, err
+	}
+	if res.ExitCode != 0 {
+		return nil, fmt.Errorf("sshd -T failed (cannot verify effective sshd config): %s", res.Stderr)
+	}
+	have := make(map[string]bool)
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		have[strings.TrimSpace(line)] = true
+	}
+	for _, want := range sshdEffectiveWant {
+		if !have[want] {
+			missing = append(missing, want)
+		}
+	}
+	return missing, nil
+}
+
+// sshdConflictGrep lists files that mention the protected directives (plus
+// challengeresponseauthentication, the deprecated alias sshd still accepts
+// for kbdinteractiveauthentication). Anchored + case-insensitive so pure
+// comment lines do not match; explicit paths, no recursion — sshd includes
+// nothing else. Kept as one stable string so tests can stub it.
+const sshdConflictGrep = `grep -ilE '^[[:space:]]*(passwordauthentication|permitrootlogin|kbdinteractiveauthentication|challengeresponseauthentication)' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf`
+
+// sshdConflictSources best-effort names CANDIDATE files that could be
+// overriding berth's drop-in (grep cannot attribute first-match precedence,
+// hence "candidate"). Berth's own drop-in is filtered out; on any failure it
+// degrades to a generic hint.
+func sshdConflictSources(ctx context.Context, r bssh.Runner) string {
+	const hint = "inspect /etc/ssh/sshd_config and /etc/ssh/sshd_config.d/"
+	res, err := r.Run(ctx, sshdConflictGrep, nil)
+	if err != nil || res.ExitCode != 0 {
+		return hint
+	}
+	var files []string
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		if f := strings.TrimSpace(line); f != "" && f != sshdDropInPath {
+			files = append(files, f)
+		}
+	}
+	if len(files) == 0 {
+		return hint
+	}
+	return "candidate sources: " + strings.Join(files, ", ")
+}
+
 // renderFail2banJail renders the managed jail.local: a port-bound sshd jail
 // (journald backend) plus the recidive jail, with operator-tunable knobs.
 func renderFail2banJail(s *config.Server) ([]byte, error) {
@@ -101,6 +195,37 @@ func (hardening) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 		return provision.CheckResult{}, err
 	}
 
+	// A berth-managed drop-in at the legacy (pre-00 rename) path must be
+	// migrated away. A foreign file there is left alone: it is not ours to
+	// delete, and any global directive it sets is caught by the effective
+	// probe below.
+	legacyPresent, err := managedFilePresent(ctx, r, sshdDropInLegacyPath)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+
+	// Effective-config probe, gated on everything berth owns being converged
+	// (otherwise the step is unsatisfied anyway and Apply reconciles berth's
+	// files first — the gate also keeps a malformed managed legacy file from
+	// erroring sshd -T before Apply gets the chance to remove it).
+	effectiveOK := false
+	if sshdOK && !legacyPresent {
+		missing, err := sshdEffective(ctx, r)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if len(missing) > 0 {
+			// Berth's inputs are converged, so Apply could only rewrite
+			// identical bytes and fail the same gate forever: an effective
+			// override is unfixable from here and must fail loud, not report
+			// reconcilable drift (dry-run would otherwise promise a fix).
+			return provision.CheckResult{}, fmt.Errorf(
+				"sshd effective config lacks %q although %s is up to date — another file wins first-match (%s)",
+				strings.Join(missing, ", "), sshdDropInPath, sshdConflictSources(ctx, r))
+		}
+		effectiveOK = true
+	}
+
 	// The managed fail2ban jail must be present and up to date.
 	jailWant, err := renderFail2banJail(s)
 	if err != nil {
@@ -115,7 +240,7 @@ func (hardening) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 		return provision.CheckResult{}, err
 	}
 
-	if ufwActive && f2bUp && sshdOK && udpOK && jailOK {
+	if ufwActive && f2bUp && sshdOK && !legacyPresent && effectiveOK && udpOK && jailOK {
 		return provision.CheckResult{Satisfied: true, Reason: "firewall, fail2ban and sshd hardening in place"}, nil
 	}
 	return provision.CheckResult{
@@ -125,7 +250,8 @@ func (hardening) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 			"ufw allow ssh/80/443 + enable",
 			"install fail2ban",
 			"write managed fail2ban jail (sshd port-bound, recidive)",
-			"disable root login and password auth (after anti-lockout gate)",
+			"disable root login, password and kbd-interactive auth (after anti-lockout gate)",
+			"verify the directives win in the effective sshd config (sshd -T)",
 		},
 	}, nil
 }
