@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/robsonek/berth/internal/apt"
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
 	bssh "github.com/robsonek/berth/internal/ssh"
@@ -160,11 +159,9 @@ func (valkey) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 			if fresh, err = unitCacheFresh(ctx, r, valkeyInstanceUnit(site.Domain)); err != nil {
 				return provision.CheckResult{}, err
 			}
-			res, err := r.Run(ctx, valkeyPingCmd(s.SiteUser(site), site.Domain), nil)
-			if err != nil {
+			if pong, err = valkeyPong(ctx, r, s.SiteUser(site), site.Domain); err != nil {
 				return provision.CheckResult{}, err
 			}
-			pong = res.ExitCode == 0 && strings.TrimSpace(res.Stdout) == "PONG"
 		}
 		ok = ok && unitOK && up && loaded && fresh && pong
 	}
@@ -206,14 +203,179 @@ func (valkey) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 	}, nil
 }
 
-func (valkey) Apply(ctx context.Context, _ provision.RunCtx, _ *config.Server, r bssh.Runner) error {
-	if err := apt.New(r).EnsurePackages(ctx, nil, "valkey-server"); err != nil {
+func (valkey) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
+	if err := aptInstall(ctx, r, "valkey-server"); err != nil {
 		return fmt.Errorf("install valkey-server: %w", err)
 	}
-	if res, err := r.Run(ctx, "systemctl enable --now "+valkeyUnit, nil); err != nil {
+	// The stock shared service is the unauthenticated 6379 listener this step
+	// replaces. disable --now is idempotent, and a disabled unit is not
+	// re-enabled by package upgrades (deb-systemd-helper respects the state).
+	if res, err := r.Run(ctx, "systemctl disable --now "+valkeyUnit, nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
-		return fmt.Errorf("enable valkey-server: %s", res.Stderr)
+		return fmt.Errorf("disable stock %s: %s", valkeyUnit, res.Stderr)
+	}
+
+	needReload := false
+
+	// Migrate the legacy tuning drop-in (targeted the stock unit) — guarded:
+	// only a berth-managed file is removed.
+	if present, err := managedFilePresent(ctx, r, valkeyDropInPath); err != nil {
+		return err
+	} else if present {
+		if res, err := r.Run(ctx, "rm -f "+shQuote(valkeyDropInPath), nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("remove legacy %s: %s", valkeyDropInPath, res.Stderr)
+		}
+		if res, err := r.Run(ctx, "rmdir --ignore-fail-on-non-empty "+shQuote(valkeyDropInDir), nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("rmdir %s: %s", valkeyDropInDir, res.Stderr)
+		}
+		needReload = true
+	}
+
+	// Orphan sweep, modelled on the supervisor one in site.go: disable and
+	// remove berth-managed instances no site desires; never a foreign file.
+	desired := desiredValkeyUnitPaths(s)
+	units, err := listValkeyUnits(ctx, r)
+	if err != nil {
+		return err
+	}
+	for _, u := range units {
+		if desired[u] {
+			continue
+		}
+		present, err := managedFilePresent(ctx, r, u)
+		if err != nil {
+			return err
+		}
+		if !present {
+			continue
+		}
+		unit := strings.TrimPrefix(u, valkeyUnitDir+"/")
+		if res, err := r.Run(ctx, "systemctl disable --now "+unit, nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("disable orphan %s: %s", unit, res.Stderr)
+		}
+		if res, err := r.Run(ctx, "rm -f "+shQuote(u), nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("remove orphan %s: %s", u, res.Stderr)
+		}
+		needReload = true
+	}
+
+	// Per-site units: write when absent or drifted (writeManagedFile enforces
+	// the foreign-file abort), remember which changed for a targeted restart.
+	changed := map[string]bool{}
+	for _, site := range s.Sites {
+		want, err := renderValkeyUnit(s, site)
+		if err != nil {
+			return err
+		}
+		state, err := checkManagedFile(ctx, r, valkeyUnitPath(site.Domain), want)
+		if err != nil {
+			return err
+		}
+		if state == fileUpToDate {
+			continue
+		}
+		if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
+			Path: valkeyUnitPath(site.Domain), Content: want,
+			Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
+		}); err != nil {
+			return fmt.Errorf("write %s: %w", valkeyUnitPath(site.Domain), err)
+		}
+		// A replaced unit needs a restart to load the new ExecStart; a FRESH
+		// one does not — enable --now below starts it with current content.
+		if state != fileAbsent {
+			changed[site.Domain] = true
+		}
+		needReload = true
+	}
+
+	if needReload {
+		if res, err := r.Run(ctx, "systemctl daemon-reload", nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("daemon-reload: %s", res.Stderr)
+		}
+	}
+
+	for _, site := range s.Sites {
+		unit := valkeyInstanceUnit(site.Domain)
+		if res, err := r.Run(ctx, "systemctl enable --now "+unit, nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("enable %s: %s", unit, res.Stderr)
+		}
+		// enable --now is a no-op on an already-running unit, so a REPLACED
+		// unit needs an explicit restart to load the rewritten ExecStart; an
+		// untouched one may still be running stale config after a crash
+		// between a past write and its restart (the loaded/NeedDaemonReload
+		// probes catch that).
+		restarted := false
+		if changed[site.Domain] {
+			if err := restartValkey(ctx, r, unit); err != nil {
+				return err
+			}
+			restarted = true
+		} else {
+			loaded, err := serviceConfigLoaded(ctx, r, unit, valkeyUnitPath(site.Domain))
+			if err != nil {
+				return err
+			}
+			fresh, err := unitCacheFresh(ctx, r, unit)
+			if err != nil {
+				return err
+			}
+			if !loaded || !fresh {
+				if err := restartValkey(ctx, r, unit); err != nil {
+					return err
+				}
+				restarted = true
+			}
+		}
+		// Heal-and-verify: an up-to-date unit whose daemon is wedged (or whose
+		// socket vanished) would otherwise never converge — Check unsatisfied,
+		// Apply all-no-op, forever. One restart, then fail loud.
+		pong, err := valkeyPong(ctx, r, s.SiteUser(site), site.Domain)
+		if err != nil {
+			return err
+		}
+		if !pong && !restarted {
+			if err := restartValkey(ctx, r, unit); err != nil {
+				return err
+			}
+			if pong, err = valkeyPong(ctx, r, s.SiteUser(site), site.Domain); err != nil {
+				return err
+			}
+		}
+		if !pong {
+			return fmt.Errorf("%s does not answer PONG on %s as %s (restart did not heal it); check `journalctl -u %s`",
+				unit, valkeySocketPath(site.Domain), s.SiteUser(site), unit)
+		}
+	}
+	return nil
+}
+
+// valkeyPong runs the per-site PONG probe (see valkeyPingCmd).
+func valkeyPong(ctx context.Context, r bssh.Runner, user, domain string) (bool, error) {
+	res, err := r.Run(ctx, valkeyPingCmd(user, domain), nil)
+	if err != nil {
+		return false, err
+	}
+	return res.ExitCode == 0 && strings.TrimSpace(res.Stdout) == "PONG", nil
+}
+
+func restartValkey(ctx context.Context, r bssh.Runner, unit string) error {
+	if res, err := r.Run(ctx, "systemctl restart "+unit, nil); err != nil {
+		return err
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("restart %s: %s", unit, res.Stderr)
 	}
 	return nil
 }

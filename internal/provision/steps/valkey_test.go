@@ -232,21 +232,235 @@ func TestRenderValkeyUnit(t *testing.T) {
 	}
 }
 
-func TestValkeyApplyInstallsAndEnables(t *testing.T) {
+func TestValkeyApplyConvergesFreshFleet(t *testing.T) {
+	s := valkeyServer()
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})
-	f.On("systemctl enable --now valkey-server.service", bssh.Result{})
-	if err := Valkey().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f); err != nil {
+	f.On("systemctl disable --now valkey-server.service", bssh.Result{})
+	f.On("cat "+shQuote(valkeyDropInPath), bssh.Result{ExitCode: 1})                  // legacy: absent
+	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0})                                // no instances yet
+	f.On("cat "+shQuote(valkeyUnitPath("app.example.com")), bssh.Result{ExitCode: 1}) // write-guard: absent
+	f.On("systemctl daemon-reload", bssh.Result{})
+	f.On("systemctl enable --now "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
+	// Fresh unit -> no restart; the post-enable liveness/heal probes run:
+	f.On(valkeyLoadedCmd("app.example.com"), bssh.Result{ExitCode: 0})
+	f.On(valkeyCacheFreshCmd("app.example.com"), bssh.Result{ExitCode: 0, Stdout: "no\n"})
+	f.On(valkeyPingCmd("tenant1", "app.example.com"), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
+
+	if err := Valkey().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
-	var cmds []string
-	for _, c := range f.Calls() {
-		cmds = append(cmds, c.Cmd)
+	idx := func(want string) int {
+		for i, c := range f.Calls() {
+			if c.Cmd == want {
+				return i
+			}
+		}
+		return -1
 	}
-	joined := strings.Join(cmds, "\n")
-	for _, want := range []string{"apt-get install -y valkey-server", "systemctl enable --now valkey-server.service"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("Apply did not run %q; calls:\n%s", want, joined)
+	// lastIdx: the unit path is cat'ed twice (checkManagedFile, then
+	// writeManagedFile's guard). The SECOND cat immediately precedes the
+	// actual write — the closest observable proxy for write-before-reload,
+	// since FakeRunner records WriteFile outside the Run timeline.
+	lastIdx := func(want string) int {
+		last := -1
+		for i, c := range f.Calls() {
+			if c.Cmd == want {
+				last = i
+			}
+		}
+		return last
+	}
+	install := idx("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server")
+	stockOff := idx("systemctl disable --now valkey-server.service")
+	guard := lastIdx("cat " + shQuote(valkeyUnitPath("app.example.com")))
+	reload := idx("systemctl daemon-reload")
+	enable := idx("systemctl enable --now " + valkeyInstanceUnit("app.example.com"))
+	if install < 0 || stockOff < 0 || guard < 0 || reload < 0 || enable < 0 {
+		t.Fatalf("missing commands; install=%d stockOff=%d guard=%d reload=%d enable=%d", install, stockOff, guard, reload, enable)
+	}
+	if !(install < stockOff && stockOff < guard && guard < reload && reload < enable) {
+		t.Errorf("want install < stock-disable < write-guard < daemon-reload < enable; got %d %d %d %d %d", install, stockOff, guard, reload, enable)
+	}
+	for _, c := range f.Calls() {
+		if c.Cmd == "systemctl restart "+valkeyInstanceUnit("app.example.com") {
+			t.Error("a FRESH unit must not be restarted after enable --now")
+		}
+	}
+	var wrote bool
+	for _, w := range f.Writes() {
+		if w.Path == valkeyUnitPath("app.example.com") {
+			wrote = true
+			if w.Owner != "root" || w.Group != "root" || w.Mode != 0o644 {
+				t.Errorf("unit FileSpec = %s:%s %o, want root:root 644", w.Owner, w.Group, w.Mode)
+			}
+		}
+	}
+	if !wrote {
+		t.Error("instance unit was not written")
+	}
+}
+
+func TestValkeyApplyRestartsDriftedUnit(t *testing.T) {
+	s := valkeyServer()
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})
+	f.On("systemctl disable --now valkey-server.service", bssh.Result{})
+	f.On("cat "+shQuote(valkeyDropInPath), bssh.Result{ExitCode: 1})
+	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0, Stdout: valkeyUnitPath("app.example.com") + "\n"})
+	// Managed unit with stale content -> drift -> rewrite + restart.
+	f.On("cat "+shQuote(valkeyUnitPath("app.example.com")),
+		bssh.Result{ExitCode: 0, Stdout: managedMarker + "\n[Service]\nExecStart=/usr/bin/valkey-server --old\n"})
+	f.On("systemctl daemon-reload", bssh.Result{})
+	f.On("systemctl enable --now "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
+	f.On("systemctl restart "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
+	f.On(valkeyPingCmd("tenant1", "app.example.com"), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
+
+	if err := Valkey().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var restarted bool
+	for _, c := range f.Calls() {
+		if c.Cmd == "systemctl restart "+valkeyInstanceUnit("app.example.com") {
+			restarted = true
+		}
+	}
+	if !restarted {
+		t.Error("a drifted unit must be restarted to load the new config")
+	}
+}
+
+func TestValkeyApplyHealsWedgedInstance(t *testing.T) {
+	// Everything on disk is converged, but the daemon does not answer (wedged
+	// process, vanished socket). Without the heal path Check stays unsatisfied
+	// and Apply is a no-op — an infinite loop. Apply must restart once and
+	// re-probe.
+	s := valkeyServer()
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})
+	f.On("systemctl disable --now valkey-server.service", bssh.Result{})
+	f.On("cat "+shQuote(valkeyDropInPath), bssh.Result{ExitCode: 1})
+	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0, Stdout: valkeyUnitPath("app.example.com") + "\n"})
+	want, _ := renderValkeyUnit(s, s.Sites[0])
+	f.On("cat "+shQuote(valkeyUnitPath("app.example.com")), bssh.Result{ExitCode: 0, Stdout: string(want)}) // up to date
+	f.On("systemctl enable --now "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
+	f.On(valkeyLoadedCmd("app.example.com"), bssh.Result{ExitCode: 0})
+	f.On(valkeyCacheFreshCmd("app.example.com"), bssh.Result{ExitCode: 0, Stdout: "no\n"})
+	f.OnSeq(valkeyPingCmd("tenant1", "app.example.com"),
+		bssh.Result{ExitCode: 1, Stderr: "Connection refused"},
+		bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
+	f.On("systemctl restart "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
+
+	if err := Valkey().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var restarts int
+	for _, c := range f.Calls() {
+		if c.Cmd == "systemctl restart "+valkeyInstanceUnit("app.example.com") {
+			restarts++
+		}
+	}
+	if restarts != 1 {
+		t.Errorf("expected exactly one healing restart, got %d", restarts)
+	}
+	// No daemon-reload: nothing on disk changed.
+	for _, c := range f.Calls() {
+		if c.Cmd == "systemctl daemon-reload" {
+			t.Error("no daemon-reload expected when no unit changed")
+		}
+	}
+}
+
+func TestValkeyApplyFailsLoudWhenInstanceStaysDead(t *testing.T) {
+	s := valkeyServer()
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})
+	f.On("systemctl disable --now valkey-server.service", bssh.Result{})
+	f.On("cat "+shQuote(valkeyDropInPath), bssh.Result{ExitCode: 1})
+	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0, Stdout: valkeyUnitPath("app.example.com") + "\n"})
+	want, _ := renderValkeyUnit(s, s.Sites[0])
+	f.On("cat "+shQuote(valkeyUnitPath("app.example.com")), bssh.Result{ExitCode: 0, Stdout: string(want)})
+	f.On("systemctl enable --now "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
+	f.On(valkeyLoadedCmd("app.example.com"), bssh.Result{ExitCode: 0})
+	f.On(valkeyCacheFreshCmd("app.example.com"), bssh.Result{ExitCode: 0, Stdout: "no\n"})
+	f.On(valkeyPingCmd("tenant1", "app.example.com"), bssh.Result{ExitCode: 1, Stderr: "Connection refused"})
+	f.On("systemctl restart "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
+
+	err := Valkey().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "PONG") {
+		t.Fatalf("err = %v, want a loud does-not-answer-PONG failure", err)
+	}
+	var restarts int
+	for _, c := range f.Calls() {
+		if c.Cmd == "systemctl restart "+valkeyInstanceUnit("app.example.com") {
+			restarts++
+		}
+	}
+	if restarts != 1 {
+		t.Errorf("expected exactly one healing restart before failing, got %d", restarts)
+	}
+}
+
+func TestValkeyApplySweepsOrphanAndLegacyDropIn(t *testing.T) {
+	s := valkeyServer()
+	orphan := "/etc/systemd/system/berth-valkey-gone_example_com.service"
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})
+	f.On("systemctl disable --now valkey-server.service", bssh.Result{})
+	// Legacy berth-managed tuning drop-in present -> removed (+ rmdir attempt).
+	f.On("cat "+shQuote(valkeyDropInPath), bssh.Result{ExitCode: 0, Stdout: managedMarker + "\n[Service]\n"})
+	f.On("rm -f "+shQuote(valkeyDropInPath), bssh.Result{})
+	f.On("rmdir --ignore-fail-on-non-empty "+shQuote(valkeyDropInDir), bssh.Result{})
+	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0, Stdout: orphan + "\n"})
+	f.On("cat "+shQuote(orphan), bssh.Result{ExitCode: 0, Stdout: managedMarker + "\n[Service]\n"})
+	f.On("systemctl disable --now berth-valkey-gone_example_com.service", bssh.Result{})
+	f.On("rm -f "+shQuote(orphan), bssh.Result{})
+	f.On("cat "+shQuote(valkeyUnitPath("app.example.com")), bssh.Result{ExitCode: 1}) // write-guard: absent
+	f.On("systemctl daemon-reload", bssh.Result{})
+	f.On("systemctl enable --now "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
+	f.On(valkeyLoadedCmd("app.example.com"), bssh.Result{ExitCode: 0})
+	f.On(valkeyCacheFreshCmd("app.example.com"), bssh.Result{ExitCode: 0, Stdout: "no\n"})
+	f.On(valkeyPingCmd("tenant1", "app.example.com"), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
+
+	if err := Valkey().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var sawOrphanRm, sawLegacyRm bool
+	for _, c := range f.Calls() {
+		switch c.Cmd {
+		case "rm -f " + shQuote(orphan):
+			sawOrphanRm = true
+		case "rm -f " + shQuote(valkeyDropInPath):
+			sawLegacyRm = true
+		}
+	}
+	if !sawOrphanRm || !sawLegacyRm {
+		t.Errorf("expected orphan and legacy drop-in removal; orphan=%v legacy=%v", sawOrphanRm, sawLegacyRm)
+	}
+}
+
+func TestValkeyApplyLeavesForeignOrphanUnit(t *testing.T) {
+	s := valkeyServer()
+	orphan := "/etc/systemd/system/berth-valkey-foreign_example_com.service"
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})
+	f.On("systemctl disable --now valkey-server.service", bssh.Result{})
+	f.On("cat "+shQuote(valkeyDropInPath), bssh.Result{ExitCode: 1})
+	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0, Stdout: orphan + "\n"})
+	f.On("cat "+shQuote(orphan), bssh.Result{ExitCode: 0, Stdout: "[Unit]\nDescription=hand-written\n"}) // no marker
+	f.On("cat "+shQuote(valkeyUnitPath("app.example.com")), bssh.Result{ExitCode: 1})
+	f.On("systemctl daemon-reload", bssh.Result{})
+	f.On("systemctl enable --now "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
+	f.On(valkeyLoadedCmd("app.example.com"), bssh.Result{ExitCode: 0})
+	f.On(valkeyCacheFreshCmd("app.example.com"), bssh.Result{ExitCode: 0, Stdout: "no\n"})
+	f.On(valkeyPingCmd("tenant1", "app.example.com"), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
+
+	if err := Valkey().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	for _, c := range f.Calls() {
+		if c.Cmd == "rm -f "+shQuote(orphan) || c.Cmd == "systemctl disable --now berth-valkey-foreign_example_com.service" {
+			t.Error("a foreign file matching the glob must never be disabled or removed")
 		}
 	}
 }
