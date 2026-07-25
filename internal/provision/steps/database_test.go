@@ -303,9 +303,12 @@ func stubGreenRemote(f *bssh.FakeRunner, s *config.Server) {
 }
 
 // appKeyProbe is Check's exact-shape APP_KEY probe command for the test
-// server's env (exit-code only; must match envHasBerthAppKey verbatim).
+// server's env (exit-code only, FIRST-line semantics; must match
+// envHasBerthAppKey verbatim).
 func appKeyProbe(s *config.Server) string {
-	return "grep -Eq '^APP_KEY=base64:[A-Za-z0-9+/]{43}=$' " + shQuote(envPath(s))
+	return "line=$(grep -m1 '^APP_KEY=' " + shQuote(envPath(s)) + "); s=$?; " +
+		"if [ $s -eq 1 ]; then exit 1; elif [ $s -ne 0 ]; then exit 2; fi; " +
+		`printf '%s' "$line" | grep -Eq '^APP_KEY=base64:[A-Za-z0-9+/]{43}=$' && exit 0; exit 3`
 }
 
 func TestDatabaseCheckUnsatisfiedWhenCacheMissingCredential(t *testing.T) {
@@ -374,6 +377,30 @@ func TestDatabaseCheckSatisfiedWhenEnvAppKeyNotBerthFormat(t *testing.T) {
 	}
 }
 
+func TestDatabaseCheckSatisfiedWhenFirstAppKeyLineNotBerthFormat(t *testing.T) {
+	// Probe exit 3: the FIRST APP_KEY line is non-berth (e.g. the stock empty
+	// "APP_KEY=" placeholder) even if a berth-format key sits on a LATER line.
+	// Apply's appKeyFromEnv reads only the first line (grep -m1, phpdotenv's
+	// first-occurrence-wins), treats it as absent or refuses loudly, and never
+	// caches — so Check demanding a cache entry here would drift forever.
+	chdirTemp(t)
+	s := databaseServer()
+	dbUser := s.SiteDBUser(s.Sites[0])
+	if err := secret.SaveCache(s.Host, map[string]string{dbUser: "pw123"}); err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	stubGreenRemote(f, s)
+	f.On(appKeyProbe(s), bssh.Result{ExitCode: 3})
+	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("a non-berth FIRST APP_KEY line must not require a backup (Apply never caches it); got %+v", cr)
+	}
+}
+
 func TestDatabaseCheckUnsatisfiedWhenAppKeyBackupMissing(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
@@ -414,8 +441,10 @@ func TestDatabaseCheckFailsWhenAppKeyProbeErrors(t *testing.T) {
 }
 
 // envWriteSpy wraps a FakeRunner: at the exact moment shared/.env is written it
-// loads the LOCAL cache from disk and records whether the site's password and
-// APP_KEY were already persisted (the persist-before-remote-seed ordering).
+// loads the LOCAL cache from disk and records whether it already holds EXACTLY
+// the DB_PASSWORD and APP_KEY values being written (the
+// persist-before-remote-seed ordering; non-empty alone would also pass with
+// stale mismatched entries).
 type envWriteSpy struct {
 	*bssh.FakeRunner
 	host, dbUser, envPath string
@@ -426,9 +455,18 @@ type envWriteSpy struct {
 func (s *envWriteSpy) WriteFile(ctx context.Context, spec bssh.FileSpec) error {
 	if spec.Path == s.envPath {
 		s.wrote = true
+		var envPW, envKey string
+		for _, line := range strings.Split(string(spec.Content), "\n") {
+			if v, ok := strings.CutPrefix(line, "DB_PASSWORD="); ok {
+				envPW = v
+			}
+			if v, ok := strings.CutPrefix(line, "APP_KEY="); ok {
+				envKey = v
+			}
+		}
 		if cache, err := secret.LoadCache(s.host); err == nil {
-			s.pwCached = cache[s.dbUser] != ""
-			s.keyCached = cache["appkey:"+s.dbUser] != ""
+			s.pwCached = envPW != "" && cache[s.dbUser] == envPW
+			s.keyCached = envKey != "" && cache["appkey:"+s.dbUser] == envKey
 		}
 	}
 	return s.FakeRunner.WriteFile(ctx, spec)

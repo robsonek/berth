@@ -256,27 +256,36 @@ func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	return provision.CheckResult{Satisfied: true, Reason: eng.ServerPackage() + " installed (" + s.Database.Source + "); per-site databases, users and credentials present"}, nil
 }
 
-// envHasBerthAppKey reports whether a site's live shared/.env holds an APP_KEY
-// in EXACTLY the shape berth generates (appKeyShape — the same string reAppKey
-// compiles; they MUST stay identical), which is the only shape berth backs up.
-// Deliberately exact-shape, not "any APP_KEY line": an operator-managed env can
-// hold a Laravel-legal key berth does not back up (no "base64:" prefix, or an
-// AES-128 22-char key), and appKeyFromEnv refuses those loudly as malformed
-// when Apply runs. If Check flagged them unsatisfied, Apply would fail on
-// EVERY subsequent run — bricking the step for such hosts with no operator
-// recourse (the key cannot be rotated without data loss). Probe-match ⟹ Apply
-// caches the key (converges); probe-miss ⟹ Apply treats it as absent or fails
-// loud exactly as today. Exit-code only (-q) so the key never enters stdout;
-// exit 1 is "no such line", anything above is a loud I/O error.
+// envHasBerthAppKey reports whether the FIRST APP_KEY line of a site's live
+// shared/.env carries a value in EXACTLY the shape berth generates
+// (appKeyShape — the same string reAppKey compiles; they MUST stay identical),
+// which is the only shape berth backs up. FIRST-line on purpose: it must match
+// appKeyFromEnv's `grep -m1` read (phpdotenv's first-occurrence-wins) exactly,
+// or a duplicate-key env — e.g. an empty first "APP_KEY=" and a berth-format
+// key on a later line — would make Check demand a cache entry Apply never
+// writes: endless drift. Deliberately exact-shape, not "any APP_KEY line": an
+// operator-managed env can hold a Laravel-legal key berth does not back up
+// (no "base64:" prefix, or an AES-128 22-char key), and appKeyFromEnv refuses
+// those loudly as malformed when Apply runs. If Check flagged them
+// unsatisfied, Apply would fail on EVERY subsequent run — bricking the step
+// for such hosts with no operator recourse (the key cannot be rotated without
+// data loss). Probe-match ⟹ Apply caches the key (converges); probe-miss ⟹
+// Apply treats it as absent or fails loud exactly as today. Exit-code only
+// (-q, and $line never printed) so the key never enters stdout. Exit map:
+// 0 = first line is a berth-format key; 1 = no APP_KEY line; 3 = first line
+// present but not berth-format; 2 (or anything else) = loud I/O error.
 func envHasBerthAppKey(ctx context.Context, r bssh.Runner, site config.Site) (bool, error) {
-	res, err := r.Run(ctx, "grep -Eq '^"+appKeyKey+"="+appKeyShape+"$' "+shQuote(sharedEnvPath(site)), nil)
+	env := shQuote(sharedEnvPath(site))
+	res, err := r.Run(ctx, "line=$(grep -m1 '^"+appKeyKey+"=' "+env+"); s=$?; "+
+		"if [ $s -eq 1 ]; then exit 1; elif [ $s -ne 0 ]; then exit 2; fi; "+
+		`printf '%s' "$line" | grep -Eq '^`+appKeyKey+`=`+appKeyShape+`$' && exit 0; exit 3`, nil)
 	if err != nil {
 		return false, err
 	}
 	switch res.ExitCode {
 	case 0:
 		return true, nil
-	case 1:
+	case 1, 3:
 		return false, nil
 	default:
 		return false, fmt.Errorf("probe %s in %s: %s", appKeyKey, sharedEnvPath(site), res.Stderr)
