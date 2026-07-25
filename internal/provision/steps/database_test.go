@@ -196,7 +196,8 @@ func TestDatabaseApplyKeepsDatabaseDriverWithoutValkey(t *testing.T) {
 	if env == nil {
 		t.Fatal("shared/.env was not written")
 	}
-	if strings.Contains(string(env.Content), "CACHE_STORE=redis") {
+	if strings.Contains(string(env.Content), "CACHE_DRIVER=redis") ||
+		strings.Contains(string(env.Content), "CACHE_STORE=redis") {
 		t.Errorf("without Valkey, redis drivers must NOT be seeded; got:\n%s", env.Content)
 	}
 }

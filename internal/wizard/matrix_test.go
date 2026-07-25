@@ -555,7 +555,7 @@ func TestConfigMatrix(t *testing.T) {
 		}
 	})
 
-	t.Run("valkey-exactly-16-sites", func(t *testing.T) {
+	t.Run("valkey-16-sites-distinct-users", func(t *testing.T) {
 		a := base("valkey16", "203.0.113.14")
 		a.Valkey = true
 		for k := 0; k < 16; k++ {
