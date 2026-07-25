@@ -230,7 +230,7 @@ func assertServicesActive(ctx context.Context, t *testing.T, c *bssh.Client, srv
 
 // assertSelfSignedCert verifies each self-signed site has a berth-managed
 // certificate under /etc/ssl/berth/<domain> (site.go certDir) that is valid
-// beyond the renewal window — the same condition the tls step's certValid uses,
+// beyond the renewal window — the same condition the tls step's certStatus uses,
 // so a re-run's tls.Check stays satisfied.
 func assertSelfSignedCert(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server) {
 	t.Helper()

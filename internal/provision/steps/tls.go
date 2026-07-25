@@ -59,17 +59,29 @@ func (tls) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 		if !site.SSL {
 			continue
 		}
-		ok, err := certValid(ctx, r, site)
+		found, valid, expired, testCert, err := certStatus(ctx, r, site)
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
-		if !ok {
-			return provision.CheckResult{
-				Satisfied: false,
-				Reason:    "no valid certificate for " + site.Domain,
-				Changes:   []string{"issue " + site.CertMode() + " certificate for " + site.Domain, "install 443 server block"},
-			}, nil
+		// A staging cert under a production run must be replaced. Conversely a
+		// production cert satisfies a --ssl-staging run (a staging run must
+		// never issue or replace it) — UNLESS it has already expired, which a
+		// staging run cannot repair, so that is a loud error.
+		needsReplace := testCert && !rc.SSLStaging
+		prodCertUnderStagingRun := rc.SSLStaging && found && !testCert && site.CertMode() == "letsencrypt"
+		if prodCertUnderStagingRun && expired {
+			return provision.CheckResult{}, fmt.Errorf("production certificate for %s has expired and a --ssl-staging run cannot renew it; re-run without --ssl-staging", site.Domain)
 		}
+		if (valid && !needsReplace) || prodCertUnderStagingRun {
+			continue
+		}
+		reason := "no valid certificate for " + site.Domain
+		changes := []string{"issue " + site.CertMode() + " certificate for " + site.Domain, "install 443 server block"}
+		if needsReplace {
+			reason = "staging certificate present for " + site.Domain + "; will re-issue against production"
+			changes = []string{"re-issue production certificate for " + site.Domain + " (--force-renewal)", "install 443 server block"}
+		}
+		return provision.CheckResult{Satisfied: false, Reason: reason, Changes: changes}, nil
 	}
 	// Renewal deploy hook: without it a renewed cert lands on disk while nginx
 	// keeps serving the old one from memory (expired at ~day 90). Same gate as
@@ -122,12 +134,16 @@ func (st tls) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 		if !site.SSL {
 			continue
 		}
-		// Idempotent: a present, non-near-expiry cert short-circuits.
-		ok, err := certValid(ctx, r, site)
+		found, valid, expired, testCert, err := certStatus(ctx, r, site)
 		if err != nil {
 			return err
 		}
-		if ok {
+		needsReplace := testCert && !rc.SSLStaging
+		prodCertUnderStagingRun := rc.SSLStaging && found && !testCert && site.CertMode() == "letsencrypt"
+		if prodCertUnderStagingRun && expired {
+			return fmt.Errorf("production certificate for %s has expired and a --ssl-staging run cannot renew it; re-run without --ssl-staging", site.Domain)
+		}
+		if (valid && !needsReplace) || prodCertUnderStagingRun {
 			continue
 		}
 		if site.CertMode() == "selfsigned" {
@@ -138,13 +154,21 @@ func (st tls) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 			continue
 		}
 		// Let's Encrypt: the domain must resolve to this host or certbot will
-		// fail the ACME challenge. On mismatch, skip with a logged warning (the
-		// operator may be staging behind a proxy); do not abort the run.
+		// fail the ACME challenge.
 		if !dnsPointsAtHost(site.Domain, s.Host) {
+			if found {
+				// A certificate already exists (staging cert to replace, or a
+				// production cert due for renewal): skipping would report
+				// Applied while the host stays unconverged, drifting forever.
+				// Only a genuine fresh box (no cert yet) may skip with a warning.
+				return fmt.Errorf("cannot issue or renew the certificate for %s: it does not resolve to %s; point DNS at the host (or, for a staging cert, re-run with --ssl-staging to keep it)", site.Domain, s.Host)
+			}
+			// Fresh issue on a box without DNS yet: skip with a warning (the
+			// operator may be staging behind a proxy); do not abort the run.
 			fmt.Printf("berth: skipping TLS for %s: it does not resolve to %s\n", site.Domain, s.Host)
 			continue
 		}
-		if err := st.issue(ctx, rc, s, site, r); err != nil {
+		if err := st.issue(ctx, rc, s, site, r, needsReplace); err != nil {
 			return err
 		}
 	}
@@ -187,16 +211,26 @@ func (st tls) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 
 // issue installs certbot, obtains a certificate via the ACME webroot, swaps in
 // the 443 server block, validates and reloads nginx, and ensures the renew timer.
-func (tls) issue(ctx context.Context, rc provision.RunCtx, s *config.Server, site config.Site, r bssh.Runner) error {
+func (tls) issue(ctx context.Context, rc provision.RunCtx, s *config.Server, site config.Site, r bssh.Runner, forceRenewal bool) error {
 	if err := aptInstall(ctx, r, "certbot"); err != nil {
 		return fmt.Errorf("install certbot: %w", err)
 	}
 
 	certonly := fmt.Sprintf(
-		"certbot certonly --webroot -w %s -d %s --agree-tos -m %s --non-interactive",
-		acmeWebroot(site.Domain), site.Domain, shQuote(site.SSLEmail))
+		"certbot certonly --webroot -w %s -d %s --cert-name %s --agree-tos -m %s --non-interactive",
+		acmeWebroot(site.Domain), site.Domain, site.Domain, shQuote(site.SSLEmail))
 	if rc.SSLStaging {
 		certonly += " --staging"
+	} else {
+		// Select the production CA explicitly: --force-renewal is not a CA
+		// selector, and certbot derives TEST_CERT from the lineage's saved
+		// server, so a replacement without this would stay staging and loop.
+		certonly += " --server https://acme-v02.api.letsencrypt.org/directory"
+	}
+	if forceRenewal {
+		// Replacing a still-valid staging certificate: without this, certbot
+		// answers "not yet due for renewal" and exits 0 without re-issuing.
+		certonly += " --force-renewal"
 	}
 	if res, err := r.Run(ctx, certonly, nil); err != nil {
 		return err
@@ -269,75 +303,87 @@ func swapToHTTPS(ctx context.Context, r bssh.Runner, s *config.Server, site conf
 	return nil
 }
 
-// certValid reports whether a site has a certificate valid beyond the renew
-// window. Let's Encrypt certs are read from `certbot certificates`; self-signed
-// certs are checked directly with `openssl x509 -checkend`.
-func certValid(ctx context.Context, r bssh.Runner, site config.Site) (bool, error) {
+// certStatus reports whether a site's certificate exists (found), is valid
+// beyond the renew window, is already expired, and is a certbot test (staging)
+// certificate. valid and expired are distinct: a cert inside the renew window
+// but not yet past its notAfter is (valid=false, expired=false). Let's Encrypt
+// certs are read from `certbot certificates`; self-signed certs keep their
+// direct `openssl x509 -checkend` probe, are never test certs, and report
+// expired=false (the expired/staging distinction only gates the letsencrypt
+// asymmetry, which never applies to self-signed).
+func certStatus(ctx context.Context, r bssh.Runner, site config.Site) (found, valid, expired, testCert bool, err error) {
 	if site.CertMode() == "selfsigned" {
 		exists, err := fileExists(ctx, r, certFullchainPath(site))
 		if err != nil || !exists {
-			return false, err
+			return false, false, false, false, err
 		}
 		secs := int(certRenewWindow.Seconds())
 		res, err := r.Run(ctx, fmt.Sprintf("openssl x509 -checkend %d -noout -in %s", secs, shQuote(certFullchainPath(site))), nil)
 		if err != nil {
-			return false, err
+			return false, false, false, false, err
 		}
-		return res.ExitCode == 0, nil // exit 0 => valid beyond the window
+		return true, res.ExitCode == 0, false, false, nil // exit 0 => valid beyond the window
 	}
 	res, err := r.Run(ctx, "certbot certificates", nil)
 	if err != nil {
-		return false, err
+		return false, false, false, false, err
 	}
 	if res.ExitCode != 0 {
-		return false, nil // certbot not installed yet / no certs
+		return false, false, false, false, nil // certbot not installed yet / no certs
 	}
-	expiry, ok := parseCertExpiry(res.Stdout, site.Domain)
+	expiry, testCert, ok := parseCertStatus(res.Stdout, site.Domain)
 	if !ok {
-		return false, nil
+		return false, false, false, false, nil
 	}
-	return time.Until(expiry) > certRenewWindow, nil
+	return true, time.Until(expiry) > certRenewWindow, time.Until(expiry) <= 0, testCert, nil
 }
 
-// parseCertExpiry scans `certbot certificates` output for the named certificate
-// and returns its expiry. The block layout is:
+// parseCertStatus scans `certbot certificates` output for the lineage whose
+// Certificate Name equals domain — the /live/<domain> lineage nginx serves,
+// NOT merely any lineage listing the SAN (certbot may keep app.example.com and
+// app.example.com-0001). It additionally requires that block's Domains: to
+// contain domain, so a hand-renamed lineage named app.example.com but issued
+// for a different SAN is not accepted (the original parser kept this SAN
+// check; the rename must not drop it). It returns the expiry and whether
+// certbot flags it as a test (staging) certificate. The block layout is:
 //
 //	Certificate Name: <name>
 //	  Domains: <domain> ...
 //	  Expiry Date: 2026-08-01 12:00:00+00:00 (VALID: 60 days)
-func parseCertExpiry(out, domain string) (time.Time, bool) {
+//
+// Staging certificates carry TEST_CERT inside the parenthetical annotation
+// (e.g. "(INVALID: TEST_CERT)", or combined "(INVALID: TEST_CERT, EXPIRED)").
+func parseCertStatus(out, domain string) (expiry time.Time, testCert bool, ok bool) {
 	const layout = "2006-01-02 15:04:05-07:00"
-	var current string
+	inBlock := false // Certificate Name == domain
+	sanOK := false   // Domains: within this block contains domain
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(line, "Certificate Name:"):
-			current = strings.TrimSpace(strings.TrimPrefix(line, "Certificate Name:"))
-		case strings.HasPrefix(line, "Domains:"):
-			doms := strings.Fields(strings.TrimPrefix(line, "Domains:"))
-			matched := false
-			for _, d := range doms {
+			inBlock = strings.TrimSpace(strings.TrimPrefix(line, "Certificate Name:")) == domain
+			sanOK = false
+		case strings.HasPrefix(line, "Domains:") && inBlock:
+			for _, d := range strings.Fields(strings.TrimPrefix(line, "Domains:")) {
 				if d == domain {
-					matched = true
+					sanOK = true
 					break
 				}
 			}
-			if !matched {
-				current = "" // not the certificate we want
-			}
-		case strings.HasPrefix(line, "Expiry Date:") && current != "":
+		case strings.HasPrefix(line, "Expiry Date:") && inBlock && sanOK:
 			val := strings.TrimSpace(strings.TrimPrefix(line, "Expiry Date:"))
 			if i := strings.Index(val, " ("); i >= 0 {
+				testCert = strings.Contains(val[i:], "TEST_CERT")
 				val = val[:i]
 			}
 			t, err := time.Parse(layout, strings.TrimSpace(val))
 			if err != nil {
-				return time.Time{}, false
+				return time.Time{}, false, false
 			}
-			return t, true
+			return t, testCert, true
 		}
 	}
-	return time.Time{}, false
+	return time.Time{}, false, false
 }
 
 // dnsPointsAtHost reports whether domain resolves to the same address as host.

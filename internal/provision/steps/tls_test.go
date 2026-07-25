@@ -48,6 +48,16 @@ func certbotCertsOutput(domain string, expiry time.Time) string {
 		"    Expiry Date: " + expiry.Format("2006-01-02 15:04:05-07:00") + " (VALID: 60 days)\n"
 }
 
+// certbotStagingCertsOutput mimics `certbot certificates` for a staging
+// (test) certificate: certbot flags those with TEST_CERT in the expiry
+// annotation.
+func certbotStagingCertsOutput(domain string, expiry time.Time) string {
+	return "Found the following certs:\n" +
+		"  Certificate Name: " + domain + "\n" +
+		"    Domains: " + domain + "\n" +
+		"    Expiry Date: " + expiry.Format("2006-01-02 15:04:05-07:00") + " (INVALID: TEST_CERT)\n"
+}
+
 func TestTLSCheckSatisfiedWhenValidCertPresent(t *testing.T) {
 	s := tlsServer()
 	f := bssh.NewFakeRunner()
@@ -122,7 +132,7 @@ func TestTLSApplyUsesWebrootAndIssuesCert(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: "No certificates found.\n"})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y certbot", bssh.Result{})
-	certonly := "certbot certonly --webroot -w /var/www/berth-acme/app.example.com -d app.example.com --agree-tos -m 'ops@example.com' --non-interactive"
+	certonly := "certbot certonly --webroot -w /var/www/berth-acme/app.example.com -d app.example.com --cert-name app.example.com --agree-tos -m 'ops@example.com' --non-interactive --server https://acme-v02.api.letsencrypt.org/directory"
 	f.On(certonly, bssh.Result{ExitCode: 0})
 	f.On("nginx -t", bssh.Result{ExitCode: 0})
 	f.On("systemctl reload nginx", bssh.Result{})
@@ -159,7 +169,7 @@ func TestTLSApplyHonorsStagingFlag(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: "No certificates found.\n"})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y certbot", bssh.Result{})
-	certonly := "certbot certonly --webroot -w /var/www/berth-acme/app.example.com -d app.example.com --agree-tos -m 'ops@example.com' --non-interactive --staging"
+	certonly := "certbot certonly --webroot -w /var/www/berth-acme/app.example.com -d app.example.com --cert-name app.example.com --agree-tos -m 'ops@example.com' --non-interactive --staging"
 	f.On(certonly, bssh.Result{ExitCode: 0})
 	f.On("nginx -t", bssh.Result{ExitCode: 0})
 	f.On("systemctl reload nginx", bssh.Result{})
@@ -178,6 +188,203 @@ func TestTLSApplyHonorsStagingFlag(t *testing.T) {
 	}
 	if !sawStaging {
 		t.Error("expected --staging to be appended when rc.SSLStaging is set")
+	}
+}
+
+func TestParseCertStatus(t *testing.T) {
+	const expiry = "2026-08-01 12:00:00+00:00"
+	cases := map[string]struct {
+		annotation string
+		wantTest   bool
+	}{
+		"production valid": {" (VALID: 60 days)", false},
+		"staging":          {" (INVALID: TEST_CERT)", true},
+		"staging combined": {" (INVALID: TEST_CERT, EXPIRED)", true},
+		"no annotation":    {"", false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			out := "Found the following certs:\n" +
+				"  Certificate Name: app.example.com\n" +
+				"    Domains: app.example.com\n" +
+				"    Expiry Date: " + expiry + tc.annotation + "\n"
+			got, testCert, ok := parseCertStatus(out, "app.example.com")
+			if !ok {
+				t.Fatal("expected ok=true")
+			}
+			want, _ := time.Parse("2006-01-02 15:04:05-07:00", expiry)
+			if !got.Equal(want) {
+				t.Errorf("expiry = %v, want %v", got, want)
+			}
+			if testCert != tc.wantTest {
+				t.Errorf("testCert = %v, want %v", testCert, tc.wantTest)
+			}
+		})
+	}
+}
+
+func TestParseCertStatusMatchesLineageNameNotSAN(t *testing.T) {
+	// Two lineages carry the SAN; only the one whose Certificate Name equals
+	// the domain (the /live/<domain> lineage nginx serves) must be selected,
+	// regardless of block order.
+	staging := "  Certificate Name: app.example.com\n    Domains: app.example.com\n    Expiry Date: 2026-08-01 12:00:00+00:00 (INVALID: TEST_CERT)\n"
+	other := "  Certificate Name: app.example.com-0001\n    Domains: app.example.com\n    Expiry Date: 2027-01-01 12:00:00+00:00 (VALID: 200 days)\n"
+	for _, out := range []string{"Found:\n" + staging + other, "Found:\n" + other + staging} {
+		_, testCert, ok := parseCertStatus(out, "app.example.com")
+		if !ok || !testCert {
+			t.Errorf("must select the app.example.com lineage (testCert=true); got ok=%v testCert=%v", ok, testCert)
+		}
+	}
+}
+
+func TestParseCertStatusRejectsExactNameWithoutSAN(t *testing.T) {
+	// A lineage named exactly app.example.com but issued for a different SAN
+	// must NOT be accepted (nginx would serve a hostname-invalid cert).
+	out := "Found:\n  Certificate Name: app.example.com\n    Domains: other.example.com\n    Expiry Date: 2027-01-01 12:00:00+00:00 (VALID: 200 days)\n"
+	if _, _, ok := parseCertStatus(out, "app.example.com"); ok {
+		t.Error("a lineage whose Domains omit the requested SAN must be rejected")
+	}
+}
+
+func TestTLSCheckReplacesStagingCertOnProductionRun(t *testing.T) {
+	s := tlsServer()
+	f := bssh.NewFakeRunner()
+	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: certbotStagingCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour))})
+	cr, err := TLS().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Fatal("a staging cert under a production run must be unsatisfied")
+	}
+	if !strings.Contains(cr.Reason, "staging certificate") {
+		t.Errorf("Reason %q should name the staging certificate", cr.Reason)
+	}
+}
+
+func TestTLSCheckAcceptsStagingCertUnderStagingRun(t *testing.T) {
+	s := tlsServer()
+	f := bssh.NewFakeRunner()
+	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: certbotStagingCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour))})
+	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
+	hookStub(t, f)
+	cr, err := TLS().Check(context.Background(), provision.RunCtx{SSLStaging: true}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("a valid staging cert under --ssl-staging must satisfy Check; got %+v", cr)
+	}
+}
+
+func TestTLSApplyForceRenewsStagingCertOnProductionRun(t *testing.T) {
+	s := tlsServer()
+	withResolver(t, func(host string) ([]string, error) { return []string{s.Host}, nil })
+	f := bssh.NewFakeRunner()
+	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: certbotStagingCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour))})
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y certbot", bssh.Result{})
+	certonly := "certbot certonly --webroot -w /var/www/berth-acme/app.example.com -d app.example.com --cert-name app.example.com --agree-tos -m 'ops@example.com' --non-interactive --server https://acme-v02.api.letsencrypt.org/directory --force-renewal"
+	f.On(certonly, bssh.Result{ExitCode: 0})
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload nginx", bssh.Result{})
+	f.On("systemctl enable --now certbot.timer", bssh.Result{})
+	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
+	f.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 1})
+	if err := TLS().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var sawReissue bool
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "certonly") {
+			sawReissue = true
+			if !strings.Contains(c.Cmd, "--force-renewal") {
+				t.Errorf("certonly must carry --force-renewal when replacing a staging cert; got %q", c.Cmd)
+			}
+			if !strings.Contains(c.Cmd, "--server https://acme-v02.api.letsencrypt.org/directory") {
+				t.Errorf("the replacement must select the production CA explicitly; got %q", c.Cmd)
+			}
+			if strings.Contains(c.Cmd, "--staging") {
+				t.Errorf("the production replacement must not pass --staging; got %q", c.Cmd)
+			}
+		}
+	}
+	if !sawReissue {
+		t.Error("expected a certonly re-issue for the staging certificate")
+	}
+}
+
+func TestTLSApplyLeavesProductionCertUnderStagingRun(t *testing.T) {
+	// A production cert (valid OR near expiry) must never be replaced by a
+	// staging run — certbot.timer renews it against production on its own.
+	for name, expiry := range map[string]time.Time{
+		"valid":       time.Now().Add(60 * 24 * time.Hour),
+		"near expiry": time.Now().Add(5 * 24 * time.Hour),
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := tlsServer()
+			f := bssh.NewFakeRunner()
+			f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: certbotCertsOutput(s.Sites[0].Domain, expiry)})
+			f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
+			f.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 1})
+			if err := TLS().Apply(context.Background(), provision.RunCtx{SSLStaging: true}, s, f); err != nil {
+				t.Fatalf("Apply() error = %v", err)
+			}
+			for _, c := range f.Calls() {
+				if strings.Contains(c.Cmd, "certonly") {
+					t.Errorf("a production cert must never be issued/replaced by a staging run; ran %q", c.Cmd)
+				}
+			}
+		})
+	}
+}
+
+func TestTLSApplyRefusesStagingReplacementOnDNSMismatch(t *testing.T) {
+	s := tlsServer()
+	// Host-aware resolver so the domain and the host do NOT share an address
+	// (a flat stub would make them intersect and read as a match).
+	withResolver(t, func(host string) ([]string, error) {
+		if host == s.Sites[0].Domain {
+			return []string{"198.51.100.1"}, nil
+		}
+		return []string{s.Host}, nil
+	})
+	f := bssh.NewFakeRunner()
+	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: certbotStagingCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour))})
+	err := TLS().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "does not resolve") {
+		t.Fatalf("Apply() = %v, want a hard error refusing to leave a staging cert when DNS does not point at the host", err)
+	}
+}
+
+func TestTLSApplyErrorsOnDNSMismatchForExistingCertRenewal(t *testing.T) {
+	// An existing production cert due for renewal (found=true, valid=false)
+	// with a DNS mismatch must fail loudly rather than skip-and-report-Applied.
+	s := tlsServer()
+	withResolver(t, func(host string) ([]string, error) {
+		if host == s.Sites[0].Domain {
+			return []string{"198.51.100.1"}, nil
+		}
+		return []string{s.Host}, nil
+	})
+	f := bssh.NewFakeRunner()
+	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: certbotCertsOutput(s.Sites[0].Domain, time.Now().Add(5*24*time.Hour))})
+	err := TLS().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "does not resolve") {
+		t.Fatalf("Apply() = %v, want a hard error when an existing cert cannot be renewed due to DNS mismatch", err)
+	}
+}
+
+func TestTLSApplyErrorsOnExpiredProductionCertUnderStagingRun(t *testing.T) {
+	// A staging run must not touch a production cert — but an already-expired
+	// one it cannot repair, so that is a loud error, not a silent Satisfied.
+	s := tlsServer()
+	expiredProd := "Found:\n  Certificate Name: app.example.com\n    Domains: app.example.com\n    Expiry Date: " +
+		time.Now().Add(-24*time.Hour).Format("2006-01-02 15:04:05-07:00") + " (INVALID: EXPIRED)\n"
+	f := bssh.NewFakeRunner()
+	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: expiredProd})
+	err := TLS().Apply(context.Background(), provision.RunCtx{SSLStaging: true}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("Apply() = %v, want a hard error: a staging run cannot renew an expired production cert", err)
 	}
 }
 
