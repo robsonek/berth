@@ -259,8 +259,12 @@ func TestDatabaseCheckSatisfiedDoesNotReseedExistingEnv(t *testing.T) {
 	// Once installed + .env + database + user are all present the step is
 	// satisfied, so flipping valkey: true on an already-provisioned host does
 	// NOT re-seed the Redis keys (and Apply never rewrites an existing .env).
+	chdirTemp(t)
 	s := databaseServer()
 	s.Valkey = true
+	if err := secret.SaveCache(s.Host, map[string]string{s.SiteDBUser(s.Sites[0]): "pw123"}); err != nil {
+		t.Fatal(err)
+	}
 	f := bssh.NewFakeRunner()
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present, driver matches
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
@@ -269,6 +273,7 @@ func TestDatabaseCheckSatisfiedDoesNotReseedExistingEnv(t *testing.T) {
 	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
 	f.On(mariadbGrantProbe, bssh.Result{Stdout: "1\n"})
 	f.On("test -e "+shQuote("/home/deploy/.my.cnf"), bssh.Result{ExitCode: 0}) // client creds already seeded
+	f.On(appKeyProbe(s), bssh.Result{ExitCode: 1})                             // no berth-format APP_KEY -> no backup required
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -283,7 +288,191 @@ const (
 	mariadbGrantProbe = `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='myapp' AND GRANTEE='''myapp''@''localhost''' LIMIT 1"`
 )
 
+// stubGreenRemote stubs every REMOTE probe of a fully provisioned single-site
+// mariadb host (installed, .env with matching driver and a valid credential,
+// database + grant present, client auth seeded) — the state in which only the
+// local-cache checks can still make Check unsatisfied.
+func stubGreenRemote(f *bssh.FakeRunner, s *config.Server) {
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0})
+	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
+	f.On(mariadbGrantProbe, bssh.Result{Stdout: "1\n"})
+	f.On("test -e "+shQuote("/home/deploy/.my.cnf"), bssh.Result{ExitCode: 0})
+}
+
+// appKeyProbe is Check's exact-shape APP_KEY probe command for the test
+// server's env (exit-code only; must match envHasBerthAppKey verbatim).
+func appKeyProbe(s *config.Server) string {
+	return "grep -Eq '^APP_KEY=base64:[A-Za-z0-9+/]{43}=$' " + shQuote(envPath(s))
+}
+
+func TestDatabaseCheckUnsatisfiedWhenCacheMissingCredential(t *testing.T) {
+	// A fully green REMOTE with an empty local cache (new workstation, upgrade
+	// from the old CWD-relative cache, crash before the final save) must
+	// re-trigger Apply so the recovery copy is backfilled — otherwise a later
+	// .env loss re-seeds with fresh secrets and encrypted data is gone.
+	chdirTemp(t)
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	stubGreenRemote(f, s)
+	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Fatal("a green remote with an empty local cache must be unsatisfied (the recovery copy is part of convergence)")
+	}
+	if !strings.Contains(cr.Reason, "local secret cache missing the DB credential") {
+		t.Errorf("Reason = %q", cr.Reason)
+	}
+}
+
+func TestDatabaseCheckSatisfiedWithFullCache(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	dbUser := s.SiteDBUser(s.Sites[0])
+	if err := secret.SaveCache(s.Host, map[string]string{
+		dbUser:             "pw123",
+		"appkey:" + dbUser: "base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	stubGreenRemote(f, s)
+	f.On(appKeyProbe(s), bssh.Result{ExitCode: 0}) // live env holds a berth-format APP_KEY
+	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("expected satisfied with both the credential and APP_KEY backup cached; got %+v", cr)
+	}
+}
+
+func TestDatabaseCheckSatisfiedWhenEnvAppKeyNotBerthFormat(t *testing.T) {
+	// Probe exit 1: APP_KEY absent, or in a shape berth does not generate (an
+	// operator-managed key). No backup is required then — requiring one would
+	// make Apply fail on every run (it refuses to cache a malformed key),
+	// bricking the step with no operator recourse.
+	chdirTemp(t)
+	s := databaseServer()
+	dbUser := s.SiteDBUser(s.Sites[0])
+	if err := secret.SaveCache(s.Host, map[string]string{dbUser: "pw123"}); err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	stubGreenRemote(f, s)
+	f.On(appKeyProbe(s), bssh.Result{ExitCode: 1})
+	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("no APP_KEY backup may be required when the env key is not berth-format; got %+v", cr)
+	}
+}
+
+func TestDatabaseCheckUnsatisfiedWhenAppKeyBackupMissing(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	dbUser := s.SiteDBUser(s.Sites[0])
+	if err := secret.SaveCache(s.Host, map[string]string{dbUser: "pw123"}); err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	stubGreenRemote(f, s)
+	f.On(appKeyProbe(s), bssh.Result{ExitCode: 0}) // berth-format APP_KEY live, no local backup
+	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Fatal("a live berth-format APP_KEY without a local backup must be unsatisfied")
+	}
+	if !strings.Contains(cr.Reason, "APP_KEY backup") {
+		t.Errorf("Reason = %q", cr.Reason)
+	}
+}
+
+func TestDatabaseCheckFailsWhenAppKeyProbeErrors(t *testing.T) {
+	// grep exit >= 2 is an I/O failure, not "no key" — it must be loud.
+	chdirTemp(t)
+	s := databaseServer()
+	dbUser := s.SiteDBUser(s.Sites[0])
+	if err := secret.SaveCache(s.Host, map[string]string{dbUser: "pw123"}); err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	stubGreenRemote(f, s)
+	f.On(appKeyProbe(s), bssh.Result{ExitCode: 2, Stderr: "grep: input: Permission denied"})
+	_, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "Permission denied") {
+		t.Fatalf("Check() = %v, want a hard error surfacing the probe stderr", err)
+	}
+}
+
+// envWriteSpy wraps a FakeRunner: at the exact moment shared/.env is written it
+// loads the LOCAL cache from disk and records whether the site's password and
+// APP_KEY were already persisted (the persist-before-remote-seed ordering).
+type envWriteSpy struct {
+	*bssh.FakeRunner
+	host, dbUser, envPath string
+	wrote                 bool
+	pwCached, keyCached   bool
+}
+
+func (s *envWriteSpy) WriteFile(ctx context.Context, spec bssh.FileSpec) error {
+	if spec.Path == s.envPath {
+		s.wrote = true
+		if cache, err := secret.LoadCache(s.host); err == nil {
+			s.pwCached = cache[s.dbUser] != ""
+			s.keyCached = cache["appkey:"+s.dbUser] != ""
+		}
+	}
+	return s.FakeRunner.WriteFile(ctx, spec)
+}
+
+func TestDatabaseApplyCachesSecretsBeforeSeedingEnv(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
+	stubClientAuthAbsent(f, s, ".my.cnf")
+	f.On("mysql --protocol=socket", bssh.Result{})
+	spy := &envWriteSpy{FakeRunner: f, host: s.Host, dbUser: s.SiteDBUser(s.Sites[0]), envPath: envPath(s)}
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, spy); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if !spy.wrote {
+		t.Fatal("shared/.env was never written")
+	}
+	if !spy.pwCached || !spy.keyCached {
+		t.Errorf("secrets must be persisted locally BEFORE the remote seed (pw cached: %v, APP_KEY cached: %v)", spy.pwCached, spy.keyCached)
+	}
+}
+
+func TestDatabaseApplyFailsWhenAppKeyGrepErrors(t *testing.T) {
+	// An I/O failure reading APP_KEY from an existing .env must be a hard error
+	// — treating it as "absent" would silently skip the backup.
+	chdirTemp(t)
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=existingpw\n"})
+	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 2, Stderr: "grep: input: I/O error"})
+	err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "I/O error") {
+		t.Fatalf("Apply() = %v, want a hard error surfacing the grep stderr", err)
+	}
+}
+
 func TestDatabaseCheckUnsatisfiedWhenDatabaseMissing(t *testing.T) {
+	chdirTemp(t)
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present, driver matches
@@ -304,6 +493,7 @@ func TestDatabaseCheckUnsatisfiedWhenDatabaseMissing(t *testing.T) {
 }
 
 func TestDatabaseCheckUnsatisfiedWhenUserOrGrantMissing(t *testing.T) {
+	chdirTemp(t)
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present, driver matches
@@ -325,6 +515,7 @@ func TestDatabaseCheckUnsatisfiedWhenUserOrGrantMissing(t *testing.T) {
 }
 
 func TestDatabaseCheckUnsatisfiedWhenEnvLacksValidPassword(t *testing.T) {
+	chdirTemp(t)
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present, driver matches
@@ -687,6 +878,7 @@ func TestDatabaseApplyClientAuthFileNeverRewritten(t *testing.T) {
 }
 
 func TestDatabaseCheckUnsatisfiedWhenClientAuthMissing(t *testing.T) {
+	chdirTemp(t)
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present, driver matches
