@@ -457,6 +457,9 @@ func (st *Site) validate() error {
 	if !reHostname.MatchString(st.Domain) {
 		return fmt.Errorf("domain %q is not a valid hostname", st.Domain)
 	}
+	if st.Domain != strings.ToLower(st.Domain) {
+		return fmt.Errorf("domain %q must be lowercase: certbot lowercases DNS names while nginx and certificate file paths are case-sensitive", st.Domain)
+	}
 	if err := ValidateDeployPath(st.DeployPath); err != nil {
 		return err
 	}
