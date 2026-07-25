@@ -45,12 +45,20 @@ const valkeyBinary = "/usr/bin/valkey-server"
 
 // valkeyExecCmd probes whether unit's running process still executes the
 // CURRENT valkey binary: it compares the inode the process's /proc/<pid>/exe
-// resolves to (stat -L follows to the possibly-deleted inode) against the
-// on-disk binary's inode. A mismatch means the binary was replaced (e.g. by
-// unattended-upgrades) under a running process — the stock unit gets a
-// postinst restart, ours do not, so Check must catch it.
+// resolves to against the binary the unit would exec. A mismatch means the
+// binary was replaced (e.g. by unattended-upgrades) under a running process —
+// the stock unit gets a postinst restart, ours do not, so Check must catch it.
+//
+// BOTH sides use `stat -L` (follow symlinks): /usr/bin/valkey-server is a
+// symlink to the multi-call binary valkey-check-rdb (one file, mode chosen by
+// argv[0], busybox-style), so /proc/<pid>/exe resolves to that real file. A
+// bare `stat` on the symlink would report the SYMLINK's inode, never matching
+// the process's real executable inode — making the probe fire on every
+// healthy instance and breaking idempotency (found only on a fresh box, since
+// unit tests stub the command string and a `cp+mv` "upgrade" replaces the
+// symlink with a plain file, both of which hide the mismatch).
 func valkeyExecCmd(unit string) string {
-	return `p="$(systemctl show -p MainPID --value ` + unit + `)"; [ "$(stat -Lc %i /proc/$p/exe 2>/dev/null)" = "$(stat -c %i ` + valkeyBinary + ` 2>/dev/null)" ]`
+	return `p="$(systemctl show -p MainPID --value ` + unit + `)"; [ "$(stat -Lc %i /proc/$p/exe 2>/dev/null)" = "$(stat -Lc %i ` + valkeyBinary + ` 2>/dev/null)" ]`
 }
 
 // valkeyExecCurrent reports whether unit's process runs the current binary.

@@ -200,6 +200,26 @@ func TestValkeyPathHelpers(t *testing.T) {
 	}
 }
 
+// TestValkeyExecCmdFollowsSymlinkBothSides guards the idempotency bug found on
+// a fresh box: /usr/bin/valkey-server is a symlink to the multi-call binary,
+// so the exec-freshness probe MUST `stat -L` (follow) BOTH the process's exe
+// and the binary path — otherwise it compares the process's real inode to the
+// symlink's inode, never matches, and every healthy instance re-applies
+// forever. Unit tests cannot model symlink resolution (FakeRunner stubs the
+// string), so pin the command shape.
+func TestValkeyExecCmdFollowsSymlinkBothSides(t *testing.T) {
+	cmd := valkeyExecCmd("berth-valkey-app_example_com.service")
+	if !strings.Contains(cmd, "stat -Lc %i /proc/$p/exe") {
+		t.Errorf("exec probe must stat -L the process exe:\n%s", cmd)
+	}
+	if !strings.Contains(cmd, "stat -Lc %i "+valkeyBinary) {
+		t.Errorf("exec probe must stat -L the binary (it is a symlink to the multi-call binary):\n%s", cmd)
+	}
+	if strings.Contains(cmd, "stat -c %i "+valkeyBinary) {
+		t.Errorf("exec probe must NOT bare-stat the symlink (compares symlink inode, never matches):\n%s", cmd)
+	}
+}
+
 func TestRenderValkeyUnit(t *testing.T) {
 	s := &config.Server{Sites: []config.Site{{Domain: "app.example.com", User: "tenant1"}}}
 	got, err := renderValkeyUnit(s, s.Sites[0])
