@@ -445,3 +445,24 @@ func TestRenderFail2banJailZeroValueUsesDefaults(t *testing.T) {
 		}
 	}
 }
+
+func TestHardeningDropInTargetsSortFirstPath(t *testing.T) {
+	// OpenSSH applies first-match-wins and Include expands lexicographically:
+	// the managed drop-in must sort before image drop-ins like
+	// 50-cloud-init.conf, or its directives silently lose.
+	if sshdDropInPath != "/etc/ssh/sshd_config.d/00-berth.conf" {
+		t.Errorf("sshdDropInPath = %q, want the 00-prefixed path", sshdDropInPath)
+	}
+	if sshdDropInLegacyPath != "/etc/ssh/sshd_config.d/berth.conf" {
+		t.Errorf("sshdDropInLegacyPath = %q, want the pre-rename path", sshdDropInLegacyPath)
+	}
+	for _, want := range []string{
+		"PermitRootLogin no\n",
+		"PasswordAuthentication no\n",
+		"KbdInteractiveAuthentication no\n",
+	} {
+		if !strings.Contains(sshdDropInBody, want) {
+			t.Errorf("sshdDropInBody missing %q:\n%s", want, sshdDropInBody)
+		}
+	}
+}

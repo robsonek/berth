@@ -13,9 +13,15 @@ import (
 )
 
 const (
-	sshdDropInPath   = "/etc/ssh/sshd_config.d/berth.conf"
-	sshdDropInBody   = managedMarker + "\nPermitRootLogin no\nPasswordAuthentication no\n"
-	fail2banJailPath = "/etc/fail2ban/jail.local"
+	// sshdDropInPath is 00-prefixed on purpose: sshd's Include expands
+	// lexicographically and each directive keeps its FIRST value, so berth
+	// must sort before image drop-ins (e.g. cloud-init's 50-cloud-init.conf
+	// re-enabling PasswordAuthentication). sshdDropInLegacyPath is the
+	// pre-rename location, kept only so Apply can migrate it away.
+	sshdDropInPath       = "/etc/ssh/sshd_config.d/00-berth.conf"
+	sshdDropInLegacyPath = "/etc/ssh/sshd_config.d/berth.conf"
+	sshdDropInBody       = managedMarker + "\nPermitRootLogin no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n"
+	fail2banJailPath     = "/etc/fail2ban/jail.local"
 )
 
 // renderFail2banJail renders the managed jail.local: a port-bound sshd jail
