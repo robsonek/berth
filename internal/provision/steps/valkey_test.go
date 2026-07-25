@@ -44,6 +44,55 @@ func TestValkeyCheckUnsatisfiedWhenNotInstalled(t *testing.T) {
 	}
 }
 
+func TestValkeyPathHelpers(t *testing.T) {
+	if got := valkeyInstanceUnit("app.example.com"); got != "berth-valkey-app_example_com.service" {
+		t.Errorf("valkeyInstanceUnit = %q", got)
+	}
+	if got := valkeyUnitPath("app.example.com"); got != "/etc/systemd/system/berth-valkey-app_example_com.service" {
+		t.Errorf("valkeyUnitPath = %q", got)
+	}
+	if got := valkeySocketPath("app.example.com"); got != "/run/berth-valkey/app_example_com/valkey.sock" {
+		t.Errorf("valkeySocketPath = %q", got)
+	}
+	if got := valkeyDataDir("app.example.com"); got != "/var/lib/berth-valkey/app_example_com" {
+		t.Errorf("valkeyDataDir = %q", got)
+	}
+}
+
+func TestRenderValkeyUnit(t *testing.T) {
+	s := &config.Server{Sites: []config.Site{{Domain: "app.example.com", User: "tenant1"}}}
+	got, err := renderValkeyUnit(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(got)
+	if !strings.HasPrefix(body, "# managed by berth\n") {
+		t.Errorf("unit must start with the managed marker:\n%s", body)
+	}
+	for _, want := range []string{
+		"User=tenant1",
+		"Group=tenant1",
+		"RuntimeDirectory=berth-valkey/app_example_com",
+		"RuntimeDirectoryMode=0700",
+		"StateDirectory=berth-valkey/app_example_com",
+		"StateDirectoryMode=0700",
+		"--port 0",
+		"--unixsocket /run/berth-valkey/app_example_com/valkey.sock",
+		"--unixsocketperm 600",
+		"--dir /var/lib/berth-valkey/app_example_com",
+		"--maxmemory 256mb",              // default from ValkeyMaxmemoryEff
+		"--maxmemory-policy allkeys-lru", // default from PolicyEff
+		"Type=notify",
+		"--supervised systemd",
+		"Restart=always",
+		"WantedBy=multi-user.target",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("unit missing %q:\n%s", want, body)
+		}
+	}
+}
+
 func TestValkeyApplyInstallsAndEnables(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})

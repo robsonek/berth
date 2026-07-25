@@ -194,6 +194,15 @@ func TestRenderValkeyDropInGolden(t *testing.T) {
 	})
 }
 
+func TestRenderBerthValkeyServiceGolden(t *testing.T) {
+	checkGolden(t, "berth_valkey.service.tmpl", "berth_valkey.service.golden", struct {
+		Domain, User, Pool, Maxmemory, Policy string
+	}{
+		Domain: "app.example.com", User: "webuser", Pool: "app_example_com",
+		Maxmemory: "256mb", Policy: "allkeys-lru",
+	})
+}
+
 func TestRenderMariaDBTuningGolden(t *testing.T) {
 	checkGolden(t, "mariadb_tuning.cnf.tmpl", "mariadb_tuning.golden", struct {
 		BufferPool    string
