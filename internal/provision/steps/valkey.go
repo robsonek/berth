@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/robsonek/berth/internal/apt"
 	"github.com/robsonek/berth/internal/config"
@@ -53,24 +54,155 @@ type valkey struct{}
 func Valkey() provision.Step { return valkey{} }
 
 func (valkey) Name() string       { return "valkey" }
-func (valkey) Requires() []string { return []string{"base"} }
+func (valkey) Requires() []string { return []string{"base", "accounts"} }
 
-func (valkey) Check(ctx context.Context, _ provision.RunCtx, _ *config.Server, r bssh.Runner) (provision.CheckResult, error) {
+// valkeyListUnitsCmd lists berth-managed per-site instance units. Global glob
+// (never per-pool): pool names can be prefixes of one another, so a per-site
+// glob could match a sibling's unit — same rule as the supervisor sweep.
+const valkeyListUnitsCmd = "ls -1 /etc/systemd/system/berth-valkey-*.service 2>/dev/null"
+
+func listValkeyUnits(ctx context.Context, r bssh.Runner) ([]string, error) {
+	res, err := r.Run(ctx, valkeyListUnitsCmd, nil)
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, line := range strings.Split(strings.TrimSpace(res.Stdout), "\n") {
+		if p := strings.TrimSpace(line); p != "" {
+			paths = append(paths, p)
+		}
+	}
+	return paths, nil
+}
+
+func desiredValkeyUnitPaths(s *config.Server) map[string]bool {
+	desired := map[string]bool{}
+	for _, site := range s.Sites {
+		desired[valkeyUnitPath(site.Domain)] = true
+	}
+	return desired
+}
+
+// valkeyPingCmd probes an instance AS THE SITE USER over its socket: a PONG
+// proves both that the daemon answers and that the socket path admits the
+// tenant (owner-only runtime dir + socket perms) — the step's whole point.
+func valkeyPingCmd(user, domain string) string {
+	return "runuser -u " + shQuote(user) + " -- valkey-cli -s " + shQuote(valkeySocketPath(domain)) + " ping"
+}
+
+// unitCacheFresh reports whether systemd's loaded copy of unit matches the
+// file on disk (NeedDaemonReload=no). A write that crashed before
+// daemon-reload leaves the manager serving stale ExecStart args — a state the
+// mtime-vs-ActiveEnterTimestamp probe alone cannot always expose.
+func unitCacheFresh(ctx context.Context, r bssh.Runner, unit string) (bool, error) {
+	res, err := r.Run(ctx, "systemctl show -p NeedDaemonReload --value "+unit, nil)
+	if err != nil {
+		return false, err
+	}
+	return res.ExitCode == 0 && strings.TrimSpace(res.Stdout) == "no", nil
+}
+
+func (valkey) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
+	ok := true
 	installed, err := pkgInstalled(ctx, r, "valkey-server")
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	up, err := serviceUp(ctx, r, valkeyUnit)
+	ok = ok && installed
+
+	// The stock shared service IS the vulnerability this step removes (an
+	// unauthenticated listener on 127.0.0.1:6379): it must be disabled AND
+	// inactive.
+	stockEnabled, err := r.Run(ctx, "systemctl is-enabled "+valkeyUnit, nil)
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	if installed && up {
-		return provision.CheckResult{Satisfied: true, Reason: "valkey-server installed and running"}, nil
+	stockActive, err := r.Run(ctx, "systemctl is-active "+valkeyUnit, nil)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	ok = ok && stockEnabled.ExitCode != 0 && stockActive.ExitCode != 0
+
+	// The legacy tuning drop-in targeted the stock unit; a berth-managed copy
+	// left behind must be migrated away (foreign files are left alone).
+	legacyDropIn, err := managedFilePresent(ctx, r, valkeyDropInPath)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	ok = ok && !legacyDropIn
+
+	for _, site := range s.Sites {
+		want, err := renderValkeyUnit(s, site)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		state, err := checkManagedFile(ctx, r, valkeyUnitPath(site.Domain), want)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		unitOK, err := managedFileSatisfied(state, valkeyUnitPath(site.Domain), rc.Force)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		up, err := serviceUp(ctx, r, valkeyInstanceUnit(site.Domain))
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		// Liveness beyond "active": the running process must actually use the
+		// on-disk unit (crash between write and restart leaves stale ExecStart
+		// args running — the same window checkTuned closes for MariaDB), and
+		// the daemon must answer over the socket AS the site user.
+		loaded, fresh, pong := false, false, false
+		if unitOK && up {
+			if loaded, err = serviceConfigLoaded(ctx, r, valkeyInstanceUnit(site.Domain), valkeyUnitPath(site.Domain)); err != nil {
+				return provision.CheckResult{}, err
+			}
+			if fresh, err = unitCacheFresh(ctx, r, valkeyInstanceUnit(site.Domain)); err != nil {
+				return provision.CheckResult{}, err
+			}
+			res, err := r.Run(ctx, valkeyPingCmd(s.SiteUser(site), site.Domain), nil)
+			if err != nil {
+				return provision.CheckResult{}, err
+			}
+			pong = res.ExitCode == 0 && strings.TrimSpace(res.Stdout) == "PONG"
+		}
+		ok = ok && unitOK && up && loaded && fresh && pong
+	}
+
+	// Orphans: only berth-MANAGED units count (mirror Apply's guard) — a
+	// foreign file matching the glob is not ours to remove, so counting it
+	// would make the step permanently unsatisfiable.
+	units, err := listValkeyUnits(ctx, r)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	desired := desiredValkeyUnitPaths(s)
+	for _, u := range units {
+		if desired[u] {
+			continue
+		}
+		present, err := managedFilePresent(ctx, r, u)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if present {
+			ok = false
+		}
+	}
+
+	if ok {
+		return provision.CheckResult{Satisfied: true, Reason: "per-site valkey instances running, stock service off"}, nil
 	}
 	return provision.CheckResult{
 		Satisfied: false,
-		Reason:    "valkey-server not installed or not running",
-		Changes:   []string{"install valkey-server", "systemctl enable --now " + valkeyUnit},
+		Reason:    "per-site valkey fleet not converged",
+		Changes: []string{
+			"install valkey-server (valkey-cli comes via its valkey-tools dependency)",
+			"disable the stock shared valkey-server.service",
+			"remove the legacy valkey tuning drop-in (when berth-managed)",
+			"per site: write berth-valkey-<pool>.service, enable --now, verify PONG over the socket",
+			"remove orphan berth-valkey instances",
+		},
 	}, nil
 }
 
