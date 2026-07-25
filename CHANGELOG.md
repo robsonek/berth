@@ -26,7 +26,9 @@ Notable changes to berth. Older releases are documented on the
   access control) is replaced by per-site instances running as each site's OS
   user, reachable only via a unix socket in a 0700 directory, with no TCP
   listener. The stock `valkey-server.service` is disabled, the legacy tuning
-  drop-in migrated away, and instances for removed sites are swept. Fresh
+  drop-in migrated away, and instances for removed sites are swept (their
+  `/var/lib/berth-valkey/<pool>` data directories are left in place —
+  cache-class data, remove manually if desired). Fresh
   `.env` seeds point `REDIS_HOST` at the socket (`REDIS_PORT=0`, cache in its
   own logical DB); `REDIS_DB` allocation and `REDIS_PREFIX` are gone. The
   `tuning.valkey_maxmemory*` knobs now cap each instance. **Existing hosts:**

@@ -164,8 +164,9 @@ func TestValkeyCheckAbortsOnUnmanagedUnit(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	stubValkeyCheckGreen(f, s)
 	f.On("cat "+shQuote(valkeyUnitPath("app.example.com")), bssh.Result{ExitCode: 0, Stdout: "[Unit]\nDescription=hand-written\n"})
-	if _, err := Valkey().Check(context.Background(), provision.RunCtx{}, s, f); err == nil {
-		t.Fatal("expected abort on an unmanaged file at the instance unit path without --force")
+	_, err := Valkey().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "not managed by berth") {
+		t.Fatalf("err = %v, want the unmanaged-file refusal", err)
 	}
 }
 
