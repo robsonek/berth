@@ -37,11 +37,12 @@ func hardeningServer() *config.Server {
 const sshdTGood = "port 2222\npermitrootlogin no\npasswordauthentication no\nkbdinteractiveauthentication no\n"
 
 // stubSshdEffectiveGood stubs the probes a fully converged host answers:
-// no legacy drop-in, no SSHD_OPTS override (grep exits 1 on no match),
-// and an effective config with all required directives.
+// no legacy drop-in, no SSHD_OPTS override (/etc/default/ssh missing:
+// exit 0, empty output), and an effective config with all required
+// directives.
 func stubSshdEffectiveGood(f *bssh.FakeRunner) {
 	f.On("cat "+shQuote(sshdDropInLegacyPath), bssh.Result{ExitCode: 1})
-	f.On(sshdOptsProbe, bssh.Result{ExitCode: 1})
+	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
 	f.On("sshd -T", bssh.Result{ExitCode: 0, Stdout: sshdTGood})
 }
 
@@ -122,6 +123,7 @@ func TestHardeningApplyRefusesForeignSshdDropIn(t *testing.T) {
 	f.On("ufw allow 2222/tcp", bssh.Result{})
 	f.On("ufw allow 80,443/tcp", bssh.Result{})
 	f.On("ufw --force enable", bssh.Result{})
+	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 0, Stdout: "PermitRootLogin prohibit-password\n"}) // foreign
 
 	err := Hardening().Apply(context.Background(), provision.RunCtx{}, s, f)
@@ -214,6 +216,7 @@ func TestHardeningApplyAbortsWhenGateFails(t *testing.T) {
 	f.On("ufw allow 80,443/tcp", bssh.Result{})
 	f.On("ufw --force enable", bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
+	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
 
 	err := Hardening().Apply(context.Background(), provision.RunCtx{}, s, f)
 	if err == nil {
@@ -513,7 +516,7 @@ func TestHardeningCheckErrorsWhenEffectiveOverridden(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	stubCheckGreenBase(f)
 	f.On("cat "+shQuote(sshdDropInLegacyPath), bssh.Result{ExitCode: 1})
-	f.On(sshdOptsProbe, bssh.Result{ExitCode: 1})
+	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
 	f.On("sshd -T", bssh.Result{ExitCode: 0,
 		Stdout: "port 2222\npermitrootlogin no\npasswordauthentication yes\nkbdinteractiveauthentication no\n"})
 	f.On(sshdConflictGrep, bssh.Result{ExitCode: 0,
@@ -536,7 +539,6 @@ func TestHardeningCheckFailsClosedOnSshdOpts(t *testing.T) {
 	// override every config file, so sshd -T cannot see them. Fail closed.
 	f := bssh.NewFakeRunner()
 	stubCheckGreenBase(f)
-	f.On("cat "+shQuote(sshdDropInLegacyPath), bssh.Result{ExitCode: 1})
 	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0, Stdout: `SSHD_OPTS="-o PasswordAuthentication=yes"` + "\n"})
 
 	_, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
@@ -550,26 +552,53 @@ func TestHardeningCheckFailsClosedOnSshdOpts(t *testing.T) {
 	}
 }
 
-func TestSshdOptsValue(t *testing.T) {
+func TestHardeningCheckErrorsWhenSshdOptsUnreadable(t *testing.T) {
+	// A present-but-unreadable /etc/default/ssh is a read FAILURE, not
+	// "unset": berth must refuse to trust sshd -T rather than assume
+	// SSHD_OPTS is empty.
+	f := bssh.NewFakeRunner()
+	stubCheckGreenBase(f)
+	f.On(sshdOptsProbe, bssh.Result{ExitCode: 1, Stderr: "cat: /etc/default/ssh: Permission denied"})
+
+	_, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
+	if err == nil || !strings.Contains(err.Error(), "cannot read /etc/default/ssh") {
+		t.Fatalf("err = %v, want a fail-closed unreadable-file error", err)
+	}
+}
+
+func TestSshdOptsHelpers(t *testing.T) {
+	// sshdOptsEmpty accepts only values PROVABLY empty (``, `""`, `''`);
+	// anything else — including a dangling opening quote that systemd's
+	// EnvironmentFile parser would continue across lines, or a trailing
+	// comment — conservatively counts as set.
 	tests := []struct {
-		name string
-		in   string
-		want string
+		name  string
+		in    string
+		found bool
+		raw   string
+		empty bool
 	}{
-		{"empty input", "", ""},
-		{"empty double-quoted value", `SSHD_OPTS=""`, ""},
-		{"double-quoted options", `SSHD_OPTS="-o PasswordAuthentication=yes"`, "-o PasswordAuthentication=yes"},
-		{"single-quoted value", `SSHD_OPTS='-4'`, "-4"},
-		{"unquoted value", `SSHD_OPTS=-4`, "-4"},
-		{"last assignment wins", "SSHD_OPTS=\"-4\"\nSSHD_OPTS=\"-6\"", "-6"},
-		{"leading whitespace tolerated", `  SSHD_OPTS="-4"`, "-4"},
-		{"commented-out assignment ignored", `#SSHD_OPTS=x`, ""},
-		{"whitespace-only value", `SSHD_OPTS="   "`, ""},
+		{"no assignment", "# defaults for openssh-server\nUNRELATED=1\n", false, "", true},
+		{"bare empty value", `SSHD_OPTS=`, true, "", true},
+		{"empty double quotes", `SSHD_OPTS=""`, true, `""`, true},
+		{"empty single quotes", `SSHD_OPTS=''`, true, `''`, true},
+		{"double-quoted options", `SSHD_OPTS="-o PasswordAuthentication=yes"`, true, `"-o PasswordAuthentication=yes"`, false},
+		{"dangling opening quote", `SSHD_OPTS='`, true, `'`, false},
+		{"multiline quoted value", "SSHD_OPTS='\n-o PasswordAuthentication=yes'", true, `'`, false},
+		{"last assignment empty wins", "SSHD_OPTS=\"-4\"\nSSHD_OPTS=\"\"", true, `""`, true},
+		{"last assignment set wins", "SSHD_OPTS=\"\"\nSSHD_OPTS=\"-6\"", true, `"-6"`, false},
+		{"leading whitespace recognized", `  SSHD_OPTS="-4"`, true, `"-4"`, false},
+		{"commented-out assignment ignored", `#SSHD_OPTS=x`, false, "", true},
+		{"trailing comment counts as set", `SSHD_OPTS="" # comment`, true, `"" # comment`, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := sshdOptsValue(tt.in); got != tt.want {
-				t.Errorf("sshdOptsValue(%q) = %q, want %q", tt.in, got, tt.want)
+			raw, found := sshdOptsAssignment(tt.in)
+			if found != tt.found || raw != tt.raw {
+				t.Errorf("sshdOptsAssignment(%q) = (%q, %v), want (%q, %v)", tt.in, raw, found, tt.raw, tt.found)
+			}
+			if got := sshdOptsEmpty(raw); got != tt.empty {
+				t.Errorf("sshdOptsEmpty(%q) = %v, want %v", raw, got, tt.empty)
 			}
 		})
 	}
@@ -580,7 +609,7 @@ func TestHardeningCheckErrorsWhenSshdDumpFails(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	stubCheckGreenBase(f)
 	f.On("cat "+shQuote(sshdDropInLegacyPath), bssh.Result{ExitCode: 1})
-	f.On(sshdOptsProbe, bssh.Result{ExitCode: 1})
+	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
 	f.On("sshd -T", bssh.Result{ExitCode: 1, Stderr: "/etc/ssh/sshd_config.d/60-broken.conf: Bad configuration option"})
 
 	_, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
@@ -590,11 +619,13 @@ func TestHardeningCheckErrorsWhenSshdDumpFails(t *testing.T) {
 }
 
 func TestHardeningCheckUnsatisfiedWhenLegacyDropInPresent(t *testing.T) {
-	// A berth-managed legacy file gates the effective probe OFF: Apply must
-	// migrate it first (a malformed managed legacy file would otherwise error
-	// sshd -T before Apply could remove the very file berth owns).
+	// A berth-managed legacy file gates sshd -T OFF: Apply must migrate it
+	// first (a malformed managed legacy file would otherwise error sshd -T
+	// before Apply could remove the very file berth owns). The SSHD_OPTS
+	// guard is NOT gated — it runs on every Check.
 	f := bssh.NewFakeRunner()
 	stubCheckGreenBase(f)
+	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(sshdDropInLegacyPath),
 		bssh.Result{ExitCode: 0, Stdout: managedMarker + "\nPermitRootLogin no\nPasswordAuthentication no\n"})
 
@@ -606,8 +637,8 @@ func TestHardeningCheckUnsatisfiedWhenLegacyDropInPresent(t *testing.T) {
 		t.Error("expected unsatisfied while the berth-managed legacy drop-in remains")
 	}
 	for _, c := range f.Calls() {
-		if c.Cmd == "sshd -T" || c.Cmd == sshdOptsProbe {
-			t.Error("the effective probe must be gated off while a managed legacy file remains")
+		if c.Cmd == "sshd -T" {
+			t.Error("sshd -T must be gated off while a managed legacy file remains")
 		}
 	}
 }
@@ -617,10 +648,12 @@ func TestHardeningCheckFreshHostGatesEffectiveProbeOff(t *testing.T) {
 	// not probe the effective config: cloud-init images ship drop-ins that
 	// re-enable password auth, so an ungated sshd -T would hard-error every
 	// first provision instead of letting Apply converge berth's file first.
+	// The SSHD_OPTS guard still runs — it is unconditional by design.
 	f := bssh.NewFakeRunner()
 	stubCheckGreenBase(f)
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 1})       // fresh: drop-in absent
 	f.On("cat "+shQuote(sshdDropInLegacyPath), bssh.Result{ExitCode: 1}) // no legacy file either
+	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
 
 	cr, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
 	if err != nil {
@@ -630,8 +663,8 @@ func TestHardeningCheckFreshHostGatesEffectiveProbeOff(t *testing.T) {
 		t.Error("expected unsatisfied on a fresh host (drop-in absent)")
 	}
 	for _, c := range f.Calls() {
-		if c.Cmd == "sshd -T" || c.Cmd == sshdOptsProbe {
-			t.Error("the effective probe must be gated off while berth's own drop-in is not converged")
+		if c.Cmd == "sshd -T" {
+			t.Error("sshd -T must be gated off while berth's own drop-in is not converged")
 		}
 	}
 }
@@ -643,7 +676,7 @@ func TestHardeningCheckIgnoresForeignLegacyDropIn(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	stubCheckGreenBase(f)
 	f.On("cat "+shQuote(sshdDropInLegacyPath), bssh.Result{ExitCode: 0, Stdout: "# operator notes\n"})
-	f.On(sshdOptsProbe, bssh.Result{ExitCode: 1})
+	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
 	f.On("sshd -T", bssh.Result{ExitCode: 0, Stdout: sshdTGood})
 
 	cr, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
@@ -687,7 +720,7 @@ func TestHardeningApplyMigratesLegacyDropIn(t *testing.T) {
 		bssh.Result{ExitCode: 0, Stdout: managedMarker + "\nPermitRootLogin no\nPasswordAuthentication no\n"})
 	f.On("rm -f "+shQuote(sshdDropInLegacyPath), bssh.Result{})
 	f.On("sshd -t", bssh.Result{})
-	f.On(sshdOptsProbe, bssh.Result{ExitCode: 1})
+	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
 	f.On("sshd -T", bssh.Result{ExitCode: 0, Stdout: sshdTGood})
 	f.On("systemctl reload ssh", bssh.Result{})
 
@@ -726,7 +759,7 @@ func TestHardeningApplyLeavesForeignLegacyDropIn(t *testing.T) {
 	stubApplyGreenBase(f)
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 1}) // write-guard: absent
 	f.On("cat "+shQuote(sshdDropInLegacyPath), bssh.Result{ExitCode: 0, Stdout: "# operator notes\n"})
-	f.On(sshdOptsProbe, bssh.Result{ExitCode: 1})
+	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
 	f.On("sshd -t", bssh.Result{})
 	f.On("sshd -T", bssh.Result{ExitCode: 0, Stdout: sshdTGood})
 	f.On("systemctl reload ssh", bssh.Result{})
@@ -748,7 +781,7 @@ func TestHardeningApplyFailsLoudWhenEffectiveConfigLoses(t *testing.T) {
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 1}) // write-guard: absent
 	f.On("cat "+shQuote(sshdDropInLegacyPath), bssh.Result{ExitCode: 1})
 	f.On("sshd -t", bssh.Result{})
-	f.On(sshdOptsProbe, bssh.Result{ExitCode: 1})
+	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
 	// A file sorting before 00-berth.conf keeps password auth enabled.
 	f.On("sshd -T", bssh.Result{ExitCode: 0,
 		Stdout: "port 2222\npermitrootlogin no\npasswordauthentication yes\nkbdinteractiveauthentication no\n"})
@@ -773,5 +806,26 @@ func TestHardeningApplyFailsLoudWhenEffectiveConfigLoses(t *testing.T) {
 		if c.Cmd == "systemctl reload ssh" {
 			t.Error("reload ssh must not run when the effective config is wrong")
 		}
+	}
+}
+
+func TestHardeningApplyFailsClosedOnSshdOptsBeforeMutating(t *testing.T) {
+	// A set SSHD_OPTS dooms the effective gate at the end of Apply, so Apply
+	// must refuse up front — before installing packages or touching ufw.
+	stubGate(t, nil, nil)
+	f := bssh.NewFakeRunner()
+	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0, Stdout: `SSHD_OPTS="-o PasswordAuthentication=yes"` + "\n"})
+
+	err := Hardening().Apply(context.Background(), provision.RunCtx{}, hardeningServer(), f)
+	if err == nil || !strings.Contains(err.Error(), "SSHD_OPTS") {
+		t.Fatalf("err = %v, want a fail-closed SSHD_OPTS error", err)
+	}
+	for _, c := range f.Calls() {
+		if c.Cmd == "DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban" || strings.HasPrefix(c.Cmd, "ufw ") {
+			t.Errorf("Apply must not mutate after the SSHD_OPTS refusal; ran %q", c.Cmd)
+		}
+	}
+	if len(f.Writes()) != 0 {
+		t.Error("Apply must not write files after the SSHD_OPTS refusal")
 	}
 }

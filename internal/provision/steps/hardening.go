@@ -37,39 +37,55 @@ var sshdEffectiveWant = []string{
 	"kbdinteractiveauthentication no",
 }
 
-// sshdOptsProbe reads any SSHD_OPTS assignment from /etc/default/ssh.
-// Debian's ssh.service starts `sshd -D $SSHD_OPTS` (EnvironmentFile), and
-// command-line options override every config file — so a non-empty value
-// means `sshd -T` cannot reproduce the daemon's effective view and berth
-// must fail closed. grep -s: a missing file exits non-zero with no output,
-// which parses as "unset".
-const sshdOptsProbe = `grep -hs '^[[:space:]]*SSHD_OPTS=' /etc/default/ssh`
+// sshdOptsProbe reads /etc/default/ssh whole. A missing file is fine (exit 0,
+// empty output — Debian marks the EnvironmentFile optional), but a present
+// file that cannot be read exits non-zero so the caller fails CLOSED instead
+// of treating a read failure as "unset".
+const sshdOptsProbe = `test ! -e /etc/default/ssh || cat -- /etc/default/ssh`
 
-// sshdOptsValue extracts the value of the LAST SSHD_OPTS assignment (later
-// assignments win for both shell sourcing and systemd's EnvironmentFile),
-// stripping surrounding quotes and whitespace. Empty string = unset.
-func sshdOptsValue(out string) string {
-	val := ""
-	for _, line := range strings.Split(out, "\n") {
+// sshdOptsAssignment returns the raw value text of the LAST SSHD_OPTS
+// assignment line in the file body (later assignments win for systemd's
+// EnvironmentFile), trimmed of surrounding whitespace only — quotes are NOT
+// stripped. found is false when no assignment line exists.
+func sshdOptsAssignment(body string) (raw string, found bool) {
+	for _, line := range strings.Split(body, "\n") {
 		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "SSHD_OPTS="); ok {
-			val = strings.Trim(strings.TrimSpace(rest), `"'`)
+			raw, found = strings.TrimSpace(rest), true
 		}
 	}
-	return strings.TrimSpace(val)
+	return raw, found
 }
 
-// sshdEffective verifies the effective global sshd configuration: it fails
-// closed on a non-empty SSHD_OPTS, then dumps the config (sshd -T) and
+// sshdOptsEmpty reports whether a raw assignment value PROVABLY denotes an
+// empty SSHD_OPTS: exactly the empty string, a pair of double quotes, or a
+// pair of single quotes. Anything else — a real value, a trailing comment,
+// or a dangling opening quote that systemd's EnvironmentFile parser would
+// continue across lines — counts as set: berth fails closed on what it
+// cannot prove empty rather than parsing systemd quoting in full.
+func sshdOptsEmpty(raw string) bool { return raw == "" || raw == `""` || raw == `''` }
+
+// sshdOptsGuard fails closed unless SSHD_OPTS is provably absent or empty:
+// Debian's ssh.service starts `sshd -D $SSHD_OPTS` (EnvironmentFile), and
+// command-line options override every config file, so any value berth cannot
+// prove empty means `sshd -T` would not reproduce the daemon's view.
+func sshdOptsGuard(ctx context.Context, r bssh.Runner) error {
+	res, err := r.Run(ctx, sshdOptsProbe, nil)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("cannot read /etc/default/ssh to verify SSHD_OPTS (refusing to trust sshd -T): %s", res.Stderr)
+	}
+	if raw, found := sshdOptsAssignment(res.Stdout); found && !sshdOptsEmpty(raw) {
+		return fmt.Errorf("cannot verify the effective sshd config: /etc/default/ssh sets SSHD_OPTS=%s, and sshd command-line options override sshd_config; clear it (or move it into a config drop-in) and re-run", raw)
+	}
+	return nil
+}
+
+// sshdEffective dumps the effective global sshd configuration (sshd -T) and
 // returns which required directives are missing. A non-zero sshd -T exit is
 // an error: the config is broken in a way berth does not own.
 func sshdEffective(ctx context.Context, r bssh.Runner) (missing []string, err error) {
-	opts, err := r.Run(ctx, sshdOptsProbe, nil)
-	if err != nil {
-		return nil, err
-	}
-	if v := sshdOptsValue(opts.Stdout); v != "" {
-		return nil, fmt.Errorf("cannot verify the effective sshd config: /etc/default/ssh sets SSHD_OPTS=%q, and sshd command-line options override sshd_config; clear it (or move it into a config drop-in) and re-run", v)
-	}
 	res, err := r.Run(ctx, "sshd -T", nil)
 	if err != nil {
 		return nil, err
@@ -195,6 +211,13 @@ func (hardening) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 		return provision.CheckResult{}, err
 	}
 
+	// SSHD_OPTS guard, unconditional: Apply cannot clear a foreign SSHD_OPTS,
+	// so a doomed run must fail on every Check — before dry-run promises a
+	// fix — not only once berth's own files have converged.
+	if err := sshdOptsGuard(ctx, r); err != nil {
+		return provision.CheckResult{}, err
+	}
+
 	// A berth-managed drop-in at the legacy (pre-00 rename) path must be
 	// migrated away. A foreign file there is left alone: it is not ours to
 	// delete, and any of the protected directives it sets is caught by the
@@ -204,7 +227,8 @@ func (hardening) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 		return provision.CheckResult{}, err
 	}
 
-	// Effective-config probe, gated on everything berth owns being converged
+	// Effective-config probe (sshd -T only — the SSHD_OPTS guard above is
+	// unconditional), gated on everything berth owns being converged
 	// (otherwise the step is unsatisfied anyway and Apply reconciles berth's
 	// files first — the gate also keeps a malformed managed legacy file from
 	// erroring sshd -T before Apply gets the chance to remove it).
@@ -258,6 +282,13 @@ func (hardening) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 }
 
 func (h hardening) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
+	// Fail closed on SSHD_OPTS before mutating anything: the effective gate
+	// below could never be trusted with it set, so the run is doomed — refuse
+	// up front rather than after installing packages and touching the firewall.
+	if err := sshdOptsGuard(ctx, r); err != nil {
+		return err
+	}
+
 	// Install the firewall and intrusion-prevention packages first: a minimal
 	// Debian install ships neither ufw nor fail2ban, so the ufw commands below
 	// would otherwise fail with "ufw: not found".
@@ -320,8 +351,8 @@ func (h hardening) Apply(ctx context.Context, rc provision.RunCtx, s *config.Ser
 	// Effective gate: valid syntax is not enough — sshd keeps the FIRST value
 	// per directive, so a drop-in sorting before ours can override it. Refuse
 	// to reload (and fail the step) rather than report a hardening that the
-	// config sshd loads does not contain. Same helper as Check, including the
-	// SSHD_OPTS fail-closed rule.
+	// config sshd loads does not contain. Same helper as Check; the SSHD_OPTS
+	// guard already ran at the top of Apply.
 	if missing, err := sshdEffective(ctx, r); err != nil {
 		return err
 	} else if len(missing) > 0 {
