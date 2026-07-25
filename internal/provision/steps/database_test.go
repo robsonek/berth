@@ -208,6 +208,7 @@ func TestDatabaseApplyHealsFromExistingEnvWithoutRewriting(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env already present
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Reused123\n"})
 	f.On("mysql --protocol=socket", bssh.Result{})
 
@@ -237,7 +238,8 @@ func TestDatabaseApplyFailsWhenExistingEnvLacksPassword(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
-	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // key absent
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"}) // guard passes; the missing password fails later
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})                                    // key absent
 	err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
 	if err == nil || !strings.Contains(err.Error(), "has no DB_PASSWORD") {
 		t.Fatalf("err = %v, want the pointed no-DB_PASSWORD error", err)
@@ -256,6 +258,8 @@ func TestDatabaseCheckSatisfiedDoesNotReseedExistingEnv(t *testing.T) {
 	s := databaseServer()
 	s.Valkey = true
 	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present, driver matches
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0})
 	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
@@ -278,6 +282,8 @@ const (
 func TestDatabaseCheckUnsatisfiedWhenDatabaseMissing(t *testing.T) {
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present, driver matches
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0}) // credential present
 	f.On(mariadbDBProbe, bssh.Result{Stdout: ""})                                                                                          // database absent
@@ -296,6 +302,8 @@ func TestDatabaseCheckUnsatisfiedWhenDatabaseMissing(t *testing.T) {
 func TestDatabaseCheckUnsatisfiedWhenUserOrGrantMissing(t *testing.T) {
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present, driver matches
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0})
 	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
@@ -315,8 +323,10 @@ func TestDatabaseCheckUnsatisfiedWhenUserOrGrantMissing(t *testing.T) {
 func TestDatabaseCheckUnsatisfiedWhenEnvLacksValidPassword(t *testing.T) {
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present, driver matches
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})
-	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 1}) // no valid DB_PASSWORD on the first line (or key/file absent — same outcome)
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 1}) // no valid DB_PASSWORD on the first line (or key absent — same outcome)
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -337,7 +347,8 @@ func TestDatabaseCheckUnsatisfiedWhenEnvLacksValidPassword(t *testing.T) {
 func TestDatabaseCheckSkipsProbesWhenNotInstalled(t *testing.T) {
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
-	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 1}) // not installed
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env, guard passes
+	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 1})       // not installed
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -356,6 +367,7 @@ func TestDatabaseCheckSourceMariaDBRequiresRepo(t *testing.T) {
 	s := databaseServer()
 	s.Database.Source = "mariadb"
 	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env, guard passes
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})
 	// mariadb.org repo not yet registered -> not satisfied (before any per-site probe).
 	f.On("test -e "+shQuote("/etc/apt/sources.list.d/mariadb-org.list"), bssh.Result{ExitCode: 1})
@@ -453,6 +465,7 @@ func TestDatabaseApplyRejectsTamperedPassword(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env already present
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	// A tampered env value containing a quote must be rejected (defence-in-depth).
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{Stdout: "DB_PASSWORD=bad'value\n"})
 
@@ -468,6 +481,7 @@ func TestDatabaseApplyRejectsLeadingSpacePassword(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env already present
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	// A leading-space value fails Check's probe, so laundering it here would
 	// oscillate forever (Check unsatisfied, Apply "succeeds"). It must instead
 	// fail loudly with the charset refusal.
@@ -489,6 +503,7 @@ func TestDatabaseApplyRejectsTrailingUnicodeSpacePassword(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env already present
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	// A trailing NBSP (U+00A0) is NOT [[:space:]] to the Check probe's C-locale
 	// grep, so Check rejects this line; trimming it away here would oscillate
 	// forever. It must stay in the value and fail the charset refusal.
@@ -510,6 +525,7 @@ func TestDatabaseApplyAcceptsTrailingASCIIWhitespacePassword(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env already present
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	// A trailing vertical tab IS [[:space:]] to the Check probe (POSIX C-locale
 	// set), so Apply must trim it the same way and reuse the value.
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Good123\v\n"})
@@ -649,6 +665,7 @@ func TestDatabaseApplyClientAuthFileNeverRewritten(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env already present
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Reused123\n"})
 	f.On("test -e '/home/deploy/.my.cnf'", bssh.Result{ExitCode: 0}) // already seeded (possibly operator-customized)
 	f.On("mysql --protocol=socket", bssh.Result{})
@@ -666,6 +683,8 @@ func TestDatabaseApplyClientAuthFileNeverRewritten(t *testing.T) {
 func TestDatabaseCheckUnsatisfiedWhenClientAuthMissing(t *testing.T) {
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present, driver matches
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0})
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0})
 	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
@@ -680,6 +699,151 @@ func TestDatabaseCheckUnsatisfiedWhenClientAuthMissing(t *testing.T) {
 	}
 	if !strings.Contains(cr.Reason, "client DB credentials") {
 		t.Errorf("Reason = %q", cr.Reason)
+	}
+}
+
+func TestDatabaseCheckFailsLoudlyOnEngineEnvConflict(t *testing.T) {
+	s := databaseServer() // engine mariadb -> seeds DB_CONNECTION=mysql
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=pgsql\n"})
+	_, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil {
+		t.Fatal("expected a loud error when DB_CONNECTION disagrees with database.engine")
+	}
+	for _, want := range []string{"DB_CONNECTION=pgsql", "mariadb", "mysql", envPath(s)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should mention %q", err, want)
+		}
+	}
+}
+
+func TestDatabaseCheckConflictGuardIgnoresForce(t *testing.T) {
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=pgsql\n"})
+	_, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{Force: true}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "DB_CONNECTION") {
+		t.Fatalf("Check() = %v; --force must not override the engine/env conflict guard", err)
+	}
+}
+
+func TestDatabaseCheckFailsWhenExistingEnvLacksDBConnection(t *testing.T) {
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})                    // .env present...
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // ...but no DB_CONNECTION line
+	_, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "DB_CONNECTION") {
+		t.Fatalf("Check() = %v, want an error naming the missing DB_CONNECTION key", err)
+	}
+}
+
+func TestDatabaseCheckFailsLoudlyOnEngineEnvConflictPostgres(t *testing.T) {
+	s := databaseServer()
+	s.Database = config.Database{Engine: "postgres", Name: "myapp", User: "myapp", Source: "debian"}
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	_, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "pgsql") {
+		t.Fatalf("Check() = %v, want a conflict naming the expected driver pgsql", err)
+	}
+}
+
+func TestDatabaseApplyFailsOnEngineEnvConflictBeforeMutating(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env exists
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=pgsql\n"})
+	// NOTE: apt install is deliberately NOT stubbed — the guard must fire before it.
+	err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "DB_CONNECTION") {
+		t.Fatalf("Apply() = %v, want the engine/env conflict error", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "apt-get") || strings.HasPrefix(c.Cmd, "mysql") {
+			t.Errorf("Apply must not install or mutate anything after detecting the conflict; ran %q", c.Cmd)
+		}
+	}
+}
+
+func TestDatabaseApplyPreScansAllSitesBeforeMutating(t *testing.T) {
+	// The conflict is on the SECOND site; the pre-scan must find it before any
+	// apt/SQL runs for the first (clean) site.
+	chdirTemp(t)
+	s := &config.Server{
+		Host:     "app.example.com",
+		Database: config.Database{Engine: "mariadb", Source: "debian"},
+		Sites: []config.Site{
+			{Domain: "one.example.com", DeployPath: "/var/www/one", Database: config.SiteDatabase{Name: "one_db", User: "one_user"}},
+			{Domain: "two.example.com", DeployPath: "/var/www/two", Database: config.SiteDatabase{Name: "two_db", User: "two_user"}},
+		},
+	}
+	env0, env1 := "/var/www/one/shared/.env", "/var/www/two/shared/.env"
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(env0), bssh.Result{ExitCode: 1})                                                     // first site: no .env -> guard passes
+	f.On("test -e "+shQuote(env1), bssh.Result{ExitCode: 0})                                                     // second site: .env exists...
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(env1), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=pgsql\n"}) // ...conflicts
+	err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "two.example.com") {
+		t.Fatalf("Apply() = %v, want the conflict error naming the second site", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "apt-get") || strings.HasPrefix(c.Cmd, "mysql") {
+			t.Errorf("no site may be installed or mutated when a later site conflicts; ran %q", c.Cmd)
+		}
+	}
+}
+
+func TestDatabaseCheckFailsWhenGrepErrors(t *testing.T) {
+	// grep exit >= 2 (unreadable input / I/O error) must be a hard error, not
+	// silently treated as "key absent".
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 2, Stderr: "grep: input: Permission denied"})
+	_, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "Permission denied") {
+		t.Fatalf("Check() = %v, want a hard error surfacing the grep stderr", err)
+	}
+}
+
+func TestDatabaseCheckPassesWhenDBConnectionMatchesOrFileAbsent(t *testing.T) {
+	// A matching driver, and an ABSENT file, both stay silent; Check then
+	// proceeds to its normal flow (here: the not-installed early return). An
+	// existing file that merely lacks the key is covered separately (it errors).
+	// Trailing space, vertical tab, and form feed after the value are all
+	// trimmed (mirrors passwordFromEnv's ASCII set), so they still match.
+	cases := map[string]struct {
+		envExists int // test -e exit code
+		grep      *bssh.Result
+	}{
+		"matching driver":       {0, &bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"}},
+		"trailing space":        {0, &bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql \n"}},
+		"trailing vertical tab": {0, &bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\v\n"}},
+		"trailing form feed":    {0, &bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\f\n"}},
+		"file absent":           {1, nil},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := databaseServer()
+			f := bssh.NewFakeRunner()
+			f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: tc.envExists})
+			if tc.grep != nil {
+				f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), *tc.grep)
+			}
+			f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 1}) // not installed -> early unsatisfied
+			cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+			if err != nil {
+				t.Fatalf("Check() error = %v", err)
+			}
+			if cr.Satisfied {
+				t.Error("expected unsatisfied (server not installed), not an error")
+			}
+		})
 	}
 }
 
