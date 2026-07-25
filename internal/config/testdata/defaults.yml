@@ -7,4 +7,4 @@ database:
   user: myapp
 sites:
   - domain: app.example.com
-    deploy_path: /home/deploy/myapp
+    deploy_path: /var/www/app

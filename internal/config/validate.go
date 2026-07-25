@@ -74,6 +74,62 @@ var reservedOSUsers = map[string]bool{
 	"berth": true,
 }
 
+// deniedDeployRoots are filesystem trees a deploy_path may never equal or
+// enter. appdirs runs `install -d -o <user> -g www-data -m 0710 <deploy_path>`
+// as root, and GNU install -d applies -o/-g/-m to an EXISTING directory (and
+// follows a directory symlink to its target), so a deploy_path inside a
+// system tree hands its ownership to the tenant (e.g. /etc -> replaceable
+// /etc/pam.d -> root). /home is banned outright: a site user owns its own
+// /home/<user> (0700), so a deploy_path under it (a) cannot be served — nginx
+// as www-data cannot traverse the 0700 home — and (b) lets the tenant swap
+// the directory for a symlink between runs. /var is handled separately (only
+// /var/www is allowed) so the enumeration cannot silently miss a /var subtree.
+var deniedDeployRoots = []string{
+	"/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib32", "/lib64",
+	"/libx32", "/media", "/mnt", "/proc", "/root", "/run", "/sbin", "/sys",
+	"/tmp", "/usr",
+}
+
+// ValidateDeployPath guards a single site's deploy_path. Exported so the
+// wizard's per-field validation applies exactly the same rules as config
+// loading. The path must be absolute, free of shell metacharacters, in
+// canonical (clean) form, at least two components deep, and outside every
+// denied tree; under /var only a per-site subdirectory of /var/www is allowed.
+// Cross-site rules (duplicates, nesting) live in Server.Validate, which sees
+// all sites at once.
+func ValidateDeployPath(p string) error {
+	if !path.IsAbs(p) || strings.ContainsAny(p, " ;&|$`\n\t\"'\\*?[]{}~") {
+		return fmt.Errorf("deploy_path %q must be an absolute path without shell metacharacters", p)
+	}
+	if path.Clean(p) != p {
+		return fmt.Errorf("deploy_path %q is not in canonical form; write it clean (e.g. /var/www/app: no trailing slash, no . or .. segments)", p)
+	}
+	if strings.Count(p, "/") < 2 {
+		return fmt.Errorf("deploy_path %q is a top-level directory; use a dedicated subdirectory (e.g. /var/www/app)", p)
+	}
+	// /var: only a per-site subdirectory of the web root is allowed. Denying
+	// by allow-rule (not an enumeration of /var subtrees) means no future
+	// /var/<x> tree can slip through.
+	if p == "/var" || strings.HasPrefix(p, "/var/") {
+		switch {
+		case p == "/var/www":
+			return fmt.Errorf("deploy_path %q is the shared web root itself; use a per-site subdirectory such as /var/www/<domain>", p)
+		case p == "/var/www/berth-acme" || strings.HasPrefix(p, "/var/www/berth-acme/"):
+			return fmt.Errorf("deploy_path %q is berth's ACME webroot (owned by www-data); use a dedicated directory such as /var/www/<domain>", p)
+		case strings.HasPrefix(p, "/var/www/"):
+			return nil
+		default:
+			return fmt.Errorf("deploy_path %q is under /var but outside /var/www; berth would chown it as root — use /var/www/<domain>", p)
+		}
+	}
+	for _, root := range deniedDeployRoots {
+		if p == root || strings.HasPrefix(p, root+"/") {
+			return fmt.Errorf("deploy_path %q is inside the system tree %s; berth would chown it as root (install -d applies ownership to an existing directory, and a tenant-owned parent enables a symlink swap to root) — use a dedicated directory such as /var/www/<domain>", p, root)
+		}
+	}
+	return nil
+}
+
 // dbEngineUpstreamSource maps each supported database engine to the non-"debian"
 // value its database.source may take (its trusted producer repo).
 var dbEngineUpstreamSource = map[string]string{"mariadb": "mariadb", "postgres": "pgdg"}
@@ -201,6 +257,8 @@ func (s *Server) Validate() error {
 	}
 	seenDomain, seenUser, seenDBName, seenDBUser, seenPath := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
 	seenProgram := map[string]bool{}
+	type sitePath struct{ domain, path string }
+	var seenSitePaths []sitePath
 	dup := func(seen map[string]bool, key, what string) error {
 		if seen[key] {
 			return fmt.Errorf("two sites share the same %s %q; each site must be distinct for isolation", what, key)
@@ -266,6 +324,17 @@ func (s *Server) Validate() error {
 		if err := dup(seenPath, site.DeployPath, "deploy_path"); err != nil {
 			return err
 		}
+		// Nested deploy_paths break tenant isolation: appdirs would chown one
+		// site's ancestor (or subtree) to another site's user. Paths are clean
+		// here (ValidateDeployPath ran in site.validate above), so the
+		// "/"-suffixed prefix test is exact — siblings sharing a string prefix
+		// (/var/www/app-one, /var/www/app-two) do NOT match.
+		for _, prev := range seenSitePaths {
+			if strings.HasPrefix(site.DeployPath, prev.path+"/") || strings.HasPrefix(prev.path, site.DeployPath+"/") {
+				return fmt.Errorf("site %s deploy_path %s and site %s deploy_path %s are nested; every deploy_path must be a disjoint directory for isolation", prev.domain, prev.path, site.Domain, site.DeployPath)
+			}
+		}
+		seenSitePaths = append(seenSitePaths, sitePath{domain: site.Domain, path: site.DeployPath})
 		for _, prog := range s.SiteProgramNames(site) {
 			if err := dup(seenProgram, prog, "supervisor program"); err != nil {
 				return err
@@ -388,8 +457,8 @@ func (st *Site) validate() error {
 	if !reHostname.MatchString(st.Domain) {
 		return fmt.Errorf("domain %q is not a valid hostname", st.Domain)
 	}
-	if !path.IsAbs(st.DeployPath) || strings.ContainsAny(st.DeployPath, " ;&|$`\n\t\"'\\*?[]{}~") {
-		return fmt.Errorf("deploy_path %q must be an absolute path without shell metacharacters", st.DeployPath)
+	if err := ValidateDeployPath(st.DeployPath); err != nil {
+		return err
 	}
 	if st.Repository != "" && !validGitURL(st.Repository) {
 		return fmt.Errorf("repository %q must be an SSH git URL (scp-like or ssh://); HTTPS is out of v1 scope", st.Repository)

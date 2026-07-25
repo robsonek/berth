@@ -14,7 +14,7 @@ func base() *Server {
 		PHP:      PHP{Version: "8.5", Source: "auto"},
 		Nginx:    Nginx{Source: "debian"},
 		Database: Database{Engine: "mariadb", Name: "myapp", User: "myapp", Source: "debian"},
-		Sites:    []Site{{Domain: "app.example.com", DeployPath: "/home/deploy/myapp"}},
+		Sites:    []Site{{Domain: "app.example.com", DeployPath: "/var/www/app"}},
 	}
 }
 
@@ -118,11 +118,23 @@ func TestValidateRejects(t *testing.T) {
 			s.Database.Engine = "postgres"
 			s.Database.Source = "mariadb" // wrong upstream for postgres
 		},
-		"relative path":   func(s *Server) { s.Sites[0].DeployPath = "deploy/x" },
-		"shell meta path": func(s *Server) { s.Sites[0].DeployPath = "/home/$(whoami)" },
-		"quote in path":   func(s *Server) { s.Sites[0].DeployPath = `/srv/a"b` },
-		"glob in path":    func(s *Server) { s.Sites[0].DeployPath = "/srv/*" },
-		"ssl no email":    func(s *Server) { s.Sites[0].SSL = true },
+		"relative path":          func(s *Server) { s.Sites[0].DeployPath = "deploy/x" },
+		"shell meta path":        func(s *Server) { s.Sites[0].DeployPath = "/home/$(whoami)" },
+		"quote in path":          func(s *Server) { s.Sites[0].DeployPath = `/srv/a"b` },
+		"glob in path":           func(s *Server) { s.Sites[0].DeployPath = "/srv/*" },
+		"unclean trailing slash": func(s *Server) { s.Sites[0].DeployPath = "/var/www/app/" },
+		"unclean dotdot":         func(s *Server) { s.Sites[0].DeployPath = "/var/www/../etc/app" },
+		"top-level path":         func(s *Server) { s.Sites[0].DeployPath = "/app" },
+		"system tree etc":        func(s *Server) { s.Sites[0].DeployPath = "/etc/nginx" },
+		"system tree usr":        func(s *Server) { s.Sites[0].DeployPath = "/usr/local/app" },
+		"home tree":              func(s *Server) { s.Sites[0].DeployPath = "/home/deploy/app" },
+		"home root":              func(s *Server) { s.Sites[0].DeployPath = "/home/deploy" },
+		"var non-www lib":        func(s *Server) { s.Sites[0].DeployPath = "/var/lib/app" },
+		"var non-www crash":      func(s *Server) { s.Sites[0].DeployPath = "/var/crash/app" },
+		"var non-www snap":       func(s *Server) { s.Sites[0].DeployPath = "/var/snap/app" },
+		"shared web root":        func(s *Server) { s.Sites[0].DeployPath = "/var/www" },
+		"acme webroot subtree":   func(s *Server) { s.Sites[0].DeployPath = "/var/www/berth-acme/x" },
+		"ssl no email":           func(s *Server) { s.Sites[0].SSL = true },
 		"ssl bad email": func(s *Server) {
 			s.Sites[0].SSL = true
 			s.Sites[0].SSLEmail = "x@y.com; reboot"
@@ -154,6 +166,59 @@ func TestValidateRejects(t *testing.T) {
 				t.Errorf("expected error for %s, got nil", name)
 			}
 		})
+	}
+}
+
+func TestValidateDeployPathDeniesEverySystemRoot(t *testing.T) {
+	// Every entry of the deny-list must be refused both as an exact path (the
+	// depth>=2 rule catches single-component roots) and as a parent of the
+	// deploy_path (the prefix branch).
+	for _, root := range []string{
+		"/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib32", "/lib64",
+		"/libx32", "/media", "/mnt", "/proc", "/root", "/run", "/sbin", "/sys",
+		"/tmp", "/usr",
+	} {
+		for _, p := range []string{root, root + "/app"} {
+			s := base()
+			s.Sites[0].DeployPath = p
+			if err := s.Validate(); err == nil {
+				t.Errorf("deploy_path %s must be rejected", p)
+			}
+		}
+	}
+}
+
+func TestValidateDeployPathIsolation(t *testing.T) {
+	// Accepted: disjoint sibling paths that merely share a string prefix.
+	ok := multiSite()
+	ok.Sites[0].DeployPath = "/var/www/app-one"
+	ok.Sites[1].DeployPath = "/var/www/app-two"
+	if err := ok.Validate(); err != nil {
+		t.Errorf("sibling deploy_paths sharing a string prefix must pass, got %v", err)
+	}
+
+	// Rejected: one site's deploy_path nested inside another's (either order).
+	nested := multiSite()
+	nested.Sites[0].DeployPath = "/var/www/app"
+	nested.Sites[1].DeployPath = "/var/www/app/blog"
+	if err := nested.Validate(); err == nil {
+		t.Error("expected error for nested deploy_paths (child after parent)")
+	}
+	reversed := multiSite()
+	reversed.Sites[0].DeployPath = "/var/www/app/blog"
+	reversed.Sites[1].DeployPath = "/var/www/app"
+	if err := reversed.Validate(); err == nil {
+		t.Error("expected error for nested deploy_paths (parent after child)")
+	}
+}
+
+func TestValidateDeployPathAcceptsCommonLayouts(t *testing.T) {
+	for _, p := range []string{"/var/www/app", "/srv/app", "/opt/apps/site", "/data/app"} {
+		s := base()
+		s.Sites[0].DeployPath = p
+		if err := s.Validate(); err != nil {
+			t.Errorf("deploy_path %s should validate, got %v", p, err)
+		}
 	}
 }
 

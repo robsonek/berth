@@ -15,7 +15,7 @@ queue: true
 scheduler: true
 sites:
   - domain: app.example.com
-    deploy_path: /home/deploy/myapp
+    deploy_path: /var/www/app
     repository: git@github.com:owner/repo.git
     ssl: true
     ssl_email: admin@example.com
