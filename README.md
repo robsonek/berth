@@ -131,7 +131,7 @@ system:                        # optional host-level OS provisioning — all def
                                # (hostnamectl) and keeps a 127.0.1.1 alias line in
                                # /etc/hosts so sudo resolves the name without DNS
   break_glass: true            # default off; give the berth account a console
-                               # password (saved to .berth/<name>.secrets.json) for
+                               # password (saved to ~/.berth/<name>.secrets.json) for
                                # provider console/VNC access when SSH is down —
                                # sshd keeps password logins disabled either way
 
@@ -171,9 +171,9 @@ sites:                         # one or more
       - { name: reverb, command: php artisan reverb:start, processes: 1 }
 ```
 
-Generated passwords are cached in a gitignored `.berth/` directory (the secrets
-file is mode 0600) and reused across runs — never rotated. The thematic sections
-below explain each area in depth.
+Generated passwords are cached in `~/.berth/` (the secrets file is mode 0600)
+and reused across runs — never rotated. The thematic sections below explain
+each area in depth.
 
 ## Package sources
 
@@ -316,7 +316,7 @@ scope):
   account is created with a locked password, which makes the provider's
   console/VNC useless when SSH is down (only rescue mode remains). Setting
   `break_glass: true` gives the `berth` account a generated password, stored
-  locally in `.berth/<name>.secrets.json` (0600, gitignored) so you can type
+  locally in `~/.berth/<name>.secrets.json` (0600) so you can type
   it at the console. It never opens a network path — sshd keeps
   `PasswordAuthentication no` — but note the `berth` account has full sudo, so
   treat the cached password as a root credential. Setting the knob back to

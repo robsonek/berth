@@ -24,6 +24,13 @@ Notable changes to berth. Older releases are documented on the
   a symlink that root's `install -d` would follow and chown, reaching root. The
   path validation cannot catch this (the new path is valid and the old one has
   left the config), so the guard is a runtime check.
+- **The local secret cache moved from `./.berth/` to `~/.berth/`** and is now
+  guarded by a per-host lock. Anchoring it under `$HOME` means it is found
+  regardless of the working directory (break-glass lock-back and the
+  re-seed-after-`.env`-loss flow depend on this), and the lock stops two
+  concurrent runs against the same host from lost-updating it. **There is no
+  automatic migration:** an old `./.berth/` is simply ignored — berth re-seeds,
+  reusing secrets from each host's live `shared/.env`.
 
 ### Fixed
 
@@ -48,6 +55,19 @@ Notable changes to berth. Older releases are documented on the
   near-expiry production certificate under `--ssl-staging`) could report success
   while automatic renewal was disabled. Check now reports the inactive timer and
   Apply enables it whenever certbot is installed.
+- **The Laravel `APP_KEY` is kept in sync with `shared/.env` instead of
+  regenerated** — the DB password was synced to the local cache every run but
+  the APP_KEY was only minted on first seed and never cached, so an existing
+  install got no protection and a lost `.env` re-seeded with a NEW key,
+  silently and permanently breaking decryption of encrypted-at-rest data. It is
+  now read from the `.env` when present, recovered-or-generated when absent, and
+  cached beside the password.
+- **The break-glass console password is validated before `chpasswd`** — a
+  tampered cache value with a newline could otherwise inject a second `chpasswd`
+  record and overwrite root's password.
+- **Uppercase domains are rejected** — they passed the case-insensitive
+  hostname check but broke the case-sensitive certificate lineage match and 443
+  vhost file paths.
 
 ## [0.15.0] — 2026-07-25
 

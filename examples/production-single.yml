@@ -59,7 +59,7 @@ system:
   hostname: app.example.com # sets the static hostname + a 127.0.1.1 alias in
                             # /etc/hosts; omit to leave the image's name untouched
   break_glass: true         # console password for the berth account, saved to
-                            # .berth/<name>.secrets.json (SSH password logins stay
+                            # ~/.berth/<name>.secrets.json (SSH password logins stay
                             # disabled); omit to keep the account locked
 
 sites:

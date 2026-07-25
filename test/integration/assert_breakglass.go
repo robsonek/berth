@@ -51,7 +51,7 @@ func assertBreakGlass(ctx context.Context, t *testing.T, c *bssh.Client, srv *co
 			t.Fatalf("load local secret cache: %v", err)
 		}
 		if cache["console:berth"] == "" {
-			t.Error("break_glass on: console password missing from the local secret cache (.berth/) — the operator cannot read it")
+			t.Error("break_glass on: console password missing from the local secret cache (~/.berth/) — the operator cannot read it")
 		}
 		return
 	}
