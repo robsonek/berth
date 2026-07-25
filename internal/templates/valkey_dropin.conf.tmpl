@@ -1,3 +1,0 @@
-[Service]
-ExecStart=
-ExecStart=/usr/bin/valkey-server /etc/valkey/valkey.conf --supervised systemd --daemonize no --maxmemory {{ .Maxmemory }} --maxmemory-policy {{ .Policy }}

@@ -14,6 +14,13 @@ import (
 // valkeyUnit is the systemd unit shipped by the Debian valkey-server package.
 const valkeyUnit = "valkey-server.service"
 
+// Legacy paths of the pre-per-site tuning drop-in that targeted the stock
+// valkey-server.service; kept only so Apply can migrate them away.
+const (
+	valkeyDropInDir  = "/etc/systemd/system/valkey-server.service.d"
+	valkeyDropInPath = valkeyDropInDir + "/berth.conf"
+)
+
 const (
 	valkeyUnitDir   = "/etc/systemd/system"
 	valkeyRunBase   = "/run/berth-valkey"

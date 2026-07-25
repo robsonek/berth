@@ -93,11 +93,13 @@ func TestPipelineIncludesTuningForMariaDB(t *testing.T) {
 	}
 }
 
-func TestPipelineIncludesTuningForValkey(t *testing.T) {
+func TestPipelineOmitsTuningForValkeyOnly(t *testing.T) {
+	// Valkey no longer pulls in the tuning step: maxmemory lives in the
+	// per-site instance units owned by the valkey step.
 	s := &config.Server{Valkey: true, Database: config.Database{Engine: "postgres"}, Sites: []config.Site{{Domain: "a.example.com"}}}
 	names := stepNames(steps.Pipeline(s, nil, true))
-	if !contains(names, "tuning") {
-		t.Errorf("expected tuning step for valkey; got %v", names)
+	if contains(names, "tuning") {
+		t.Errorf("did not expect tuning step for valkey-only config; got %v", names)
 	}
 }
 
@@ -107,21 +109,6 @@ func TestPipelineOmitsTuningForPostgresNoValkey(t *testing.T) {
 	if contains(names, "tuning") {
 		t.Errorf("did not expect tuning step; got %v", names)
 	}
-}
-
-// TestPipelineTuningRequiresValkeyWhenEnabled pins that Pipeline threads
-// Server.Valkey into the tuning constructor, not just that tuning is present.
-func TestPipelineTuningRequiresValkeyWhenEnabled(t *testing.T) {
-	s := &config.Server{Valkey: true, Database: config.Database{Engine: "postgres"}, Sites: []config.Site{{Domain: "a.example.com"}}}
-	for _, st := range steps.Pipeline(s, nil, true) {
-		if st.Name() == "tuning" {
-			if !contains(st.Requires(), "valkey") {
-				t.Errorf("tuning built by Pipeline(valkey=true) must require valkey; got %v", st.Requires())
-			}
-			return
-		}
-	}
-	t.Fatal("tuning step missing from pipeline")
 }
 
 func TestPipelineTuningAfterDatabase(t *testing.T) {

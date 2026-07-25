@@ -14,8 +14,6 @@ import (
 )
 
 const (
-	valkeyDropInDir   = "/etc/systemd/system/valkey-server.service.d"
-	valkeyDropInPath  = valkeyDropInDir + "/berth.conf"
 	mariadbUnit       = "mariadb.service"
 	mariadbTuningPath = "/etc/mysql/mariadb.conf.d/99-berth.cnf"
 	// mariadbSlowLogDir hosts the slow query log. Debian 13's mariadb logs to
@@ -117,31 +115,17 @@ func checkMariaDBBufferPoolFits(ctx context.Context, r bssh.Runner, s *config.Se
 	return nil
 }
 
-type tuning struct{ valkey bool }
+type tuning struct{}
 
-// Tuning writes managed performance-tuning drop-ins for Valkey (systemd drop-in)
-// and MariaDB (mariadb.conf.d), each gated on whether that service is provisioned.
-// It runs after database so both services are installed. valkey mirrors
-// Server.Valkey: when set, Requires() also names the valkey step so the --only
-// gate refuses to tune a host whose Valkey was never provisioned (full runs are
-// ordered by registration and unaffected).
-func Tuning(valkey bool) provision.Step { return tuning{valkey: valkey} }
+// Tuning writes the managed MariaDB performance-tuning drop-in
+// (mariadb.conf.d), gated on the engine being mariadb. It runs after database
+// so the service is installed. Valkey maxmemory tuning lives in the per-site
+// instance units owned by the valkey step.
+func Tuning() provision.Step { return tuning{} }
 
 func (tuning) Name() string { return "tuning" }
 
-func (t tuning) Requires() []string {
-	if t.valkey {
-		return []string{"database", "valkey"}
-	}
-	return []string{"database"}
-}
-
-func renderValkeyDropIn(s *config.Server) ([]byte, error) {
-	return templates.Render("valkey_dropin.conf.tmpl", struct{ Maxmemory, Policy string }{
-		Maxmemory: s.Tuning.ValkeyMaxmemoryEff(),
-		Policy:    s.Tuning.ValkeyMaxmemoryPolicyEff(),
-	})
-}
+func (tuning) Requires() []string { return []string{"database"} }
 
 // renderMariaDBTuning renders the managed mariadb.conf.d drop-in. The slow-log
 // block is conditional so the default render stays byte-identical to the
@@ -225,19 +209,6 @@ func checkTuned(ctx context.Context, rc provision.RunCtx, r bssh.Runner, unit, p
 
 func (tuning) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
 	var changes []string
-	if s.Valkey {
-		want, err := renderValkeyDropIn(s)
-		if err != nil {
-			return provision.CheckResult{}, err
-		}
-		ok, ch, err := checkTuned(ctx, rc, r, valkeyUnit, valkeyDropInPath, want, "valkey maxmemory/eviction")
-		if err != nil {
-			return provision.CheckResult{}, err
-		}
-		if !ok {
-			changes = append(changes, ch...)
-		}
-	}
 	if s.Database.Engine == "mariadb" {
 		if err := checkMariaDBBufferPoolFits(ctx, r, s); err != nil {
 			return provision.CheckResult{}, err
@@ -275,38 +246,10 @@ func (tuning) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 	return provision.CheckResult{Satisfied: false, Reason: "service tuning not applied", Changes: changes}, nil
 }
 
-// Apply reconciles only the service blocks that are actually unsatisfied. Each block
-// re-runs the SAME checkTuned predicate Check uses, so a healthy service is skipped
-// entirely (no spurious restart) — a Valkey-only drift never restarts MariaDB, and
-// vice versa. This is re-entrant and idempotent.
+// Apply reconciles only when actually unsatisfied: it re-runs the SAME checkTuned
+// predicate Check uses, so a healthy service is skipped entirely (no spurious
+// restart). This is re-entrant and idempotent.
 func (tuning) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
-	if s.Valkey {
-		cfg, err := renderValkeyDropIn(s)
-		if err != nil {
-			return err
-		}
-		ok, _, err := checkTuned(ctx, rc, r, valkeyUnit, valkeyDropInPath, cfg, "valkey maxmemory/eviction")
-		if err != nil {
-			return err
-		}
-		if !ok {
-			if res, err := r.Run(ctx, "mkdir -p "+valkeyDropInDir, nil); err != nil {
-				return err
-			} else if res.ExitCode != 0 {
-				return fmt.Errorf("mkdir %s: %s", valkeyDropInDir, res.Stderr)
-			}
-			if err := r.WriteFile(ctx, bssh.FileSpec{Path: valkeyDropInPath, Content: cfg, Owner: "root", Group: "root", Mode: 0o644, Sudo: true}); err != nil {
-				return fmt.Errorf("write %s: %w", valkeyDropInPath, err)
-			}
-			for _, cmd := range []string{"systemctl daemon-reload", "systemctl restart " + valkeyUnit} {
-				if res, err := r.Run(ctx, cmd, nil); err != nil {
-					return err
-				} else if res.ExitCode != 0 {
-					return fmt.Errorf("tuning %q: %s", cmd, res.Stderr)
-				}
-			}
-		}
-	}
 	if s.Database.Engine == "mariadb" {
 		cfg, err := renderMariaDBTuning(s)
 		if err != nil {
