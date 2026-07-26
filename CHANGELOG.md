@@ -5,6 +5,18 @@ Notable changes to berth. Older releases are documented on the
 
 ## [Unreleased]
 
+### Added
+
+- **Five `tuning.*` parity knobs** — `mariadb_log_file_size`,
+  `mariadb_tmp_table_size` (drives both `tmp_table_size` and
+  `max_heap_table_size`), `mariadb_max_connections`,
+  `mariadb_max_allowed_packet` (capped at MariaDB's 1G ceiling, which the
+  server would otherwise enforce by silent truncation), and
+  `php_fpm_max_children` (every site's pool, default 10). The MariaDB knobs
+  are unset-by-default: an empty knob renders no directive and the engine's
+  stock default stays in force — existing hosts see zero drift and no
+  restart until a knob is set.
+
 ### Fixed
 
 - **"Written but not reloaded" is now detected and healed** — a crash (or a
