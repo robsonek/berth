@@ -44,9 +44,14 @@ func supervisorProgramPath(domain string) string {
 // domain literally named backup-<x>.tld would otherwise produce
 // /etc/cron.d/berth-backup-<x>_tld — inside the backups sweep's glob (deleted
 // every run) and able to collide with another domain's backup cron. Legacy
-// "berth-<pool>" files self-migrate: the orphan sweep below removes them
-// (berth-marked, outside the desired set) while the drift path writes this name.
+// "berth-<pool>" files of a CONFIGURED site self-migrate via an atomic rename
+// in Apply's pre-write phase (see the migration loop there); a REMOVED site's
+// legacy file is swept like any other orphan.
 func cronPath(domain string) string { return "/etc/cron.d/berth-site-" + poolName(domain) }
+
+// legacyCronPath is the pre-rename scheduler-cron path of a site; current
+// crons live at cronPath. Kept only so Apply can migrate the old files away.
+func legacyCronPath(domain string) string { return "/etc/cron.d/berth-" + poolName(domain) }
 
 // anySchedulerEnabled reports whether at least one site wants the scheduler cron.
 func anySchedulerEnabled(s *config.Server) bool {
@@ -422,7 +427,10 @@ func orphanSiteFiles(ctx context.Context, r bssh.Runner, s *config.Server) ([]si
 		{"/etc/nginx/sites-available", ""},
 		{fpmPoolDir(s.PHP.Version), "*.conf"},
 		// berth-* (not berth-site-*): legacy pre-rename scheduler crons must be
-		// swept too; the backups prefix below keeps that step's files out.
+		// swept too; the backups prefix below keeps that step's files out. Any
+		// FUTURE berth cron family must live under berth-site-/berth-backup-
+		// or be excluded here explicitly, or this sweep will delete it — the
+		// exact bug class the berth-site- rename fixed.
 		{"/etc/cron.d", "berth-*"},
 	} {
 		paths, err := findRegularFiles(ctx, r, k.dir, k.pattern)
@@ -501,34 +509,41 @@ func (st site) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 		}
 	}
 	for _, mf := range mfs {
+		var reason string
 		if mf.remove {
 			present, err := managedFilePresent(ctx, r, mf.path)
 			if err != nil {
 				return provision.CheckResult{}, err
 			}
-			if present {
-				// Destructive dry-run preview: list EVERY planned removal, not
-				// just the first one this loop trips on (content drift keeps the
-				// plain short-circuit above/below — writes are not destructive).
-				removals, err := plannedRemovals(ctx, r, mfs)
-				if err != nil {
-					return provision.CheckResult{}, err
-				}
-				return provision.CheckResult{Satisfied: false, Reason: mf.path + " should be removed (feature disabled or site removed)", Changes: append(removals, st.changes()...)}, nil
+			if !present {
+				continue
 			}
-			continue
+			reason = mf.path + " should be removed (feature disabled or site removed)"
+		} else {
+			state, err := checkManagedFile(ctx, r, mf.path, mf.content)
+			if err != nil {
+				return provision.CheckResult{}, err
+			}
+			ok, err := managedFileSatisfied(state, mf.path, rc.Force)
+			if err != nil {
+				return provision.CheckResult{}, err
+			}
+			if ok {
+				continue
+			}
+			reason = mf.path + " not up to date"
 		}
-		state, err := checkManagedFile(ctx, r, mf.path, mf.content)
+		// First unsatisfied hit, whatever tripped it: Apply will ALSO perform
+		// every planned removal, so the destructive dry-run preview must ride
+		// along on EVERY unsatisfied result of this loop — a content drift
+		// used to short-circuit before the preview was computed, silently
+		// omitting deletions from --dry-run. Computed lazily (read-only cat
+		// probes) so a satisfied run never pays for it.
+		removals, err := plannedRemovals(ctx, r, mfs)
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
-		ok, err := managedFileSatisfied(state, mf.path, rc.Force)
-		if err != nil {
-			return provision.CheckResult{}, err
-		}
-		if !ok {
-			return provision.CheckResult{Satisfied: false, Reason: mf.path + " not up to date", Changes: st.changes()}, nil
-		}
+		return provision.CheckResult{Satisfied: false, Reason: reason, Changes: append(removals, st.changes()...)}, nil
 	}
 	// The active nginx and PHP-FPM configurations must validate.
 	if res, err := r.Run(ctx, "nginx -t", nil); err != nil {
@@ -658,6 +673,45 @@ func (site) changes() []string {
 }
 
 func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
+	// Legacy scheduler-cron migration (pre-rename berth-<pool> ->
+	// berth-site-<pool>) for CONFIGURED sites: writing the NEW file first and
+	// sweeping the legacy one later would leave a window where BOTH schedule
+	// schedule:run every minute (duplicate mail/billing risk if cron ticks in
+	// between). An atomic within-directory rename closes it: legacy
+	// berth-managed && new absent -> mv (the rename does not change the
+	// content, so the normal write below is a plain same-bytes rewrite);
+	// legacy berth-managed && new present (a half-migrated host) -> rm the
+	// legacy NOW rather than in the orphan loop. Both happen before any cron
+	// write and before the orphan discovery below, which therefore never sees
+	// the legacy file. /etc/cron.d has no reload window, so this may precede
+	// the stamp invalidations.
+	for _, site := range s.Sites {
+		if !s.SchedulerEnabled(site) {
+			continue // no new file will be written; the orphan sweep removes a legacy one
+		}
+		legacy := legacyCronPath(site.Domain)
+		managed, err := managedFilePresent(ctx, r, legacy)
+		if err != nil {
+			return err
+		}
+		if !managed {
+			continue
+		}
+		newPresent, err := fileExists(ctx, r, cronPath(site.Domain))
+		if err != nil {
+			return err
+		}
+		cmd := "mv " + shQuote(legacy) + " " + shQuote(cronPath(site.Domain))
+		if newPresent {
+			cmd = "rm -f " + shQuote(legacy)
+		}
+		if res, err := r.Run(ctx, cmd, nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("migrate legacy scheduler cron %s: %s", legacy, res.Stderr)
+		}
+	}
+
 	// Discover the removed-site orphans up front (read-only, so it may precede
 	// the stamp invalidation) and classify them by owning unit: each class is
 	// deleted inside its unit's invalidate→mutate→validate→reload→mark window.
@@ -747,9 +801,11 @@ func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server,
 
 	// Orphan vhosts: the site left the config. The enabled entry is removed
 	// ONLY when it is a symlink resolving to exactly this vhost (an operator's
-	// foreign file or repointed link at that path is not ours to delete —
-	// nginx -t fails loudly on a genuinely broken leftover, as designed);
-	// the berth-marked available file always goes.
+	// foreign file or repointed link at that path is not ours to delete); the
+	// berth-marked available file always goes. A leftover the guard skipped is
+	// then a LOUD error, not a note: nginx -t is perfectly happy with a
+	// regular file or hardlink there, so it would keep serving the removed
+	// site silently forever while every run reported green.
 	for _, p := range orphanVhosts {
 		link := nginxEnabledPath(strings.TrimPrefix(p, "/etc/nginx/sites-available/"))
 		cmd := "if [ -L " + shQuote(link) + " ] && [ " + shQuote(link) + " -ef " + shQuote(p) + " ]; then rm -f " + shQuote(link) + "; fi && rm -f " + shQuote(p)
@@ -757,6 +813,11 @@ func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server,
 			return err
 		} else if res.ExitCode != 0 {
 			return fmt.Errorf("remove orphan vhost %s: %s", p, res.Stderr)
+		}
+		if res, err := r.Run(ctx, "[ ! -e "+shQuote(link)+" ]", nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("removed vhost %s but %s still exists (foreign file or hardlink) — remove it manually; nginx keeps serving the removed site until then", p, link)
 		}
 	}
 
@@ -884,8 +945,9 @@ func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server,
 		}
 	}
 
-	// Orphan scheduler crons (removed sites, plus legacy pre-rename berth-<pool>
-	// names self-migrating to berth-site-<pool>): no unit window — /etc/cron.d
+	// Orphan scheduler crons (removed sites, including their legacy pre-rename
+	// berth-<pool> names — a CONFIGURED site's legacy cron was already renamed
+	// in the pre-write migration above): no unit window — /etc/cron.d
 	// drop-ins take effect on removal by themselves.
 	for _, p := range orphanCrons {
 		if res, err := r.Run(ctx, "rm -f "+shQuote(p), nil); err != nil {
