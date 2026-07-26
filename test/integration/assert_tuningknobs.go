@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -75,7 +76,10 @@ func assertTuningKnobs(ctx context.Context, t *testing.T, c *bssh.Client, srv *c
 		if err != nil {
 			t.Fatalf("php-fpm -tt: %v", err)
 		}
-		if !strings.Contains(res.Stdout+res.Stderr, fmt.Sprintf("pm.max_children = %d", v)) {
+		// Anchored to end-of-line so knob=5 cannot false-pass on a host
+		// serving 50 (decimal-prefix collision).
+		re := regexp.MustCompile(fmt.Sprintf(`(?m)^\s*pm\.max_children = %d\s*$`, v))
+		if !re.MatchString(res.Stdout + res.Stderr) {
 			t.Errorf("php-fpm -tt output lacks pm.max_children = %d", v)
 		}
 	}
