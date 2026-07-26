@@ -70,12 +70,14 @@ Notable changes to berth. Older releases are documented on the
   gated on the unit being enabled too, letting a running worker keep
   executing removed code.
 - **Overly long domains are rejected at validation, not mid-provision** — a
-  still-RFC-valid domain longer than 70 characters derives on-host names the
-  kernel cannot create: the per-site PHP-FPM/Valkey unix sockets exceed the
-  107-byte socket-path budget (and, far later, cron/unit filenames exceed
-  NAME_MAX), so every run failed at socket creation after nginx and PHP-FPM
-  were already reloaded. `berth provision` now refuses the config up front,
-  stating the limit and the reason.
+  still-RFC-valid domain longer than 77 characters overflows the kernel's
+  107-byte unix-socket path budget for the per-site Valkey socket (the
+  PHP-FPM socket follows at 88, cron/unit filenames much later at NAME_MAX),
+  so provisioning failed at socket creation after nginx and PHP-FPM were
+  already reloaded. `berth provision` now refuses the config up front,
+  stating the limit and the reason; the cap includes the Valkey budget even
+  while `valkey` is off, so a valid config never breaks the day the knob is
+  switched on.
 
 ### Changed
 

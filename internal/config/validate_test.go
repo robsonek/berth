@@ -185,6 +185,14 @@ func TestValidateAcceptsLowercaseDomain(t *testing.T) {
 // creating the derived socket/cron artifacts. The longest accepted length
 // must pass and one more character must fail.
 func TestValidateDomainLengthBoundary(t *testing.T) {
+	// The cap must be the TRUE universal hard bound, not a headroom pick: the
+	// tightest budget is the per-site Valkey socket path against sun_path,
+	// 107 - 30 = 77 (unconditionally, so a config never turns invalid the day
+	// valkey: true is switched on). A lower cap rejects working 71-77 char
+	// domains; recompute before moving this.
+	if maxSiteDomainLen != 77 {
+		t.Fatalf("maxSiteDomainLen = %d, want the universal hard bound 77 (= 107-byte sun_path - 30-byte Valkey socket overhead)", maxSiteDomainLen)
+	}
 	// 63-char label + "." + filler label + ".com" -> total is 68 + len(filler).
 	domain := func(total int) string {
 		return strings.Repeat("a", 63) + "." + strings.Repeat("b", total-68) + ".com"
