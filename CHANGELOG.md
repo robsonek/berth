@@ -40,6 +40,10 @@ Notable changes to berth. Older releases are documented on the
   package to be actually installed, so a package removed but not purged
   (dpkg state `rc`) no longer counts as installed and gets reinstalled
   instead of skipped; held-but-installed packages still count as installed.
+- `berth init` no longer prints success and then possibly fails on
+  `.gitignore`: the vestigial CWD `.gitignore` management was removed
+  entirely — secret caches live under `~/.berth` (never in the working
+  directory) and the generated YAML is secret-free by design.
 
 ## [0.17.0] — 2026-07-26
 
