@@ -978,11 +978,8 @@ func TestAccountsApplyFailsLoudWhenVisudoRejects(t *testing.T) {
 	f.On("visudo -cf "+shQuote(sudoersPath(u1)), bssh.Result{ExitCode: 1})
 
 	err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
-	if err == nil || !strings.Contains(err.Error(), "failed visudo -cf validation") {
-		t.Fatalf("Apply() = %v, want the visudo rejection error", err)
-	}
-	if !strings.Contains(err.Error(), sudoersPath(u1)) {
-		t.Errorf("the error must name the rejected file; got %v", err)
+	if want := sudoersPath(u1) + " failed visudo -cf validation"; err == nil || err.Error() != want {
+		t.Fatalf("Apply() = %v, want exactly %q", err, want)
 	}
 	var wroteRejected bool
 	for _, w := range f.Writes() {
