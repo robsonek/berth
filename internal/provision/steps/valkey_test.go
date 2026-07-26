@@ -15,10 +15,10 @@ func valkeyServer() *config.Server {
 }
 
 // valkeyLoadedCmd mirrors serviceConfigLoaded's exact command construction
-// (tuning.go:180) for an instance unit — FakeRunner needs the exact string.
+// (tuning.go) for an instance unit — FakeRunner needs the exact string.
 // Keep it byte-identical to the production helper's fmt (copy, don't retype).
 func valkeyLoadedCmd(domain string) string {
-	return `[ "$(stat -c %Y ` + shQuote(valkeyUnitPath(domain)) + ` 2>/dev/null)" -le "$(date -d "$(systemctl show -p ActiveEnterTimestamp --value ` + valkeyInstanceUnit(domain) + `)" +%s 2>/dev/null)" ]`
+	return `[ "$(stat -c %Y ` + shQuote(valkeyUnitPath(domain)) + ` 2>/dev/null)" -le "$(systemctl show -p ActiveEnterTimestamp --value --timestamp=unix ` + valkeyInstanceUnit(domain) + ` 2>/dev/null | tr -d @)" ]`
 }
 
 func valkeyCacheFreshCmd(domain string) string {
