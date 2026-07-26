@@ -157,6 +157,7 @@ func TestValidateRejects(t *testing.T) {
 		"bad fail2ban bantime":           func(s *Server) { s.Fail2ban.Bantime = "5 minutes" },
 		"bad fail2ban maxretry":          func(s *Server) { s.Fail2ban.Maxretry = 9999 },
 		"bad fail2ban maxretry negative": func(s *Server) { s.Fail2ban.Maxretry = -1 },
+		"uppercase domain":               func(s *Server) { s.Sites[0].Domain = "App.Example.com" },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -166,6 +167,14 @@ func TestValidateRejects(t *testing.T) {
 				t.Errorf("expected error for %s, got nil", name)
 			}
 		})
+	}
+}
+
+func TestValidateAcceptsLowercaseDomain(t *testing.T) {
+	s := base()
+	s.Sites[0].Domain = "app.example.com"
+	if err := s.Validate(); err != nil {
+		t.Errorf("a lowercase domain must validate, got %v", err)
 	}
 }
 

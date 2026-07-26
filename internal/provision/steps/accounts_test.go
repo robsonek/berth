@@ -89,6 +89,7 @@ func TestAccountsCheckUnsatisfiedWhenUserMissing(t *testing.T) {
 }
 
 func TestAccountsCheckSatisfiedWhenAllPresent(t *testing.T) {
+	chdirTemp(t)
 	s := testServerWithKey(t)
 	want := authorizedKeys(testOperatorKey)
 	deploySudoers, err := renderSiteSudoers(s, s.Sites[0])
@@ -197,6 +198,7 @@ func TestSiteSudoersHasNoUnscopedSupervisorGrants(t *testing.T) {
 }
 
 func TestAccountsApplyCreatesUsersAndWritesSudoers(t *testing.T) {
+	chdirTemp(t)
 	s := testServerWithKey(t)
 	f := bssh.NewFakeRunner()
 	stubAccountCreate(f, "berth")
@@ -235,6 +237,7 @@ func TestAccountsApplyCreatesUsersAndWritesSudoers(t *testing.T) {
 }
 
 func TestAccountsApplyMultiSiteIsolatesUsers(t *testing.T) {
+	chdirTemp(t)
 	s := &config.Server{
 		SSH:   config.SSH{Key: writeOperatorKey(t)},
 		PHP:   config.PHP{Version: "8.5"},
@@ -300,6 +303,7 @@ func TestAccountsApplyRefusesForeignAuthorizedKeys(t *testing.T) {
 }
 
 func TestAccountsApplyOverwritesForeignAuthorizedKeysWithForce(t *testing.T) {
+	chdirTemp(t)
 	s := testServerWithKey(t)
 	f := bssh.NewFakeRunner()
 	stubAccountCreate(f, "berth")
@@ -325,6 +329,7 @@ func TestAccountsApplyOverwritesForeignAuthorizedKeysWithForce(t *testing.T) {
 }
 
 func TestAccountsApplyGeneratesDeployKeyWhenRepository(t *testing.T) {
+	chdirTemp(t)
 	s := testServerWithKey(t)
 	s.Sites[0].Repository = "git@github.com:owner/repo.git"
 	f := bssh.NewFakeRunner()
@@ -348,6 +353,7 @@ func TestAccountsApplyGeneratesDeployKeyWhenRepository(t *testing.T) {
 }
 
 func TestAccountsApplySkipsDeployKeyWithoutRepository(t *testing.T) {
+	chdirTemp(t)
 	s := testServerWithKey(t) // no repository
 	f := bssh.NewFakeRunner()
 	stubAccountCreate(f, "berth")
@@ -428,6 +434,7 @@ func TestAccountsCheckUnsatisfiedWhenDeployKeyMissing(t *testing.T) {
 }
 
 func TestAccountsCheckSatisfiedWithDeployKeyPresent(t *testing.T) {
+	chdirTemp(t)
 	s := testServerWithKey(t)
 	s.Sites[0].Repository = "git@github.com:owner/repo.git"
 	want := authorizedKeys(testOperatorKey)
@@ -550,6 +557,7 @@ func TestAccountsCheckBreakGlassSatisfiedBothWays(t *testing.T) {
 		{"on usable", true, "P"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			chdirTemp(t)
 			s := testServerWithKey(t)
 			s.System.BreakGlass = tc.knob
 			deploySudoers, err := renderSiteSudoers(s, s.Sites[0])
@@ -627,6 +635,27 @@ func TestAccountsApplyBreakGlassReusesCachedPassword(t *testing.T) {
 	}
 }
 
+func TestAccountsApplyBreakGlassRefusesTamperedConsolePassword(t *testing.T) {
+	chdirTemp(t)
+	s := testServerWithKey(t)
+	s.System.BreakGlass = true
+	if err := secret.SaveCache(s.Host, map[string]string{"console:berth": "good\nroot:evil"}); err != nil {
+		t.Fatal(err)
+	}
+	f := stubFullApply(t, s)
+	stubConsoleLocked(f) // berth console not usable -> the set-password branch runs
+	// chpasswd deliberately NOT stubbed: the guard must refuse before running it.
+	err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "charset") {
+		t.Fatalf("Apply() = %v, want a refusal to use the tampered cached console password", err)
+	}
+	for _, c := range f.Calls() {
+		if c.Cmd == "chpasswd" {
+			t.Error("chpasswd must not run with a cache value outside the allowed charset")
+		}
+	}
+}
+
 func TestAccountsApplyBreakGlassNeverRotatesUsablePassword(t *testing.T) {
 	chdirTemp(t)
 	s := testServerWithKey(t)
@@ -640,6 +669,99 @@ func TestAccountsApplyBreakGlassNeverRotatesUsablePassword(t *testing.T) {
 		if c.Cmd == "chpasswd" {
 			t.Error("a usable password must never be rotated")
 		}
+	}
+}
+
+func TestAccountsCheckBreakGlassOffStaleMarkerUnsatisfied(t *testing.T) {
+	// A crash between `passwd -l` and the cache save leaves the ownership
+	// marker (and a root-equivalent plaintext) in ~/.berth while the account
+	// is already locked; Check must flag it so Apply retries the cleanup.
+	chdirTemp(t)
+	s := testServerWithKey(t)
+	if err := secret.SaveCache(s.Host, map[string]string{"console:berth": "StalePW123"}); err != nil {
+		t.Fatal(err)
+	}
+	want := authorizedKeys(testOperatorKey)
+	deploySudoers, err := renderSiteSudoers(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
+	stubAccountExists(f, "deploy", deploySudoers, want)
+	stubConsoleLocked(f)
+	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("a lingering berth ownership marker with break_glass off must be unsatisfied")
+	}
+}
+
+func TestAccountsApplyBreakGlassOffCleansStaleMarkerWithoutRelocking(t *testing.T) {
+	chdirTemp(t)
+	s := testServerWithKey(t)
+	if err := secret.SaveCache(s.Host, map[string]string{"console:berth": "StalePW123", "other": "keep"}); err != nil {
+		t.Fatal(err)
+	}
+	f := stubFullApply(t, s)
+	stubConsoleLocked(f) // already locked: the crash happened after passwd -l
+	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if calledCmd(f, "passwd -l berth") {
+		t.Error("an already-locked account must not be re-locked (cache-only cleanup)")
+	}
+	cache, err := secret.LoadCache(s.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cache["console:berth"] != "" {
+		t.Error("the stale marker (and its plaintext) must be dropped")
+	}
+	if cache["other"] != "keep" {
+		t.Error("dropping the marker must not clobber other cached secrets")
+	}
+}
+
+// chpasswdSpy wraps a FakeRunner: at the exact moment chpasswd runs it loads
+// the LOCAL cache from disk and records whether the password on stdin was
+// already persisted (the crash-safety ordering ensureConsolePassword promises).
+type chpasswdSpy struct {
+	*bssh.FakeRunner
+	host      string
+	ran       bool
+	sawCached bool
+}
+
+func (s *chpasswdSpy) Run(ctx context.Context, cmd string, stdin []byte) (bssh.Result, error) {
+	if cmd == "chpasswd" {
+		s.ran = true
+		pw := strings.TrimSuffix(strings.TrimPrefix(string(stdin), "berth:"), "\n")
+		if cache, err := secret.LoadCache(s.host); err == nil {
+			s.sawCached = pw != "" && cache[consoleCacheKey] == pw
+		}
+	}
+	return s.FakeRunner.Run(ctx, cmd, stdin)
+}
+
+func TestAccountsApplyBreakGlassCachesPasswordBeforeChpasswd(t *testing.T) {
+	chdirTemp(t)
+	s := testServerWithKey(t)
+	s.System.BreakGlass = true
+	f := stubFullApply(t, s)
+	stubConsoleLocked(f)
+	f.On("chpasswd", bssh.Result{})
+	spy := &chpasswdSpy{FakeRunner: f, host: s.Host}
+	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, spy); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if !spy.ran {
+		t.Fatal("chpasswd never ran")
+	}
+	if !spy.sawCached {
+		t.Error("the freshly generated console password must be in the local cache BEFORE chpasswd runs")
 	}
 }
 

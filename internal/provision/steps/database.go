@@ -40,6 +40,23 @@ const dbPasswordLen = 32
 // injecting quotes/metacharacters (design §7).
 var reDBPassword = regexp.MustCompile(`^[A-Za-z0-9]+$`)
 
+// appKeyCacheKey is the local secret-cache key for a site's Laravel APP_KEY,
+// stored beside the DB password (keyed by DB user) so a lost shared/.env can be
+// re-seeded with the SAME key — otherwise encrypted-at-rest data (encrypted
+// casts, Crypt::) is permanently undecryptable.
+func appKeyCacheKey(dbUser string) string { return "appkey:" + dbUser }
+
+// appKeyShape is the exact value shape of a berth-generated APP_KEY
+// (secret.AppKey encodes exactly 32 bytes → "base64:" + 43 base64 chars + one
+// "=" pad). It is shared verbatim by reAppKey and Check's remote grep -E probe
+// (envHasBerthAppKey) so the two can never judge a key differently.
+const appKeyShape = `base64:[A-Za-z0-9+/]{43}=`
+
+// reAppKey validates an APP_KEY against appKeyShape. The strict shape rejects a
+// truncated/corrupt key AND any newline a tampered source might use to inject a
+// second shared/.env line.
+var reAppKey = regexp.MustCompile(`^` + appKeyShape + `$`)
+
 type database struct {
 	redactor *secret.Redactor
 }
@@ -168,10 +185,20 @@ func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Serve
 		// No server to probe yet (or the wrong source): Apply reconciles.
 		return d.unsatisfied(eng, "database server or configured source not yet provisioned"), nil
 	}
+	// The recovery promise (re-seed a lost shared/.env with the SAME secrets)
+	// holds only while the LOCAL cache carries them, so the cache is part of
+	// this step's convergence, probed per site below. Read-only load — never
+	// LockCache here (it creates files; Check must stay side-effect-free).
+	cache, err := secret.LoadCache(s.Host)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
 	// The server is installed: every site needs its credential persisted AND
 	// its database + user actually present. Probing real state (not just the
 	// .env file) lets a re-run heal a provision that failed between the .env
-	// write and EnsureUser.
+	// write and EnsureUser. Convergence also covers the local recovery cache:
+	// a green host with an empty ~/.berth (new workstation, crash before the
+	// final save) must re-trigger Apply's backfill.
 	for _, site := range s.Sites {
 		// The credential must be PRESENT AND VALID in shared/.env, not merely the
 		// file: an operator-preseeded or truncated env without DB_PASSWORD would
@@ -211,8 +238,58 @@ func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Serve
 		if !authOK {
 			return d.unsatisfied(eng, "client DB credentials for "+site.Domain+" not yet seeded"), nil
 		}
+		// Local recovery cache: without the site's password a lost shared/.env
+		// re-seeds with a NEW one (recoverable), and without the APP_KEY backup
+		// it re-seeds with a NEW key — permanently breaking decryption of
+		// encrypted-at-rest data. Apply backfills both from the live .env.
+		if cache[s.SiteDBUser(site)] == "" {
+			return d.unsatisfied(eng, "local secret cache missing the DB credential for "+site.Domain), nil
+		}
+		berthKey, err := envHasBerthAppKey(ctx, r, site)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if berthKey && cache[appKeyCacheKey(s.SiteDBUser(site))] == "" {
+			return d.unsatisfied(eng, "local secret cache missing the APP_KEY backup for "+site.Domain), nil
+		}
 	}
 	return provision.CheckResult{Satisfied: true, Reason: eng.ServerPackage() + " installed (" + s.Database.Source + "); per-site databases, users and credentials present"}, nil
+}
+
+// envHasBerthAppKey reports whether the FIRST APP_KEY line of a site's live
+// shared/.env carries a value in EXACTLY the shape berth generates
+// (appKeyShape — the same string reAppKey compiles; they MUST stay identical),
+// which is the only shape berth backs up. FIRST-line on purpose: it must match
+// appKeyFromEnv's `grep -m1` read (phpdotenv's first-occurrence-wins) exactly,
+// or a duplicate-key env — e.g. an empty first "APP_KEY=" and a berth-format
+// key on a later line — would make Check demand a cache entry Apply never
+// writes: endless drift. Deliberately exact-shape, not "any APP_KEY line": an
+// operator-managed env can hold a Laravel-legal key berth does not back up
+// (no "base64:" prefix, or an AES-128 22-char key), and appKeyFromEnv refuses
+// those loudly as malformed when Apply runs. If Check flagged them
+// unsatisfied, Apply would fail on EVERY subsequent run — bricking the step
+// for such hosts with no operator recourse (the key cannot be rotated without
+// data loss). Probe-match ⟹ Apply caches the key (converges); probe-miss ⟹
+// Apply treats it as absent or fails loud exactly as today. Exit-code only
+// (-q, and $line never printed) so the key never enters stdout. Exit map:
+// 0 = first line is a berth-format key; 1 = no APP_KEY line; 3 = first line
+// present but not berth-format; 2 (or anything else) = loud I/O error.
+func envHasBerthAppKey(ctx context.Context, r bssh.Runner, site config.Site) (bool, error) {
+	env := shQuote(sharedEnvPath(site))
+	res, err := r.Run(ctx, "line=$(grep -m1 '^"+appKeyKey+"=' "+env+"); s=$?; "+
+		"if [ $s -eq 1 ]; then exit 1; elif [ $s -ne 0 ]; then exit 2; fi; "+
+		`printf '%s' "$line" | grep -Eq '^`+appKeyKey+`=`+appKeyShape+`$' && exit 0; exit 3`, nil)
+	if err != nil {
+		return false, err
+	}
+	switch res.ExitCode {
+	case 0:
+		return true, nil
+	case 1, 3:
+		return false, nil
+	default:
+		return false, fmt.Errorf("probe %s in %s: %s", appKeyKey, sharedEnvPath(site), res.Stderr)
+	}
 }
 
 // unsatisfied builds this step's standard not-yet-converged result.
@@ -256,6 +333,11 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	// sites do not clobber each other's cached passwords. A cache that cannot
 	// be READ is a hard error, not an empty map — saving over it would clobber
 	// every credential it held (LoadCache treats only never-written as empty).
+	release, err := secret.LockCache(s.Host)
+	if err != nil {
+		return fmt.Errorf("lock local secret cache: %w", err)
+	}
+	defer release()
 	cache, err := secret.LoadCache(s.Host)
 	if err != nil {
 		return fmt.Errorf("load local secret cache: %w", err)
@@ -266,7 +348,7 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 		if err != nil {
 			return err
 		}
-		var pw string
+		var pw, appKey string
 		if envExists {
 			// An existing .env is never rewritten: WriteFile is atomic, so a
 			// present file is complete, and rewriting would clobber
@@ -276,23 +358,36 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 			if err != nil {
 				return err
 			}
+			appKey, err = d.appKeyFromEnv(ctx, r, site)
+			if err != nil {
+				return err
+			}
 		} else {
 			pw, err = newPassword(dbUser, cache)
 			if err != nil {
 				return err
 			}
-			appKey, err := secret.AppKey()
+			appKey, err = recoverOrNewAppKey(dbUser, cache)
 			if err != nil {
 				return err
 			}
-			d.redactor.Add(appKey)
-			// Persist FIRST (atomic), so a crash before EnsureUser still leaves a
-			// recoverable secret on the host.
+			cache[dbUser] = pw
+			cache[appKeyCacheKey(dbUser)] = appKey
+			// Persist the recovery copy BEFORE the secret goes live remotely
+			// (the accounts step does the same before chpasswd): a crash after
+			// the remote seed can no longer strand a secret that exists only on
+			// the host.
+			if err := secret.SaveCache(s.Host, cache); err != nil {
+				return fmt.Errorf("cache database secrets before seeding: %w", err)
+			}
+			// The remote write itself is atomic, so a crash before EnsureUser
+			// still leaves a complete, recoverable .env on the host.
 			if err := d.seedSharedEnv(ctx, r, s, site, dbName, dbUser, pw, appKey, driver, host, port, socket); err != nil {
 				return err
 			}
 		}
 		d.redactor.Add(pw)
+		d.redactor.Add(appKey) // no-op when empty
 		if err := eng.EnsureDatabase(ctx, r, dbName); err != nil {
 			return err
 		}
@@ -319,6 +414,9 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 			}
 		}
 		cache[dbUser] = pw
+		if appKey != "" { // keep the cached key in sync with the live .env
+			cache[appKeyCacheKey(dbUser)] = appKey
+		}
 	}
 	if err := secret.SaveCache(s.Host, cache); err != nil {
 		return fmt.Errorf("cache database secrets: %w", err)
@@ -359,6 +457,39 @@ func (d database) passwordFromEnv(ctx context.Context, r bssh.Runner, site confi
 	return "", fmt.Errorf("%s for %s exists but has no %s; add one or remove the file to have berth re-seed it", env, site.Domain, dbPasswordKey)
 }
 
+// appKeyFromEnv reads APP_KEY from a site's existing shared/.env, mirroring
+// passwordFromEnv but LENIENT on absence: a berth-seeded .env always has it, yet
+// an operator-managed .env may not, so a missing key returns ("", nil) — it
+// simply is not backed up. A present-but-EMPTY "APP_KEY=" line (stock Laravel's
+// placeholder) also counts as absent rather than erroring, so operator envs
+// still provision. A PRESENT but malformed key IS an error (a corrupt key must
+// never be silently cached), and so is a grep failure (exit >= 2) — an I/O
+// error must never read as "absent". Reading it keeps the cached key in sync
+// with the live file, exactly as cache[dbUser]=pw does for the password.
+func (d database) appKeyFromEnv(ctx context.Context, r bssh.Runner, site config.Site) (string, error) {
+	env := sharedEnvPath(site)
+	res, err := r.Run(ctx, "grep -m1 '^"+appKeyKey+"=' "+shQuote(env), nil)
+	if err != nil {
+		return "", err
+	}
+	switch res.ExitCode {
+	case 0:
+	case 1:
+		return "", nil // no APP_KEY line
+	default:
+		return "", fmt.Errorf("grep %s in %s: %s", appKeyKey, env, res.Stderr)
+	}
+	line := strings.TrimRight(res.Stdout, " \t\n\v\f\r")
+	k := strings.TrimPrefix(line, appKeyKey+"=")
+	if k == "" || k == line {
+		return "", nil
+	}
+	if !reAppKey.MatchString(k) {
+		return "", fmt.Errorf("%s in %s is malformed; refusing to cache it", appKeyKey, env)
+	}
+	return k, nil
+}
+
 // newPassword returns the locally cached password for dbUser or generates a
 // fresh one. The cache hit covers the documented re-seed flow: an operator
 // removes shared/.env to have berth re-seed it, and the password from the
@@ -375,6 +506,23 @@ func newPassword(dbUser string, cache map[string]string) (string, error) {
 		return "", fmt.Errorf("generate database password: %w", err)
 	}
 	return pw, nil
+}
+
+// recoverOrNewAppKey reuses a well-formed cached APP_KEY, else generates one and
+// stores it — mirroring newPassword's reuse-not-rotate rule.
+func recoverOrNewAppKey(dbUser string, cache map[string]string) (string, error) {
+	if k := cache[appKeyCacheKey(dbUser)]; k != "" {
+		if !reAppKey.MatchString(k) {
+			return "", fmt.Errorf("cached APP_KEY for %s is malformed; refusing to use it", dbUser)
+		}
+		return k, nil
+	}
+	k, err := secret.AppKey()
+	if err != nil {
+		return "", err
+	}
+	cache[appKeyCacheKey(dbUser)] = k
+	return k, nil
 }
 
 // seedSharedEnv renders a site's shared/.env and writes it atomically, owned by

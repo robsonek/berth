@@ -239,7 +239,7 @@ func (t Tuning) PHPMaxInputVarsEff() int {
 // state, so empty means "stop managing", never "revert". BreakGlass, by
 // contrast, reconciles BOTH ways (the berth account's posture is fully
 // berth-owned): on gives the account a generated console password (cached in
-// .berth/<host>.secrets.json — sshd keeps PasswordAuthentication off, so it
+// ~/.berth/<host>.secrets.json — sshd keeps PasswordAuthentication off, so it
 // works only at the provider's console/VNC), off locks the password again.
 type System struct {
 	Swap       string `mapstructure:"swap"        yaml:"swap,omitempty"`        // e.g. "2G"; empty = no swap

@@ -2,8 +2,11 @@ package secret
 
 import (
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestEnvFileDeterministicAndComplete(t *testing.T) {
@@ -16,11 +19,18 @@ func TestEnvFileDeterministicAndComplete(t *testing.T) {
 	}
 }
 
+// cacheHome points the secret cache at a throwaway HOME (and USERPROFILE for
+// Windows) and returns the expected .berth dir inside it.
+func cacheHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	return filepath.Join(home, ".berth")
+}
+
 func TestSaveAndLoadCacheRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	old, _ := os.Getwd()
-	defer os.Chdir(old)
-	os.Chdir(dir)
+	berth := cacheHome(t)
 	if err := SaveCache("srv", map[string]string{"DB_PASSWORD": "x"}); err != nil {
 		t.Fatal(err)
 	}
@@ -28,13 +38,13 @@ func TestSaveAndLoadCacheRoundTrip(t *testing.T) {
 	if err != nil || got["DB_PASSWORD"] != "x" {
 		t.Fatalf("round-trip failed: %v %v", got, err)
 	}
-	if fi, _ := os.Stat(".berth/srv.secrets.json"); fi.Mode().Perm() != 0o600 {
-		t.Errorf("cache mode = %v, want 0600", fi.Mode().Perm())
+	if fi, _ := os.Stat(filepath.Join(berth, "srv.secrets.json")); fi == nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("cache must be written under $HOME/.berth at mode 0600")
 	}
 }
 
 func TestLoadCacheMissingIsEmptyNotError(t *testing.T) {
-	t.Chdir(t.TempDir())
+	cacheHome(t)
 	m, err := LoadCache("never-written.example.com")
 	if err != nil {
 		t.Fatalf("a never-written cache must not error: %v", err)
@@ -45,47 +55,99 @@ func TestLoadCacheMissingIsEmptyNotError(t *testing.T) {
 }
 
 func TestLoadCacheMalformedIsError(t *testing.T) {
-	t.Chdir(t.TempDir())
-	if err := os.MkdirAll(".berth", 0o700); err != nil {
+	berth := cacheHome(t)
+	if err := os.MkdirAll(berth, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(".berth/h.secrets.json", []byte("{not json"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(berth, "h.secrets.json"), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := LoadCache("h"); err == nil {
-		t.Fatal("a malformed cache must fail loud, not read as empty (a later save would clobber it)")
+		t.Fatal("a malformed cache must fail loud, not read as empty")
 	}
 }
 
-func TestSaveCacheTightensPermissiveModes(t *testing.T) {
-	t.Chdir(t.TempDir())
-	// Pre-existing permissive dir + file: SaveCache must tighten both — the
-	// cache can hold a root-equivalent console password.
-	if err := os.MkdirAll(".berth", 0o755); err != nil {
+func TestLoadCacheNullIsEmptyNotNil(t *testing.T) {
+	berth := cacheHome(t)
+	if err := os.MkdirAll(berth, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(".berth/h.secrets.json", []byte("{}"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(berth, "h.secrets.json"), []byte("null"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m, err := LoadCache("h")
+	if err != nil {
+		t.Fatalf("null cache must not error: %v", err)
+	}
+	if m == nil {
+		t.Fatal("null cache must yield a non-nil map")
+	}
+	m["k"] = "v" // must not panic
+}
+
+func TestSaveCacheTightensPermissiveModes(t *testing.T) {
+	berth := cacheHome(t)
+	if err := os.MkdirAll(berth, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(berth, "h.secrets.json"), []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := SaveCache("h", map[string]string{"k": "v"}); err != nil {
 		t.Fatal(err)
 	}
-	di, err := os.Stat(".berth")
+	if di, _ := os.Stat(berth); di == nil || di.Mode().Perm() != 0o700 {
+		t.Errorf(".berth mode must be tightened to 0700")
+	}
+	if fi, _ := os.Stat(filepath.Join(berth, "h.secrets.json")); fi == nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("cache file mode must be 0600")
+	}
+}
+
+func TestLockCacheTightensDir(t *testing.T) {
+	berth := cacheHome(t)
+	if err := os.MkdirAll(berth, 0o755); err != nil { // pre-existing permissive dir
+		t.Fatal(err)
+	}
+	release, err := LockCache("h")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if di.Mode().Perm() != 0o700 {
-		t.Errorf(".berth mode = %v, want 0700", di.Mode().Perm())
+	defer release()
+	if di, _ := os.Stat(berth); di == nil || di.Mode().Perm() != 0o700 {
+		t.Errorf("LockCache must tighten the cache dir to 0700 (it guards a root-equivalent secret)")
 	}
-	fi, err := os.Stat(".berth/h.secrets.json")
+}
+
+func TestLockCacheSerialises(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("flock is a no-op on Windows")
+	}
+	cacheHome(t)
+	release, err := LockCache("h")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm() != 0o600 {
-		t.Errorf("cache file mode = %v, want 0600", fi.Mode().Perm())
+	// A second acquisition of the same host lock must BLOCK until release.
+	got := make(chan struct{})
+	go func() {
+		r2, err := LockCache("h")
+		if err == nil {
+			r2()
+		}
+		close(got)
+	}()
+	select {
+	case <-got:
+		t.Fatal("second LockCache returned while the first was held; the lock is a no-op")
+	case <-time.After(150 * time.Millisecond):
+		// still blocked, as required
 	}
-	m, err := LoadCache("h")
-	if err != nil || m["k"] != "v" {
-		t.Fatalf("round-trip failed: %v %v", m, err)
+	release()
+	select {
+	case <-got:
+		// proceeded after release, correct
+	case <-time.After(2 * time.Second):
+		t.Fatal("second LockCache never proceeded after release")
 	}
 }

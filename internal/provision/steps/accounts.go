@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/robsonek/berth/internal/config"
@@ -22,6 +23,12 @@ const (
 	// consolePasswordLen matches the database step's generated-password length.
 	consolePasswordLen = 32
 )
+
+// reConsolePassword matches secret.Generate's alphanumeric charset (identical to
+// the database step's reDBPassword). A cached console password is re-validated
+// against it before chpasswd, so a tampered cache cannot inject a newline — and
+// thus a second chpasswd record (e.g. overwriting root's password).
+var reConsolePassword = regexp.MustCompile(`^[A-Za-z0-9]+$`)
 
 type accounts struct {
 	redactor *secret.Redactor
@@ -180,7 +187,11 @@ func (a accounts) Check(ctx context.Context, rc provision.RunCtx, s *config.Serv
 	// Break-glass console password: with the knob on, a usable password must
 	// exist. With the knob off, only a password BERTH SET is locked back — the
 	// local cache entry is the ownership marker (the swap-file rule: berth
-	// removes only what it created), so an operator-set password is left alone.
+	// removes only what it created), so an operator-set password is left
+	// alone. The marker is probed regardless of the password's usability: a
+	// crash between `passwd -l` and the cache save leaves the account locked
+	// but the marker (plus a root-equivalent plaintext) behind, and only an
+	// unsatisfied Check lets Apply retry that cleanup.
 	usable, err := consolePasswordUsable(ctx, r)
 	if err != nil {
 		return provision.CheckResult{}, err
@@ -188,13 +199,13 @@ func (a accounts) Check(ctx context.Context, rc provision.RunCtx, s *config.Serv
 	if s.System.BreakGlass && !usable {
 		return provision.CheckResult{Satisfied: false, Reason: "berth console password not set (break_glass on)", Changes: a.changes()}, nil
 	}
-	if !s.System.BreakGlass && usable {
+	if !s.System.BreakGlass {
 		owned, err := consolePasswordOwned(s.Host)
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
 		if owned {
-			return provision.CheckResult{Satisfied: false, Reason: "berth-set console password present but break_glass is off", Changes: a.changes()}, nil
+			return provision.CheckResult{Satisfied: false, Reason: "berth-set console password marker present but break_glass is off", Changes: a.changes()}, nil
 		}
 	}
 	return provision.CheckResult{Satisfied: true, Reason: "accounts, sudoers, keys and console posture in desired state"}, nil
@@ -307,17 +318,24 @@ func (a accounts) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serv
 // uncached password would be unreadable by the operator forever) and rides on
 // stdin, never the command string. With the knob off, ONLY a berth-set
 // password (cache marker present) is locked back — lock first, then drop the
-// marker, so a crash in between converges next run (locked = satisfied) with
-// nothing worse than a lingering plaintext for an unusable password; the
-// reverse order could leave berth's password live and unowned forever.
-// Dropping the marker also keeps a stale root-equivalent plaintext out of
-// .berth once it stops working; re-enabling mints a fresh password.
+// marker; the reverse order could leave berth's password live and unowned
+// forever. Check flags a lingering marker whenever the knob is off, so a
+// crash between `passwd -l` and the cache save is retried here as a
+// cache-only cleanup (the account is already locked — only the marker and its
+// plaintext remain to drop). Dropping the marker keeps a stale
+// root-equivalent plaintext out of ~/.berth once it stops working;
+// re-enabling mints a fresh password.
 func (a accounts) ensureConsolePassword(ctx context.Context, s *config.Server, r bssh.Runner) error {
 	usable, err := consolePasswordUsable(ctx, r)
 	if err != nil {
 		return err
 	}
 	if s.System.BreakGlass && !usable {
+		release, err := secret.LockCache(s.Host)
+		if err != nil {
+			return fmt.Errorf("lock local secret cache: %w", err)
+		}
+		defer release()
 		cache, err := secret.LoadCache(s.Host)
 		if err != nil {
 			return fmt.Errorf("load local secret cache: %w", err)
@@ -328,9 +346,16 @@ func (a accounts) ensureConsolePassword(ctx context.Context, s *config.Server, r
 				return fmt.Errorf("generate console password: %w", err)
 			}
 			cache[consoleCacheKey] = pw
+			// Persist BEFORE chpasswd: a set-but-uncached password would be
+			// unrecoverable by the operator.
 			if err := secret.SaveCache(s.Host, cache); err != nil {
 				return fmt.Errorf("cache console password: %w", err)
 			}
+		}
+		// Validate before feeding chpasswd via stdin: a tampered cache value
+		// with a newline would inject a second chpasswd record (e.g. root:…).
+		if !reConsolePassword.MatchString(pw) {
+			return fmt.Errorf("console password from local cache is outside the allowed charset; refusing to use it")
 		}
 		a.redactor.Add(pw)
 		if res, err := r.Run(ctx, "chpasswd", []byte("berth:"+pw+"\n")); err != nil {
@@ -340,7 +365,12 @@ func (a accounts) ensureConsolePassword(ctx context.Context, s *config.Server, r
 		}
 		return nil
 	}
-	if !s.System.BreakGlass && usable {
+	if !s.System.BreakGlass {
+		release, err := secret.LockCache(s.Host)
+		if err != nil {
+			return fmt.Errorf("lock local secret cache: %w", err)
+		}
+		defer release()
 		cache, err := secret.LoadCache(s.Host)
 		if err != nil {
 			return fmt.Errorf("load local secret cache: %w", err)
@@ -348,10 +378,12 @@ func (a accounts) ensureConsolePassword(ctx context.Context, s *config.Server, r
 		if cache[consoleCacheKey] == "" {
 			return nil // not berth's password — leave the operator's intent alone
 		}
-		if res, err := r.Run(ctx, "passwd -l berth", nil); err != nil {
-			return err
-		} else if res.ExitCode != 0 {
-			return fmt.Errorf("lock berth password: %s", res.Stderr)
+		if usable {
+			if res, err := r.Run(ctx, "passwd -l berth", nil); err != nil {
+				return err
+			} else if res.ExitCode != 0 {
+				return fmt.Errorf("lock berth password: %s", res.Stderr)
+			}
 		}
 		delete(cache, consoleCacheKey)
 		if err := secret.SaveCache(s.Host, cache); err != nil {
