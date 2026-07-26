@@ -426,6 +426,48 @@ func (st site) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 	} else if res.ExitCode != 0 {
 		return provision.CheckResult{Satisfied: false, Reason: "php-fpm -t fails", Changes: st.changes()}, nil
 	}
+	// The RUNNING nginx/FPM must postdate every managed vhost/pool: a crash
+	// between a write and its reload otherwise serves the old config forever
+	// (e.g. a just-enabled cloudflare_only lockdown not actually enforced)
+	// while the bytes on disk read converged. The enabled symlink and the
+	// absence of the stock www pool are probed too — Apply converges both
+	// every run, but nothing re-triggered it when only they drifted.
+	var vhosts, pools []string
+	if s.AnyCloudflareOnly() {
+		vhosts = append(vhosts, cloudflareConfPath)
+	}
+	for _, site := range s.Sites {
+		vhosts = append(vhosts, nginxAvailablePath(site.Domain))
+		pools = append(pools, fpmPoolPath(s.PHP.Version, site.Domain))
+		res, err := r.Run(ctx, "[ "+shQuote(nginxEnabledPath(site.Domain))+" -ef "+shQuote(nginxAvailablePath(site.Domain))+" ]", nil)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if res.ExitCode != 0 {
+			return provision.CheckResult{Satisfied: false, Reason: "site " + site.Domain + " not enabled (sites-enabled link missing or wrong)", Changes: st.changes()}, nil
+		}
+	}
+	stock, err := fileExists(ctx, r, defaultFPMPoolPath(s))
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	if stock {
+		return provision.CheckResult{Satisfied: false, Reason: "stock FPM pool present (must be disabled)", Changes: st.changes()}, nil
+	}
+	nginxLoaded, err := reloadedSince(ctx, r, "nginx", vhosts...)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	if !nginxLoaded {
+		return provision.CheckResult{Satisfied: false, Reason: "running nginx predates a managed vhost (reload pending)", Changes: st.changes()}, nil
+	}
+	fpmLoaded, err := reloadedSince(ctx, r, fpmService(s), pools...)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	if !fpmLoaded {
+		return provision.CheckResult{Satisfied: false, Reason: "running php-fpm predates a managed pool (reload pending)", Changes: st.changes()}, nil
+	}
 	// Every desired supervisor program must be LOADED in supervisord (not just on
 	// disk), or the deployer's start/restart fails. A box whose conf predates this
 	// enforcement reports "no such" here -> unsatisfied -> Apply reread/updates it.
@@ -459,10 +501,18 @@ func (site) changes() []string {
 }
 
 func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
+	// Invalidate nginx's reload stamp before the first nginx-config mutation
+	// (the cloudflare snippet or a vhost): from here until markReloaded after
+	// the successful reload in step 3, a crash leaves no stamp and the next
+	// run reconciles with one reload.
+	if err := invalidateReloaded(ctx, r, "nginx"); err != nil {
+		return err
+	}
+
 	// 0) When cloudflare_only is active, write the global geo/realip snippet BEFORE
 	//    the per-site vhosts so $berth_cloudflare is defined when nginx -t validates a
 	//    guarded vhost. (The disabled-state removal happens AFTER the vhosts are
-	//    rewritten unguarded — step 2b below — so the geo outlives the last vhost
+	//    rewritten unguarded — step 2 below — so the geo outlives the last vhost
 	//    that references it.)
 	if s.AnyCloudflareOnly() {
 		cf, err := renderCloudflareConf()
@@ -496,22 +546,13 @@ func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server,
 		}
 	}
 
-	// 2) Validate the whole nginx configuration BEFORE reloading.
-	if res, err := r.Run(ctx, "nginx -t", nil); err != nil {
-		return err
-	} else if res.ExitCode != 0 {
-		return fmt.Errorf("nginx -t failed, refusing to reload: %s", res.Stderr)
-	}
-	if res, err := r.Run(ctx, "systemctl reload nginx", nil); err != nil {
-		return err
-	} else if res.ExitCode != 0 {
-		return fmt.Errorf("reload nginx: %s", res.Stderr)
-	}
-
-	// 2b) cloudflare_only disabled: now that the vhosts have been rewritten without
-	//     the guard and nginx reloaded, drift-remove a lingering berth-managed
-	//     snippet (guarded so a foreign conf.d file is never clobbered). Removing it
-	//     only here guarantees the geo outlived every vhost that referenced it.
+	// 2) cloudflare_only disabled: the vhosts above are already rewritten
+	//    without the guard, so validation passes without the geo — drift-remove
+	//    a lingering berth-managed snippet (guarded so a foreign conf.d file is
+	//    never clobbered) BEFORE the validate+reload: under the transactional
+	//    reload stamp no nginx-config mutation may follow the mark in step 3.
+	//    The geo still outlives every vhost that referenced it — the removal
+	//    runs only after step 1 rewrote them all unguarded.
 	if !s.AnyCloudflareOnly() {
 		present, err := managedFilePresent(ctx, r, cloudflareConfPath)
 		if err != nil {
@@ -526,8 +567,28 @@ func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server,
 		}
 	}
 
-	// 3) Per-site FPM pools (each its own user + socket). Disable the stock www
-	//    pool first so it cannot answer on a shared socket.
+	// 3) Validate the whole nginx configuration BEFORE reloading, then stamp:
+	//    the running nginx now postdates every vhost written above.
+	if res, err := r.Run(ctx, "nginx -t", nil); err != nil {
+		return err
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("nginx -t failed, refusing to reload: %s", res.Stderr)
+	}
+	if res, err := r.Run(ctx, "systemctl reload nginx", nil); err != nil {
+		return err
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("reload nginx: %s", res.Stderr)
+	}
+	if err := markReloaded(ctx, r, "nginx"); err != nil {
+		return err
+	}
+
+	// 4) Per-site FPM pools (each its own user + socket), a separate unit with
+	//    its own invalidate/mark pair. Disable the stock www pool first so it
+	//    cannot answer on a shared socket.
+	if err := invalidateReloaded(ctx, r, fpmService(s)); err != nil {
+		return err
+	}
 	disableWWW := fmt.Sprintf("test -f %[1]s && mv -f %[1]s %[1]s.disabled || true", shQuote(defaultFPMPoolPath(s)))
 	if _, err := r.Run(ctx, disableWWW, nil); err != nil {
 		return err
@@ -554,9 +615,14 @@ func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server,
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("reload %s: %s", fpmService(s), res.Stderr)
 	}
+	// No FPM-config mutation follows (supervisor/cron/logrotate below belong
+	// to other units), so the stamp may bless the running pools.
+	if err := markReloaded(ctx, r, fpmService(s)); err != nil {
+		return err
+	}
 
-	// 4) Per-site Supervisor worker (iff queue enabled) + daemons, then
-	//    5) guarded scheduler cron.
+	// 5) Per-site Supervisor worker (iff queue enabled) + daemons, then
+	//    6) guarded scheduler cron.
 	for _, site := range s.Sites {
 		if s.QueueEnabled(site) {
 			worker, err := renderSupervisorProgram(programName(site.Domain), queueCommand(s, site), queueNumprocs(site), s.SiteUser(site), site.DeployPath)
@@ -666,7 +732,7 @@ func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server,
 		}
 	}
 
-	// 6) Global logrotate fragment for FPM + supervisor logs (one file, globs).
+	// 7) Global logrotate fragment for FPM + supervisor logs (one file, globs).
 	lr, err := renderLogrotate()
 	if err != nil {
 		return err

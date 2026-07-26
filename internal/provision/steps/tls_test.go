@@ -136,8 +136,10 @@ func TestTLSApplyUsesWebrootAndIssuesCert(t *testing.T) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y certbot", bssh.Result{})
 	certonly := "certbot certonly --webroot -w /var/www/berth-acme/app.example.com -d app.example.com --cert-name app.example.com --agree-tos -m 'ops@example.com' --non-interactive --server https://acme-v02.api.letsencrypt.org/directory"
 	f.On(certonly, bssh.Result{ExitCode: 0})
+	f.On("rm -f "+shQuote("/var/lib/berth/nginx.reloaded"), bssh.Result{}) // swap invalidates first
 	f.On("nginx -t", bssh.Result{ExitCode: 0})
 	f.On("systemctl reload nginx", bssh.Result{})
+	f.On(markReloadedCmd("nginx"), bssh.Result{})
 	f.On("systemctl enable --now certbot.timer", bssh.Result{})
 	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 1}) // hook write-guard: absent
@@ -163,6 +165,27 @@ func TestTLSApplyUsesWebrootAndIssuesCert(t *testing.T) {
 	if !sawHTTPSWrite {
 		t.Error("expected the 443 nginx_https server block to be written")
 	}
+	// The swap participates in the transactional reload-stamp contract:
+	// invalidate before the 443 vhost write, mark only after its reload —
+	// otherwise the vhost just written would be newer than the stamp and the
+	// next site.Check would schedule one spurious reload.
+	idx := func(want string) int {
+		for i, c := range f.Calls() {
+			if c.Cmd == want {
+				return i
+			}
+		}
+		return -1
+	}
+	invalidate := idx("rm -f " + shQuote("/var/lib/berth/nginx.reloaded"))
+	reload := idx("systemctl reload nginx")
+	mark := idx(markReloadedCmd("nginx"))
+	if invalidate < 0 || reload < 0 || invalidate > reload {
+		t.Errorf("the nginx stamp must be invalidated BEFORE the swap's reload; rm=%d reload=%d", invalidate, reload)
+	}
+	if mark < 0 || reload > mark {
+		t.Errorf("the nginx stamp must be recorded AFTER the swap's reload; reload=%d mark=%d", reload, mark)
+	}
 }
 
 func TestTLSApplyHonorsStagingFlag(t *testing.T) {
@@ -173,8 +196,10 @@ func TestTLSApplyHonorsStagingFlag(t *testing.T) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y certbot", bssh.Result{})
 	certonly := "certbot certonly --webroot -w /var/www/berth-acme/app.example.com -d app.example.com --cert-name app.example.com --agree-tos -m 'ops@example.com' --non-interactive --staging"
 	f.On(certonly, bssh.Result{ExitCode: 0})
+	f.On("rm -f "+shQuote("/var/lib/berth/nginx.reloaded"), bssh.Result{})
 	f.On("nginx -t", bssh.Result{ExitCode: 0})
 	f.On("systemctl reload nginx", bssh.Result{})
+	f.On(markReloadedCmd("nginx"), bssh.Result{})
 	f.On("systemctl enable --now certbot.timer", bssh.Result{})
 	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 1}) // hook write-guard: absent
@@ -288,8 +313,10 @@ func TestTLSApplyForceRenewsStagingCertOnProductionRun(t *testing.T) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y certbot", bssh.Result{})
 	certonly := "certbot certonly --webroot -w /var/www/berth-acme/app.example.com -d app.example.com --cert-name app.example.com --agree-tos -m 'ops@example.com' --non-interactive --server https://acme-v02.api.letsencrypt.org/directory --force-renewal"
 	f.On(certonly, bssh.Result{ExitCode: 0})
+	f.On("rm -f "+shQuote("/var/lib/berth/nginx.reloaded"), bssh.Result{})
 	f.On("nginx -t", bssh.Result{ExitCode: 0})
 	f.On("systemctl reload nginx", bssh.Result{})
+	f.On(markReloadedCmd("nginx"), bssh.Result{})
 	f.On("systemctl enable --now certbot.timer", bssh.Result{})
 	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 1})
@@ -454,8 +481,10 @@ func TestTLSSelfSignedIssuesWithoutCertbotOrDNS(t *testing.T) {
 		shQuote(certKeyPath(site)), shQuote(certFullchainPath(site)), shQuote("/CN="+site.Domain), shQuote("subjectAltName=DNS:"+site.Domain))
 	f.On(openssl, bssh.Result{})
 	f.On("chmod 600 "+shQuote(certKeyPath(site)), bssh.Result{})
+	f.On("rm -f "+shQuote("/var/lib/berth/nginx.reloaded"), bssh.Result{})
 	f.On("nginx -t", bssh.Result{})
 	f.On("systemctl reload nginx", bssh.Result{})
+	f.On(markReloadedCmd("nginx"), bssh.Result{})
 	f.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 1}) // no lingering hook
 
 	if err := TLS().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {

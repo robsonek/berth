@@ -69,10 +69,11 @@ func TestSiteApplyValidatesNginxBeforeReload(t *testing.T) {
 func TestSiteApplyAbortsOnNginxTestFailure(t *testing.T) {
 	s := siteServer()
 	f := bssh.NewFakeRunner()
+	f.On("rm -f "+shQuote("/var/lib/berth/nginx.reloaded"), bssh.Result{})                // stamp invalidation up front
 	f.On("cat "+shQuote(nginxAvailablePath("app.example.com")), bssh.Result{ExitCode: 1}) // vhost write-guard: absent
 	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
 	f.On("nginx -t", bssh.Result{ExitCode: 1, Stderr: "invalid config"})
-	f.On("cat "+shQuote(cloudflareConfPath), bssh.Result{ExitCode: 1}) // step-0 cloudflare snippet absent
+	f.On("cat "+shQuote(cloudflareConfPath), bssh.Result{ExitCode: 1}) // disabled cloudflare snippet absent
 	// systemctl reload is intentionally NOT stubbed: it must never be called.
 
 	err := Site().Apply(context.Background(), provision.RunCtx{}, s, f)
@@ -99,6 +100,7 @@ func TestSiteApplyRefusesForeignVhost(t *testing.T) {
 	// path itself must refuse to clobber a config berth does not manage.
 	s := siteServer()
 	f := bssh.NewFakeRunner()
+	f.On("rm -f "+shQuote("/var/lib/berth/nginx.reloaded"), bssh.Result{}) // stamp invalidation up front
 	f.On("cat "+shQuote(nginxAvailablePath("app.example.com")), bssh.Result{ExitCode: 0, Stdout: "server { listen 80; } # hand-written\n"})
 
 	err := Site().Apply(context.Background(), provision.RunCtx{}, s, f)
@@ -183,6 +185,7 @@ func TestSiteCheckSatisfiedWhenFilesManagedAndNginxValid(t *testing.T) {
 	stubManagedSiteFiles(t, s, f)
 	f.On("nginx -t", bssh.Result{ExitCode: 0})
 	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
+	stubSiteConvergedProbes(s, f)
 
 	cr, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
@@ -562,6 +565,35 @@ func TestSiteCheckUnsatisfiedWhenDisabledCronLingers(t *testing.T) {
 	}
 }
 
+// siteStampFileLists mirrors Check's stamp-probe list construction: the
+// cloudflare snippet FIRST when any site is cloudflare_only, then every site's
+// vhost / pool in config order. Kept in lock-step with site.Check by the tests
+// that use it.
+func siteStampFileLists(s *config.Server) (vhosts, pools []string) {
+	if s.AnyCloudflareOnly() {
+		vhosts = append(vhosts, cloudflareConfPath)
+	}
+	for _, site := range s.Sites {
+		vhosts = append(vhosts, nginxAvailablePath(site.Domain))
+		pools = append(pools, fpmPoolPath(s.PHP.Version, site.Domain))
+	}
+	return vhosts, pools
+}
+
+// stubSiteConvergedProbes stubs Check's enabled-symlink, stock-pool and
+// reload-stamp probes the way a converged host answers: every sites-enabled
+// link resolves to its vhost, the stock www pool is absent, and the running
+// nginx/php-fpm postdate every managed vhost/pool.
+func stubSiteConvergedProbes(s *config.Server, f *bssh.FakeRunner) {
+	for _, site := range s.Sites {
+		f.On("[ "+shQuote(nginxEnabledPath(site.Domain))+" -ef "+shQuote(nginxAvailablePath(site.Domain))+" ]", bssh.Result{})
+	}
+	f.On("test -e "+shQuote(defaultFPMPoolPath(s)), bssh.Result{ExitCode: 1})
+	vhosts, pools := siteStampFileLists(s)
+	f.On(reloadedSinceCmd("nginx", vhosts...), bssh.Result{})
+	f.On(reloadedSinceCmd(fpmService(s), pools...), bssh.Result{})
+}
+
 // stubManagedSiteFiles makes every managed site file read back as up-to-date so
 // the Check's content-hash comparison is satisfied.
 func stubManagedSiteFiles(t *testing.T, s *config.Server, f *bssh.FakeRunner) {
@@ -585,6 +617,12 @@ func stubManagedSiteFiles(t *testing.T, s *config.Server, f *bssh.FakeRunner) {
 // It also stubs the step-0 Cloudflare-snippet probe (cat -> absent), which every
 // Apply success path now hits via managedFilePresent when cloudflare_only is off.
 func stubFPMApply(s *config.Server, f *bssh.FakeRunner) {
+	// Reload-stamp bookkeeping: both units are invalidated up front and
+	// re-stamped after their successful reloads.
+	f.On("rm -f "+shQuote("/var/lib/berth/nginx.reloaded"), bssh.Result{})
+	f.On("rm -f "+shQuote("/var/lib/berth/"+fpmService(s)+".reloaded"), bssh.Result{})
+	f.On(markReloadedCmd("nginx"), bssh.Result{})
+	f.On(markReloadedCmd(fpmService(s)), bssh.Result{})
 	f.On(fmt.Sprintf("test -f %[1]s && mv -f %[1]s %[1]s.disabled || true", shQuote(defaultFPMPoolPath(s))), bssh.Result{})
 	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
 	f.On("systemctl reload "+fpmService(s), bssh.Result{})
@@ -665,6 +703,7 @@ func TestSiteCheckSatisfiedAfterTLSSwap(t *testing.T) {
 	fCheck.On("test -e "+shQuote(certFullchainPath(site)), bssh.Result{ExitCode: 0})
 	fCheck.On("nginx -t", bssh.Result{ExitCode: 0})
 	fCheck.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
+	stubSiteConvergedProbes(s, fCheck)
 	fCheck.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{})
 	fCheck.On("cat "+shQuote(cloudflareConfPath), bssh.Result{ExitCode: 1}) // cloudflare snippet absent (off), remove-entry satisfied
 
@@ -822,7 +861,7 @@ func TestSiteApplyWritesCloudflareConfWhenEnabled(t *testing.T) {
 	// (see Task 4 Step 7) and is covered by code review, not this test.
 }
 
-func TestSiteApplyRemovesCloudflareConfWhenDisabled(t *testing.T) {
+func TestSiteApplyRemovesDisabledCloudflareBeforeReload(t *testing.T) {
 	s := siteServer() // cloudflare_only off
 	f := bssh.NewFakeRunner()
 	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
@@ -836,12 +875,15 @@ func TestSiteApplyRemovesCloudflareConfWhenDisabled(t *testing.T) {
 	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
-	// The rm must run AFTER the vhosts are rewritten (unguarded) and nginx reloaded,
-	// so the $berth_cloudflare geo always outlives the last vhost that referenced it
-	// — a partial failure mid-Apply must never leave a guarded vhost without its geo.
-	idxReload, idxRemove := -1, -1
+	// The rm must run AFTER the vhosts are rewritten unguarded (so validation
+	// passes without the geo) but BEFORE nginx -t + reload: under the
+	// transactional reload stamp nothing may mutate nginx config after the
+	// mark, and the mark directly follows the reload.
+	idxTest, idxReload, idxRemove := -1, -1, -1
 	for i, c := range f.Calls() {
 		switch c.Cmd {
+		case "nginx -t":
+			idxTest = i
 		case "systemctl reload nginx":
 			idxReload = i
 		case "rm -f " + shQuote(cloudflareConfPath):
@@ -851,8 +893,11 @@ func TestSiteApplyRemovesCloudflareConfWhenDisabled(t *testing.T) {
 	if idxRemove < 0 {
 		t.Fatal("Apply must rm the lingering berth-managed cloudflare conf when disabled")
 	}
-	if idxReload < 0 || idxRemove < idxReload {
-		t.Errorf("rm of the cloudflare snippet (idx %d) must run AFTER systemctl reload nginx (idx %d)", idxRemove, idxReload)
+	if idxTest < 0 || idxRemove > idxTest {
+		t.Errorf("rm of the cloudflare snippet (idx %d) must run BEFORE nginx -t (idx %d)", idxRemove, idxTest)
+	}
+	if idxReload < 0 || idxRemove > idxReload {
+		t.Errorf("rm of the cloudflare snippet (idx %d) must run BEFORE systemctl reload nginx (idx %d)", idxRemove, idxReload)
 	}
 }
 
@@ -1133,6 +1178,7 @@ func TestSiteCheckUnsatisfiedWhenSupervisorProgramNotLoaded(t *testing.T) {
 	stubManagedSiteFiles(t, s, f)
 	f.On("nginx -t", bssh.Result{ExitCode: 0})
 	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
+	stubSiteConvergedProbes(s, f)
 	// The worker conf is on disk but supervisord never loaded it. The glob is
 	// shell-quoted (so /bin/sh -c never pathname-expands it), matching the step.
 	f.On("supervisorctl status "+shQuote("berth-app_example_com:*"), bssh.Result{ExitCode: 4, Stdout: "berth-app_example_com: ERROR (no such group)\n"})
@@ -1157,6 +1203,7 @@ func TestSiteCheckSatisfiedWhenSupervisorProgramLoaded(t *testing.T) {
 	stubManagedSiteFiles(t, s, f)
 	f.On("nginx -t", bssh.Result{ExitCode: 0})
 	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
+	stubSiteConvergedProbes(s, f)
 	// supervisord has the program loaded (dormant); status lists it, no "no such".
 	f.On("supervisorctl status "+shQuote("berth-app_example_com:*"), bssh.Result{ExitCode: 3, Stdout: "berth-app_example_com:berth-app_example_com_00   STOPPED   Not started\n"})
 
@@ -1166,5 +1213,165 @@ func TestSiteCheckSatisfiedWhenSupervisorProgramLoaded(t *testing.T) {
 	}
 	if !cr.Satisfied {
 		t.Errorf("expected satisfied when the supervisor program is loaded; got %+v", cr)
+	}
+}
+
+func TestSiteCheckUnsatisfiedWhenVhostNewerThanNginxStamp(t *testing.T) {
+	// A crash between writing a vhost and reloading nginx leaves the daemon
+	// serving the old server block forever while the on-disk bytes read
+	// converged — only the reload stamp catches it.
+	s := siteServer()
+	f := bssh.NewFakeRunner()
+	stubManagedSiteFiles(t, s, f)
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
+	stubSiteConvergedProbes(s, f)
+	f.On(reloadedSinceCmd("nginx", nginxAvailablePath(s.Sites[0].Domain)), bssh.Result{ExitCode: 1})
+	// (FPM stamp probe not reached — Check returns at the first failed probe.)
+
+	cr, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("a vhost newer than the nginx reload stamp must be unsatisfied (written but not reloaded)")
+	}
+}
+
+func TestSiteCheckUnsatisfiedWhenPoolNewerThanFPMStamp(t *testing.T) {
+	s := siteServer()
+	f := bssh.NewFakeRunner()
+	stubManagedSiteFiles(t, s, f)
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
+	stubSiteConvergedProbes(s, f)
+	f.On(reloadedSinceCmd("nginx", nginxAvailablePath(s.Sites[0].Domain)), bssh.Result{})
+	f.On(reloadedSinceCmd(fpmService(s), fpmPoolPath(s.PHP.Version, s.Sites[0].Domain)), bssh.Result{ExitCode: 1})
+
+	cr, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("a pool newer than the php-fpm reload stamp must be unsatisfied (written but not reloaded)")
+	}
+}
+
+func TestSiteCheckUnsatisfiedWhenEnabledLinkMissing(t *testing.T) {
+	// Apply converges the sites-enabled symlink every run, but nothing
+	// re-triggered it when only the link drifted (deleted or repointed).
+	s := siteServer()
+	f := bssh.NewFakeRunner()
+	stubManagedSiteFiles(t, s, f)
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
+	stubSiteConvergedProbes(s, f)
+	f.On("[ "+shQuote(nginxEnabledPath(s.Sites[0].Domain))+" -ef "+shQuote(nginxAvailablePath(s.Sites[0].Domain))+" ]", bssh.Result{ExitCode: 1})
+
+	cr, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("a missing/wrong sites-enabled link must be unsatisfied (the vhost is not actually served)")
+	}
+}
+
+func TestSiteCheckUnsatisfiedWhenStockPoolPresent(t *testing.T) {
+	// Apply disables the stock www pool every run; a pool that reappeared
+	// (e.g. a php-fpm package upgrade restoring www.conf) must re-trigger it.
+	s := siteServer()
+	f := bssh.NewFakeRunner()
+	stubManagedSiteFiles(t, s, f)
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
+	stubSiteConvergedProbes(s, f)
+	f.On("test -e "+shQuote(defaultFPMPoolPath(s)), bssh.Result{})
+
+	cr, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("a present stock FPM pool must be unsatisfied (it must stay disabled)")
+	}
+}
+
+func TestSiteApplyStampsNginxAndFPMAfterReloads(t *testing.T) {
+	s := siteServer()
+	f := bssh.NewFakeRunner()
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	idx := func(want string) int {
+		for i, c := range f.Calls() {
+			if c.Cmd == want {
+				return i
+			}
+		}
+		return -1
+	}
+	reloadNginx := idx("systemctl reload nginx")
+	markNginx := idx(markReloadedCmd("nginx"))
+	reloadFPM := idx("systemctl reload " + fpmService(s))
+	markFPM := idx(markReloadedCmd(fpmService(s)))
+	if markNginx < 0 || markFPM < 0 {
+		t.Fatalf("both reload stamps must be recorded; markNginx=%d markFPM=%d", markNginx, markFPM)
+	}
+	if reloadNginx < 0 || reloadNginx > markNginx {
+		t.Errorf("nginx stamp must be recorded AFTER systemctl reload nginx; reload=%d mark=%d", reloadNginx, markNginx)
+	}
+	if reloadFPM < 0 || reloadFPM > markFPM {
+		t.Errorf("FPM stamp must be recorded AFTER systemctl reload %s; reload=%d mark=%d", fpmService(s), reloadFPM, markFPM)
+	}
+	// Invalidate-before-mutation: the write-guard cat is issued by
+	// writeManagedFile immediately before each WriteFile — the closest
+	// observable proxy for the write itself (Run and WriteFile orders cannot
+	// be correlated on the FakeRunner). The FPM phase's first mutation is the
+	// stock-pool disable.
+	rmNginx := idx("rm -f " + shQuote("/var/lib/berth/nginx.reloaded"))
+	guardVhost := idx("cat " + shQuote(nginxAvailablePath(s.Sites[0].Domain)))
+	if rmNginx < 0 || guardVhost < 0 || rmNginx > guardVhost {
+		t.Errorf("nginx stamp must be invalidated BEFORE the vhost write; rm=%d write-guard=%d", rmNginx, guardVhost)
+	}
+	rmFPM := idx("rm -f " + shQuote("/var/lib/berth/"+fpmService(s)+".reloaded"))
+	disableWWW := idx(fmt.Sprintf("test -f %[1]s && mv -f %[1]s %[1]s.disabled || true", shQuote(defaultFPMPoolPath(s))))
+	if rmFPM < 0 || disableWWW < 0 || rmFPM > disableWWW {
+		t.Errorf("FPM stamp must be invalidated BEFORE the stock-pool disable; rm=%d disable=%d", rmFPM, disableWWW)
+	}
+}
+
+func TestSiteApplyNoNginxStampWhenValidationFails(t *testing.T) {
+	s := siteServer()
+	f := bssh.NewFakeRunner()
+	f.On("rm -f "+shQuote("/var/lib/berth/nginx.reloaded"), bssh.Result{})
+	f.On("cat "+shQuote(nginxAvailablePath("app.example.com")), bssh.Result{ExitCode: 1}) // vhost write-guard: absent
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("cat "+shQuote(cloudflareConfPath), bssh.Result{ExitCode: 1}) // disabled-snippet probe: absent
+	f.On("nginx -t", bssh.Result{ExitCode: 1, Stderr: "broken"})
+
+	err := Site().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil {
+		t.Fatal("expected Apply to abort when nginx -t fails")
+	}
+	var invalidated bool
+	for _, c := range f.Calls() {
+		if c.Cmd == "rm -f "+shQuote("/var/lib/berth/nginx.reloaded") {
+			invalidated = true
+		}
+		if c.Cmd == markReloadedCmd("nginx") {
+			t.Error("the nginx reload stamp must not be recorded after a failed nginx -t")
+		}
+		if c.Cmd == "systemctl reload nginx" {
+			t.Error("reload must not run after a failed nginx -t")
+		}
+	}
+	if !invalidated {
+		t.Error("the nginx stamp must be invalidated before the vhost writes (crash-safe window)")
 	}
 }

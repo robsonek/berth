@@ -299,11 +299,18 @@ func (tls) issueSelfSigned(ctx context.Context, s *config.Server, site config.Si
 }
 
 // swapToHTTPS writes a site's 443 server block (shared renderer with the site
-// step so a re-run sees no drift), validates, and reloads nginx.
+// step so a re-run sees no drift), validates, and reloads nginx. It follows
+// the transactional reload-stamp contract for the shared nginx unit:
+// invalidate before the vhost write, mark only after the successful reload —
+// without the stamp the vhost just written would be newer than the stamp and
+// the next site.Check would schedule one spurious reload.
 func swapToHTTPS(ctx context.Context, r bssh.Runner, s *config.Server, site config.Site) error {
 	https, err := renderNginxHTTPS(s, site)
 	if err != nil {
 		return fmt.Errorf("render https config for %s: %w", site.Domain, err)
+	}
+	if err := invalidateReloaded(ctx, r, "nginx"); err != nil {
+		return err
 	}
 	if err := r.WriteFile(ctx, bssh.FileSpec{
 		Path: nginxAvailablePath(site.Domain), Content: https,
@@ -321,7 +328,7 @@ func swapToHTTPS(ctx context.Context, r bssh.Runner, s *config.Server, site conf
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("reload nginx: %s", res.Stderr)
 	}
-	return nil
+	return markReloaded(ctx, r, "nginx")
 }
 
 // certStatus reports whether a site's certificate exists (found), is valid

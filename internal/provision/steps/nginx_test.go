@@ -24,13 +24,16 @@ func stubDefaultsAbsent(f *bssh.FakeRunner) {
 	f.On("test -e "+shQuote(nginxOrgDefaultConf), bssh.Result{ExitCode: 1})
 }
 
-// stubNginxApplyTail stubs the tail of Apply: disabling the stock defaults and
-// the validate+reload that follows.
+// stubNginxApplyTail stubs the tail of Apply: disabling the stock defaults,
+// the validate+reload that follows, and the reload-stamp bookkeeping around
+// them (invalidate up front, mark after the successful reload).
 func stubNginxApplyTail(f *bssh.FakeRunner) {
+	f.On("rm -f "+shQuote("/var/lib/berth/nginx.reloaded"), bssh.Result{})
 	f.On("rm -f "+shQuote(debianDefaultSite), bssh.Result{})
 	f.On(fmt.Sprintf("test -f %[1]s && mv -f %[1]s %[1]s.disabled || true", shQuote(nginxOrgDefaultConf)), bssh.Result{})
 	f.On("nginx -t", bssh.Result{})
 	f.On("systemctl reload nginx", bssh.Result{})
+	f.On(markReloadedCmd("nginx"), bssh.Result{})
 }
 
 func TestNginxCheckSatisfiedWhenInstalledAndUp(t *testing.T) {
@@ -39,12 +42,32 @@ func TestNginxCheckSatisfiedWhenInstalledAndUp(t *testing.T) {
 	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
 	stubDefaultsAbsent(f)
+	f.On(reloadedSinceCmd("nginx", nginxConfPath), bssh.Result{}) // stamp fresh
 	cr, err := Nginx().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !cr.Satisfied {
 		t.Errorf("expected satisfied when nginx installed, running, defaults disabled; got %+v", cr)
+	}
+}
+
+func TestNginxCheckUnsatisfiedWhenConfNewerThanStamp(t *testing.T) {
+	// A crash between Apply's core-config writes and its reload leaves the
+	// daemon on the old config while every byte-level probe reads converged —
+	// only the reload stamp catches it.
+	f := bssh.NewFakeRunner()
+	f.On("dpkg -s nginx", bssh.Result{ExitCode: 0})
+	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
+	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
+	stubDefaultsAbsent(f)
+	f.On(reloadedSinceCmd("nginx", nginxConfPath), bssh.Result{ExitCode: 1})
+	cr, err := Nginx().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("nginx.conf newer than the reload stamp must be unsatisfied (written but not reloaded)")
 	}
 }
 
@@ -127,9 +150,11 @@ func TestNginxCheckSourceNginxRequiresRepo(t *testing.T) {
 	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
 	stubDefaultsAbsent(f)
-	// Worker user reconciled and bridge managed (so only the repo gates this test).
+	// Worker user reconciled, bridge managed and stamp fresh (so only the repo
+	// gates this test). source=nginx probes the bridge file too.
 	f.On("grep -qE '^[[:space:]]*user[[:space:]]+www-data;' "+nginxConfPath, bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(nginxBridgePath), bssh.Result{ExitCode: 0, Stdout: string(nginxBridgeContent())})
+	f.On(reloadedSinceCmd("nginx", nginxConfPath, nginxBridgePath), bssh.Result{})
 	// nginx.org repo not yet registered -> not satisfied even though nginx runs.
 	f.On("test -e "+shQuote(nginxOrgSourceList), bssh.Result{ExitCode: 1})
 	cr, err := Nginx().Check(context.Background(), provision.RunCtx{}, s, f)
@@ -190,6 +215,7 @@ func TestNginxApplyRefusesForeignSitesBridge(t *testing.T) {
 	f.On("apt-get update", bssh.Result{})
 	f.On("apt-get update -o Dir::Etc::sourcelist=sources.list.d/nginx-org.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o APT::Update::Error-Mode=any", bssh.Result{ExitCode: 0})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx", bssh.Result{})
+	f.On("rm -f "+shQuote("/var/lib/berth/nginx.reloaded"), bssh.Result{}) // stamp invalidation up front
 	f.On("install -d /etc/nginx/sites-available /etc/nginx/sites-enabled", bssh.Result{})
 	f.On("cat "+shQuote("/etc/nginx/conf.d/berth-sites.conf"), bssh.Result{ExitCode: 0, Stdout: "include /srv/legacy/*.conf;\n"}) // foreign
 
@@ -245,6 +271,37 @@ func TestNginxApplySourceNginxAddsRepoAndBridge(t *testing.T) {
 	}
 	if !sourceListWritten {
 		t.Error("expected the nginx-org apt source list to be written")
+	}
+}
+
+func TestNginxApplyInvalidatesBeforeMutationAndStampsAfterReload(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx", bssh.Result{})
+	f.On("systemctl enable --now nginx", bssh.Result{})
+	stubNginxApplyTail(f)
+	if err := Nginx().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	idx := func(want string) int {
+		for i, c := range f.Calls() {
+			if c.Cmd == want {
+				return i
+			}
+		}
+		return -1
+	}
+	// On the debian source the first config mutation is the stock-default
+	// removal; the stamp must be invalidated before it and re-installed only
+	// after the successful reload.
+	invalidate := idx("rm -f " + shQuote("/var/lib/berth/nginx.reloaded"))
+	firstMutation := idx("rm -f " + shQuote(debianDefaultSite))
+	reload := idx("systemctl reload nginx")
+	mark := idx(markReloadedCmd("nginx"))
+	if invalidate < 0 || firstMutation < 0 || invalidate > firstMutation {
+		t.Errorf("nginx stamp must be invalidated BEFORE the stock-default removal; rm=%d mutation=%d", invalidate, firstMutation)
+	}
+	if mark < 0 || reload < 0 || reload > mark {
+		t.Errorf("nginx stamp must be recorded AFTER systemctl reload nginx; reload=%d mark=%d", reload, mark)
 	}
 }
 

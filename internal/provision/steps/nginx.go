@@ -45,7 +45,20 @@ func nginxBridgeContent() []byte {
 	return []byte(managedMarker + "\ninclude /etc/nginx/sites-enabled/*;\n")
 }
 
-func (nginx) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
+// nginxOwnedConfigFiles are the config files this step's Apply lays down or
+// rewrites, probed against the reload stamp: nginx.conf always (the package
+// ships it; the worker-user sed rewrites it for source=nginx), plus the conf.d
+// sites bridge for source=nginx. The stock-default removals need no entry —
+// a removed path can never be newer than the stamp.
+func nginxOwnedConfigFiles(s *config.Server) []string {
+	files := []string{nginxConfPath}
+	if s.Nginx.Source == "nginx" {
+		files = append(files, nginxBridgePath)
+	}
+	return files
+}
+
+func (n nginx) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
 	installed, err := pkgInstalled(ctx, r, "nginx")
 	if err != nil {
 		return provision.CheckResult{}, err
@@ -84,14 +97,35 @@ func (nginx) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	if installed && up && sourceOK && userOK && bridgeOK && defaultsDisabled {
-		return provision.CheckResult{Satisfied: true, Reason: "nginx installed and running from the " + s.Nginx.Source + " source (worker user www-data); stock default sites disabled"}, nil
+	if !(installed && up && sourceOK && userOK && bridgeOK && defaultsDisabled) {
+		return provision.CheckResult{
+			Satisfied: false,
+			Reason:    "nginx not installed, not running, not from the configured source, worker user not www-data, or stock default site still enabled",
+			Changes:   n.changes(s),
+		}, nil
 	}
-	return provision.CheckResult{
-		Satisfied: false,
-		Reason:    "nginx not installed, not running, not from the configured source, worker user not www-data, or stock default site still enabled",
-		Changes:   []string{"install nginx (" + s.Nginx.Source + ")", "run workers as www-data", "disable stock default site(s)", "systemctl enable --now nginx"},
-	}, nil
+	// The RUNNING nginx must postdate the core config this step owns: a crash
+	// between Apply's writes and its final reload leaves the daemon on the old
+	// config forever while every byte-level probe above reads converged. Probed
+	// only once everything else is satisfied — any drift above re-runs Apply,
+	// which always ends with a reload + fresh stamp. serviceUp above is the
+	// liveness probe reloadedSince requires.
+	loaded, err := reloadedSince(ctx, r, "nginx", nginxOwnedConfigFiles(s)...)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	if !loaded {
+		return provision.CheckResult{
+			Satisfied: false,
+			Reason:    "running nginx predates its managed core config (reload pending)",
+			Changes:   n.changes(s),
+		}, nil
+	}
+	return provision.CheckResult{Satisfied: true, Reason: "nginx installed and running from the " + s.Nginx.Source + " source (worker user www-data); stock default sites disabled"}, nil
+}
+
+func (nginx) changes(s *config.Server) []string {
+	return []string{"install nginx (" + s.Nginx.Source + ")", "run workers as www-data", "disable stock default site(s)", "systemctl enable --now nginx"}
 }
 
 // nginxRunsAsWWWData reports whether nginx.conf sets the worker user to www-data.
@@ -128,6 +162,13 @@ func (nginx) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r
 	if err := m.EnsurePackages(ctx, nil, "nginx"); err != nil {
 		return fmt.Errorf("install nginx: %w", err)
 	}
+	// Invalidate nginx's reload stamp before the first config mutation this
+	// step performs (bridge write / worker-user sed / stock-default removal):
+	// from here until markReloaded after the successful reload below, a crash
+	// leaves no stamp and the next run reconciles with one reload.
+	if err := invalidateReloaded(ctx, r, "nginx"); err != nil {
+		return err
+	}
 	if s.Nginx.Source == "nginx" {
 		if err := bridgeNginxSitesLayout(ctx, r, rc.Force); err != nil {
 			return err
@@ -156,7 +197,9 @@ func (nginx) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("reload nginx: %s", res.Stderr)
 	}
-	return nil
+	// No nginx-config mutation follows (every write/removal above precedes the
+	// validate+reload), so the stamp may bless the running config.
+	return markReloaded(ctx, r, "nginx")
 }
 
 // disableStockDefaults idempotently removes the Debian default-site symlink and
