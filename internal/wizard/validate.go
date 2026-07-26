@@ -121,10 +121,13 @@ func optionalMariaDBSize(s string) error {
 	return fmt.Errorf("%q must be a number optionally suffixed K/M/G", s)
 }
 
-// mariadbPacketCeiling mirrors config's mariadbMaxAllowedPacketCeiling
-// (unexported there) for inline feedback; config.Server.Validate stays
-// authoritative.
-const mariadbPacketCeiling = 1 << 30
+// mariadbPacketCeiling / mariadbPacketFloor mirror config's
+// mariadbMaxAllowedPacketCeiling / mariadbMaxAllowedPacketFloor (unexported
+// there) for inline feedback; config.Server.Validate stays authoritative.
+const (
+	mariadbPacketCeiling = 1 << 30
+	mariadbPacketFloor   = 1 << 10
+)
 
 func optionalMariaDBPacket(s string) error {
 	if s == "" {
@@ -145,6 +148,49 @@ func optionalMariaDBPacket(s string) error {
 	n, err := strconv.ParseUint(num, 10, 64)
 	if err != nil || n > math.MaxUint64/mult || n*mult > mariadbPacketCeiling {
 		return fmt.Errorf("%q exceeds MariaDB's 1G max_allowed_packet ceiling", s)
+	}
+	if n*mult < mariadbPacketFloor {
+		return fmt.Errorf("%q is below MariaDB's 1024-byte max_allowed_packet floor", s)
+	}
+	if n*mult%mariadbPacketFloor != 0 {
+		return fmt.Errorf("%q is not a multiple of 1024 (MariaDB rounds max_allowed_packet down)", s)
+	}
+	return nil
+}
+
+// mariadbLogSizeMin/Max and the 4096-byte block mirror config's
+// mariadbLogFileSize{Min,Max,Block} innodb_log_file_size domain (unexported
+// there) for inline feedback; config.Server.Validate stays authoritative.
+const (
+	mariadbLogSizeMin = 4 << 20
+	mariadbLogSizeMax = 512 << 30
+)
+
+func optionalMariaDBLogSize(s string) error {
+	if s == "" {
+		return nil
+	}
+	if !reMariaDBSize.MatchString(s) {
+		return fmt.Errorf("%q must be a number optionally suffixed K/M/G", s)
+	}
+	num, mult := s, uint64(1)
+	switch s[len(s)-1] {
+	case 'K', 'k':
+		num, mult = s[:len(s)-1], 1<<10
+	case 'M', 'm':
+		num, mult = s[:len(s)-1], 1<<20
+	case 'G', 'g':
+		num, mult = s[:len(s)-1], 1<<30
+	}
+	n, err := strconv.ParseUint(num, 10, 64)
+	if err != nil || n > math.MaxUint64/mult || n*mult > mariadbLogSizeMax {
+		return fmt.Errorf("%q exceeds MariaDB's 512G innodb_log_file_size maximum", s)
+	}
+	if n*mult < mariadbLogSizeMin {
+		return fmt.Errorf("%q is below MariaDB's 4M innodb_log_file_size minimum", s)
+	}
+	if n*mult%4096 != 0 {
+		return fmt.Errorf("%q is not a multiple of 4096 (the redo-log block size)", s)
 	}
 	return nil
 }

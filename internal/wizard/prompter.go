@@ -97,7 +97,7 @@ func (h *huhPrompter) ServerAdvanced(a *Answers) error {
 			huh.NewInput().Title("MariaDB innodb_buffer_pool (e.g. 256M, blank=default)").Value(&a.Tuning.MariaDBBufferPool).Validate(optionalMariaDBSize),
 			huh.NewConfirm().Title("MariaDB slow query log?").Value(&a.Tuning.MariaDBSlowQueryLog),
 			huh.NewInput().Title("MariaDB long_query_time (1-86400 s, blank/0=default 2; needs the slow log on)").Value(&longQuery).Validate(optionalInt("tuning.mariadb_long_query_time", 1, 86400)),
-			huh.NewInput().Title("MariaDB innodb_log_file_size (e.g. 1G, blank=engine default 96M)").Value(&a.Tuning.MariaDBLogFileSize).Validate(optionalMariaDBSize),
+			huh.NewInput().Title("MariaDB innodb_log_file_size (4M-512G, e.g. 1G, blank=engine default 96M)").Value(&a.Tuning.MariaDBLogFileSize).Validate(optionalMariaDBLogSize),
 			huh.NewInput().Title("MariaDB tmp_table_size + max_heap_table_size (e.g. 128M, blank=engine default 16M)").Value(&a.Tuning.MariaDBTmpTableSize).Validate(optionalMariaDBSize),
 			huh.NewInput().Title("MariaDB max_connections (10-100000, blank/0=engine default 151)").Value(&maxConns).Validate(optionalInt("tuning.mariadb_max_connections", 10, 100000)),
 			huh.NewInput().Title("MariaDB max_allowed_packet (e.g. 64M, max 1G, blank=engine default 16M)").Value(&a.Tuning.MariaDBMaxAllowedPacket).Validate(optionalMariaDBPacket),

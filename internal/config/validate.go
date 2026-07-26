@@ -390,8 +390,23 @@ func (t Tuning) validate() error {
 	if t.MariaDBBufferPool != "" && !reMariaDBSize.MatchString(t.MariaDBBufferPool) {
 		return fmt.Errorf("tuning.mariadb_innodb_buffer_pool %q must be a number optionally suffixed K/M/G (e.g. 256M)", t.MariaDBBufferPool)
 	}
-	if t.MariaDBLogFileSize != "" && !reMariaDBSize.MatchString(t.MariaDBLogFileSize) {
-		return fmt.Errorf("tuning.mariadb_log_file_size %q must be a number optionally suffixed K/M/G (e.g. 1G)", t.MariaDBLogFileSize)
+	if t.MariaDBLogFileSize != "" {
+		if !reMariaDBSize.MatchString(t.MariaDBLogFileSize) {
+			return fmt.Errorf("tuning.mariadb_log_file_size %q must be a number optionally suffixed K/M/G (e.g. 1G)", t.MariaDBLogFileSize)
+		}
+		b, err := phpSizeBytes(t.MariaDBLogFileSize)
+		if err != nil {
+			return fmt.Errorf("tuning.mariadb_log_file_size %q: %v", t.MariaDBLogFileSize, err)
+		}
+		if b < mariadbLogFileSizeMin {
+			return fmt.Errorf("tuning.mariadb_log_file_size %q is below MariaDB's 4M minimum", t.MariaDBLogFileSize)
+		}
+		if b > mariadbLogFileSizeMax {
+			return fmt.Errorf("tuning.mariadb_log_file_size %q exceeds MariaDB's 512G maximum", t.MariaDBLogFileSize)
+		}
+		if b%mariadbLogFileSizeBlock != 0 {
+			return fmt.Errorf("tuning.mariadb_log_file_size %q must be a multiple of 4096 (the redo-log block size)", t.MariaDBLogFileSize)
+		}
 	}
 	if t.MariaDBTmpTableSize != "" && !reMariaDBSize.MatchString(t.MariaDBTmpTableSize) {
 		return fmt.Errorf("tuning.mariadb_tmp_table_size %q must be a number optionally suffixed K/M/G (e.g. 128M)", t.MariaDBTmpTableSize)
@@ -406,6 +421,12 @@ func (t Tuning) validate() error {
 		}
 		if b > mariadbMaxAllowedPacketCeiling {
 			return fmt.Errorf("tuning.mariadb_max_allowed_packet %q exceeds MariaDB's 1G ceiling (the server silently truncates larger values)", t.MariaDBMaxAllowedPacket)
+		}
+		if b < mariadbMaxAllowedPacketFloor {
+			return fmt.Errorf("tuning.mariadb_max_allowed_packet %q is below MariaDB's 1024-byte floor (the server silently clamps it up)", t.MariaDBMaxAllowedPacket)
+		}
+		if b%mariadbMaxAllowedPacketFloor != 0 {
+			return fmt.Errorf("tuning.mariadb_max_allowed_packet %q must be a multiple of 1024 (MariaDB silently rounds down)", t.MariaDBMaxAllowedPacket)
 		}
 	}
 	if t.MariaDBMaxConnections != 0 && (t.MariaDBMaxConnections < 10 || t.MariaDBMaxConnections > 100000) {

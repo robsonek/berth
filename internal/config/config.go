@@ -128,6 +128,24 @@ const phpSizeMaxBytes = 64 << 30
 // values, so berth rejects them loudly instead.
 const mariadbMaxAllowedPacketCeiling = 1 << 30
 
+// mariadbMaxAllowedPacketFloor is MariaDB's lower bound and block size for
+// max_allowed_packet (1024 bytes). The server silently clamps smaller values
+// up to it and rounds non-multiples down to the nearest 1024-byte block, so
+// the effective value would differ from the configured one; berth rejects
+// both loudly instead.
+const mariadbMaxAllowedPacketFloor = 1 << 10
+
+// mariadbLogFileSize{Min,Max,Block} pin innodb_log_file_size to MariaDB's
+// documented domain: 4 MiB to 512 GiB in 4096-byte redo-log blocks. An
+// out-of-domain value risks a poison drop-in — mariadbd failing at startup
+// poisons every subsequent run (the same failure mode the buffer-pool RAM
+// guard exists for) — so berth rejects it before it reaches the host.
+const (
+	mariadbLogFileSizeMin   = 4 << 20
+	mariadbLogFileSizeMax   = 512 << 30
+	mariadbLogFileSizeBlock = 4096
+)
+
 // phpPostHeadroomMinBytes is the minimum multipart-envelope allowance added
 // to php_upload_max when deriving post_max_size / client_max_body_size
 // (boundaries, form fields and metadata all count toward the request body).

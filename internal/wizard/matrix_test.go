@@ -1054,6 +1054,16 @@ func TestConfigMatrix(t *testing.T) {
 		mustContain(t, err, "mariadb_max_allowed_packet")
 	})
 
+	t.Run("tuning-log-file-size-below-min-invalid", func(t *testing.T) {
+		a := base("adv-tune-logsize", "vps.example.com")
+		a.Tuning = TuningAnswers{MariaDBLogFileSize: "1M"}
+		a.Sites = []SiteAnswers{{
+			Domain: "vps.example.com", DeployPath: "/srv/app", DBName: "appdb", DBUser: "appuser", SchedulerOverride: "inherit",
+		}}
+		err := writeInvalid(t, a)
+		mustContain(t, err, "mariadb_log_file_size")
+	})
+
 	t.Run("tuning-fpm-children-below-floor-invalid", func(t *testing.T) {
 		a := base("adv-tune-fpm", "vps.example.com")
 		a.Tuning = TuningAnswers{PHPFPMMaxChildren: 3}

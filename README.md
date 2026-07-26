@@ -114,7 +114,7 @@ tuning:                        # optional — omit any field to keep its default
   mariadb_innodb_buffer_pool: 256M
   mariadb_slow_query_log: true # default off; log queries slower than the threshold
   mariadb_long_query_time: 2   # seconds (default 2); needs the slow log on
-  mariadb_log_file_size: 1G    # innodb redo log; omit = engine default (96M)
+  mariadb_log_file_size: 1G    # innodb redo log, 4M-512G; omit = engine default (96M)
   mariadb_tmp_table_size: 128M # sets tmp_table_size AND max_heap_table_size; omit = engine default (16M)
   mariadb_max_connections: 256 # 10-100000; omit = engine default (151)
   mariadb_max_allowed_packet: 64M # max 1G; omit = engine default (16M)
@@ -272,7 +272,7 @@ tuning:
   mariadb_innodb_buffer_pool: 256M     # default
   mariadb_slow_query_log: false        # default; opt-in slow query log
   mariadb_long_query_time: 2           # default; seconds, needs the slow log on
-  mariadb_log_file_size: 1G            # omit = engine default (96M)
+  mariadb_log_file_size: 1G            # 4M-512G; omit = engine default (96M)
   mariadb_tmp_table_size: 128M         # omit = engine default (16M)
   mariadb_max_connections: 256         # omit = engine default (151); 10-100000
   mariadb_max_allowed_packet: 64M      # omit = engine default (16M); max 1G
