@@ -76,9 +76,10 @@ func assertTuningKnobs(ctx context.Context, t *testing.T, c *bssh.Client, srv *c
 		if err != nil {
 			t.Fatalf("php-fpm -tt: %v", err)
 		}
-		// Anchored to end-of-line so knob=5 cannot false-pass on a host
-		// serving 50 (decimal-prefix collision).
-		re := regexp.MustCompile(fmt.Sprintf(`(?m)^\s*pm\.max_children = %d\s*$`, v))
+		// End-of-line anchored so knob=5 cannot false-pass on a host serving
+		// 50 (decimal-prefix collision). No start anchor: php-fpm -tt emits
+		// the dump through its logger ("[date] NOTICE: \tpm.max_children = 5").
+		re := regexp.MustCompile(fmt.Sprintf(`(?m)\bpm\.max_children = %d\s*$`, v))
 		if !re.MatchString(res.Stdout + res.Stderr) {
 			t.Errorf("php-fpm -tt output lacks pm.max_children = %d", v)
 		}
