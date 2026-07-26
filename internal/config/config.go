@@ -123,6 +123,11 @@ const (
 // sentinel, silently removing the limit.
 const phpSizeMaxBytes = 64 << 30
 
+// mariadbMaxAllowedPacketCeiling is MariaDB's hard upper bound for
+// max_allowed_packet (1 GiB). The server silently truncates larger configured
+// values, so berth rejects them loudly instead.
+const mariadbMaxAllowedPacketCeiling = 1 << 30
+
 // phpPostHeadroomMinBytes is the minimum multipart-envelope allowance added
 // to php_upload_max when deriving post_max_size / client_max_body_size
 // (boundaries, form fields and metadata all count toward the request body).

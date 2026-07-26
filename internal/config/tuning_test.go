@@ -111,6 +111,14 @@ func TestTuningValidateAcceptsEmptyAndValid(t *testing.T) {
 		{PHPUploadMax: "512k"},        // suffixes are case-insensitive
 		{PHPUploadMax: "64G"},         // exactly the 64 GiB bound is accepted (reject is >)
 		{PHPMaxExecutionTime: -1},     // non-positive = unset, lenient
+		{MariaDBLogFileSize: "1G", MariaDBTmpTableSize: "128M", MariaDBMaxConnections: 256, MariaDBMaxAllowedPacket: "64M"},
+		{MariaDBMaxConnections: 10},          // range floor
+		{MariaDBMaxConnections: 100000},      // range ceiling
+		{MariaDBMaxAllowedPacket: "1G"},      // exactly MariaDB's ceiling is accepted (reject is >)
+		{MariaDBMaxAllowedPacket: "1048576"}, // bare bytes
+		{MariaDBTmpTableSize: "131072k"},     // suffixes are case-insensitive
+		{PHPFPMMaxChildren: 4},               // floor: static pm.max_spare_servers = 4
+		{PHPFPMMaxChildren: 10000},           // ceiling
 	} {
 		if err := tn.validate(); err != nil {
 			t.Errorf("validate(%+v) unexpected error: %v", tn, err)
@@ -136,6 +144,18 @@ func TestTuningValidateRejectsBad(t *testing.T) {
 		{PHPMemoryLimit: "18446744073709551615"}, // would wrap PHP's int64 parse to -1
 		{PHPMaxExecutionTime: 301},               // opinionated 300 s cap
 		{PHPMaxInputVars: 1000001},               // matches the wizard's domain
+		{MariaDBLogFileSize: "1GB"},              // MariaDB uses K/M/G, not GB
+		{MariaDBLogFileSize: "huge"},
+		{MariaDBTmpTableSize: "128M; rm -rf /"},
+		{MariaDBMaxConnections: 9},              // below MariaDB's own floor
+		{MariaDBMaxConnections: 100001},         // above MariaDB's own ceiling
+		{MariaDBMaxConnections: -1},             // negative would render verbatim
+		{MariaDBMaxAllowedPacket: "2G"},         // > 1G: server would silently truncate
+		{MariaDBMaxAllowedPacket: "1073741825"}, // 1G + 1 byte
+		{MariaDBMaxAllowedPacket: "64MB"},
+		{PHPFPMMaxChildren: 3}, // pm.max_spare_servers = 4 would exceed it: php-fpm -t rejects
+		{PHPFPMMaxChildren: 10001},
+		{PHPFPMMaxChildren: -1},
 	} {
 		if err := tn.validate(); err == nil {
 			t.Errorf("validate(%+v) expected error, got nil", tn)
