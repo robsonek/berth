@@ -38,7 +38,15 @@ func fpmPoolPath(phpVersion, domain string) string {
 func supervisorProgramPath(domain string) string {
 	return "/etc/supervisor/conf.d/" + programName(domain) + ".conf"
 }
-func cronPath(domain string) string { return "/etc/cron.d/berth-" + poolName(domain) }
+
+// cronPath is the scheduler cron for a site. The "berth-site-" prefix keeps
+// the namespace disjoint from the backups step's "berth-backup-" crons: a
+// domain literally named backup-<x>.tld would otherwise produce
+// /etc/cron.d/berth-backup-<x>_tld — inside the backups sweep's glob (deleted
+// every run) and able to collide with another domain's backup cron. Legacy
+// "berth-<pool>" files self-migrate: the orphan sweep below removes them
+// (berth-marked, outside the desired set) while the drift path writes this name.
+func cronPath(domain string) string { return "/etc/cron.d/berth-site-" + poolName(domain) }
 
 // anySchedulerEnabled reports whether at least one site wants the scheduler cron.
 func anySchedulerEnabled(s *config.Server) bool {
@@ -128,6 +136,11 @@ func managedSiteFiles(ctx context.Context, r bssh.Runner, s *config.Server) ([]s
 			files = append(files, siteFile{path: p, remove: true})
 		}
 	}
+	orphans, err := orphanSiteFiles(ctx, r, s)
+	if err != nil {
+		return nil, err
+	}
+	files = append(files, orphans...)
 	lr, err := renderLogrotate()
 	if err != nil {
 		return nil, err
@@ -356,6 +369,73 @@ func listSupervisorPrograms(ctx context.Context, r bssh.Runner) ([]string, error
 	return paths, nil
 }
 
+// findRegularFiles lists the immediate REGULAR files of dir (optionally
+// matching namePattern). find, not ls: a foreign subdirectory must not spill
+// its contents into the listing, and symlinks/special files must never reach
+// the marker probe (cat follows symlinks and can block on a FIFO) nor rm.
+func findRegularFiles(ctx context.Context, r bssh.Runner, dir, namePattern string) ([]string, error) {
+	cmd := "find " + shQuote(dir) + " -maxdepth 1 -type f"
+	if namePattern != "" {
+		cmd += " -name " + shQuote(namePattern)
+	}
+	cmd += " 2>/dev/null"
+	res, err := r.Run(ctx, cmd, nil)
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, line := range strings.Split(strings.TrimSpace(res.Stdout), "\n") {
+		if p := strings.TrimSpace(line); p != "" {
+			paths = append(paths, p)
+		}
+	}
+	return paths, nil
+}
+
+// orphanSiteFiles returns remove-entries for berth-managed vhosts, FPM pools
+// and scheduler crons whose site is no longer in the config. Discovery is the
+// proven sweep pattern (supervisor/backups/valkey): list candidates, skip the
+// desired set, and remove ONLY files carrying the berth managed marker — a
+// foreign vhost/pool/cron is never touched. Without this, removing a site from
+// the YAML left its vhost publicly served, its pool running and its cron
+// executing schedule:run of removed code, forever, with every run green.
+// Only the CONFIGURED PHP version's pool dir is swept: cleaning up after a
+// php.version change is a separate (documented) manual step.
+func orphanSiteFiles(ctx context.Context, r bssh.Runner, s *config.Server) ([]siteFile, error) {
+	desired := map[string]bool{}
+	for _, site := range s.Sites {
+		desired[nginxAvailablePath(site.Domain)] = true
+		desired[fpmPoolPath(s.PHP.Version, site.Domain)] = true
+		desired[cronPath(site.Domain)] = true
+	}
+	var files []siteFile
+	for _, k := range []struct{ dir, pattern string }{
+		{"/etc/nginx/sites-available", ""},
+		{fpmPoolDir(s.PHP.Version), "*.conf"},
+		// berth-* (not berth-site-*): legacy pre-rename scheduler crons must be
+		// swept too; the backups prefix below keeps that step's files out.
+		{"/etc/cron.d", "berth-*"},
+	} {
+		paths, err := findRegularFiles(ctx, r, k.dir, k.pattern)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range paths {
+			if desired[p] || strings.HasPrefix(p, backupCronPrefix) {
+				continue
+			}
+			managed, err := managedFilePresent(ctx, r, p)
+			if err != nil {
+				return nil, err
+			}
+			if managed {
+				files = append(files, siteFile{path: p, remove: true})
+			}
+		}
+	}
+	return files, nil
+}
+
 // supervisorReload registers berth's program set with the running supervisord
 // (reread then update). update does NOT start an autostart=false program, so
 // workers stay STOPPED (dormant); this is what makes the deployer's
@@ -418,7 +498,14 @@ func (st site) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 				return provision.CheckResult{}, err
 			}
 			if present {
-				return provision.CheckResult{Satisfied: false, Reason: mf.path + " should be removed (feature disabled)", Changes: st.changes()}, nil
+				// Destructive dry-run preview: list EVERY planned removal, not
+				// just the first one this loop trips on (content drift keeps the
+				// plain short-circuit above/below — writes are not destructive).
+				removals, err := plannedRemovals(ctx, r, mfs)
+				if err != nil {
+					return provision.CheckResult{}, err
+				}
+				return provision.CheckResult{Satisfied: false, Reason: mf.path + " should be removed (feature disabled or site removed)", Changes: append(removals, st.changes()...)}, nil
 			}
 			continue
 		}
@@ -528,18 +615,61 @@ func (st site) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 	return provision.CheckResult{Satisfied: true, Reason: "site config in place; nginx and php-fpm valid"}, nil
 }
 
+// plannedRemovals probes every remove-entry in mfs and returns a
+// "remove: <path>" line for each berth-managed file actually present — the
+// deletions Apply will really perform (an absent or foreign file is skipped
+// by Apply's guards, so previewing it would lie to the operator).
+func plannedRemovals(ctx context.Context, r bssh.Runner, mfs []siteFile) ([]string, error) {
+	var out []string
+	for _, mf := range mfs {
+		if !mf.remove {
+			continue
+		}
+		present, err := managedFilePresent(ctx, r, mf.path)
+		if err != nil {
+			return nil, err
+		}
+		if present {
+			out = append(out, "remove: "+mf.path)
+		}
+	}
+	return out, nil
+}
+
 func (site) changes() []string {
 	return []string{
 		"write per-site nginx server block + enable it",
 		"write per-site FPM pool (own user + socket)",
 		"write per-site supervisor programs (worker + daemons) and remove orphans",
 		"reconcile per-site scheduler cron (install or remove)",
+		"remove orphan vhosts/pools/scheduler crons of sites no longer in the config",
 		"write global logrotate fragment",
 		"reconcile the global Cloudflare origin-lockdown snippet (write or remove)",
 	}
 }
 
 func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
+	// Discover the removed-site orphans up front (read-only, so it may precede
+	// the stamp invalidation) and classify them by owning unit: each class is
+	// deleted inside its unit's invalidate→mutate→validate→reload→mark window.
+	// The managedFilePresent guard already ran inside discovery this same call —
+	// removal goes by the discovered absolute paths only.
+	orphans, err := orphanSiteFiles(ctx, r, s)
+	if err != nil {
+		return err
+	}
+	var orphanVhosts, orphanPools, orphanCrons []string
+	for _, o := range orphans {
+		switch {
+		case strings.HasPrefix(o.path, "/etc/nginx/sites-available/"):
+			orphanVhosts = append(orphanVhosts, o.path)
+		case strings.HasPrefix(o.path, fpmPoolDir(s.PHP.Version)+"/"):
+			orphanPools = append(orphanPools, o.path)
+		default:
+			orphanCrons = append(orphanCrons, o.path)
+		}
+	}
+
 	// Invalidate nginx's reload stamp before the first nginx-config mutation
 	// (the cloudflare snippet or a vhost): from here until markReloaded after
 	// the successful reload in step 3, a crash leaves no stamp and the next
@@ -606,6 +736,21 @@ func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server,
 		}
 	}
 
+	// Orphan vhosts: the site left the config. The enabled entry is removed
+	// ONLY when it is a symlink resolving to exactly this vhost (an operator's
+	// foreign file or repointed link at that path is not ours to delete —
+	// nginx -t fails loudly on a genuinely broken leftover, as designed);
+	// the berth-marked available file always goes.
+	for _, p := range orphanVhosts {
+		link := nginxEnabledPath(strings.TrimPrefix(p, "/etc/nginx/sites-available/"))
+		cmd := "if [ -L " + shQuote(link) + " ] && [ " + shQuote(link) + " -ef " + shQuote(p) + " ]; then rm -f " + shQuote(link) + "; fi && rm -f " + shQuote(p)
+		if res, err := r.Run(ctx, cmd, nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("remove orphan vhost %s: %s", p, res.Stderr)
+		}
+	}
+
 	// 3) Validate the whole nginx configuration BEFORE reloading, then stamp:
 	//    the running nginx now postdates every vhost written above.
 	if res, err := r.Run(ctx, "nginx -t", nil); err != nil {
@@ -642,6 +787,15 @@ func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server,
 			Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
 		}); err != nil {
 			return fmt.Errorf("write FPM pool for %s: %w", site.Domain, err)
+		}
+	}
+	// Orphan pools (removed sites): deleted inside the FPM window so the
+	// validate+reload below stop the orphan's workers in the same transaction.
+	for _, p := range orphanPools {
+		if res, err := r.Run(ctx, "rm -f "+shQuote(p), nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("remove orphan FPM pool %s: %s", p, res.Stderr)
 		}
 	}
 	if res, err := r.Run(ctx, "php-fpm"+s.PHP.Version+" -t", nil); err != nil {
@@ -721,6 +875,17 @@ func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server,
 		}
 	}
 
+	// Orphan scheduler crons (removed sites, plus legacy pre-rename berth-<pool>
+	// names self-migrating to berth-site-<pool>): no unit window — /etc/cron.d
+	// drop-ins take effect on removal by themselves.
+	for _, p := range orphanCrons {
+		if res, err := r.Run(ctx, "rm -f "+shQuote(p), nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("remove orphan scheduler cron %s: %s", p, res.Stderr)
+		}
+	}
+
 	// Global orphan removal: rm berth-managed supervisor program files no site
 	// desires (never a foreign/unmanaged file). removedOrphan is declared at
 	// function scope so the reload below can see it after the block closes.
@@ -764,10 +929,12 @@ func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server,
 		}
 	} else if removedOrphan {
 		// No desired programs, but a stale one was removed: unload it from
-		// supervisord too — only if supervisor is actually present (a server that
-		// never needed it may not have it installed). A non-zero probe exit just
-		// means absent (skip); a transport error propagates like any Apply command.
-		up, err := serviceUp(ctx, r, "supervisor")
+		// supervisord too — whenever supervisord is RUNNING (an active but
+		// boot-disabled daemon would otherwise keep executing the removed
+		// site's worker; enablement stays the supervisor step's business).
+		// A non-zero probe exit just means absent (skip); a transport error
+		// propagates like any Apply command.
+		up, err := serviceActive(ctx, r, "supervisor")
 		if err != nil {
 			return err
 		}

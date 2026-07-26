@@ -69,6 +69,7 @@ func TestSiteApplyValidatesNginxBeforeReload(t *testing.T) {
 func TestSiteApplyAbortsOnNginxTestFailure(t *testing.T) {
 	s := siteServer()
 	f := bssh.NewFakeRunner()
+	stubEmptyDiscovery(f, s)                                                              // Apply's read-only orphan discovery runs first
 	f.On("rm -f "+shQuote("/var/lib/berth/nginx.reloaded"), bssh.Result{})                // stamp invalidation up front
 	f.On("cat "+shQuote(nginxAvailablePath("app.example.com")), bssh.Result{ExitCode: 1}) // vhost write-guard: absent
 	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
@@ -100,6 +101,7 @@ func TestSiteApplyRefusesForeignVhost(t *testing.T) {
 	// path itself must refuse to clobber a config berth does not manage.
 	s := siteServer()
 	f := bssh.NewFakeRunner()
+	stubEmptyDiscovery(f, s)                                               // Apply's read-only orphan discovery runs first
 	f.On("rm -f "+shQuote("/var/lib/berth/nginx.reloaded"), bssh.Result{}) // stamp invalidation up front
 	f.On("cat "+shQuote(nginxAvailablePath("app.example.com")), bssh.Result{ExitCode: 0, Stdout: "server { listen 80; } # hand-written\n"})
 
@@ -221,6 +223,7 @@ func TestSiteNginxIsCertAware(t *testing.T) {
 	noCert := bssh.NewFakeRunner()
 	noCert.On("test -e "+shQuote(certPath), bssh.Result{ExitCode: 1})
 	noCert.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{})
+	stubEmptyDiscovery(noCert, s)
 	mfs, err := managedSiteFiles(context.Background(), noCert, s)
 	if err != nil {
 		t.Fatal(err)
@@ -234,6 +237,7 @@ func TestSiteNginxIsCertAware(t *testing.T) {
 	withCert := bssh.NewFakeRunner()
 	withCert.On("test -e "+shQuote(certPath), bssh.Result{ExitCode: 0})
 	withCert.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{})
+	stubEmptyDiscovery(withCert, s)
 	mfs, err = managedSiteFiles(context.Background(), withCert, s)
 	if err != nil {
 		t.Fatal(err)
@@ -664,11 +668,31 @@ func stubSiteConvergedProbes(s *config.Server, f *bssh.FakeRunner) {
 	f.On("systemctl is-enabled cron", bssh.Result{})
 }
 
+// findFilesCmd mirrors findRegularFiles' command shape (orphan discovery).
+func findFilesCmd(dir, pattern string) string {
+	cmd := "find " + shQuote(dir) + " -maxdepth 1 -type f"
+	if pattern != "" {
+		cmd += " -name " + shQuote(pattern)
+	}
+	return cmd + " 2>/dev/null"
+}
+
+// stubEmptyDiscovery stubs the three orphan-discovery listings as empty.
+// Apply it in every satisfied-shaped fixture (and every direct
+// managedSiteFiles caller); orphan tests OVERRIDE single listings AFTER it
+// (FakeRunner.On is last-wins).
+func stubEmptyDiscovery(f *bssh.FakeRunner, s *config.Server) {
+	f.On(findFilesCmd("/etc/nginx/sites-available", ""), bssh.Result{})
+	f.On(findFilesCmd(fpmPoolDir(s.PHP.Version), "*.conf"), bssh.Result{})
+	f.On(findFilesCmd("/etc/cron.d", "berth-*"), bssh.Result{})
+}
+
 // stubManagedSiteFiles makes every managed site file read back as up-to-date so
 // the Check's content-hash comparison is satisfied.
 func stubManagedSiteFiles(t *testing.T, s *config.Server, f *bssh.FakeRunner) {
 	t.Helper()
 	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{})
+	stubEmptyDiscovery(f, s)
 	mfs, err := managedSiteFiles(context.Background(), f, s)
 	if err != nil {
 		t.Fatalf("managedSiteFiles: %v", err)
@@ -698,6 +722,7 @@ func stubFPMApply(s *config.Server, f *bssh.FakeRunner) {
 	f.On("systemctl reload "+fpmService(s), bssh.Result{})
 	f.On("logrotate -d "+shQuote(logrotatePath), bssh.Result{})
 	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{})
+	stubEmptyDiscovery(f, s)
 	f.On("supervisorctl reread", bssh.Result{})
 	f.On("supervisorctl update", bssh.Result{})
 	// ensureCron pre-check (runs only when a site wants the scheduler): cron is
@@ -779,6 +804,7 @@ func TestSiteCheckSatisfiedAfterTLSSwap(t *testing.T) {
 	fCheck.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
 	stubSiteConvergedProbes(s, fCheck)
 	fCheck.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{})
+	stubEmptyDiscovery(fCheck, s)
 	fCheck.On("cat "+shQuote(cloudflareConfPath), bssh.Result{ExitCode: 1}) // cloudflare snippet absent (off), remove-entry satisfied
 
 	cr, err := Site().Check(ctx, provision.RunCtx{}, s, fCheck)
@@ -799,6 +825,7 @@ func TestManagedSiteFilesEnumeratesWorkerAndDaemons(t *testing.T) {
 	s.Sites[0].Daemons = []config.Daemon{{Name: "reverb", Command: "php artisan reverb:start"}}
 	f := bssh.NewFakeRunner()
 	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{ExitCode: 0, Stdout: ""})
+	stubEmptyDiscovery(f, s)
 	mfs, err := managedSiteFiles(context.Background(), f, s)
 	if err != nil {
 		t.Fatal(err)
@@ -822,6 +849,7 @@ func TestManagedSiteFilesNoWorkerWhenQueueDisabled(t *testing.T) {
 	s.Queue = false
 	f := bssh.NewFakeRunner()
 	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{ExitCode: 0, Stdout: ""})
+	stubEmptyDiscovery(f, s)
 	mfs, err := managedSiteFiles(context.Background(), f, s)
 	if err != nil {
 		t.Fatal(err)
@@ -839,6 +867,7 @@ func TestManagedSiteFilesFlagsOrphanProgram(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{ExitCode: 0,
 		Stdout: "/etc/supervisor/conf.d/berth-app_example_com.conf\n/etc/supervisor/conf.d/berth-app_example_com-old.conf\n"})
+	stubEmptyDiscovery(f, s)
 	mfs, err := managedSiteFiles(context.Background(), f, s)
 	if err != nil {
 		t.Fatal(err)
@@ -863,6 +892,7 @@ func TestManagedSiteFilesIncludesCloudflareConf(t *testing.T) {
 	s.Sites[0].CloudflareOnly = &tru
 	f := bssh.NewFakeRunner()
 	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{})
+	stubEmptyDiscovery(f, s)
 	mfs, err := managedSiteFiles(context.Background(), f, s)
 	if err != nil {
 		t.Fatal(err)
@@ -888,6 +918,7 @@ func TestManagedSiteFilesRemovesCloudflareConfWhenDisabled(t *testing.T) {
 	s := siteServer() // cloudflare_only off
 	f := bssh.NewFakeRunner()
 	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{})
+	stubEmptyDiscovery(f, s)
 	mfs, err := managedSiteFiles(context.Background(), f, s)
 	if err != nil {
 		t.Fatal(err)
@@ -1431,6 +1462,7 @@ func TestSiteApplyStampsNginxAndFPMAfterReloads(t *testing.T) {
 func TestSiteApplyNoNginxStampWhenValidationFails(t *testing.T) {
 	s := siteServer()
 	f := bssh.NewFakeRunner()
+	stubEmptyDiscovery(f, s) // Apply's read-only orphan discovery runs first
 	f.On("rm -f "+shQuote("/var/lib/berth/nginx.reloaded"), bssh.Result{})
 	f.On("cat "+shQuote(nginxAvailablePath("app.example.com")), bssh.Result{ExitCode: 1}) // vhost write-guard: absent
 	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
@@ -1455,5 +1487,243 @@ func TestSiteApplyNoNginxStampWhenValidationFails(t *testing.T) {
 	}
 	if !invalidated {
 		t.Error("the nginx stamp must be invalidated before the vhost writes (crash-safe window)")
+	}
+}
+
+func TestSiteCronPathUsesDisjointNamespace(t *testing.T) {
+	if got := cronPath("backup-shop.example.com"); got != "/etc/cron.d/berth-site-backup-shop_example_com" {
+		t.Fatalf("cronPath() = %q; the berth-site- prefix keeps a backup-*.tld domain out of the backups sweep glob", got)
+	}
+	if strings.HasPrefix(cronPath("shop.example.com"), backupCronPrefix) {
+		t.Fatal("a scheduler cron must never fall inside the backups namespace")
+	}
+}
+
+func TestSiteCheckFlagsOrphanVhostAndAggregatesRemovals(t *testing.T) {
+	s := siteServer()
+	f := bssh.NewFakeRunner()
+	stubManagedSiteFiles(t, s, f)
+	// Overrides AFTER the empty-discovery stubs (On is last-wins): the vhost
+	// listing also holds a berth-managed leftover of a removed site, and the
+	// cron listing a berth-managed leftover scheduler cron.
+	goneVhost := "/etc/nginx/sites-available/gone.example.com"
+	goneCron := "/etc/cron.d/berth-gone_example_com"
+	f.On(findFilesCmd("/etc/nginx/sites-available", ""), bssh.Result{Stdout: nginxAvailablePath(s.Sites[0].Domain) + "\n" + goneVhost + "\n"})
+	f.On("cat "+shQuote(goneVhost), bssh.Result{Stdout: managedMarker + "\nserver {}\n"})
+	f.On(findFilesCmd("/etc/cron.d", "berth-*"), bssh.Result{Stdout: goneCron + "\n"})
+	f.On("cat "+shQuote(goneCron), bssh.Result{Stdout: managedMarker + "\n* * * * * gone ...\n"})
+
+	cr, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Fatal("expected unsatisfied when a removed site's berth-managed vhost lingers")
+	}
+	if !strings.Contains(cr.Reason, "removed") {
+		t.Errorf("Reason must mention removal; got %q", cr.Reason)
+	}
+	// Dry-run must preview EVERY planned removal, not just the first one found.
+	for _, want := range []string{"remove: " + goneVhost, "remove: " + goneCron} {
+		var seen bool
+		for _, c := range cr.Changes {
+			if c == want {
+				seen = true
+			}
+		}
+		if !seen {
+			t.Errorf("Changes must list the planned removal %q; got %v", want, cr.Changes)
+		}
+	}
+}
+
+func TestSiteCheckIgnoresForeignVhost(t *testing.T) {
+	s := siteServer()
+	f := bssh.NewFakeRunner()
+	stubManagedSiteFiles(t, s, f)
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
+	stubSiteConvergedProbes(s, f)
+	// The listing returns a stray file WITHOUT the berth marker: an operator's
+	// hand-written vhost must never be flagged (let alone removed).
+	foreign := "/etc/nginx/sites-available/foreign.example.com"
+	f.On(findFilesCmd("/etc/nginx/sites-available", ""), bssh.Result{Stdout: nginxAvailablePath(s.Sites[0].Domain) + "\n" + foreign + "\n"})
+	f.On("cat "+shQuote(foreign), bssh.Result{Stdout: "server {}\n"})
+
+	cr, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("a foreign (unmarked) vhost must not make Check unsatisfied; got %+v", cr)
+	}
+}
+
+func TestSiteApplyRemovesOrphanVhostPairBeforeReload(t *testing.T) {
+	s := siteServer()
+	f := bssh.NewFakeRunner()
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+	// Discovery override AFTER stubFPMApply's empty stubs.
+	goneVhost := "/etc/nginx/sites-available/gone.example.com"
+	goneLink := nginxEnabledPath("gone.example.com")
+	f.On(findFilesCmd("/etc/nginx/sites-available", ""), bssh.Result{Stdout: nginxAvailablePath(s.Sites[0].Domain) + "\n" + goneVhost + "\n"})
+	f.On("cat "+shQuote(goneVhost), bssh.Result{Stdout: managedMarker + "\nserver {}\n"})
+	// The GUARDED pair removal: the enabled entry goes only when it is a
+	// symlink resolving to exactly this vhost.
+	rmPair := "if [ -L " + shQuote(goneLink) + " ] && [ " + shQuote(goneLink) + " -ef " + shQuote(goneVhost) + " ]; then rm -f " + shQuote(goneLink) + "; fi && rm -f " + shQuote(goneVhost)
+	f.On(rmPair, bssh.Result{})
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	idx := func(want string) int {
+		last := -1
+		for i, c := range f.Calls() {
+			if c.Cmd == want {
+				last = i
+			}
+		}
+		return last
+	}
+	idxRm := idx(rmPair)
+	idxVhostGuard := idx("cat " + shQuote(nginxAvailablePath(s.Sites[0].Domain)))
+	idxTest := idx("nginx -t")
+	idxReload := idx("systemctl reload nginx")
+	idxMark := idx(markReloadedCmd("nginx"))
+	if idxRm < 0 {
+		t.Fatalf("Apply must remove the orphan vhost pair; calls=%v", f.Calls())
+	}
+	if idxVhostGuard < 0 || idxRm < idxVhostGuard {
+		t.Errorf("the orphan removal (idx %d) must run AFTER the desired vhost writes (write-guard idx %d)", idxRm, idxVhostGuard)
+	}
+	if idxTest < 0 || idxRm > idxTest {
+		t.Errorf("the orphan removal (idx %d) must run BEFORE nginx -t (idx %d)", idxRm, idxTest)
+	}
+	if idxReload < 0 || idxTest > idxReload || idxMark < 0 || idxReload > idxMark {
+		t.Errorf("expected nginx -t (%d) < reload (%d) < mark (%d)", idxTest, idxReload, idxMark)
+	}
+}
+
+func TestSiteApplyRemovesOrphanPoolBeforeFPMReload(t *testing.T) {
+	s := siteServer()
+	f := bssh.NewFakeRunner()
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+	orphanPool := fpmPoolPath(s.PHP.Version, "gone.example.com")
+	f.On(findFilesCmd(fpmPoolDir(s.PHP.Version), "*.conf"), bssh.Result{Stdout: orphanPool + "\n"})
+	f.On("cat "+shQuote(orphanPool), bssh.Result{Stdout: managedMarkerINI + "\n[gone_example_com]\n"})
+	f.On("rm -f "+shQuote(orphanPool), bssh.Result{})
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	idx := func(want string) int {
+		last := -1
+		for i, c := range f.Calls() {
+			if c.Cmd == want {
+				last = i
+			}
+		}
+		return last
+	}
+	idxRm := idx("rm -f " + shQuote(orphanPool))
+	idxPoolGuard := idx("cat " + shQuote(fpmPoolPath(s.PHP.Version, s.Sites[0].Domain)))
+	idxTest := idx("php-fpm" + s.PHP.Version + " -t")
+	idxReload := idx("systemctl reload " + fpmService(s))
+	idxMark := idx(markReloadedCmd(fpmService(s)))
+	if idxRm < 0 {
+		t.Fatalf("Apply must remove the orphan FPM pool; calls=%v", f.Calls())
+	}
+	if idxPoolGuard < 0 || idxRm < idxPoolGuard {
+		t.Errorf("the orphan pool removal (idx %d) must run AFTER the desired pool writes (write-guard idx %d)", idxRm, idxPoolGuard)
+	}
+	if idxTest < 0 || idxRm > idxTest {
+		t.Errorf("the orphan pool removal (idx %d) must run BEFORE php-fpm -t (idx %d)", idxRm, idxTest)
+	}
+	if idxReload < 0 || idxTest > idxReload || idxMark < 0 || idxReload > idxMark {
+		t.Errorf("expected php-fpm -t (%d) < reload (%d) < mark (%d)", idxTest, idxReload, idxMark)
+	}
+}
+
+func TestSiteApplyRemovesLegacyCronAndSkipsBackupCrons(t *testing.T) {
+	s := siteServer() // Scheduler: true -> the NEW berth-site- cron is written
+	f := bssh.NewFakeRunner()
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+	// The cron listing holds a LEGACY pre-rename scheduler cron of a CURRENT
+	// site (self-migration!) AND a backup cron (the backups step's file).
+	legacy := "/etc/cron.d/berth-" + poolName(s.Sites[0].Domain)
+	f.On(findFilesCmd("/etc/cron.d", "berth-*"), bssh.Result{Stdout: legacy + "\n" + backupCronPrefix + "x\n"})
+	f.On("cat "+shQuote(legacy), bssh.Result{Stdout: managedMarker + "\n* * * * * deploy ...\n"})
+	f.On("rm -f "+shQuote(legacy), bssh.Result{})
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var removedLegacy bool
+	for _, c := range f.Calls() {
+		if c.Cmd == "rm -f "+shQuote(legacy) {
+			removedLegacy = true
+		}
+		// The backup cron belongs to the backups step: never cat'ed, never rm'ed
+		// (the discovery listing itself carries only the berth-* glob).
+		if strings.Contains(c.Cmd, "berth-backup-") {
+			t.Errorf("the site sweep must never touch a backups-namespace cron; saw %q", c.Cmd)
+		}
+	}
+	if !removedLegacy {
+		t.Error("the legacy berth-<pool> scheduler cron must self-migrate (be removed by the sweep)")
+	}
+	var wroteNew bool
+	for _, w := range f.Writes() {
+		if w.Path == cronPath(s.Sites[0].Domain) {
+			wroteNew = true
+		}
+	}
+	if !wroteNew {
+		t.Error("the scheduler cron must be written at the NEW berth-site- path by the normal drift path")
+	}
+}
+
+// TestSiteApplyUpdatesSupervisorWhenActiveButDisabled pins the post-removal
+// supervisor gate to serviceActive: an ACTIVE but boot-DISABLED supervisord
+// still runs the removed site's worker, so reread/update MUST run after the
+// orphan conf removal (enablement stays the supervisor step's business).
+func TestSiteApplyUpdatesSupervisorWhenActiveButDisabled(t *testing.T) {
+	s := siteServer() // no queue, no daemons -> NeedsSupervisor false
+	f := bssh.NewFakeRunner()
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+	orphan := "/etc/supervisor/conf.d/berth-app_example_com.conf"
+	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{Stdout: orphan + "\n"})
+	f.On("cat "+shQuote(orphan), bssh.Result{ExitCode: 0, Stdout: managedMarker + "\n[program:berth-app_example_com]\n"})
+	f.On("rm -f "+shQuote(orphan), bssh.Result{})
+	// supervisord is running but disabled at boot (is-active 0, is-enabled 1).
+	f.On("systemctl is-active supervisor", bssh.Result{ExitCode: 0, Stdout: "active\n"})
+	f.On("systemctl is-enabled supervisor", bssh.Result{ExitCode: 1, Stdout: "disabled\n"})
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var sawReread, sawUpdate bool
+	for _, c := range f.Calls() {
+		switch c.Cmd {
+		case "supervisorctl reread":
+			sawReread = true
+		case "supervisorctl update":
+			sawUpdate = true
+		}
+	}
+	if !sawReread || !sawUpdate {
+		t.Errorf("an active-but-disabled supervisord must still be reread/updated after the orphan removal; reread=%v update=%v", sawReread, sawUpdate)
 	}
 }

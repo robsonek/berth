@@ -23,7 +23,13 @@ const (
 func backupScriptPath(domain string) string {
 	return "/usr/local/sbin/berth-backup-" + poolName(domain)
 }
-func backupCronPath(domain string) string { return "/etc/cron.d/berth-backup-" + poolName(domain) }
+
+// backupCronPrefix namespaces the backup crons under /etc/cron.d. The site
+// step's orphan sweep must skip this prefix: those files belong to the
+// backups step, which has its own sweep.
+const backupCronPrefix = "/etc/cron.d/berth-backup-"
+
+func backupCronPath(domain string) string { return backupCronPrefix + poolName(domain) }
 func backupDir(domain string) string      { return backupBaseDir + "/" + poolName(domain) }
 func backupLogPath(domain string) string {
 	return backupLogDir + "/backup-" + poolName(domain) + ".log"
