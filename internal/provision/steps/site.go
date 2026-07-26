@@ -373,15 +373,24 @@ func listSupervisorPrograms(ctx context.Context, r bssh.Runner) ([]string, error
 // matching namePattern). find, not ls: a foreign subdirectory must not spill
 // its contents into the listing, and symlinks/special files must never reach
 // the marker probe (cat follows symlinks and can block on a FIFO) nor rm.
+// A nonzero find exit (permission, I/O) is a loud error: empty output would
+// otherwise read as "no candidates" and every orphan would be silently
+// skipped forever. All three swept directories exist by the time the site
+// step runs (their owning steps precede it), so a missing dir is not a
+// legitimate quiet case. Filenames with embedded newlines or edge whitespace
+// stay as-is: a mangled path fails safe through the marker re-probe (its cat
+// finds no berth marker), never through rm.
 func findRegularFiles(ctx context.Context, r bssh.Runner, dir, namePattern string) ([]string, error) {
 	cmd := "find " + shQuote(dir) + " -maxdepth 1 -type f"
 	if namePattern != "" {
 		cmd += " -name " + shQuote(namePattern)
 	}
-	cmd += " 2>/dev/null"
 	res, err := r.Run(ctx, cmd, nil)
 	if err != nil {
 		return nil, err
+	}
+	if res.ExitCode != 0 {
+		return nil, fmt.Errorf("list %s for orphan discovery: find exited %d: %s", dir, res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 	var paths []string
 	for _, line := range strings.Split(strings.TrimSpace(res.Stdout), "\n") {

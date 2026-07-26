@@ -674,7 +674,7 @@ func findFilesCmd(dir, pattern string) string {
 	if pattern != "" {
 		cmd += " -name " + shQuote(pattern)
 	}
-	return cmd + " 2>/dev/null"
+	return cmd
 }
 
 // stubEmptyDiscovery stubs the three orphan-discovery listings as empty.
@@ -1534,6 +1534,30 @@ func TestSiteCheckFlagsOrphanVhostAndAggregatesRemovals(t *testing.T) {
 		if !seen {
 			t.Errorf("Changes must list the planned removal %q; got %v", want, cr.Changes)
 		}
+	}
+}
+
+// TestSiteCheckErrorsWhenOrphanDiscoveryFindFails pins fail-loud discovery: a
+// find failure (permission, I/O) yields empty output + nonzero exit, which
+// used to read as "no orphans" and silently skip every removal forever. All
+// three swept directories exist by the time the site step runs (their owning
+// steps precede it), so a nonzero exit is never a quiet "missing dir" case.
+func TestSiteCheckErrorsWhenOrphanDiscoveryFindFails(t *testing.T) {
+	s := siteServer()
+	f := bssh.NewFakeRunner()
+	stubManagedSiteFiles(t, s, f)
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
+	stubSiteConvergedProbes(s, f)
+	// Override AFTER the empty-discovery stubs: the cron listing fails.
+	f.On(findFilesCmd("/etc/cron.d", "berth-*"), bssh.Result{ExitCode: 2, Stderr: "find: '/etc/cron.d': Permission denied"})
+
+	_, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil {
+		t.Fatal("Check must fail loud when an orphan-discovery find exits nonzero")
+	}
+	if !strings.Contains(err.Error(), "/etc/cron.d") || !strings.Contains(err.Error(), "Permission denied") {
+		t.Errorf("the error must name the directory and carry find's stderr; got %v", err)
 	}
 }
 
