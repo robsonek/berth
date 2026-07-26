@@ -264,7 +264,33 @@ func (hardening) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 		return provision.CheckResult{}, err
 	}
 
-	if ufwActive && f2bUp && sshdOK && !legacyPresent && effectiveOK && udpOK && jailOK {
+	// The RUNNING fail2ban must postdate the managed jail: a crash between
+	// writing jail.local and reloading leaves the old jails active forever
+	// (e.g. the sshd jail guarding port 22 instead of ssh.port) while the
+	// bytes on disk read converged.
+	f2bLoaded, err := reloadedSince(ctx, r, "fail2ban", fail2banJailPath)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	// sshd itself must be up (enabled+active): a stopped ssh.service is
+	// invisible over berth's already-established connection but locks out
+	// every NEW connection — and lockout prevention is this step's mission.
+	// serviceUp (not serviceActive): a disabled sshd is a reboot away from
+	// the same lockout, and Apply's heal re-enables deliberately.
+	sshUp, err := serviceUp(ctx, r, "ssh")
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	// And the running sshd must postdate the managed drop-in: the sshd -T
+	// probe above validates the on-disk effective config, not what the
+	// running daemon loaded — only the reload stamp covers the write→reload
+	// window.
+	sshdLoaded, err := reloadedSince(ctx, r, "ssh", sshdDropInPath)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+
+	if ufwActive && f2bUp && sshdOK && !legacyPresent && effectiveOK && udpOK && jailOK && f2bLoaded && sshUp && sshdLoaded {
 		return provision.CheckResult{Satisfied: true, Reason: "firewall, fail2ban and sshd hardening in place"}, nil
 	}
 	return provision.CheckResult{
@@ -277,6 +303,9 @@ func (hardening) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 			"disable root login, password and kbd-interactive auth (after anti-lockout gate)",
 			"remove legacy sshd drop-in (when present)",
 			"verify the directives win in the effective sshd config (sshd -T)",
+			"reload fail2ban to load the managed jail",
+			"start/enable sshd when stopped",
+			"reload ssh to load the managed drop-in",
 		},
 	}, nil
 }
@@ -316,12 +345,39 @@ func (h hardening) Apply(ctx context.Context, rc provision.RunCtx, s *config.Ser
 		}
 	}
 
+	// A stopped/disabled sshd locks out every NEW connection while berth's
+	// established one still works — and it would make the anti-lockout dial
+	// below fail before anything could heal it. Validate the on-disk config
+	// first, then start+enable.
+	sshUp, err := serviceUp(ctx, r, "ssh")
+	if err != nil {
+		return err
+	}
+	if !sshUp {
+		if res, err := r.Run(ctx, "sshd -t", nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("sshd -t failed, refusing to start ssh: %s", res.Stderr)
+		}
+		if res, err := r.Run(ctx, "systemctl enable --now ssh", nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("start ssh: %s", res.Stderr)
+		}
+	}
+
 	// Anti-lockout gate: only after confirming a FRESH berth session with sudo
 	// do we touch sshd. On failure, abort without modifying sshd (fail safe).
 	if err := verifyBerthAccess(ctx, s); err != nil {
 		return fmt.Errorf("anti-lockout: refusing to harden sshd, berth access not verified: %w", err)
 	}
 
+	// Invalidate ssh's reload stamp before the first mutation of its config:
+	// from here until markReloaded after the successful reload, a crash
+	// leaves no stamp and the next run reconciles with one reload.
+	if err := invalidateReloaded(ctx, r, "ssh"); err != nil {
+		return err
+	}
 	if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
 		Path: sshdDropInPath, Content: []byte(sshdDropInBody),
 		Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
@@ -364,11 +420,19 @@ func (h hardening) Apply(ctx context.Context, rc provision.RunCtx, s *config.Ser
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("reload ssh: %s", res.Stderr)
 	}
+	// The legacy drop-in removal above precedes this reload, so no ssh config
+	// mutation follows the stamp — the transactional contract holds.
+	if err := markReloaded(ctx, r, "ssh"); err != nil {
+		return err
+	}
 
 	// Managed fail2ban jail: harden sshd (bound to the real port, journald backend)
 	// and enable recidive. Validate before reloading, mirroring nginx -t / visudo.
 	jail, err := renderFail2banJail(s)
 	if err != nil {
+		return err
+	}
+	if err := invalidateReloaded(ctx, r, "fail2ban"); err != nil {
 		return err
 	}
 	if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
@@ -395,5 +459,5 @@ func (h hardening) Apply(ctx context.Context, rc provision.RunCtx, s *config.Ser
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("reload fail2ban: %s", res.Stderr)
 	}
-	return nil
+	return markReloaded(ctx, r, "fail2ban")
 }

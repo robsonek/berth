@@ -70,6 +70,7 @@ func TestHardeningApplyAllowsBeforeEnableAndGatesBeforeSshd(t *testing.T) {
 	f.On("systemctl enable --now fail2ban", bssh.Result{})
 	f.On("systemctl reload fail2ban", bssh.Result{})
 	stubSshdEffectiveGood(f)
+	stubApplyStampsGreen(f)
 
 	if err := Hardening().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -125,6 +126,7 @@ func TestHardeningApplyRefusesForeignSshdDropIn(t *testing.T) {
 	f.On("ufw --force enable", bssh.Result{})
 	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 0, Stdout: "PermitRootLogin prohibit-password\n"}) // foreign
+	stubApplyStampsGreen(f)
 
 	err := Hardening().Apply(context.Background(), provision.RunCtx{}, s, f)
 	if err == nil || !strings.Contains(err.Error(), "not managed by berth") {
@@ -159,6 +161,7 @@ func TestHardeningApplyValidatesSshdBeforeReload(t *testing.T) {
 	f.On("systemctl enable --now fail2ban", bssh.Result{})
 	f.On("systemctl reload fail2ban", bssh.Result{})
 	stubSshdEffectiveGood(f)
+	stubApplyStampsGreen(f)
 
 	if err := Hardening().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -192,6 +195,7 @@ func TestHardeningApplyAbortsReloadWhenSshdConfigInvalid(t *testing.T) {
 	// Covers the legacy-path probe Apply issues before sshd -t; the helper's
 	// SSHD_OPTS and sshd -T stubs stay inert (the failing sshd -t aborts first).
 	stubSshdEffectiveGood(f)
+	stubApplyStampsGreen(f) // ssh up: the heal skips its own sshd -t
 	f.On("sshd -t", bssh.Result{ExitCode: 1, Stderr: "/etc/ssh/sshd_config.d/00-berth.conf: Bad configuration option"})
 	// systemctl reload ssh intentionally NOT stubbed: it must never run.
 
@@ -217,6 +221,7 @@ func TestHardeningApplyAbortsWhenGateFails(t *testing.T) {
 	f.On("ufw --force enable", bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
 	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
+	stubApplyStampsGreen(f) // ssh up: the pre-gate heal is a no-op probe
 
 	err := Hardening().Apply(context.Background(), provision.RunCtx{}, s, f)
 	if err == nil {
@@ -250,6 +255,7 @@ func TestHardeningCheckSatisfied(t *testing.T) {
 	jailWant, _ := renderFail2banJail(hardeningServer())
 	f.On("cat "+shQuote(fail2banJailPath), bssh.Result{Stdout: string(jailWant), ExitCode: 0})
 	stubSshdEffectiveGood(f)
+	stubStampsGreen(f)
 	cr, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
 	if err != nil {
 		t.Fatal(err)
@@ -276,6 +282,7 @@ func TestHardeningCheckAbortsOnUnmanagedSshdDropIn(t *testing.T) {
 	jailWant, _ := renderFail2banJail(hardeningServer())
 	f.On("cat "+shQuote(fail2banJailPath), bssh.Result{Stdout: string(jailWant), ExitCode: 0})
 	stubSshdEffectiveGood(f)
+	stubStampsGreen(f)
 	cr, err := Hardening().Check(context.Background(), provision.RunCtx{Force: true}, hardeningServer(), f)
 	if err != nil {
 		t.Fatalf("with --force, expected no error; got %v", err)
@@ -294,6 +301,7 @@ func TestHardeningCheckUnsatisfiedWhenUfwInactive(t *testing.T) {
 	jailWant, _ := renderFail2banJail(hardeningServer())
 	f.On("cat "+shQuote(fail2banJailPath), bssh.Result{Stdout: string(jailWant), ExitCode: 0})
 	stubSshdEffectiveGood(f)
+	stubStampsGreen(f)
 	cr, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
 	if err != nil {
 		t.Fatal(err)
@@ -321,6 +329,7 @@ func TestHardeningApplyOpensUDP443WhenHTTP3(t *testing.T) {
 	f.On("systemctl enable --now fail2ban", bssh.Result{})
 	f.On("systemctl reload fail2ban", bssh.Result{})
 	stubSshdEffectiveGood(f)
+	stubApplyStampsGreen(f)
 
 	if err := Hardening().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -348,6 +357,7 @@ func TestHardeningCheckRequiresUDP443WhenHTTP3(t *testing.T) {
 	jailWant, _ := renderFail2banJail(s)
 	f.On("cat "+shQuote(fail2banJailPath), bssh.Result{Stdout: string(jailWant), ExitCode: 0})
 	stubSshdEffectiveGood(f)
+	stubStampsGreen(f)
 	cr, err := Hardening().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -383,6 +393,7 @@ func TestHardeningCheckUnsatisfiedWhenJailMissing(t *testing.T) {
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{Stdout: sshdDropInBody, ExitCode: 0})
 	f.On("cat "+shQuote(fail2banJailPath), bssh.Result{ExitCode: 1}) // jail.local absent
 	stubSshdEffectiveGood(f)
+	stubStampsGreen(f)
 	cr, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
 	if err != nil {
 		t.Fatal(err)
@@ -401,6 +412,7 @@ func TestHardeningCheckUnsatisfiedWhenJailDrifted(t *testing.T) {
 	// Managed by berth but stale content (different hash) -> drifted -> unsatisfied.
 	f.On("cat "+shQuote(fail2banJailPath), bssh.Result{Stdout: managedMarker + "\n[sshd]\nenabled = true\nport = 9999\n", ExitCode: 0})
 	stubSshdEffectiveGood(f)
+	stubStampsGreen(f)
 	cr, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
 	if err != nil {
 		t.Fatal(err)
@@ -426,6 +438,7 @@ func TestHardeningApplyWritesFail2banJail(t *testing.T) {
 	f.On("systemctl enable --now fail2ban", bssh.Result{})
 	f.On("systemctl reload fail2ban", bssh.Result{})
 	stubSshdEffectiveGood(f)
+	stubApplyStampsGreen(f)
 
 	if err := Hardening().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -628,6 +641,7 @@ func TestHardeningCheckUnsatisfiedWhenLegacyDropInPresent(t *testing.T) {
 	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(sshdDropInLegacyPath),
 		bssh.Result{ExitCode: 0, Stdout: managedMarker + "\nPermitRootLogin no\nPasswordAuthentication no\n"})
+	stubStampsGreen(f)
 
 	cr, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
 	if err != nil {
@@ -654,6 +668,7 @@ func TestHardeningCheckFreshHostGatesEffectiveProbeOff(t *testing.T) {
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 1})       // fresh: drop-in absent
 	f.On("cat "+shQuote(sshdDropInLegacyPath), bssh.Result{ExitCode: 1}) // no legacy file either
 	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
+	stubStampsGreen(f)
 
 	cr, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
 	if err != nil {
@@ -678,6 +693,7 @@ func TestHardeningCheckIgnoresForeignLegacyDropIn(t *testing.T) {
 	f.On("cat "+shQuote(sshdDropInLegacyPath), bssh.Result{ExitCode: 0, Stdout: "# operator notes\n"})
 	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
 	f.On("sshd -T", bssh.Result{ExitCode: 0, Stdout: sshdTGood})
+	stubStampsGreen(f)
 
 	cr, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
 	if err != nil {
@@ -723,6 +739,7 @@ func TestHardeningApplyMigratesLegacyDropIn(t *testing.T) {
 	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
 	f.On("sshd -T", bssh.Result{ExitCode: 0, Stdout: sshdTGood})
 	f.On("systemctl reload ssh", bssh.Result{})
+	stubApplyStampsGreen(f)
 
 	if err := Hardening().Apply(context.Background(), provision.RunCtx{}, hardeningServer(), f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -763,6 +780,7 @@ func TestHardeningApplyLeavesForeignLegacyDropIn(t *testing.T) {
 	f.On("sshd -t", bssh.Result{})
 	f.On("sshd -T", bssh.Result{ExitCode: 0, Stdout: sshdTGood})
 	f.On("systemctl reload ssh", bssh.Result{})
+	stubApplyStampsGreen(f)
 
 	if err := Hardening().Apply(context.Background(), provision.RunCtx{}, hardeningServer(), f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -787,6 +805,7 @@ func TestHardeningApplyFailsLoudWhenEffectiveConfigLoses(t *testing.T) {
 		Stdout: "port 2222\npermitrootlogin no\npasswordauthentication yes\nkbdinteractiveauthentication no\n"})
 	f.On(sshdConflictGrep, bssh.Result{ExitCode: 0,
 		Stdout: "/etc/ssh/sshd_config.d/00-berth.conf\n/etc/ssh/sshd_config.d/50-cloud-init.conf\n"})
+	stubApplyStampsGreen(f)
 	// systemctl reload ssh intentionally NOT stubbed: it must never run.
 
 	err := Hardening().Apply(context.Background(), provision.RunCtx{}, hardeningServer(), f)
@@ -806,6 +825,231 @@ func TestHardeningApplyFailsLoudWhenEffectiveConfigLoses(t *testing.T) {
 		if c.Cmd == "systemctl reload ssh" {
 			t.Error("reload ssh must not run when the effective config is wrong")
 		}
+	}
+}
+
+// stubStampsGreen stubs Check's reload-stamp probes and the sshd liveness
+// probe the way a converged host answers: both stamps fresh, ssh
+// active+enabled.
+func stubStampsGreen(f *bssh.FakeRunner) {
+	f.On(reloadedSinceCmd("fail2ban", fail2banJailPath), bssh.Result{})
+	f.On("systemctl is-active ssh", bssh.Result{})
+	f.On("systemctl is-enabled ssh", bssh.Result{})
+	f.On(reloadedSinceCmd("ssh", sshdDropInPath), bssh.Result{})
+}
+
+// stubApplyStampsGreen stubs Apply's stamp commands for a fully successful
+// run (ssh already up, so the liveness heal is a no-op probe).
+func stubApplyStampsGreen(f *bssh.FakeRunner) {
+	f.On("systemctl is-active ssh", bssh.Result{})
+	f.On("systemctl is-enabled ssh", bssh.Result{})
+	f.On("rm -f "+shQuote("/var/lib/berth/ssh.reloaded"), bssh.Result{})
+	f.On("rm -f "+shQuote("/var/lib/berth/fail2ban.reloaded"), bssh.Result{})
+	f.On(markReloadedCmd("ssh"), bssh.Result{})
+	f.On(markReloadedCmd("fail2ban"), bssh.Result{})
+}
+
+func TestHardeningCheckUnsatisfiedWhenJailNewerThanStamp(t *testing.T) {
+	// A crash between writing jail.local and reloading fail2ban leaves the
+	// old jails active (e.g. guarding port 22 instead of ssh.port) while the
+	// file bytes read converged — only the reload stamp catches it.
+	f := bssh.NewFakeRunner()
+	stubCheckGreenBase(f)
+	stubSshdEffectiveGood(f)
+	stubStampsGreen(f)
+	f.On(reloadedSinceCmd("fail2ban", fail2banJailPath), bssh.Result{ExitCode: 1})
+
+	res, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if res.Satisfied {
+		t.Fatal("a jail.local newer than the fail2ban reload stamp must be unsatisfied (written but not reloaded)")
+	}
+}
+
+func TestHardeningCheckUnsatisfiedWhenSSHDropInNewerThanStamp(t *testing.T) {
+	// The sshd -T probe reads the on-disk config, not what the running daemon
+	// loaded — the write→reload window is covered only by the stamp.
+	f := bssh.NewFakeRunner()
+	stubCheckGreenBase(f)
+	stubSshdEffectiveGood(f)
+	stubStampsGreen(f)
+	f.On(reloadedSinceCmd("ssh", sshdDropInPath), bssh.Result{ExitCode: 1})
+
+	res, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if res.Satisfied {
+		t.Fatal("an sshd drop-in newer than the ssh reload stamp must be unsatisfied (written but not reloaded)")
+	}
+}
+
+func TestHardeningCheckUnsatisfiedWhenSSHDown(t *testing.T) {
+	// A stopped sshd is invisible over berth's established connection but
+	// locks out every NEW connection — Check must flag it.
+	f := bssh.NewFakeRunner()
+	stubCheckGreenBase(f)
+	stubSshdEffectiveGood(f)
+	stubStampsGreen(f)
+	f.On("systemctl is-active ssh", bssh.Result{ExitCode: 3})
+
+	res, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if res.Satisfied {
+		t.Fatal("a stopped sshd must be unsatisfied — every NEW connection is locked out")
+	}
+}
+
+func TestHardeningApplyStampsAfterReloads(t *testing.T) {
+	stubGate(t, nil, nil)
+	f := bssh.NewFakeRunner()
+	stubApplyGreenBase(f)
+	stubSshdEffectiveGood(f)
+	stubApplyStampsGreen(f)
+	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 1}) // write-guard: absent
+	f.On("sshd -t", bssh.Result{})
+	f.On("systemctl reload ssh", bssh.Result{})
+
+	if err := Hardening().Apply(context.Background(), provision.RunCtx{}, hardeningServer(), f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	idx := func(want string) int {
+		for i, c := range f.Calls() {
+			if c.Cmd == want {
+				return i
+			}
+		}
+		return -1
+	}
+	reloadSSH := idx("systemctl reload ssh")
+	markSSH := idx(markReloadedCmd("ssh"))
+	reloadF2b := idx("systemctl reload fail2ban")
+	markF2b := idx(markReloadedCmd("fail2ban"))
+	if markSSH < 0 || markF2b < 0 {
+		t.Fatalf("both reload stamps must be recorded; markSSH=%d markF2b=%d", markSSH, markF2b)
+	}
+	if reloadSSH < 0 || reloadSSH > markSSH {
+		t.Errorf("ssh stamp must be recorded AFTER systemctl reload ssh; reload=%d mark=%d", reloadSSH, markSSH)
+	}
+	if reloadF2b < 0 || reloadF2b > markF2b {
+		t.Errorf("fail2ban stamp must be recorded AFTER systemctl reload fail2ban; reload=%d mark=%d", reloadF2b, markF2b)
+	}
+}
+
+func TestHardeningApplyNoStampWhenFail2banValidationFails(t *testing.T) {
+	stubGate(t, nil, nil)
+	f := bssh.NewFakeRunner()
+	stubApplyGreenBase(f)
+	stubSshdEffectiveGood(f)
+	stubApplyStampsGreen(f)
+	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 1}) // write-guard: absent
+	f.On("sshd -t", bssh.Result{})
+	f.On("systemctl reload ssh", bssh.Result{})
+	f.On("fail2ban-client -t", bssh.Result{ExitCode: 1, Stderr: "bad jail"})
+
+	err := Hardening().Apply(context.Background(), provision.RunCtx{}, hardeningServer(), f)
+	if err == nil || !strings.Contains(err.Error(), "fail2ban-client -t") {
+		t.Fatalf("err = %v, want the fail2ban-client -t refusal", err)
+	}
+	// The invalidating rm before the write is the transactional contract; the
+	// stamp must never be CREATED after a failed validation, and no reload
+	// may run either.
+	for _, c := range f.Calls() {
+		if c.Cmd == markReloadedCmd("fail2ban") {
+			t.Error("the fail2ban reload stamp must not be recorded after a failed validation")
+		}
+		if c.Cmd == "systemctl reload fail2ban" {
+			t.Error("reload fail2ban must not run after a failed validation")
+		}
+	}
+}
+
+func TestHardeningApplyStartsStoppedSSHBeforeAntiLockout(t *testing.T) {
+	// A stopped sshd would fail the anti-lockout dial before anything could
+	// heal it, so the heal must run first — verified by snapshotting the
+	// commands issued up to the moment the gate dials.
+	f := bssh.NewFakeRunner()
+	var callsAtDial []string
+	prev := verifyBerthAccess
+	verifyBerthAccess = func(_ context.Context, _ *config.Server) error {
+		for _, c := range f.Calls() {
+			callsAtDial = append(callsAtDial, c.Cmd)
+		}
+		return nil
+	}
+	t.Cleanup(func() { verifyBerthAccess = prev })
+
+	stubApplyGreenBase(f)
+	stubSshdEffectiveGood(f)
+	stubApplyStampsGreen(f)
+	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 1}) // write-guard: absent
+	f.On("systemctl is-active ssh", bssh.Result{ExitCode: 3})      // ssh is down
+	f.On("systemctl is-enabled ssh", bssh.Result{ExitCode: 1})
+	f.On("sshd -t", bssh.Result{})
+	f.On("systemctl enable --now ssh", bssh.Result{})
+	f.On("systemctl reload ssh", bssh.Result{})
+
+	if err := Hardening().Apply(context.Background(), provision.RunCtx{}, hardeningServer(), f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var healedBeforeDial bool
+	for _, cmd := range callsAtDial {
+		if cmd == "systemctl enable --now ssh" {
+			healedBeforeDial = true
+		}
+	}
+	if !healedBeforeDial {
+		t.Error("systemctl enable --now ssh must run BEFORE the anti-lockout dial")
+	}
+}
+
+func TestHardeningApplyInvalidatesBeforeWrites(t *testing.T) {
+	stubGate(t, nil, nil)
+	f := bssh.NewFakeRunner()
+	stubApplyGreenBase(f)
+	stubSshdEffectiveGood(f)
+	stubApplyStampsGreen(f)
+	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 1}) // write-guard: absent
+	f.On("sshd -t", bssh.Result{})
+	f.On("systemctl reload ssh", bssh.Result{})
+
+	if err := Hardening().Apply(context.Background(), provision.RunCtx{}, hardeningServer(), f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	idx := func(want string) int {
+		for i, c := range f.Calls() {
+			if c.Cmd == want {
+				return i
+			}
+		}
+		return -1
+	}
+	// The write-guard cat is issued by writeManagedFile immediately before
+	// each WriteFile — the closest observable proxy for the write itself
+	// (Run and WriteFile orders cannot be correlated on the FakeRunner).
+	rmSSH := idx("rm -f " + shQuote("/var/lib/berth/ssh.reloaded"))
+	guardSSH := idx("cat " + shQuote(sshdDropInPath))
+	rmF2b := idx("rm -f " + shQuote("/var/lib/berth/fail2ban.reloaded"))
+	guardF2b := idx("cat " + shQuote(fail2banJailPath))
+	if rmSSH < 0 || guardSSH < 0 || rmSSH > guardSSH {
+		t.Errorf("ssh stamp must be invalidated BEFORE the drop-in write; rm=%d write-guard=%d", rmSSH, guardSSH)
+	}
+	if rmF2b < 0 || guardF2b < 0 || rmF2b > guardF2b {
+		t.Errorf("fail2ban stamp must be invalidated BEFORE the jail write; rm=%d write-guard=%d", rmF2b, guardF2b)
+	}
+	reloadSSH := idx("systemctl reload ssh")
+	markSSH := idx(markReloadedCmd("ssh"))
+	reloadF2b := idx("systemctl reload fail2ban")
+	markF2b := idx(markReloadedCmd("fail2ban"))
+	if markSSH < 0 || reloadSSH < 0 || reloadSSH > markSSH {
+		t.Errorf("ssh stamp must be recorded after the reload; reload=%d mark=%d", reloadSSH, markSSH)
+	}
+	if markF2b < 0 || reloadF2b < 0 || reloadF2b > markF2b {
+		t.Errorf("fail2ban stamp must be recorded after the reload; reload=%d mark=%d", reloadF2b, markF2b)
 	}
 }
 
