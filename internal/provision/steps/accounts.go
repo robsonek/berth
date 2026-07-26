@@ -165,23 +165,44 @@ func (a accounts) Check(ctx context.Context, rc provision.RunCtx, s *config.Serv
 			return provision.CheckResult{Satisfied: false, Reason: u + " authorized_keys not up to date", Changes: a.changes()}, nil
 		}
 	}
-	// Per-site deploy keys: Apply's ensureDeployKey generates a key only for
-	// sites with a repository, gated on the private key's existence — probe
-	// exactly that condition so adding repository: to an already-provisioned
-	// site re-triggers Apply (Check/Apply symmetry, the database step's
-	// probe-real-state precedent). known_hosts drift is deliberately not
-	// probed: Apply re-scans the git host whenever it runs anyway.
+	// Per-site deploy keys must be COMPLETE, not merely present: the private
+	// key (Apply generates it), its .pub (berth site key prints it — and
+	// points the operator at `berth provision`, which must then actually
+	// heal), and the git host's known_hosts entry (without it the first
+	// deploy fails host-key verification). All three are probed so Apply
+	// re-runs on any gap; the old "Apply re-scans anyway" shortcut was false
+	// precisely when the step reported Satisfied.
 	for _, site := range s.Sites {
 		if site.Repository == "" {
 			continue
 		}
-		keyPath := fmt.Sprintf("/home/%s/.ssh/id_ed25519", s.SiteUser(site))
-		ok, err := fileExists(ctx, r, keyPath)
+		host, port, err := config.GitEndpoint(site.Repository)
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
-		if !ok {
-			return provision.CheckResult{Satisfied: false, Reason: "deploy key for " + site.Domain + " missing", Changes: a.changes()}, nil
+		user := s.SiteUser(site)
+		keyPath := fmt.Sprintf("/home/%s/.ssh/id_ed25519", user)
+		for _, p := range []string{keyPath, keyPath + ".pub"} {
+			ok, err := fileExists(ctx, r, p)
+			if err != nil {
+				return provision.CheckResult{}, err
+			}
+			if !ok {
+				return provision.CheckResult{Satisfied: false, Reason: "deploy key material for " + site.Domain + " incomplete (" + p + " missing)", Changes: a.changes()}, nil
+			}
+		}
+		// known_hosts stores non-22 endpoints under the "[host]:port" token.
+		token := host
+		if port != "" {
+			token = "[" + host + "]:" + port
+		}
+		kh := fmt.Sprintf("/home/%s/.ssh/known_hosts", user)
+		res, err := r.Run(ctx, "ssh-keygen -F "+shQuote(token)+" -f "+shQuote(kh)+" >/dev/null 2>&1", nil)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if res.ExitCode != 0 { // not found, or the file is missing — either way Apply re-scans
+			return provision.CheckResult{Satisfied: false, Reason: "known_hosts entry for " + token + " missing for " + site.Domain, Changes: a.changes()}, nil
 		}
 	}
 	// Break-glass console password: with the knob on, a usable password must
@@ -481,14 +502,15 @@ func installAuthorizedKey(ctx context.Context, r bssh.Runner, force bool, user s
 	return nil
 }
 
-// ensureDeployKey generates a deploy SSH key under the site user's ~/.ssh and
-// scans the Git host into that user's known_hosts, only when the site has a
-// repository.
+// ensureDeployKey generates a deploy SSH key under the site user's ~/.ssh,
+// re-derives a missing .pub from an existing private key, and scans the Git
+// host (honoring a non-22 ssh:// port) into that user's known_hosts, only when
+// the site has a repository.
 func (accounts) ensureDeployKey(ctx context.Context, s *config.Server, site config.Site, r bssh.Runner) error {
 	if site.Repository == "" {
 		return nil
 	}
-	host, err := config.GitHost(site.Repository)
+	host, port, err := config.GitEndpoint(site.Repository)
 	if err != nil {
 		return fmt.Errorf("parse git host from %q: %w", site.Repository, err)
 	}
@@ -507,9 +529,35 @@ func (accounts) ensureDeployKey(ctx context.Context, s *config.Server, site conf
 			return fmt.Errorf("ssh-keygen for %s: %s", user, res.Stderr)
 		}
 	}
+	pubPath := keyPath + ".pub"
+	pubExists, err := fileExists(ctx, r, pubPath)
+	if err != nil {
+		return err
+	}
+	if !pubExists {
+		// Derive the public half from the private key — NEVER regenerate the
+		// pair: it is registered at the git host, and a fresh pair would break
+		// every deploy until re-registered.
+		derive := fmt.Sprintf("sudo -u %s sh -c %s", user,
+			shQuote(fmt.Sprintf("ssh-keygen -y -f %s > %s", shQuote(keyPath), shQuote(pubPath))))
+		if res, err := r.Run(ctx, derive, nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("derive %s from the private key: %s", pubPath, res.Stderr)
+		}
+	}
+	// known_hosts stores non-22 endpoints under "[host]:port" and ssh-keyscan
+	// needs -p; host and paths are quoted INSIDE the user shell too (they are
+	// config-validated, but the inner sh -c deserves the same discipline).
+	token, scanArgs := host, shQuote(host)
+	if port != "" {
+		token = "[" + host + "]:" + port
+		scanArgs = "-p " + port + " " + shQuote(host)
+	}
 	knownHosts := fmt.Sprintf("/home/%s/.ssh/known_hosts", user)
 	scan := fmt.Sprintf("sudo -u %s sh -c %s", user,
-		shQuote(fmt.Sprintf("ssh-keygen -F %s -f %s >/dev/null 2>&1 || ssh-keyscan %s >> %s", host, knownHosts, host, knownHosts)))
+		shQuote(fmt.Sprintf("ssh-keygen -F %s -f %s >/dev/null 2>&1 || ssh-keyscan %s >> %s",
+			shQuote(token), shQuote(knownHosts), scanArgs, shQuote(knownHosts))))
 	if res, err := r.Run(ctx, scan, nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {

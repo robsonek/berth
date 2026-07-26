@@ -357,6 +357,28 @@ func TestValidateRejectsSpaceInQueueConnection(t *testing.T) {
 	}
 }
 
+func TestGitEndpoint(t *testing.T) {
+	for _, tc := range []struct {
+		in, host, port string
+	}{
+		{"git@github.com:owner/repo.git", "github.com", ""},
+		{"ssh://git@example.com/x.git", "example.com", ""},
+		{"ssh://git@example.com:2222/x.git", "example.com", "2222"},
+		// An explicit :22 is OpenSSH's default: known_hosts stores it under the
+		// bare hostname, so the port must normalize away or a "[host]:22" probe
+		// would never match what ssh-keyscan -p 22 writes.
+		{"ssh://git@example.org:22/owner/r.git", "example.org", ""},
+	} {
+		host, port, err := GitEndpoint(tc.in)
+		if err != nil || host != tc.host || port != tc.port {
+			t.Errorf("GitEndpoint(%q) = %q, %q, %v; want %q, %q", tc.in, host, port, err, tc.host, tc.port)
+		}
+	}
+	if _, _, err := GitEndpoint("not-a-git-url"); err == nil {
+		t.Error("expected an error for an unparseable repository string")
+	}
+}
+
 func TestGitHost(t *testing.T) {
 	for in, want := range map[string]string{
 		"git@github.com:owner/repo.git":        "github.com",
