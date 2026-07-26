@@ -21,9 +21,6 @@ const composerInstallerURL = "https://getcomposer.org/installer"
 // never hardcoded (design decision: compare against the live signature).
 const composerSigURL = "https://composer.github.io/installer.sig"
 
-// composerSetupPath is the temporary on-host path for the downloaded installer.
-const composerSetupPath = "/tmp/composer-setup.php"
-
 // fetchComposerSig retrieves the expected installer SHA-384 from Composer. It is
 // a package-level var so tests can stub the network without a real HTTP call.
 var fetchComposerSig = func(ctx context.Context) (string, error) {
@@ -70,8 +67,28 @@ func (composer) Check(ctx context.Context, _ provision.RunCtx, _ *config.Server,
 }
 
 func (composer) Apply(ctx context.Context, _ provision.RunCtx, _ *config.Server, r bssh.Runner) error {
+	// Download, verify and run the installer from a private, unpredictable
+	// root-only directory rather than a fixed world-writable /tmp path —
+	// closing the predictable-path + hash-check→exec TOCTOU window.
+	mk, err := r.Run(ctx, "mktemp -d /tmp/berth-composer.XXXXXXXXXX", nil)
+	if err != nil {
+		return err
+	}
+	if mk.ExitCode != 0 {
+		return fmt.Errorf("create composer temp dir: %s", mk.Stderr)
+	}
+	dir := strings.TrimSpace(mk.Stdout)
+	if dir == "" || !strings.HasPrefix(dir, "/") {
+		return fmt.Errorf("mktemp -d returned an unexpected path %q", dir)
+	}
+	setup := dir + "/composer-setup.php"
+	// Best-effort cleanup that survives an already-cancelled ctx (the live
+	// runner rejects a cancelled context immediately, so reusing ctx here would
+	// skip the remote rm on Ctrl-C).
+	defer func() { _, _ = r.Run(context.WithoutCancel(ctx), "rm -rf "+shQuote(dir), nil) }()
+
 	// Download the installer onto the host.
-	dl := fmt.Sprintf("php -r \"copy('%s', '%s');\"", composerInstallerURL, composerSetupPath)
+	dl := fmt.Sprintf("php -r \"copy('%s', '%s');\"", composerInstallerURL, setup)
 	if res, err := r.Run(ctx, dl, nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
@@ -85,7 +102,7 @@ func (composer) Apply(ctx context.Context, _ provision.RunCtx, _ *config.Server,
 	if err != nil {
 		return err
 	}
-	hashRes, err := r.Run(ctx, fmt.Sprintf("php -r \"echo hash_file('sha384', '%s');\"", composerSetupPath), nil)
+	hashRes, err := r.Run(ctx, fmt.Sprintf("php -r \"echo hash_file('sha384', '%s');\"", setup), nil)
 	if err != nil {
 		return err
 	}
@@ -94,22 +111,15 @@ func (composer) Apply(ctx context.Context, _ provision.RunCtx, _ *config.Server,
 	}
 	actual := strings.TrimSpace(hashRes.Stdout)
 	if actual != expected {
-		// Remove the corrupt installer, then abort.
-		_, _ = r.Run(ctx, "rm -f "+composerSetupPath, nil)
 		return fmt.Errorf("composer installer checksum mismatch: got %q, expected %q", actual, expected)
 	}
 
-	// Install composer system-wide, then remove the setup file.
-	install := fmt.Sprintf("php %s --install-dir=/usr/local/bin --filename=composer", composerSetupPath)
+	// Install composer system-wide; the deferred rm -rf removes the setup dir.
+	install := fmt.Sprintf("php %s --install-dir=/usr/local/bin --filename=composer", setup)
 	if res, err := r.Run(ctx, install, nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("install composer: %s", res.Stderr)
-	}
-	if res, err := r.Run(ctx, "rm -f "+composerSetupPath, nil); err != nil {
-		return err
-	} else if res.ExitCode != 0 {
-		return fmt.Errorf("remove composer installer: %s", res.Stderr)
 	}
 	return nil
 }
