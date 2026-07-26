@@ -47,6 +47,7 @@ func TestPHPApplyRefusesForeignOpcacheDropIn(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
+	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{})                            // stamp invalidation up front
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{ExitCode: 0, Stdout: "opcache.enable=0\n"}) // foreign
 
 	err := PHP().Apply(context.Background(), provision.RunCtx{}, s, f)
@@ -65,10 +66,13 @@ func TestPHPApplyWritesOpcacheDropIn(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
-	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{ExitCode: 1})   // write-guard: absent
-	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{ExitCode: 1}) // write-guard: absent
+	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{}) // stamp invalidation up front
+	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{ExitCode: 1})    // write-guard: absent
+	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{ExitCode: 1})  // write-guard: absent
 	f.On("php-fpm8.4 -t", bssh.Result{})
+	f.On("systemctl is-active php8.4-fpm", bssh.Result{}) // alive
 	f.On("systemctl reload php8.4-fpm", bssh.Result{})
+	f.On(markReloadedCmd("php8.4-fpm"), bssh.Result{})
 
 	if err := PHP().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -158,6 +162,8 @@ func TestPHPCheckSatisfiedWhenInstalledAndOpcacheManaged(t *testing.T) {
 	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(want), ExitCode: 0})
 	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{Stdout: string(wantTuning), ExitCode: 0})
+	f.On("systemctl is-active php8.4-fpm", bssh.Result{}) // alive
+	f.On(reloadedSinceCmd("php8.4-fpm", opcacheDropInPath("8.4"), phpTuningDropInPath("8.4")), bssh.Result{})
 	f.On("test -d "+shQuote(phpLogDir), bssh.Result{ExitCode: 0})
 	f.On("dpkg -s php8.4-mysql", bssh.Result{ExitCode: 0}) // engine "" -> pdo_mysql, installed
 	cr, err := PHP().Check(context.Background(), provision.RunCtx{}, s, f)
@@ -197,6 +203,8 @@ func TestPHPCheckUnsatisfiedWhenPDODriverMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{Stdout: string(wantTuning), ExitCode: 0})
+	f.On("systemctl is-active php8.4-fpm", bssh.Result{}) // alive
+	f.On(reloadedSinceCmd("php8.4-fpm", opcacheDropInPath("8.4"), phpTuningDropInPath("8.4")), bssh.Result{})
 	f.On("test -d "+shQuote(phpLogDir), bssh.Result{ExitCode: 0})
 	f.On("dpkg -s php8.4-pgsql", bssh.Result{ExitCode: 1}) // PDO driver missing
 	cr, err := PHP().Check(context.Background(), provision.RunCtx{}, s, f)
@@ -222,6 +230,8 @@ func TestPHPCheckUnsatisfiedWhenLogDirMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{Stdout: string(wantTuning), ExitCode: 0})
+	f.On("systemctl is-active php8.4-fpm", bssh.Result{}) // alive
+	f.On(reloadedSinceCmd("php8.4-fpm", opcacheDropInPath("8.4"), phpTuningDropInPath("8.4")), bssh.Result{})
 	f.On("test -d "+shQuote(phpLogDir), bssh.Result{ExitCode: 1}) // /var/log/php missing
 	cr, err := PHP().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
@@ -303,6 +313,7 @@ func TestPHPApplyRefusesForeignTuningDropIn(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
+	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{})                                 // stamp invalidation up front
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{ExitCode: 1})                                    // absent -> written
 	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{ExitCode: 0, Stdout: "memory_limit = 512M\n"}) // foreign
 
@@ -326,6 +337,7 @@ func TestPHPApplyRemovesDropInsOnTestFailure(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
+	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{}) // stamp invalidation up front
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{ExitCode: 1})
 	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{ExitCode: 1})
 	f.On("php-fpm8.4 -t", bssh.Result{ExitCode: 1, Stderr: "syntax error"})
@@ -346,15 +358,174 @@ func TestPHPApplyRemovesDropInsOnTestFailure(t *testing.T) {
 	}
 }
 
+func TestPHPCheckUnsatisfiedWhenFPMDead(t *testing.T) {
+	// php-fpm -t validates syntax even when the daemon is dead; without a
+	// liveness probe every step reports green while the host serves 502s.
+	s := &config.Server{PHP: config.PHP{Version: "8.4"}}
+	want, err := renderOpcache()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTuning, err := renderPHPTuning(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0})
+	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(want), ExitCode: 0})
+	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{Stdout: string(wantTuning), ExitCode: 0})
+	f.On("test -d "+shQuote(phpLogDir), bssh.Result{ExitCode: 0})
+	f.On("dpkg -s php8.4-mysql", bssh.Result{ExitCode: 0})
+	f.On("systemctl is-active php8.4-fpm", bssh.Result{ExitCode: 3}) // dead
+	cr, err := PHP().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied when the FPM daemon is not running")
+	}
+	if !strings.Contains(cr.Reason, "php8.4-fpm") {
+		t.Errorf("Reason = %q, want it to mention the daemon", cr.Reason)
+	}
+}
+
+func TestPHPCheckUnsatisfiedWhenDropInsNewerThanStamp(t *testing.T) {
+	// A crash between Apply's drop-in writes and its reload leaves the running
+	// master on the old config while every byte-level probe reads converged.
+	s := &config.Server{PHP: config.PHP{Version: "8.4"}}
+	want, err := renderOpcache()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTuning, err := renderPHPTuning(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0})
+	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(want), ExitCode: 0})
+	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{Stdout: string(wantTuning), ExitCode: 0})
+	f.On("test -d "+shQuote(phpLogDir), bssh.Result{ExitCode: 0})
+	f.On("dpkg -s php8.4-mysql", bssh.Result{ExitCode: 0})
+	f.On("systemctl is-active php8.4-fpm", bssh.Result{})
+	f.On(reloadedSinceCmd("php8.4-fpm", opcacheDropInPath("8.4"), phpTuningDropInPath("8.4")), bssh.Result{ExitCode: 1})
+	cr, err := PHP().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied when the drop-ins are newer than the reload stamp")
+	}
+}
+
+func TestPHPApplyStartsDeadFPMAndStamps(t *testing.T) {
+	// A dead FPM cannot be `reload`ed: Apply must start it (start, not
+	// enable --now — the boot policy is not this step's call) and stamp.
+	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
+	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
+	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{}) // stamp invalidation up front
+	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{ExitCode: 1})    // write-guard: absent
+	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{ExitCode: 1})  // write-guard: absent
+	f.On("php-fpm8.4 -t", bssh.Result{})
+	f.On("systemctl is-active php8.4-fpm", bssh.Result{ExitCode: 3}) // dead
+	f.On("systemctl start php8.4-fpm", bssh.Result{})
+	f.On(markReloadedCmd("php8.4-fpm"), bssh.Result{})
+
+	if err := PHP().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var started, stamped bool
+	for _, c := range f.Calls() {
+		switch c.Cmd {
+		case "systemctl start php8.4-fpm":
+			started = true
+		case "systemctl reload php8.4-fpm":
+			t.Error("a dead FPM must be started, never reloaded")
+		case markReloadedCmd("php8.4-fpm"):
+			stamped = true
+		}
+	}
+	if !started {
+		t.Error("Apply must start a dead FPM so the drop-ins load")
+	}
+	if !stamped {
+		t.Error("Apply must record the reload stamp after a successful start")
+	}
+}
+
+func TestPHPApplyReloadsLiveFPMAndStamps(t *testing.T) {
+	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
+	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
+	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{}) // stamp invalidation up front
+	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{ExitCode: 1})    // write-guard: absent
+	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{ExitCode: 1})  // write-guard: absent
+	f.On("php-fpm8.4 -t", bssh.Result{})
+	f.On("systemctl is-active php8.4-fpm", bssh.Result{}) // alive
+	f.On("systemctl reload php8.4-fpm", bssh.Result{})
+	f.On(markReloadedCmd("php8.4-fpm"), bssh.Result{})
+
+	if err := PHP().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var reloaded, stamped bool
+	for _, c := range f.Calls() {
+		switch c.Cmd {
+		case "systemctl reload php8.4-fpm":
+			reloaded = true
+		case "systemctl start php8.4-fpm":
+			t.Error("a live FPM must be reloaded (graceful), never started")
+		case markReloadedCmd("php8.4-fpm"):
+			stamped = true
+		}
+	}
+	if !reloaded {
+		t.Error("Apply must gracefully reload a live FPM")
+	}
+	if !stamped {
+		t.Error("Apply must record the reload stamp after a successful reload")
+	}
+}
+
+func TestPHPApplyNoStampWhenValidationFails(t *testing.T) {
+	// A failed php-fpm -t must never install the reload stamp: the invalidation
+	// up front already removed it, so the next run reconciles with one reload.
+	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
+	rm := "rm -f " + shQuote(opcacheDropInPath("8.4")) + " " + shQuote(phpTuningDropInPath("8.4"))
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
+	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
+	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{}) // stamp invalidation up front
+	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{ExitCode: 1})
+	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{ExitCode: 1})
+	f.On("php-fpm8.4 -t", bssh.Result{ExitCode: 1, Stderr: "bad ini"})
+	f.On(rm, bssh.Result{})
+
+	err := PHP().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "-t failed") {
+		t.Fatalf("err = %v, want the -t failure", err)
+	}
+	for _, c := range f.Calls() {
+		if c.Cmd == markReloadedCmd("php8.4-fpm") {
+			t.Error("the reload stamp must not be installed after a failed php-fpm -t")
+		}
+	}
+}
+
 func TestPHPApplyRemovesDropInsOnReloadFailure(t *testing.T) {
 	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
 	rm := "rm -f " + shQuote(opcacheDropInPath("8.4")) + " " + shQuote(phpTuningDropInPath("8.4"))
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
+	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{}) // stamp invalidation up front
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{ExitCode: 1})
 	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{ExitCode: 1})
 	f.On("php-fpm8.4 -t", bssh.Result{})
+	f.On("systemctl is-active php8.4-fpm", bssh.Result{}) // alive
 	f.On("systemctl reload php8.4-fpm", bssh.Result{ExitCode: 1, Stderr: "job failed"})
 	f.On(rm, bssh.Result{})
 
