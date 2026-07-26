@@ -58,15 +58,20 @@ type Fail2banAnswers struct {
 }
 
 type TuningAnswers struct {
-	ValkeyMaxmemory       string
-	ValkeyMaxmemoryPolicy string
-	MariaDBBufferPool     string
-	MariaDBSlowQueryLog   bool
-	MariaDBLongQueryTime  int
-	PHPMemoryLimit        string
-	PHPUploadMax          string
-	PHPMaxExecutionTime   int
-	PHPMaxInputVars       int
+	ValkeyMaxmemory         string
+	ValkeyMaxmemoryPolicy   string
+	MariaDBBufferPool       string
+	MariaDBSlowQueryLog     bool
+	MariaDBLongQueryTime    int
+	MariaDBLogFileSize      string
+	MariaDBTmpTableSize     string
+	MariaDBMaxConnections   int
+	MariaDBMaxAllowedPacket string
+	PHPMemoryLimit          string
+	PHPUploadMax            string
+	PHPMaxExecutionTime     int
+	PHPMaxInputVars         int
+	PHPFPMMaxChildren       int
 }
 
 type SystemAnswers struct {

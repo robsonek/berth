@@ -1001,6 +1001,9 @@ func TestConfigMatrix(t *testing.T) {
 		a.Tuning = TuningAnswers{
 			ValkeyMaxmemory: "256mb", ValkeyMaxmemoryPolicy: "allkeys-lru", MariaDBBufferPool: "512M",
 			PHPMemoryLimit: "768M", PHPUploadMax: "64M", PHPMaxExecutionTime: 120, PHPMaxInputVars: 5000,
+			MariaDBLogFileSize: "1G", MariaDBTmpTableSize: "128M",
+			MariaDBMaxConnections: 256, MariaDBMaxAllowedPacket: "64M",
+			PHPFPMMaxChildren: 16,
 		}
 		a.Sites = []SiteAnswers{{
 			Domain: "vps.example.com", DeployPath: "/srv/app", DBName: "appdb", DBUser: "appuser", SchedulerOverride: "inherit",
@@ -1012,6 +1015,11 @@ func TestConfigMatrix(t *testing.T) {
 		if srv.Tuning.PHPMemoryLimit != "768M" || srv.Tuning.PHPUploadMax != "64M" ||
 			srv.Tuning.PHPMaxExecutionTime != 120 || srv.Tuning.PHPMaxInputVars != 5000 {
 			t.Fatalf("php tuning = %+v", srv.Tuning)
+		}
+		if srv.Tuning.MariaDBLogFileSize != "1G" || srv.Tuning.MariaDBTmpTableSize != "128M" ||
+			srv.Tuning.MariaDBMaxConnections != 256 || srv.Tuning.MariaDBMaxAllowedPacket != "64M" ||
+			srv.Tuning.PHPFPMMaxChildren != 16 {
+			t.Fatalf("tuning pack 2 = %+v", srv.Tuning)
 		}
 	})
 
@@ -1034,6 +1042,26 @@ func TestConfigMatrix(t *testing.T) {
 		}}
 		err := writeInvalid(t, a)
 		mustContain(t, err, "mariadb_innodb_buffer_pool")
+	})
+
+	t.Run("tuning-packet-over-ceiling-invalid", func(t *testing.T) {
+		a := base("adv-tune-packet", "vps.example.com")
+		a.Tuning = TuningAnswers{MariaDBMaxAllowedPacket: "2G"}
+		a.Sites = []SiteAnswers{{
+			Domain: "vps.example.com", DeployPath: "/srv/app", DBName: "appdb", DBUser: "appuser", SchedulerOverride: "inherit",
+		}}
+		err := writeInvalid(t, a)
+		mustContain(t, err, "mariadb_max_allowed_packet")
+	})
+
+	t.Run("tuning-fpm-children-below-floor-invalid", func(t *testing.T) {
+		a := base("adv-tune-fpm", "vps.example.com")
+		a.Tuning = TuningAnswers{PHPFPMMaxChildren: 3}
+		a.Sites = []SiteAnswers{{
+			Domain: "vps.example.com", DeployPath: "/srv/app", DBName: "appdb", DBUser: "appuser", SchedulerOverride: "inherit",
+		}}
+		err := writeInvalid(t, a)
+		mustContain(t, err, "php_fpm_max_children")
 	})
 
 	t.Run("tuning-bad-php-upload-invalid", func(t *testing.T) {

@@ -121,6 +121,34 @@ func optionalMariaDBSize(s string) error {
 	return fmt.Errorf("%q must be a number optionally suffixed K/M/G", s)
 }
 
+// mariadbPacketCeiling mirrors config's mariadbMaxAllowedPacketCeiling
+// (unexported there) for inline feedback; config.Server.Validate stays
+// authoritative.
+const mariadbPacketCeiling = 1 << 30
+
+func optionalMariaDBPacket(s string) error {
+	if s == "" {
+		return nil
+	}
+	if !reMariaDBSize.MatchString(s) {
+		return fmt.Errorf("%q must be a number optionally suffixed K/M/G", s)
+	}
+	num, mult := s, uint64(1)
+	switch s[len(s)-1] {
+	case 'K', 'k':
+		num, mult = s[:len(s)-1], 1<<10
+	case 'M', 'm':
+		num, mult = s[:len(s)-1], 1<<20
+	case 'G', 'g':
+		num, mult = s[:len(s)-1], 1<<30
+	}
+	n, err := strconv.ParseUint(num, 10, 64)
+	if err != nil || n > math.MaxUint64/mult || n*mult > mariadbPacketCeiling {
+		return fmt.Errorf("%q exceeds MariaDB's 1G max_allowed_packet ceiling", s)
+	}
+	return nil
+}
+
 func optionalPHPSize(s string) error {
 	if s == "" {
 		return nil
