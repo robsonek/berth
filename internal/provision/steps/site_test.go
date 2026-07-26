@@ -2017,3 +2017,22 @@ func TestSiteApplyUpdatesSupervisorWhenActiveButDisabled(t *testing.T) {
 		t.Errorf("an active-but-disabled supervisord must still be reread/updated after the orphan removal; reread=%v update=%v", sawReread, sawUpdate)
 	}
 }
+
+func TestRenderFPMPoolMaxChildren(t *testing.T) {
+	s := &config.Server{Sites: []config.Site{{Domain: "app.example.com", DeployPath: "/srv/app", User: "webuser"}}}
+	def, err := renderFPMPool(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(def), "pm.max_children = 10\n") {
+		t.Errorf("default pool must keep pm.max_children = 10 (byte-identity):\n%s", def)
+	}
+	s.Tuning.PHPFPMMaxChildren = 16
+	got, err := renderFPMPool(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "pm.max_children = 16\n") {
+		t.Errorf("tuned pool must render pm.max_children = 16:\n%s", got)
+	}
+}

@@ -109,8 +109,22 @@ func TestRenderPHPTuningGolden(t *testing.T) {
 }
 
 func TestRenderFPMPoolGolden(t *testing.T) {
-	checkGoldenINI(t, "fpm_pool.conf.tmpl", "fpm_pool.golden", struct{ PoolName, User, Socket, DeployPath string }{
+	checkGoldenINI(t, "fpm_pool.conf.tmpl", "fpm_pool.golden", struct {
+		PoolName, User, Socket, DeployPath string
+		MaxChildren                        int
+	}{
 		PoolName: "app_example_com", User: "webuser", Socket: testSocket, DeployPath: "/home/deploy/myapp",
+		MaxChildren: 10,
+	})
+}
+
+func TestRenderFPMPoolMaxChildrenGolden(t *testing.T) {
+	checkGoldenINI(t, "fpm_pool.conf.tmpl", "fpm_pool_maxchildren.golden", struct {
+		PoolName, User, Socket, DeployPath string
+		MaxChildren                        int
+	}{
+		PoolName: "app_example_com", User: "webuser", Socket: testSocket, DeployPath: "/home/deploy/myapp",
+		MaxChildren: 16,
 	})
 }
 
@@ -274,8 +288,12 @@ func TestRenderCertbotDeployHookGolden(t *testing.T) {
 }
 
 func TestFPMPoolIsolatesTempDirs(t *testing.T) {
-	out, err := RenderINI("fpm_pool.conf.tmpl", struct{ PoolName, User, Socket, DeployPath string }{
+	out, err := RenderINI("fpm_pool.conf.tmpl", struct {
+		PoolName, User, Socket, DeployPath string
+		MaxChildren                        int
+	}{
 		PoolName: "app_example_com", User: "webuser", Socket: testSocket, DeployPath: "/home/deploy/myapp",
+		MaxChildren: 10,
 	})
 	if err != nil {
 		t.Fatal(err)
