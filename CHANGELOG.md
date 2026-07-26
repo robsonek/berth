@@ -69,6 +69,13 @@ Notable changes to berth. Older releases are documented on the
   active-but-disabled supervisord** — the post-removal `reread`/`update` was
   gated on the unit being enabled too, letting a running worker keep
   executing removed code.
+- **Overly long domains are rejected at validation, not mid-provision** — a
+  still-RFC-valid domain longer than 70 characters derives on-host names the
+  kernel cannot create: the per-site PHP-FPM/Valkey unix sockets exceed the
+  107-byte socket-path budget (and, far later, cron/unit filenames exceed
+  NAME_MAX), so every run failed at socket creation after nginx and PHP-FPM
+  were already reloaded. `berth provision` now refuses the config up front,
+  stating the limit and the reason.
 
 ### Changed
 
