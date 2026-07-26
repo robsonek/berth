@@ -128,6 +128,26 @@ func TestTLSApplyShortCircuitsOnValidCert(t *testing.T) {
 	}
 }
 
+// orderedRunner wraps a FakeRunner and appends every Run command and WriteFile
+// path to ONE shared event slice, so cross-channel ordering (a write relative
+// to the commands around it) can be asserted — FakeRunner.Calls() orders only
+// Run, and a stamp invalidate moved AFTER the vhost write would still pass a
+// Calls()-based check. (Pattern precedent: envWriteSpy in database_test.go.)
+type orderedRunner struct {
+	*bssh.FakeRunner
+	events []string
+}
+
+func (o *orderedRunner) Run(ctx context.Context, cmd string, stdin []byte) (bssh.Result, error) {
+	o.events = append(o.events, "run:"+cmd)
+	return o.FakeRunner.Run(ctx, cmd, stdin)
+}
+
+func (o *orderedRunner) WriteFile(ctx context.Context, spec bssh.FileSpec) error {
+	o.events = append(o.events, "write:"+spec.Path)
+	return o.FakeRunner.WriteFile(ctx, spec)
+}
+
 func TestTLSApplyUsesWebrootAndIssuesCert(t *testing.T) {
 	s := tlsServer()
 	withResolver(t, func(host string) ([]string, error) { return []string{s.Host}, nil })
@@ -143,8 +163,9 @@ func TestTLSApplyUsesWebrootAndIssuesCert(t *testing.T) {
 	f.On("systemctl enable --now certbot.timer", bssh.Result{})
 	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 1}) // hook write-guard: absent
+	spy := &orderedRunner{FakeRunner: f}
 
-	if err := TLS().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+	if err := TLS().Apply(context.Background(), provision.RunCtx{}, s, spy); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 
@@ -166,25 +187,30 @@ func TestTLSApplyUsesWebrootAndIssuesCert(t *testing.T) {
 		t.Error("expected the 443 nginx_https server block to be written")
 	}
 	// The swap participates in the transactional reload-stamp contract:
-	// invalidate before the 443 vhost write, mark only after its reload —
-	// otherwise the vhost just written would be newer than the stamp and the
-	// next site.Check would schedule one spurious reload.
+	// invalidate BEFORE the 443 vhost write, validate, reload, and mark only
+	// after — otherwise a crash mid-swap could leave the stamp blessing a
+	// running nginx that never loaded the 443 block. Asserted on the spy's
+	// single event stream so the write's position is pinned too.
 	idx := func(want string) int {
-		for i, c := range f.Calls() {
-			if c.Cmd == want {
+		for i, e := range spy.events {
+			if e == want {
 				return i
 			}
 		}
 		return -1
 	}
-	invalidate := idx("rm -f " + shQuote("/var/lib/berth/nginx.reloaded"))
-	reload := idx("systemctl reload nginx")
-	mark := idx(markReloadedCmd("nginx"))
-	if invalidate < 0 || reload < 0 || invalidate > reload {
-		t.Errorf("the nginx stamp must be invalidated BEFORE the swap's reload; rm=%d reload=%d", invalidate, reload)
+	invalidate := idx("run:rm -f " + shQuote("/var/lib/berth/nginx.reloaded"))
+	write := idx("write:" + nginxAvailablePath(s.Sites[0].Domain))
+	validate := idx("run:nginx -t")
+	reload := idx("run:systemctl reload nginx")
+	mark := idx("run:" + markReloadedCmd("nginx"))
+	if invalidate < 0 || write < 0 || validate < 0 || reload < 0 || mark < 0 {
+		t.Fatalf("missing swap events; invalidate=%d write=%d validate=%d reload=%d mark=%d\nevents: %v",
+			invalidate, write, validate, reload, mark, spy.events)
 	}
-	if mark < 0 || reload > mark {
-		t.Errorf("the nginx stamp must be recorded AFTER the swap's reload; reload=%d mark=%d", reload, mark)
+	if !(invalidate < write && write < validate && validate < reload && reload < mark) {
+		t.Errorf("want invalidate < vhost write < nginx -t < reload < mark; got invalidate=%d write=%d validate=%d reload=%d mark=%d",
+			invalidate, write, validate, reload, mark)
 	}
 }
 

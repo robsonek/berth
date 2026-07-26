@@ -525,7 +525,8 @@ func GitEndpoint(repo string) (host, port string, err error) {
 	return repo[at+1 : colon], "", nil
 }
 
-// GitHost extracts the host from a repository URL for known_hosts (Plan 2 uses it).
+// GitHost is a thin host-only convenience over GitEndpoint. Callers that
+// manage known_hosts must use GitEndpoint instead — this drops the port.
 func GitHost(repo string) (string, error) {
 	host, _, err := GitEndpoint(repo)
 	return host, err
