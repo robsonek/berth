@@ -159,15 +159,17 @@ func (nginx) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r
 			return fmt.Errorf("add nginx.org repo: %w", err)
 		}
 	}
-	if err := m.EnsurePackages(ctx, nil, "nginx"); err != nil {
-		return fmt.Errorf("install nginx: %w", err)
-	}
-	// Invalidate nginx's reload stamp before the first config mutation this
-	// step performs (bridge write / worker-user sed / stock-default removal):
-	// from here until markReloaded after the successful reload below, a crash
-	// leaves no stamp and the next run reconciles with one reload.
+	// Invalidate nginx's reload stamp before the package transaction, not just
+	// before the config mutations this step performs itself (bridge write /
+	// worker-user sed / stock-default removal): apt can mutate the unit's
+	// config too (conffiles, maintainer scripts). From here until markReloaded
+	// after the successful reload below, a crash leaves no stamp and the next
+	// run reconciles with one reload.
 	if err := invalidateReloaded(ctx, r, "nginx"); err != nil {
 		return err
+	}
+	if err := m.EnsurePackages(ctx, nil, "nginx"); err != nil {
+		return fmt.Errorf("install nginx: %w", err)
 	}
 	if s.Nginx.Source == "nginx" {
 		if err := bridgeNginxSitesLayout(ctx, r, rc.Force); err != nil {

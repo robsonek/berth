@@ -290,14 +290,18 @@ func TestNginxApplyInvalidatesBeforeMutationAndStampsAfterReload(t *testing.T) {
 		}
 		return -1
 	}
-	// On the debian source the first config mutation is the stock-default
-	// removal; the stamp must be invalidated before it and re-installed only
-	// after the successful reload.
+	// apt itself can mutate nginx's config (conffiles, maintainer scripts), so
+	// the stamp must be invalidated BEFORE the package transaction — not just
+	// before the first config mutation this step performs itself.
 	invalidate := idx("rm -f " + shQuote("/var/lib/berth/nginx.reloaded"))
+	install := idx("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx")
 	firstMutation := idx("rm -f " + shQuote(debianDefaultSite))
 	reload := idx("systemctl reload nginx")
 	mark := idx(markReloadedCmd("nginx"))
-	if invalidate < 0 || firstMutation < 0 || invalidate > firstMutation {
+	if invalidate < 0 || install < 0 || invalidate > install {
+		t.Errorf("nginx stamp must be invalidated BEFORE the apt install; rm=%d install=%d", invalidate, install)
+	}
+	if firstMutation < 0 || invalidate > firstMutation {
 		t.Errorf("nginx stamp must be invalidated BEFORE the stock-default removal; rm=%d mutation=%d", invalidate, firstMutation)
 	}
 	if mark < 0 || reload < 0 || reload > mark {

@@ -1069,7 +1069,8 @@ func TestHardeningApplyHealRefusesForeignDropInWhenSSHDown(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	stubApplyGreenBase(f)
 	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
-	f.On("systemctl is-active ssh", bssh.Result{ExitCode: 3}) // ssh is down
+	f.On("rm -f "+shQuote("/var/lib/berth/fail2ban.reloaded"), bssh.Result{}) // invalidated before apt
+	f.On("systemctl is-active ssh", bssh.Result{ExitCode: 3})                 // ssh is down
 	f.On("systemctl is-enabled ssh", bssh.Result{ExitCode: 1})
 	f.On("sshd -t", bssh.Result{ExitCode: 1, Stderr: "Bad configuration option"})
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 0, Stdout: "PermitRootLogin yes\n"}) // foreign
@@ -1101,7 +1102,8 @@ func TestHardeningApplyHealFailsWhenRewriteDoesNotFixSshd(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	stubApplyGreenBase(f)
 	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
-	f.On("systemctl is-active ssh", bssh.Result{ExitCode: 3}) // ssh is down
+	f.On("rm -f "+shQuote("/var/lib/berth/fail2ban.reloaded"), bssh.Result{}) // invalidated before apt
+	f.On("systemctl is-active ssh", bssh.Result{ExitCode: 3})                 // ssh is down
 	f.On("systemctl is-enabled ssh", bssh.Result{ExitCode: 1})
 	f.On("sshd -t", bssh.Result{ExitCode: 1, Stderr: "60-foreign.conf: Bad configuration option"})
 	f.On("cat "+shQuote(sshdDropInPath),
@@ -1146,11 +1148,17 @@ func TestHardeningApplyInvalidatesBeforeWrites(t *testing.T) {
 	rmSSH := idx("rm -f " + shQuote("/var/lib/berth/ssh.reloaded"))
 	guardSSH := idx("cat " + shQuote(sshdDropInPath))
 	rmF2b := idx("rm -f " + shQuote("/var/lib/berth/fail2ban.reloaded"))
+	install := idx("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban")
 	guardF2b := idx("cat " + shQuote(fail2banJailPath))
 	if rmSSH < 0 || guardSSH < 0 || rmSSH > guardSSH {
 		t.Errorf("ssh stamp must be invalidated BEFORE the drop-in write; rm=%d write-guard=%d", rmSSH, guardSSH)
 	}
-	if rmF2b < 0 || guardF2b < 0 || rmF2b > guardF2b {
+	// The fail2ban package can ship jail conffile changes, so its stamp must be
+	// invalidated BEFORE the apt install, not just before the jail write.
+	if rmF2b < 0 || install < 0 || rmF2b > install {
+		t.Errorf("fail2ban stamp must be invalidated BEFORE the apt install; rm=%d install=%d", rmF2b, install)
+	}
+	if guardF2b < 0 || rmF2b > guardF2b {
 		t.Errorf("fail2ban stamp must be invalidated BEFORE the jail write; rm=%d write-guard=%d", rmF2b, guardF2b)
 	}
 	reloadSSH := idx("systemctl reload ssh")

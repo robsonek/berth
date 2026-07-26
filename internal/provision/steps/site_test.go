@@ -630,8 +630,9 @@ func TestSiteApplyEnsuresCronWhenSchedulerEnabled(t *testing.T) {
 
 // siteStampFileLists mirrors Check's stamp-probe list construction: the
 // cloudflare snippet FIRST when any site is cloudflare_only, then every site's
-// vhost / pool in config order. Kept in lock-step with site.Check by the tests
-// that use it.
+// vhost / pool in config order, then the governing directory (sites-enabled /
+// pool.d) whose mtime covers link/file creation and removal. Kept in lock-step
+// with site.Check by the tests that use it.
 func siteStampFileLists(s *config.Server) (vhosts, pools []string) {
 	if s.AnyCloudflareOnly() {
 		vhosts = append(vhosts, cloudflareConfPath)
@@ -640,6 +641,8 @@ func siteStampFileLists(s *config.Server) (vhosts, pools []string) {
 		vhosts = append(vhosts, nginxAvailablePath(site.Domain))
 		pools = append(pools, fpmPoolPath(s.PHP.Version, site.Domain))
 	}
+	vhosts = append(vhosts, nginxEnabledDir)
+	pools = append(pools, fpmPoolDir(s.PHP.Version))
 	return vhosts, pools
 }
 
@@ -1304,7 +1307,8 @@ func TestSiteCheckUnsatisfiedWhenVhostNewerThanNginxStamp(t *testing.T) {
 	f.On("nginx -t", bssh.Result{ExitCode: 0})
 	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
 	stubSiteConvergedProbes(s, f)
-	f.On(reloadedSinceCmd("nginx", nginxAvailablePath(s.Sites[0].Domain)), bssh.Result{ExitCode: 1})
+	vhosts, _ := siteStampFileLists(s)
+	f.On(reloadedSinceCmd("nginx", vhosts...), bssh.Result{ExitCode: 1})
 	// (FPM stamp probe not reached — Check returns at the first failed probe.)
 
 	cr, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
@@ -1323,8 +1327,8 @@ func TestSiteCheckUnsatisfiedWhenPoolNewerThanFPMStamp(t *testing.T) {
 	f.On("nginx -t", bssh.Result{ExitCode: 0})
 	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
 	stubSiteConvergedProbes(s, f)
-	f.On(reloadedSinceCmd("nginx", nginxAvailablePath(s.Sites[0].Domain)), bssh.Result{})
-	f.On(reloadedSinceCmd(fpmService(s), fpmPoolPath(s.PHP.Version, s.Sites[0].Domain)), bssh.Result{ExitCode: 1})
+	_, pools := siteStampFileLists(s)
+	f.On(reloadedSinceCmd(fpmService(s), pools...), bssh.Result{ExitCode: 1})
 
 	cr, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {

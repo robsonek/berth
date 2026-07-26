@@ -21,10 +21,19 @@ func programName(domain string) string { return "berth-" + poolName(domain) }
 // share a socket and each runs under its own user).
 func fpmSocket(domain string) string { return "/run/php/berth-" + poolName(domain) + ".sock" }
 
+// nginxEnabledDir / fpmPoolDir are the directories governing which vhosts and
+// pools the units load. They join the reload-stamp probes as a whole: a
+// directory's mtime changes on any create/remove/rename inside it, covering
+// topology drift (an out-of-band link recreation, a recreated stock file) that
+// the per-file probes cannot see.
+const nginxEnabledDir = "/etc/nginx/sites-enabled"
+
+func fpmPoolDir(phpVersion string) string { return "/etc/php/" + phpVersion + "/fpm/pool.d" }
+
 func nginxAvailablePath(domain string) string { return "/etc/nginx/sites-available/" + domain }
-func nginxEnabledPath(domain string) string   { return "/etc/nginx/sites-enabled/" + domain }
+func nginxEnabledPath(domain string) string   { return nginxEnabledDir + "/" + domain }
 func fpmPoolPath(phpVersion, domain string) string {
-	return fmt.Sprintf("/etc/php/%s/fpm/pool.d/%s.conf", phpVersion, poolName(domain))
+	return fpmPoolDir(phpVersion) + "/" + poolName(domain) + ".conf"
 }
 func supervisorProgramPath(domain string) string {
 	return "/etc/supervisor/conf.d/" + programName(domain) + ".conf"
@@ -53,7 +62,7 @@ func fpmService(s *config.Server) string { return "php" + s.PHP.Version + "-fpm"
 // defaultFPMPoolPath is the distro's default pool; berth disables it so its own
 // per-site pools own their sockets rather than colliding with the stock www pool.
 func defaultFPMPoolPath(s *config.Server) string {
-	return fmt.Sprintf("/etc/php/%s/fpm/pool.d/www.conf", s.PHP.Version)
+	return fpmPoolDir(s.PHP.Version) + "/www.conf"
 }
 
 // siteFile pairs a desired managed file's path with its rendered content. When
@@ -457,6 +466,12 @@ func (st site) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 			return provision.CheckResult{Satisfied: false, Reason: "site " + site.Domain + " not enabled (sites-enabled link missing or wrong)", Changes: st.changes()}, nil
 		}
 	}
+	// The governing directories join the probes: a directory newer than the
+	// stamp means links/files were added or removed after the last reload
+	// (out-of-band link recreation, a recreated stock file) — invisible to the
+	// per-file probes above — so one reconciling reload is scheduled.
+	vhosts = append(vhosts, nginxEnabledDir)
+	pools = append(pools, fpmPoolDir(s.PHP.Version))
 	stock, err := fileExists(ctx, r, defaultFPMPoolPath(s))
 	if err != nil {
 		return provision.CheckResult{}, err
@@ -464,6 +479,9 @@ func (st site) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 	if stock {
 		return provision.CheckResult{Satisfied: false, Reason: "stock FPM pool present (must be disabled)", Changes: st.changes()}, nil
 	}
+	// Liveness for these units lives in the nginx and php steps (site's
+	// Requires()), whose serviceUp/serviceActive probes satisfy the
+	// reloadedSince pairing contract at pipeline level.
 	nginxLoaded, err := reloadedSince(ctx, r, "nginx", vhosts...)
 	if err != nil {
 		return provision.CheckResult{}, err

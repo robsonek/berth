@@ -212,6 +212,14 @@ func (php) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 	}
 	v := s.PHP.Version
 	pkgs := phpPackages(v, s.Database.Engine)
+	// Invalidate the FPM reload stamp before the package transaction, not just
+	// before the drop-in writes below: apt can mutate the unit's config too
+	// (conffiles, conf.d links, maintainer scripts). From here until
+	// markReloaded after the successful reload/start below, a crash leaves no
+	// stamp and the next run reconciles with one reload.
+	if err := invalidateReloaded(ctx, r, fpmService(s)); err != nil {
+		return err
+	}
 	if err := m.EnsurePackages(ctx, nil, pkgs...); err != nil {
 		return err
 	}
@@ -219,12 +227,6 @@ func (php) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 		return err
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("create %s: %s", phpLogDir, res.Stderr)
-	}
-	// Invalidate the FPM reload stamp before the first drop-in write: from
-	// here until markReloaded after the successful reload/start below, a
-	// crash leaves no stamp and the next run reconciles with one reload.
-	if err := invalidateReloaded(ctx, r, fpmService(s)); err != nil {
-		return err
 	}
 	// Production OPcache tuning (FPM SAPI only). validate_timestamps=0 means new
 	// code is picked up only after an FPM reload — the deployer does that

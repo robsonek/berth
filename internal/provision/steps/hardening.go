@@ -318,6 +318,15 @@ func (h hardening) Apply(ctx context.Context, rc provision.RunCtx, s *config.Ser
 		return err
 	}
 
+	// Invalidate fail2ban's reload stamp before the package transaction: the
+	// fail2ban package can ship jail conffile changes, so the mutation window
+	// opens at the apt install, not at the jail write further down. From here
+	// until markReloaded after the successful reload at the end of Apply, a
+	// crash leaves no stamp and the next run reconciles with one reload.
+	if err := invalidateReloaded(ctx, r, "fail2ban"); err != nil {
+		return err
+	}
+
 	// Install the firewall and intrusion-prevention packages first: a minimal
 	// Debian install ships neither ufw nor fail2ban, so the ufw commands below
 	// would otherwise fail with "ufw: not found".
@@ -453,9 +462,6 @@ func (h hardening) Apply(ctx context.Context, rc provision.RunCtx, s *config.Ser
 	// and enable recidive. Validate before reloading, mirroring nginx -t / visudo.
 	jail, err := renderFail2banJail(s)
 	if err != nil {
-		return err
-	}
-	if err := invalidateReloaded(ctx, r, "fail2ban"); err != nil {
 		return err
 	}
 	if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{

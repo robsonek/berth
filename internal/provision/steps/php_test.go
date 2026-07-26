@@ -363,6 +363,40 @@ func TestPHPApplyRemovesDropInsOnTestFailure(t *testing.T) {
 	}
 }
 
+func TestPHPApplyInvalidatesBeforePackageInstall(t *testing.T) {
+	// apt itself can mutate the unit's config (conffiles, conf.d links,
+	// maintainer scripts), so the stamp must be invalidated BEFORE the package
+	// transaction — a crash between apt and the reload must not leave the old
+	// stamp blessing a running master that never loaded apt's changes.
+	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
+	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
+	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{})
+	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{ExitCode: 1})
+	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{ExitCode: 1})
+	f.On("php-fpm8.4 -t", bssh.Result{})
+	f.On("systemctl is-active php8.4-fpm", bssh.Result{})
+	f.On("systemctl reload php8.4-fpm", bssh.Result{})
+	f.On(markReloadedCmd("php8.4-fpm"), bssh.Result{})
+
+	if err := PHP().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	invalidate, install := -1, -1
+	for i, c := range f.Calls() {
+		switch c.Cmd {
+		case "rm -f " + shQuote("/var/lib/berth/php8.4-fpm.reloaded"):
+			invalidate = i
+		case "DEBIAN_FRONTEND=noninteractive apt-get install -y " + strings.Join(phpExtPkgs("8.4"), " "):
+			install = i
+		}
+	}
+	if invalidate < 0 || install < 0 || invalidate > install {
+		t.Errorf("the FPM stamp must be invalidated BEFORE the apt install; rm=%d install=%d", invalidate, install)
+	}
+}
+
 func TestPHPCheckUnsatisfiedWhenFPMDead(t *testing.T) {
 	// php-fpm -t validates syntax even when the daemon is dead; without a
 	// liveness probe every step reports green while the host serves 502s.
