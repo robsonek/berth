@@ -347,6 +347,11 @@ func TestPHPApplyRemovesDropInsOnTestFailure(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "-t failed") {
 		t.Fatalf("err = %v, want the -t failure", err)
 	}
+	// php-fpm -t validates the WHOLE unit, so the failure may be a pool file
+	// owned by the LATER site step — the error must point the operator there.
+	if !strings.Contains(err.Error(), "/etc/php/8.4/fpm/pool.d/") {
+		t.Errorf("err = %v, want a remediation hint naming the pool directory", err)
+	}
 	var removed bool
 	for _, c := range f.Calls() {
 		if c.Cmd == rm {

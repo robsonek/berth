@@ -357,7 +357,30 @@ func (h hardening) Apply(ctx context.Context, rc provision.RunCtx, s *config.Ser
 		if res, err := r.Run(ctx, "sshd -t", nil); err != nil {
 			return err
 		} else if res.ExitCode != 0 {
-			return fmt.Errorf("sshd -t failed, refusing to start ssh: %s", res.Stderr)
+			// The normal drop-in rewrite runs AFTER this heal, so a corrupt
+			// BERTH-MANAGED drop-in would otherwise wedge every future run
+			// on this validation. Repair what berth owns: rewrite the managed
+			// drop-in (absent/drifted states included) and re-validate. A
+			// foreign file is never touched — that config is not berth's to
+			// fix, so fail loud instead.
+			state, cerr := checkManagedFile(ctx, r, sshdDropInPath, []byte(sshdDropInBody))
+			if cerr != nil {
+				return cerr
+			}
+			if state == fileUnmanaged {
+				return fmt.Errorf("sshd is stopped and sshd -t fails, but %s is not managed by berth — a foreign sshd config blocks the heal; fix it manually, refusing to start ssh: %s", sshdDropInPath, res.Stderr)
+			}
+			if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
+				Path: sshdDropInPath, Content: []byte(sshdDropInBody),
+				Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
+			}); err != nil {
+				return fmt.Errorf("write %s: %w", sshdDropInPath, err)
+			}
+			if res, err := r.Run(ctx, "sshd -t", nil); err != nil {
+				return err
+			} else if res.ExitCode != 0 {
+				return fmt.Errorf("sshd -t still fails after rewriting %s — a foreign sshd config blocks the heal; fix it manually, refusing to start ssh: %s", sshdDropInPath, res.Stderr)
+			}
 		}
 		if res, err := r.Run(ctx, "systemctl enable --now ssh", nil); err != nil {
 			return err

@@ -305,6 +305,33 @@ func TestNginxApplyInvalidatesBeforeMutationAndStampsAfterReload(t *testing.T) {
 	}
 }
 
+func TestNginxApplyTestFailureNamesSitesAvailable(t *testing.T) {
+	// nginx -t validates the WHOLE unit, so the failure may be a vhost owned by
+	// the LATER site step — the error must point the operator there, and no
+	// reload or stamp may follow.
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx", bssh.Result{})
+	f.On("systemctl enable --now nginx", bssh.Result{})
+	f.On("rm -f "+shQuote("/var/lib/berth/nginx.reloaded"), bssh.Result{})
+	f.On("rm -f "+shQuote(debianDefaultSite), bssh.Result{})
+	f.On(fmt.Sprintf("test -f %[1]s && mv -f %[1]s %[1]s.disabled || true", shQuote(nginxOrgDefaultConf)), bssh.Result{})
+	f.On("nginx -t", bssh.Result{ExitCode: 1, Stderr: "unexpected end of file"})
+	// systemctl reload nginx and the stamp mark intentionally NOT stubbed.
+
+	err := Nginx().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f)
+	if err == nil || !strings.Contains(err.Error(), "nginx -t failed") {
+		t.Fatalf("err = %v, want the nginx -t failure", err)
+	}
+	if !strings.Contains(err.Error(), "/etc/nginx/sites-available/") {
+		t.Errorf("err = %v, want a remediation hint naming the vhost directory", err)
+	}
+	for _, c := range f.Calls() {
+		if c.Cmd == "systemctl reload nginx" || c.Cmd == markReloadedCmd("nginx") {
+			t.Errorf("%q must not run after a failed nginx -t", c.Cmd)
+		}
+	}
+}
+
 func TestNginxApplyInstallsAndEnables(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx", bssh.Result{})

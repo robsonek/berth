@@ -1007,6 +1007,118 @@ func TestHardeningApplyStartsStoppedSSHBeforeAntiLockout(t *testing.T) {
 	}
 }
 
+func TestHardeningApplyHealsCorruptManagedDropInWhenSSHDown(t *testing.T) {
+	// Stopped sshd + a corrupt BERTH-MANAGED drop-in: the heal's sshd -t fails,
+	// but the file is berth's to fix — Apply must rewrite it, re-validate, and
+	// start ssh instead of looping unrecoverably on the heal's validation.
+	stubGate(t, nil, nil)
+	f := bssh.NewFakeRunner()
+	stubApplyGreenBase(f)
+	stubSshdEffectiveGood(f)
+	stubApplyStampsGreen(f)
+	f.On("systemctl is-active ssh", bssh.Result{ExitCode: 3}) // ssh is down
+	f.On("systemctl is-enabled ssh", bssh.Result{ExitCode: 1})
+	// Corrupt but berth-managed drop-in (marker present, content drifted).
+	f.On("cat "+shQuote(sshdDropInPath),
+		bssh.Result{ExitCode: 0, Stdout: managedMarker + "\nPermitRootLogin broken\n"})
+	// First sshd -t (heal) fails on the corrupt drop-in; after the rewrite it
+	// passes (and keeps passing for the normal path's validation).
+	f.OnSeq("sshd -t",
+		bssh.Result{ExitCode: 1, Stderr: "00-berth.conf: Bad configuration option"},
+		bssh.Result{})
+	f.On("systemctl enable --now ssh", bssh.Result{})
+	f.On("systemctl reload ssh", bssh.Result{})
+
+	if err := Hardening().Apply(context.Background(), provision.RunCtx{}, hardeningServer(), f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var wrote bool
+	for _, w := range f.Writes() {
+		if w.Path == sshdDropInPath && string(w.Content) == sshdDropInBody {
+			wrote = true
+		}
+	}
+	if !wrote {
+		t.Error("the heal must rewrite the berth-managed drop-in with the desired content")
+	}
+	tRuns, start, firstT := 0, -1, -1
+	for i, c := range f.Calls() {
+		switch c.Cmd {
+		case "sshd -t":
+			tRuns++
+			if firstT < 0 {
+				firstT = i
+			}
+		case "systemctl enable --now ssh":
+			start = i
+		}
+	}
+	if tRuns < 2 {
+		t.Errorf("the heal must re-run sshd -t after the rewrite; got %d run(s)", tRuns)
+	}
+	if start < 0 || start < firstT {
+		t.Errorf("ssh must be started only after the heal validated; first -t=%d start=%d", firstT, start)
+	}
+}
+
+func TestHardeningApplyHealRefusesForeignDropInWhenSSHDown(t *testing.T) {
+	// Stopped sshd + failing sshd -t + a FOREIGN drop-in: not berth's to fix.
+	// Apply must fail loud (naming the file) without writing it or starting ssh.
+	var gateRan bool
+	stubGate(t, nil, &gateRan)
+	f := bssh.NewFakeRunner()
+	stubApplyGreenBase(f)
+	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
+	f.On("systemctl is-active ssh", bssh.Result{ExitCode: 3}) // ssh is down
+	f.On("systemctl is-enabled ssh", bssh.Result{ExitCode: 1})
+	f.On("sshd -t", bssh.Result{ExitCode: 1, Stderr: "Bad configuration option"})
+	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 0, Stdout: "PermitRootLogin yes\n"}) // foreign
+	// systemctl enable --now ssh intentionally NOT stubbed: it must never run.
+
+	err := Hardening().Apply(context.Background(), provision.RunCtx{}, hardeningServer(), f)
+	if err == nil || !strings.Contains(err.Error(), sshdDropInPath) {
+		t.Fatalf("err = %v, want a loud error naming %s", err, sshdDropInPath)
+	}
+	for _, w := range f.Writes() {
+		if w.Path == sshdDropInPath {
+			t.Error("a foreign drop-in must not be written by the heal")
+		}
+	}
+	for _, c := range f.Calls() {
+		if c.Cmd == "systemctl enable --now ssh" {
+			t.Error("ssh must not be started while its config is foreign and invalid")
+		}
+	}
+	if gateRan {
+		t.Error("the anti-lockout gate must not run after the heal refused")
+	}
+}
+
+func TestHardeningApplyHealFailsWhenRewriteDoesNotFixSshd(t *testing.T) {
+	// Stopped sshd + failing sshd -t + a berth-managed drop-in, but the rewrite
+	// does not fix the validation (another file is broken): fail loud, no start.
+	stubGate(t, nil, nil)
+	f := bssh.NewFakeRunner()
+	stubApplyGreenBase(f)
+	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
+	f.On("systemctl is-active ssh", bssh.Result{ExitCode: 3}) // ssh is down
+	f.On("systemctl is-enabled ssh", bssh.Result{ExitCode: 1})
+	f.On("sshd -t", bssh.Result{ExitCode: 1, Stderr: "60-foreign.conf: Bad configuration option"})
+	f.On("cat "+shQuote(sshdDropInPath),
+		bssh.Result{ExitCode: 0, Stdout: managedMarker + "\nPermitRootLogin broken\n"})
+	// systemctl enable --now ssh intentionally NOT stubbed: it must never run.
+
+	err := Hardening().Apply(context.Background(), provision.RunCtx{}, hardeningServer(), f)
+	if err == nil || !strings.Contains(err.Error(), sshdDropInPath) {
+		t.Fatalf("err = %v, want a loud error naming %s", err, sshdDropInPath)
+	}
+	for _, c := range f.Calls() {
+		if c.Cmd == "systemctl enable --now ssh" {
+			t.Error("ssh must not be started while sshd -t still fails after the rewrite")
+		}
+	}
+}
+
 func TestHardeningApplyInvalidatesBeforeWrites(t *testing.T) {
 	stubGate(t, nil, nil)
 	f := bssh.NewFakeRunner()

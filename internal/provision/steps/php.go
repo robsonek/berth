@@ -254,7 +254,10 @@ func (php) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 		return err
 	} else if res.ExitCode != 0 {
 		removePHPDropIns(ctx, r, v)
-		return fmt.Errorf("php-fpm%s -t failed after writing drop-ins (removed them so the next run re-applies): %s", v, res.Stderr)
+		// -t validates the WHOLE unit, so the failure may live in a pool file
+		// owned by the later site step; fail-fast stops the run before site
+		// could heal it, so point the operator there.
+		return fmt.Errorf("php-fpm%s -t failed after writing drop-ins (removed them so the next run re-applies): %s — if the failure points at a pool file under /etc/php/%s/fpm/pool.d/, fix or remove that file (berth's site step re-renders its pools on the next run)", v, res.Stderr, v)
 	}
 	active, err := serviceActive(ctx, r, fpmService(s))
 	if err != nil {

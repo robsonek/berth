@@ -190,7 +190,10 @@ func (nginx) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r
 	if res, err := r.Run(ctx, "nginx -t", nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
-		return fmt.Errorf("nginx -t failed after disabling stock defaults: %s", res.Stderr)
+		// -t validates the WHOLE unit, so the failure may live in a vhost
+		// owned by the later site step; fail-fast stops the run before site
+		// could heal it, so point the operator there.
+		return fmt.Errorf("nginx -t failed after disabling stock defaults: %s — if the failure points at a vhost under /etc/nginx/sites-available/, fix or remove that file (berth's site step re-renders its vhosts on the next run)", res.Stderr)
 	}
 	if res, err := r.Run(ctx, "systemctl reload nginx", nil); err != nil {
 		return err
