@@ -366,29 +366,42 @@ func (h hardening) Apply(ctx context.Context, rc provision.RunCtx, s *config.Ser
 		if res, err := r.Run(ctx, "sshd -t", nil); err != nil {
 			return err
 		} else if res.ExitCode != 0 {
-			// The normal drop-in rewrite runs AFTER this heal, so a corrupt
-			// BERTH-MANAGED drop-in would otherwise wedge every future run
-			// on this validation. Repair what berth owns: rewrite the managed
-			// drop-in (absent/drifted states included) and re-validate. A
-			// foreign file is never touched — that config is not berth's to
-			// fix, so fail loud instead.
+			// The gated rewrite runs AFTER this heal, so a corrupt
+			// BERTH-MANAGED drop-in would otherwise wedge every future run on
+			// this validation. Heal by REMOVAL, never by writing the
+			// restrictive body: the drop-in only tightens auth, so removing
+			// berth's own file restores the stock sshd config and can only
+			// relax access — writing it here would put the root/password
+			// lockdown live BEFORE the anti-lockout gate below. The brief
+			// window of stock sshd config between this removal and the gated
+			// re-hardening is deliberate: a failed gate must leave the host
+			// reachable, not locked down. A foreign or absent file means the
+			// breakage is not berth's to fix — fail loud.
 			state, cerr := checkManagedFile(ctx, r, sshdDropInPath, []byte(sshdDropInBody))
 			if cerr != nil {
 				return cerr
 			}
-			if state == fileUnmanaged {
+			switch state {
+			case fileUnmanaged:
 				return fmt.Errorf("sshd is stopped and sshd -t fails, but %s is not managed by berth — a foreign sshd config blocks the heal; fix it manually, refusing to start ssh: %s", sshdDropInPath, res.Stderr)
+			case fileAbsent:
+				return fmt.Errorf("sshd is stopped and sshd -t fails although %s is absent — the breakage is outside berth's file; fix the sshd config manually, refusing to start ssh: %s", sshdDropInPath, res.Stderr)
 			}
-			if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
-				Path: sshdDropInPath, Content: []byte(sshdDropInBody),
-				Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
-			}); err != nil {
-				return fmt.Errorf("write %s: %w", sshdDropInPath, err)
+			// The removal mutates ssh's config: invalidate its stamp first
+			// (transactional contract; the gated path re-invalidates before
+			// its own rewrite).
+			if err := invalidateReloaded(ctx, r, "ssh"); err != nil {
+				return err
+			}
+			if res, err := r.Run(ctx, "rm -f "+shQuote(sshdDropInPath), nil); err != nil {
+				return err
+			} else if res.ExitCode != 0 {
+				return fmt.Errorf("remove corrupt %s: %s", sshdDropInPath, res.Stderr)
 			}
 			if res, err := r.Run(ctx, "sshd -t", nil); err != nil {
 				return err
 			} else if res.ExitCode != 0 {
-				return fmt.Errorf("sshd -t still fails after rewriting %s — a foreign sshd config blocks the heal; fix it manually, refusing to start ssh: %s", sshdDropInPath, res.Stderr)
+				return fmt.Errorf("sshd -t still fails after removing %s — a foreign sshd config blocks the heal; fix it manually, refusing to start ssh: %s", sshdDropInPath, res.Stderr)
 			}
 		}
 		if res, err := r.Run(ctx, "systemctl enable --now ssh", nil); err != nil {
