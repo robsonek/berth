@@ -3,6 +3,56 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Fixed
+
+- **"Written but not reloaded" is now detected and healed** — a crash (or a
+  lost SSH transport) between writing a config file and reloading its service
+  used to leave the service running the OLD configuration forever while every
+  later run reported green: fail2ban jailing port 22 instead of `ssh.port`,
+  sshd on a stale drop-in, nginx without a just-enabled origin lockdown,
+  PHP-FPM on old pools or tuning. berth now records a per-unit stamp under
+  `/var/lib/berth/` after every successful reload and reports the step
+  unsatisfied while a managed file is newer than the stamp. The first run
+  after upgrading performs one graceful reload of nginx, PHP-FPM, fail2ban
+  and ssh (the stamps do not exist yet); no restarts, no downtime.
+- **A dead PHP-FPM is detected and started** — `php-fpm -t` validates syntax
+  even with the daemon down, so every step reported green while the host
+  served 502s. The `php` step now requires the unit active and starts it
+  when it is not (boot enablement stays apt's business). A stopped sshd is
+  likewise detected and started (validated first) by the `hardening` step —
+  before its anti-lockout gate, which could never have healed it.
+- **The scheduler crons are no longer silently inert** — the `site` step now
+  installs/enables the cron daemon before writing scheduler entries (as
+  `backups` already did) and reports unsatisfied while the daemon is down.
+  The `site` step also verifies each vhost's `sites-enabled` symlink and
+  that the stock FPM `www` pool stays disabled.
+- **Tenant directory MODES are re-checked, not just ownership** — a drifted
+  `deploy_path` mode (say 0755) silently broke tenant isolation while the
+  ownership-only probe stayed green; owner, group and mode now all converge.
+- **Deploy-key installations are verified for completeness** — a missing
+  `.pub` is derived from the private key (never regenerated) and a missing
+  `known_hosts` entry re-triggers the host scan; previously only the private
+  key was probed and `berth site key` could send the operator to a no-op
+  `berth provision`.
+- **Spurious MariaDB/Valkey restarts in some timezones** — the config-loaded
+  probe parsed `systemctl`'s human-readable timestamp with `date -d`, which
+  fails on zone abbreviations like AEST/ACST and forced a restart on every
+  run; it now uses `systemctl show --timestamp=unix` (no parsing at all).
+- **A git repository on a nonstandard SSH port now works** — the known_hosts
+  entry is stored and probed under the `[host]:port` token and the scan uses
+  `ssh-keyscan -p`; previously the port was silently dropped and the first
+  deploy failed host-key verification.
+
+### Changed
+
+- **berth now keeps per-unit reload stamps in `/var/lib/berth/`** (root-owned,
+  0755) — the on-host state backing the written-but-not-reloaded detection.
+  **After upgrading, run one full `berth provision` first**: the stamps do not
+  exist yet, so `--only <step>` can refuse on an unsatisfied prerequisite
+  until that first full run creates them.
+
 ## [0.16.0] — 2026-07-26
 
 ### Changed
