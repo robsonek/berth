@@ -30,6 +30,13 @@ Notable changes to berth. Older releases are documented on the
   re-owning the tree and orphaning the previous account, deploy key and
   sudoers entry.
 
+### Fixed
+
+- Hostname validation no longer accepts non-ASCII letters that merely
+  case-fold into a-z (e.g. U+017F); uppercase site domains still get the
+  dedicated "must be lowercase" hint (`host` and `system.hostname` accept
+  uppercase as before).
+
 ## [0.17.0] — 2026-07-26
 
 ### Added

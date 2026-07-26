@@ -158,6 +158,11 @@ func TestValidateRejects(t *testing.T) {
 		"bad fail2ban maxretry":          func(s *Server) { s.Fail2ban.Maxretry = 9999 },
 		"bad fail2ban maxretry negative": func(s *Server) { s.Fail2ban.Maxretry = -1 },
 		"uppercase domain":               func(s *Server) { s.Sites[0].Domain = "App.Example.com" },
+		// U+017F (long s) case-folds to 's' under (?i), so it used to sneak
+		// through BOTH the hostname regex and the lowercase guard
+		// (ToLower(U+017F) == U+017F). Explicit ASCII classes reject it.
+		"unicode long-s domain": func(s *Server) { s.Sites[0].Domain = "eſample.com" },
+		"unicode long-s host":   func(s *Server) { s.Host = "eſample.com" },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -167,6 +172,19 @@ func TestValidateRejects(t *testing.T) {
 				t.Errorf("expected error for %s, got nil", name)
 			}
 		})
+	}
+}
+
+func TestDomainErrorMessages(t *testing.T) {
+	up := base()
+	up.Sites[0].Domain = "App.Example.com"
+	if err := up.Validate(); err == nil || !strings.Contains(err.Error(), "must be lowercase") {
+		t.Fatalf("uppercase domain must keep the lowercase hint; got %v", err)
+	}
+	folded := base()
+	folded.Sites[0].Domain = "eſample.com"
+	if err := folded.Validate(); err == nil || !strings.Contains(err.Error(), "not a valid hostname") {
+		t.Fatalf("U+017F domain must fail the hostname regex; got %v", err)
 	}
 }
 
