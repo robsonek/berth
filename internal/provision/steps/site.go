@@ -31,6 +31,16 @@ func supervisorProgramPath(domain string) string {
 }
 func cronPath(domain string) string { return "/etc/cron.d/berth-" + poolName(domain) }
 
+// anySchedulerEnabled reports whether at least one site wants the scheduler cron.
+func anySchedulerEnabled(s *config.Server) bool {
+	for _, site := range s.Sites {
+		if s.SchedulerEnabled(site) {
+			return true
+		}
+	}
+	return false
+}
+
 // logrotatePath is the single global logrotate fragment covering every site's
 // FPM and supervisor logs via globs (rotation is host-global, not per-tenant).
 const logrotatePath = "/etc/logrotate.d/berth"
@@ -468,6 +478,17 @@ func (st site) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 	if !fpmLoaded {
 		return provision.CheckResult{Satisfied: false, Reason: "running php-fpm predates a managed pool (reload pending)", Changes: st.changes()}, nil
 	}
+	// /etc/cron.d drop-ins are inert without a running cron daemon; the
+	// scheduler promise depends on it, so probe it (Apply heals via ensureCron).
+	if anySchedulerEnabled(s) {
+		cronUp, err := serviceUp(ctx, r, "cron")
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if !cronUp {
+			return provision.CheckResult{Satisfied: false, Reason: "cron daemon not active/enabled (scheduler crons are inert)", Changes: st.changes()}, nil
+		}
+	}
 	// Every desired supervisor program must be LOADED in supervisord (not just on
 	// disk), or the deployer's start/restart fails. A box whose conf predates this
 	// enforcement reports "no such" here -> unsatisfied -> Apply reread/updates it.
@@ -619,6 +640,13 @@ func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server,
 	// to other units), so the stamp may bless the running pools.
 	if err := markReloaded(ctx, r, fpmService(s)); err != nil {
 		return err
+	}
+
+	// Scheduler crons are inert without the daemon; ensure it before writing them.
+	if anySchedulerEnabled(s) {
+		if err := ensureCron(ctx, r); err != nil {
+			return err
+		}
 	}
 
 	// 5) Per-site Supervisor worker (iff queue enabled) + daemons, then

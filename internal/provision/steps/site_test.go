@@ -565,6 +565,69 @@ func TestSiteCheckUnsatisfiedWhenDisabledCronLingers(t *testing.T) {
 	}
 }
 
+// TestSiteCheckUnsatisfiedWhenCronDownWithScheduler proves the scheduler
+// promise is probed end to end: /etc/cron.d drop-ins are inert without a
+// running cron daemon, so an otherwise converged host with cron down must
+// report drift (Apply heals it via ensureCron).
+func TestSiteCheckUnsatisfiedWhenCronDownWithScheduler(t *testing.T) {
+	s := siteServer() // Scheduler: true
+	f := bssh.NewFakeRunner()
+	stubManagedSiteFiles(t, s, f)
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
+	stubSiteConvergedProbes(s, f)
+	// Override the helper's converged cron probes: the daemon is down.
+	f.On("systemctl is-active cron", bssh.Result{ExitCode: 3})
+	f.On("systemctl is-enabled cron", bssh.Result{ExitCode: 1})
+
+	cr, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied when the cron daemon is down and a scheduler cron is desired")
+	}
+	if !strings.Contains(cr.Reason, "cron") {
+		t.Errorf("Reason must mention cron; got %q", cr.Reason)
+	}
+}
+
+// TestSiteApplyEnsuresCronWhenSchedulerEnabled proves Apply ensures the cron
+// daemon BEFORE writing the scheduler crons that depend on it (here cron is
+// already active+enabled, so ensureCron probes and installs nothing). The cron
+// file's write-guard cat is the closest observable proxy for its write (Run
+// and WriteFile orders cannot be correlated on the FakeRunner).
+func TestSiteApplyEnsuresCronWhenSchedulerEnabled(t *testing.T) {
+	s := siteServer() // Scheduler: true
+	f := bssh.NewFakeRunner()
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+	// ensureCron pre-check: cron already active+enabled -> no install.
+	f.On("systemctl is-active cron", bssh.Result{})
+	f.On("systemctl is-enabled cron", bssh.Result{})
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	idxProbe, idxCronGuard := -1, -1
+	for i, c := range f.Calls() {
+		switch c.Cmd {
+		case "systemctl is-active cron":
+			idxProbe = i
+		case "cat " + shQuote(cronPath(s.Sites[0].Domain)):
+			idxCronGuard = i
+		}
+	}
+	if idxProbe < 0 {
+		t.Fatal("Apply must ensure the cron daemon (ensureCron probe) when a scheduler cron is desired")
+	}
+	if idxCronGuard < 0 || idxProbe > idxCronGuard {
+		t.Errorf("ensureCron (idx %d) must run BEFORE the scheduler cron write (write-guard idx %d)", idxProbe, idxCronGuard)
+	}
+}
+
 // siteStampFileLists mirrors Check's stamp-probe list construction: the
 // cloudflare snippet FIRST when any site is cloudflare_only, then every site's
 // vhost / pool in config order. Kept in lock-step with site.Check by the tests
@@ -580,10 +643,12 @@ func siteStampFileLists(s *config.Server) (vhosts, pools []string) {
 	return vhosts, pools
 }
 
-// stubSiteConvergedProbes stubs Check's enabled-symlink, stock-pool and
-// reload-stamp probes the way a converged host answers: every sites-enabled
-// link resolves to its vhost, the stock www pool is absent, and the running
-// nginx/php-fpm postdate every managed vhost/pool.
+// stubSiteConvergedProbes stubs Check's enabled-symlink, stock-pool,
+// reload-stamp and cron-daemon probes the way a converged host answers: every
+// sites-enabled link resolves to its vhost, the stock www pool is absent, the
+// running nginx/php-fpm postdate every managed vhost/pool, and the cron daemon
+// is active+enabled (probed only when a site wants the scheduler; unused
+// stubs are harmless otherwise).
 func stubSiteConvergedProbes(s *config.Server, f *bssh.FakeRunner) {
 	for _, site := range s.Sites {
 		f.On("[ "+shQuote(nginxEnabledPath(site.Domain))+" -ef "+shQuote(nginxAvailablePath(site.Domain))+" ]", bssh.Result{})
@@ -592,6 +657,8 @@ func stubSiteConvergedProbes(s *config.Server, f *bssh.FakeRunner) {
 	vhosts, pools := siteStampFileLists(s)
 	f.On(reloadedSinceCmd("nginx", vhosts...), bssh.Result{})
 	f.On(reloadedSinceCmd(fpmService(s), pools...), bssh.Result{})
+	f.On("systemctl is-active cron", bssh.Result{})
+	f.On("systemctl is-enabled cron", bssh.Result{})
 }
 
 // stubManagedSiteFiles makes every managed site file read back as up-to-date so
@@ -630,6 +697,10 @@ func stubFPMApply(s *config.Server, f *bssh.FakeRunner) {
 	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{})
 	f.On("supervisorctl reread", bssh.Result{})
 	f.On("supervisorctl update", bssh.Result{})
+	// ensureCron pre-check (runs only when a site wants the scheduler): cron is
+	// already active+enabled -> no install.
+	f.On("systemctl is-active cron", bssh.Result{})
+	f.On("systemctl is-enabled cron", bssh.Result{})
 	f.On("cat "+shQuote(cloudflareConfPath), bssh.Result{ExitCode: 1}) // step-0 cloudflare snippet absent
 	// Write-guard reads: every managed file Apply may write is absent by default.
 	// Tests that model a pre-existing file re-stub the specific path AFTER this.
