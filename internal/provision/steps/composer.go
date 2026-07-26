@@ -84,8 +84,14 @@ func (composer) Apply(ctx context.Context, _ provision.RunCtx, _ *config.Server,
 	setup := dir + "/composer-setup.php"
 	// Best-effort cleanup that survives an already-cancelled ctx (the live
 	// runner rejects a cancelled context immediately, so reusing ctx here would
-	// skip the remote rm on Ctrl-C).
-	defer func() { _, _ = r.Run(context.WithoutCancel(ctx), "rm -rf "+shQuote(dir), nil) }()
+	// skip the remote rm on Ctrl-C) yet stays bounded: WithoutCancel also
+	// strips the parent's deadline, and without one a wedged transport or a
+	// hung remote rm would block Apply indefinitely.
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_, _ = r.Run(cleanupCtx, "rm -rf "+shQuote(dir), nil)
+	}()
 
 	// Download the installer onto the host.
 	dl := fmt.Sprintf("php -r \"copy('%s', '%s');\"", composerInstallerURL, setup)

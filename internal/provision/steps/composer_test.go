@@ -121,6 +121,63 @@ func TestComposerApplyAbortsOnHashMismatch(t *testing.T) {
 	}
 }
 
+// ctxSpyRunner wraps a FakeRunner and records, per command, the state of the
+// context it was invoked with (Err at call time, deadline presence).
+type ctxSpyRunner struct {
+	*bssh.FakeRunner
+	errAtCall   map[string]error
+	hadDeadline map[string]bool
+}
+
+func (s *ctxSpyRunner) Run(ctx context.Context, cmd string, stdin []byte) (bssh.Result, error) {
+	s.errAtCall[cmd] = ctx.Err()
+	_, ok := ctx.Deadline()
+	s.hadDeadline[cmd] = ok
+	return s.FakeRunner.Run(ctx, cmd, stdin)
+}
+
+func TestComposerApplyCleanupSurvivesCancelAndIsBounded(t *testing.T) {
+	const sig = "abc123def456"
+	stubComposerSig(t, sig, nil)
+
+	setup := fakeComposerDir + "/composer-setup.php"
+	dlCmd := fmt.Sprintf("php -r \"copy('%s', '%s');\"", composerInstallerURL, setup)
+	cleanupCmd := "rm -rf " + shQuote(fakeComposerDir)
+
+	f := bssh.NewFakeRunner()
+	f.On("mktemp -d /tmp/berth-composer.XXXXXXXXXX", bssh.Result{Stdout: fakeComposerDir + "\n"})
+	f.On(dlCmd, bssh.Result{})
+	f.On(fmt.Sprintf("php -r \"echo hash_file('sha384', '%s');\"", setup), bssh.Result{Stdout: sig})
+	f.On(fmt.Sprintf("php %s --install-dir=/usr/local/bin --filename=composer", setup), bssh.Result{})
+	f.On(cleanupCmd, bssh.Result{})
+
+	spy := &ctxSpyRunner{FakeRunner: f, errAtCall: map[string]error{}, hadDeadline: map[string]bool{}}
+
+	// An already-cancelled parent: the FakeRunner ignores contexts, so Apply
+	// still walks its happy path and the deferred cleanup fires.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := Composer().Apply(ctx, provision.RunCtx{}, &config.Server{}, spy); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	// Sanity: the in-run commands really did observe the cancelled parent.
+	if spy.errAtCall[dlCmd] == nil {
+		t.Error("expected the download to observe the cancelled parent context")
+	}
+	got, ran := spy.errAtCall[cleanupCmd]
+	if !ran {
+		t.Fatalf("cleanup %q never ran", cleanupCmd)
+	}
+	if got != nil {
+		t.Errorf("cleanup ctx must survive the parent's cancellation; got Err() = %v", got)
+	}
+	if !spy.hadDeadline[cleanupCmd] {
+		t.Error("cleanup ctx must carry a deadline so a wedged transport cannot hang Apply")
+	}
+}
+
 func TestComposerApplyRejectsUnexpectedMktempOutput(t *testing.T) {
 	stubComposerSig(t, "irrelevant", nil)
 
