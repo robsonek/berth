@@ -878,10 +878,14 @@ func TestSiteApplyRemovesDisabledCloudflareBeforeReload(t *testing.T) {
 	// The rm must run AFTER the vhosts are rewritten unguarded (so validation
 	// passes without the geo) but BEFORE nginx -t + reload: under the
 	// transactional reload stamp nothing may mutate nginx config after the
-	// mark, and the mark directly follows the reload.
-	idxTest, idxReload, idxRemove := -1, -1, -1
+	// mark, and the mark directly follows the reload. The vhost's write-guard
+	// cat is the closest observable proxy for its rewrite (Run and WriteFile
+	// orders cannot be correlated on the FakeRunner).
+	idxVhostGuard, idxTest, idxReload, idxRemove := -1, -1, -1, -1
 	for i, c := range f.Calls() {
 		switch c.Cmd {
+		case "cat " + shQuote(nginxAvailablePath(s.Sites[0].Domain)):
+			idxVhostGuard = i
 		case "nginx -t":
 			idxTest = i
 		case "systemctl reload nginx":
@@ -892,6 +896,9 @@ func TestSiteApplyRemovesDisabledCloudflareBeforeReload(t *testing.T) {
 	}
 	if idxRemove < 0 {
 		t.Fatal("Apply must rm the lingering berth-managed cloudflare conf when disabled")
+	}
+	if idxVhostGuard < 0 || idxRemove < idxVhostGuard {
+		t.Errorf("rm of the cloudflare snippet (idx %d) must run AFTER the vhost rewrite (write-guard idx %d) so a guarded vhost never outlives its geo", idxRemove, idxVhostGuard)
 	}
 	if idxTest < 0 || idxRemove > idxTest {
 		t.Errorf("rm of the cloudflare snippet (idx %d) must run BEFORE nginx -t (idx %d)", idxRemove, idxTest)
