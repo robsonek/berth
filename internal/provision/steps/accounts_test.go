@@ -908,6 +908,99 @@ func TestAccountsApplyBreakGlassCachesPasswordBeforeChpasswd(t *testing.T) {
 	}
 }
 
+// twoSiteApplyFixture builds a two-site server (users derived — multi-site
+// isolates per site) with the account-creation stubs for berth and both site
+// users, mirroring stubFullApply's composition. A single-site fixture could not
+// catch "validate only the first site user's sudoers".
+func twoSiteApplyFixture(t *testing.T) (*config.Server, *bssh.FakeRunner, string, string) {
+	t.Helper()
+	s := &config.Server{
+		SSH: config.SSH{Key: writeOperatorKey(t)},
+		PHP: config.PHP{Version: "8.4"},
+		Sites: []config.Site{
+			{Domain: "one.example.com", DeployPath: "/var/www/one"},
+			{Domain: "two.example.com", DeployPath: "/var/www/two"},
+		},
+	}
+	u1, u2 := s.SiteUser(s.Sites[0]), s.SiteUser(s.Sites[1])
+	f := bssh.NewFakeRunner()
+	stubAccountCreate(f, "berth")
+	stubAccountCreate(f, u1)
+	stubAccountCreate(f, u2)
+	return s, f, u1, u2
+}
+
+func TestAccountsApplyValidatesEverySudoersAfterWrite(t *testing.T) {
+	// visudo -cf is the only guard between a template regression and a broken
+	// sudoers drop-in (which sudo ignores — or which breaks sudo entirely), so
+	// EVERY written drop-in must be validated after its write: berth's and both
+	// site users', not just the first. Asserted on the orderedRunner's single
+	// event stream (tls_test.go) — FakeRunner.Calls() records only Run, so a
+	// Calls()-based index check could not prove the write happened first.
+	chdirTemp(t)
+	s, f, u1, u2 := twoSiteApplyFixture(t)
+	stubConsoleLocked(f)
+	spy := &orderedRunner{FakeRunner: f}
+
+	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, spy); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	idx := func(want string) int {
+		for i, e := range spy.events {
+			if e == want {
+				return i
+			}
+		}
+		return -1
+	}
+	for _, u := range []string{"berth", u1, u2} {
+		p := sudoersPath(u)
+		write := idx("write:" + p)
+		validate := idx("run:visudo -cf " + shQuote(p))
+		if write < 0 || validate < 0 {
+			t.Errorf("sudoers for %s: missing write (idx %d) or visudo validation (idx %d)\nevents: %v", u, write, validate, spy.events)
+			continue
+		}
+		if validate < write {
+			t.Errorf("sudoers for %s must be validated AFTER its write; write=%d validate=%d\nevents: %v", u, write, validate, spy.events)
+		}
+	}
+}
+
+func TestAccountsApplyFailsLoudWhenVisudoRejects(t *testing.T) {
+	// A visudo rejection must abort Apply loudly. The rejected file stays
+	// written (write first, validate after — the error, not a rollback, is the
+	// signal), and nothing past the sudoers phase may run.
+	s, f, u1, u2 := twoSiteApplyFixture(t)
+	// Override the first site user's visudo stub (On is last-wins): the
+	// freshly written drop-in fails validation.
+	f.On("visudo -cf "+shQuote(sudoersPath(u1)), bssh.Result{ExitCode: 1})
+
+	err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
+	if want := sudoersPath(u1) + " failed visudo -cf validation"; err == nil || err.Error() != want {
+		t.Fatalf("Apply() = %v, want exactly %q", err, want)
+	}
+	var wroteRejected bool
+	for _, w := range f.Writes() {
+		if w.Path == sudoersPath(u1) {
+			wroteRejected = true
+		}
+		if w.Path == sudoersPath(u2) {
+			t.Error("Apply must abort at the rejection; the second site's sudoers must not be written")
+		}
+	}
+	if !wroteRejected {
+		t.Error("the rejected sudoers must have been written before validation (write-then-validate semantics)")
+	}
+	// Abort proof on an UNCONDITIONAL later-stage command: the console-posture
+	// probe always follows the account/sudoers phase in a full Apply, so its
+	// absence pins that Apply stopped at the rejection.
+	if calledCmd(f, "passwd -S berth") {
+		t.Error("Apply must abort at the visudo rejection; passwd -S berth must not run")
+	}
+}
+
 func TestAccountsApplyBreakGlassOffLocksOwnedPassword(t *testing.T) {
 	chdirTemp(t)
 	s := testServerWithKey(t)

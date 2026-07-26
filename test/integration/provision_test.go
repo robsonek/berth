@@ -36,6 +36,8 @@ import (
 //   - `nginx -t` exits 0
 //   - `mysql --protocol=socket -e 'SELECT 1'` exits 0
 //   - HTTP GET / returns a response (502 is acceptable pre-deploy: no app yet)
+//   - every site answers a staged tenant-unique PHP probe through its own Host
+//     header (and SNI over TLS) — the per-site routing and pool proof
 //   - self-signed cert present + valid beyond the renew window (when configured)
 func TestProvisionFreshDebian13(t *testing.T) {
 	cfgPath := os.Getenv("BERTH_TEST_SERVER")
@@ -69,6 +71,11 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	// BERTH_TEST_SKIP_SSL=true forces a hard skip even for self-signed.
 	sslEnv := os.Getenv("BERTH_TEST_SKIP_SSL")
 	skipSSL := sslEnv == "true" || (sslEnv == "" && !anySiteSelfSigned(srv))
+	// Explicit opt-in to real-DNS SSL testing: only then is a Let's Encrypt
+	// site's certificate CA-verified (issuance is skipped without DNS). Whether
+	// a site is probed over HTTPS at all is decided per site from the actual
+	// on-host cert state — see siteHTTPSProbe.
+	sslExplicit := sslEnv == "false"
 
 	// Run the full pipeline.
 	red := secret.NewRedactor()
@@ -119,6 +126,18 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	// are quick read-only checks (mirrors assertSecondRunIdempotent's fresh deadline).
 	invCtx, invCancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer invCancel()
+
+	// Per-site tenant probes: the global HTTP/HTTPS probes above never see sites
+	// 2..n (berth writes no default_server, so nginx answers with the FIRST vhost
+	// for any unmatched name). Stage a tenant-unique PHP marker per site and
+	// demand it back through the host address with the site's own Host header
+	// (and SNI over TLS) — HTTPS eligibility comes from the on-host cert state,
+	// per site, see siteHTTPSProbe.
+	for _, site := range srv.Sites {
+		useHTTPS, insecureTLS := siteHTTPSProbe(invCtx, t, client, site, sslExplicit)
+		assertSiteServesOwnContent(invCtx, t, client, srv, site, useHTTPS, insecureTLS)
+	}
+
 	assertMultiSiteIsolation(invCtx, t, client, srv)
 	assertDBAuth(invCtx, t, client, srv)
 	assertHardeningEndState(invCtx, t, client, srv)
@@ -137,8 +156,8 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	assertDeployKeys(invCtx, t, client, srv)
 	assertSlowQueryLog(invCtx, t, client, srv)
 	assertBreakGlass(invCtx, t, client, srv)
-	// useHTTPS mirrors the test's TLS path: self-signed/LE provisioned => https, else http.
-	assertDeployReload(invCtx, t, client, srv, !skipSSL && anySiteSSL(srv))
+	// Each site's post-reload probe rides the scheme its TLS state provably serves.
+	assertDeployReload(invCtx, t, client, srv, sslExplicit)
 
 	// berth's defining contract: an immediate second run must change nothing
 	// (every step satisfied), except preflight which re-runs apt by design.
