@@ -539,3 +539,20 @@ func TestValidateCloudflareOnlyLetsEncrypt(t *testing.T) {
 		})
 	}
 }
+
+func TestIsValidSiteOSUser(t *testing.T) {
+	for name, want := range map[string]bool{
+		"deploy":         true,
+		"b_app_1a2b3c4d": true,
+		"root":           false, // reserved
+		"www-data":       false, // reserved
+		"berth":          false, // reserved
+		"UNKNOWN":        false, // stat %U for a deleted owner — uppercase fails the regex
+		"1003":           false, // numeric uid
+		"":               false,
+	} {
+		if got := IsValidSiteOSUser(name); got != want {
+			t.Errorf("IsValidSiteOSUser(%q) = %v, want %v", name, got, want)
+		}
+	}
+}

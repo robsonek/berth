@@ -20,6 +20,7 @@ func databaseServer() *config.Server {
 		Sites: []config.Site{{
 			Domain:     "app.example.com",
 			DeployPath: "/home/deploy/myapp",
+			User:       "deploy",
 			SSL:        true,
 		}},
 	}

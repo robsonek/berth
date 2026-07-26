@@ -116,8 +116,8 @@ func TestConfigMatrix(t *testing.T) {
 		if srv.Valkey {
 			t.Fatalf("valkey should be false")
 		}
-		if u := srv.SiteUser(srv.Sites[0]); u != "deploy" {
-			t.Fatalf("SiteUser = %q, want deploy", u)
+		if want := config.DerivedSiteUser("app1.example.com"); srv.Sites[0].User != want {
+			t.Fatalf("Sites[0].User = %q, want explicit derived %q", srv.Sites[0].User, want)
 		}
 	})
 
@@ -251,8 +251,8 @@ func TestConfigMatrix(t *testing.T) {
 		if srv.Sites[0].SSL {
 			t.Fatalf("SSL should be false")
 		}
-		if u := srv.SiteUser(srv.Sites[0]); u != "deploy" {
-			t.Fatalf("SiteUser = %q, want deploy", u)
+		if want := config.DerivedSiteUser("plain.example.com"); srv.Sites[0].User != want {
+			t.Fatalf("Sites[0].User = %q, want explicit derived %q", srv.Sites[0].User, want)
 		}
 		if srv.Sites[0].SSLEmail != "" {
 			t.Fatalf("SSLEmail = %q, want empty", srv.Sites[0].SSLEmail)
@@ -486,6 +486,12 @@ func TestConfigMatrix(t *testing.T) {
 		if u0 != config.DerivedSiteUser("alpha.example.com") || u1 != config.DerivedSiteUser("beta.example.com") {
 			t.Fatalf("derivation mismatch: %q %q", u0, u1)
 		}
+		// Derived users are emitted explicitly into the generated YAML.
+		for i := range srv.Sites {
+			if want := config.DerivedSiteUser(srv.Sites[i].Domain); srv.Sites[i].User != want {
+				t.Fatalf("Sites[%d].User = %q, want explicit derived %q", i, srv.Sites[i].User, want)
+			}
+		}
 		for _, u := range []string{u0, u1} {
 			if !strings.HasPrefix(u, "b_") || u == "deploy" {
 				t.Fatalf("user %q not derived", u)
@@ -499,7 +505,7 @@ func TestConfigMatrix(t *testing.T) {
 		}
 	})
 
-	t.Run("single-site-blank-user-is-deploy", func(t *testing.T) {
+	t.Run("single-site-blank-user-derives", func(t *testing.T) {
 		a := base("onesite", "203.0.113.11")
 		a.Sites = []SiteAnswers{{
 			Domain: "solo.example.com", DeployPath: "/srv/solo",
@@ -509,8 +515,8 @@ func TestConfigMatrix(t *testing.T) {
 		if len(srv.Sites) != 1 {
 			t.Fatalf("want 1 site")
 		}
-		if u := srv.SiteUser(srv.Sites[0]); u != "deploy" {
-			t.Fatalf("SiteUser = %q, want deploy", u)
+		if want := config.DerivedSiteUser("solo.example.com"); srv.Sites[0].User != want {
+			t.Fatalf("Sites[0].User = %q, want explicit derived %q", srv.Sites[0].User, want)
 		}
 	})
 
@@ -546,6 +552,10 @@ func TestConfigMatrix(t *testing.T) {
 		u1 := srv.SiteUser(srv.Sites[1])
 		if u0 != config.DerivedSiteUser("derived.example.com") || !strings.HasPrefix(u0, "b_") {
 			t.Fatalf("site0 user = %q", u0)
+		}
+		// The derived site's user is emitted explicitly into the generated YAML.
+		if srv.Sites[0].User != config.DerivedSiteUser("derived.example.com") {
+			t.Fatalf("Sites[0].User = %q, want explicit derived", srv.Sites[0].User)
 		}
 		if u1 != "app_pinned" {
 			t.Fatalf("site1 user = %q", u1)
@@ -705,8 +715,8 @@ func TestConfigMatrix(t *testing.T) {
 			q.Queue != "default,emails" || q.Sleep != 3 || q.Tries != 5 || q.Timeout != 120 || q.MaxMemory != 256 {
 			t.Fatalf("queue = %+v", q)
 		}
-		if u := srv.SiteUser(srv.Sites[0]); u != "deploy" {
-			t.Fatalf("SiteUser = %q", u)
+		if want := config.DerivedSiteUser("a.example.com"); srv.Sites[0].User != want {
+			t.Fatalf("Sites[0].User = %q, want explicit derived %q", srv.Sites[0].User, want)
 		}
 	})
 

@@ -368,7 +368,7 @@ type Daemon struct {
 type Site struct {
 	Domain         string       `mapstructure:"domain" yaml:"domain"`
 	DeployPath     string       `mapstructure:"deploy_path" yaml:"deploy_path"`
-	User           string       `mapstructure:"user" yaml:"user,omitempty"` // OS user that owns/runs the site; derived when empty
+	User           string       `mapstructure:"user" yaml:"user,omitempty"` // OS user that owns/runs the site; derived from the domain when empty
 	Repository     string       `mapstructure:"repository" yaml:"repository,omitempty"`
 	SSL            bool         `mapstructure:"ssl" yaml:"ssl"`
 	SSLMode        string       `mapstructure:"ssl_mode" yaml:"ssl_mode,omitempty"` // letsencrypt (default) | selfsigned
@@ -391,15 +391,13 @@ func (st Site) CertMode() string {
 }
 
 // SiteUser returns the OS user that owns and runs a site. An explicit
-// sites[].user wins; a single site (legacy single-site config) keeps the shared
-// "deploy" account for backward compatibility; otherwise the name is derived
-// from the domain so each site of a multi-site server is isolated.
+// sites[].user wins; otherwise the name is derived from the domain, so every
+// site is isolated under its own account regardless of how many sites the
+// config lists. (Before v0.18 a lone site implicitly kept a shared "deploy"
+// account; pin sites[].user: deploy to keep that identity.)
 func (s *Server) SiteUser(site Site) string {
 	if site.User != "" {
 		return site.User
-	}
-	if len(s.Sites) == 1 {
-		return "deploy"
 	}
 	return DerivedSiteUser(site.Domain)
 }

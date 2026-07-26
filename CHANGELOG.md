@@ -3,6 +3,31 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Changed
+
+- **BREAKING: implicit site users are always derived from the domain** — a
+  single-site config without `sites[].user` used to run the site as a shared
+  `deploy` account; it now gets the same derived `b_<slug>_<hash>` account as
+  multi-site configs, so identity no longer flips when a config grows to two
+  sites or shrinks back to one. To keep an existing installation on the old
+  account, pin it explicitly (`user: deploy`). On hosts already provisioned
+  with the old identity, provisioning refuses loudly with that instruction
+  instead of silently re-owning the tree.
+- `berth init` always writes an explicit `user:` for every site (the derived
+  name when the field was left blank), so the generated YAML shows the
+  account your deployer connects as.
+
+### Added
+
+- **Owner guard for per-site directories** — when `deploy_path`, `shared/`
+  or `shared/tmp` already exists but is owned by a different user than the
+  configured/derived site user, the `accounts` and `appdirs` steps refuse
+  loudly (even with `--force`) with remediation instructions, instead of
+  re-owning the tree and orphaning the previous account, deploy key and
+  sudoers entry.
+
 ## [0.17.0] — 2026-07-26
 
 ### Added

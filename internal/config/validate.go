@@ -74,6 +74,15 @@ var reservedOSUsers = map[string]bool{
 	"berth": true,
 }
 
+// IsValidSiteOSUser reports whether name could be configured as sites[].user:
+// a valid Linux username that is not reserved by the system or berth. Steps
+// use it to decide whether an error message may suggest pinning an
+// encountered directory owner as the site user (stat's UNKNOWN placeholder,
+// numeric uids and reserved accounts must never be suggested).
+func IsValidSiteOSUser(name string) bool {
+	return reLinuxUser.MatchString(name) && !reservedOSUsers[name]
+}
+
 // deniedDeployRoots are filesystem trees a deploy_path may never equal or
 // enter. appdirs runs `install -d -o <user> -g www-data -m 0710 <deploy_path>`
 // as root, and GNU install -d applies -o/-g/-m to an EXISTING directory (and

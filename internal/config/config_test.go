@@ -219,3 +219,27 @@ func TestCloudflareOnlyDecodes(t *testing.T) {
 		t.Fatalf("site cloudflare_only should decode to *false; got %v", s.Sites[0].CloudflareOnly)
 	}
 }
+
+func TestSiteUserDerivation(t *testing.T) {
+	// A single site WITHOUT an explicit user derives from the domain — the
+	// legacy fallback to a shared "deploy" account is gone (pack 9): identity
+	// must not depend on how many sites the config lists.
+	single := &Server{Sites: []Site{{Domain: "app.example.com", DeployPath: "/var/www/app"}}}
+	if got, want := single.SiteUser(single.Sites[0]), DerivedSiteUser("app.example.com"); got != want {
+		t.Errorf("single-site without user: SiteUser = %q, want derived %q", got, want)
+	}
+	// An explicit user always wins, including the literal "deploy" pin that
+	// keeps a pre-pack-9 installation on its old account.
+	pinned := &Server{Sites: []Site{{Domain: "app.example.com", DeployPath: "/var/www/app", User: "deploy"}}}
+	if got := pinned.SiteUser(pinned.Sites[0]); got != "deploy" {
+		t.Errorf("explicit user: SiteUser = %q, want deploy", got)
+	}
+	// Multi-site derivation is unchanged.
+	two := &Server{Sites: []Site{
+		{Domain: "app.example.com", DeployPath: "/var/www/app"},
+		{Domain: "other.example.com", DeployPath: "/var/www/other"},
+	}}
+	if got, want := two.SiteUser(two.Sites[0]), DerivedSiteUser("app.example.com"); got != want {
+		t.Errorf("multi-site: SiteUser = %q, want %q", got, want)
+	}
+}

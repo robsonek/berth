@@ -46,9 +46,10 @@ func TestRoundTripSingleSite(t *testing.T) {
 	if got := srv.Sites[0]; got.Domain != "app.example.com" || got.Database.Name != "myapp" {
 		t.Errorf("site = %+v", got)
 	}
-	// Single site keeps the legacy "deploy" OS user.
-	if u := srv.SiteUser(srv.Sites[0]); u != "deploy" {
-		t.Errorf("SiteUser = %q, want deploy", u)
+	// Single site: the OS user derives from the domain and is emitted
+	// explicitly (pack 9 removed the legacy shared "deploy" fallback).
+	if want := config.DerivedSiteUser(srv.Sites[0].Domain); srv.Sites[0].User != want {
+		t.Errorf("Sites[0].User = %q, want explicit derived %q", srv.Sites[0].User, want)
 	}
 }
 

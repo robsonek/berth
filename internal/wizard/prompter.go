@@ -156,7 +156,7 @@ func (h *huhPrompter) SiteCore(index int, sa *SiteAnswers) error {
 			huh.NewNote().Title(fmt.Sprintf("Site #%d", index+1)),
 			huh.NewInput().Title("Domain").Value(&sa.Domain).Validate(validHostname("domain")),
 			huh.NewInput().Title("Deploy path").Value(&sa.DeployPath).Validate(validDeployPath),
-			huh.NewInput().Title("OS user (blank = derived / 'deploy' for single site)").Value(&sa.User).Validate(validOSUser),
+			huh.NewInput().Title("OS user (blank = derived from the domain)").Value(&sa.User).Validate(validOSUser),
 			huh.NewInput().Title("Database name").Value(&sa.DBName).Validate(validSQLIdent("database name")),
 			huh.NewInput().Title("Database user").Value(&sa.DBUser).Validate(validSQLIdent("database user")),
 			huh.NewInput().Title("Git repository (optional, SSH URL)").Value(&sa.Repository),
