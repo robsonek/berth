@@ -175,3 +175,15 @@ func TestTuningMariaDBLongQueryTimeEff(t *testing.T) {
 		t.Errorf("explicit long_query_time = %d, want 10", got)
 	}
 }
+
+func TestPHPFPMMaxChildrenEff(t *testing.T) {
+	if got := (Tuning{}).PHPFPMMaxChildrenEff(); got != 10 {
+		t.Errorf("PHPFPMMaxChildrenEff() = %d, want 10", got)
+	}
+	if got := (Tuning{PHPFPMMaxChildren: -1}).PHPFPMMaxChildrenEff(); got != 10 {
+		t.Errorf("PHPFPMMaxChildrenEff(-1) = %d, want 10 (non-positive = unset)", got)
+	}
+	if got := (Tuning{PHPFPMMaxChildren: 16}).PHPFPMMaxChildrenEff(); got != 16 {
+		t.Errorf("PHPFPMMaxChildrenEff(16) = %d, want 16", got)
+	}
+}
