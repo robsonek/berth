@@ -4,7 +4,9 @@ package integration
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
@@ -99,9 +101,18 @@ func assertOpcacheEffective(ctx context.Context, t *testing.T, c *bssh.Client, s
 // EVERY site's FPM socket up and a .php request answering per site (404 fine, never a
 // persistent 5xx gateway error). Each site is probed with its own Host header (and SNI
 // over TLS) on the scheme its TLS state provably serves (siteHTTPSProbe).
-func assertDeployReload(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server, skipSSL, sslExplicit bool) {
+func assertDeployReload(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server, sslExplicit bool) {
 	t.Helper()
 	ver := srv.PHP.Version
+	// Resolve each site's probe scheme ONCE from the actual on-host cert state:
+	// siteHTTPSProbe costs an SSH round-trip and cert state cannot change during
+	// the reload, so probing it inside the retry loop would only add noise.
+	type probeScheme struct{ useHTTPS, insecureTLS bool }
+	schemes := make(map[string]probeScheme, len(srv.Sites))
+	for _, site := range srv.Sites {
+		useHTTPS, insecureTLS := siteHTTPSProbe(ctx, t, c, site, sslExplicit)
+		schemes[site.Domain] = probeScheme{useHTTPS, insecureTLS}
+	}
 	seen := map[string]bool{}
 	for _, site := range srv.Sites {
 		user := srv.SiteUser(site)
@@ -129,8 +140,8 @@ func assertDeployReload(ctx context.Context, t *testing.T, c *bssh.Client, srv *
 			if s.ExitCode != 0 {
 				return false
 			}
-			useHTTPS, insecureTLS := siteHTTPSProbe(site, skipSSL, sslExplicit)
-			if !phpPathServes(srv.Host, site.Domain, useHTTPS, insecureTLS) {
+			sc := schemes[site.Domain]
+			if !phpPathServes(srv.Host, site.Domain, sc.useHTTPS, sc.insecureTLS) {
 				return false
 			}
 		}
@@ -144,9 +155,11 @@ func assertDeployReload(ctx context.Context, t *testing.T, c *bssh.Client, srv *
 // phpPathServes GETs a .php URI (forcing nginx -> FastCGI -> FPM) through the host
 // address with the tenant's identity forced (Host header; SNI ServerName over TLS)
 // and reports whether the FPM chain answered: a 404 for the missing script is fine;
-// 502/503/504 means FPM is down. This is a reload-LIVENESS probe only — it requests
-// a deliberately missing path and accepts any non-gateway status, so it cannot prove
-// WHICH vhost or pool answered; the per-tenant routing/pool proof lives in
+// 502/503/504 means FPM is down, and a 301 is the HTTPS-redirect vhost answering
+// WITHOUT reaching FPM (the scheme comes from on-host cert state, so a 301 here
+// means the probe was misrouted, never liveness). This is a reload-LIVENESS probe
+// only — it requests a deliberately missing path, so it cannot prove WHICH vhost
+// or pool answered; the per-tenant routing/pool proof lives in
 // assertSiteServesOwnContent.
 func phpPathServes(host, domain string, useHTTPS, insecureTLS bool) bool {
 	scheme := "http"
@@ -167,29 +180,49 @@ func phpPathServes(host, domain string, useHTTPS, insecureTLS bool) bool {
 		return false
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode != http.StatusBadGateway &&
+	return resp.StatusCode != http.StatusMovedPermanently &&
+		resp.StatusCode != http.StatusBadGateway &&
 		resp.StatusCode != http.StatusServiceUnavailable &&
 		resp.StatusCode != http.StatusGatewayTimeout
 }
 
-// siteHTTPSProbe reports whether a site's tenant probe can run over HTTPS, and whether
-// certificate verification must be skipped. Eligibility is PER SITE (skipSSL alone is
-// server-wide): self-signed sites always have a cert once the tls step ran, but a
-// Let's Encrypt site may legitimately have none (issuance is skipped without DNS), so
-// its HTTPS probe is demanded only when the operator opted into real-DNS SSL testing
-// (BERTH_TEST_SKIP_SSL=false). Everything else is probed over plain HTTP, where the
-// cert-aware site step serves the HTTP-only vhost.
-func siteHTTPSProbe(site config.Site, skipSSL, sslExplicit bool) (useHTTPS, insecureTLS bool) {
-	switch {
-	case skipSSL || !site.SSL:
-		return false, false
-	case site.CertMode() == "selfsigned":
-		return true, true
-	case sslExplicit:
-		return true, false
-	default:
+// siteCertInstalled reports whether the site's certificate is actually present
+// on the host, probing the same fullchain path the cert-aware site step keys
+// its vhost rendering on (mirrors the steps package's certDir/certFullchainPath:
+// self-signed under /etc/ssl/berth/<domain>, Let's Encrypt under
+// /etc/letsencrypt/live/<domain>).
+func siteCertInstalled(ctx context.Context, t *testing.T, c *bssh.Client, site config.Site) bool {
+	t.Helper()
+	dir := "/etc/letsencrypt/live/" + site.Domain
+	if site.CertMode() == "selfsigned" {
+		dir = "/etc/ssl/berth/" + site.Domain
+	}
+	res, err := c.Run(ctx, "test -e "+shQuote(dir+"/fullchain.pem"), nil)
+	if err != nil {
+		t.Fatalf("%s: probe cert presence: %v", site.Domain, err)
+	}
+	return res.ExitCode == 0
+}
+
+// siteHTTPSProbe reports whether a site's tenant probe must run over HTTPS, and
+// whether certificate verification must be skipped. Eligibility is decided from
+// the ACTUAL on-host cert state, never from how this run was configured: the
+// site step's vhost is cert-aware, so once a certificate exists the vhost
+// serves HTTPS and 301s all HTTP — even on a later BERTH_TEST_SKIP_SSL=true
+// re-run — while a cert-less site (e.g. Let's Encrypt whose issuance was
+// skipped without DNS) serves the HTTP-only vhost. CA verification is applied
+// only on a real-DNS Let's Encrypt run (BERTH_TEST_SKIP_SSL=false): self-signed
+// certs are untrusted by design, and without that explicit opt-in a public CA
+// chain has no DNS guarantee to validate against.
+func siteHTTPSProbe(ctx context.Context, t *testing.T, c *bssh.Client, site config.Site, sslExplicit bool) (useHTTPS, insecureTLS bool) {
+	t.Helper()
+	if !site.SSL || !siteCertInstalled(ctx, t, c, site) {
 		return false, false
 	}
+	if site.CertMode() == "selfsigned" || !sslExplicit {
+		return true, true
+	}
+	return true, false
 }
 
 // shQuote single-quotes s for a POSIX shell (mirrors the unexported steps.shQuote).
@@ -212,54 +245,92 @@ func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) 
 // The split for SSL sites is deliberate: their HTTP side 301s to HTTPS by design,
 // and the redirect echoes the REQUEST $host — identical for every vhost — so an
 // HTTP-side check cannot discriminate tenants and is not attempted; the HTTPS
-// marker is the proof. Plain-HTTP tenants (or runs with SSL testing disabled, where
-// the cert-aware site step keeps the HTTP-only vhost) prove routing over HTTP.
+// marker is the proof. Tenants without an installed certificate (where the
+// cert-aware site step keeps the HTTP-only vhost) prove routing over HTTP.
+//
+// Staging runs entirely AS THE SITE USER: the current/ tree is tenant-controlled
+// and outside the appdirs symlink guard, so root must never create or write
+// under it (a symlinked current/public could redirect root's write anywhere).
+// As the site user, even a check-to-use race lands inside the tenant's own
+// privilege. The marker leaf is random per run and created with noclobber, so a
+// reused box's real app file is never replaced or deleted.
 func assertSiteServesOwnContent(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server, site config.Site, useHTTPS, insecureTLS bool) {
 	t.Helper()
+	user := srv.SiteUser(site)
 	marker := "berth-tenant-" + config.PoolName(site.Domain)
 	docroot := site.DeployPath + "/current/public"
-	probe := docroot + "/berth-tenant-probe.php"
+	var leafRand [8]byte
+	if _, err := rand.Read(leafRand[:]); err != nil {
+		t.Fatalf("%s: probe leaf entropy: %v", site.Domain, err)
+	}
+	leaf := "berth-tenant-probe-" + hex.EncodeToString(leafRand[:]) + ".php"
+	probe := docroot + "/" + leaf
 
-	// Stage: a pre-deploy box has no current/ tree — create it owned by the site
-	// user (as a deploy would), remembering the deepest component that already
-	// existed so cleanup removes exactly what we created and nothing pre-existing
-	// (a deployed box's current/ tree is never touched).
-	created := ""
-	if res, err := c.Run(ctx, "test -d "+shQuote(docroot), nil); err != nil {
-		t.Fatalf("%s: probe docroot: %v", site.Domain, err)
+	// Symlink-escape guard: resolve the docroot as the site user and refuse to
+	// stage unless it stays under deploy_path.
+	if res, err := c.Run(ctx, "sudo -u "+user+" realpath -m "+shQuote(docroot), nil); err != nil {
+		t.Fatalf("%s: resolve docroot: %v", site.Domain, err)
 	} else if res.ExitCode != 0 {
-		current := site.DeployPath + "/current"
-		if res, err := c.Run(ctx, "test -e "+shQuote(current), nil); err != nil {
-			t.Fatalf("%s: probe current: %v", site.Domain, err)
+		t.Fatalf("%s: resolve docroot: exit %d, stderr %q", site.Domain, res.ExitCode, strings.TrimSpace(res.Stderr))
+	} else if resolved := strings.TrimSpace(res.Stdout); !strings.HasPrefix(resolved, site.DeployPath+"/") {
+		t.Fatalf("%s: docroot %s resolves to %q, outside deploy_path %s — refusing to stage the probe",
+			site.Domain, docroot, resolved, site.DeployPath)
+	}
+	// Collision guard before cleanup is armed: after this check, anything at the
+	// probe path was created by this run, so the deferred rm -f is provably safe.
+	if res, err := c.Run(ctx, "sudo -u "+user+" test -e "+shQuote(probe), nil); err != nil {
+		t.Fatalf("%s: probe collision check: %v", site.Domain, err)
+	} else if res.ExitCode == 0 {
+		t.Fatalf("%s: probe path %s already exists — refusing to touch it", site.Domain, probe)
+	}
+
+	// Stage: a pre-deploy box has no current/ tree — create the missing levels
+	// as the site user (as a deploy would), remembering exactly which levels
+	// were missing so cleanup removes only what this run created (a deployed
+	// box's current/ tree is never touched).
+	var createdDirs []string
+	for _, dir := range []string{site.DeployPath + "/current", docroot} {
+		if res, err := c.Run(ctx, "sudo -u "+user+" test -e "+shQuote(dir), nil); err != nil {
+			t.Fatalf("%s: probe %s: %v", site.Domain, dir, err)
 		} else if res.ExitCode != 0 {
-			created = current
-		} else {
-			created = docroot
+			createdDirs = append(createdDirs, dir)
 		}
-		user := srv.SiteUser(site)
-		if res, err := c.Run(ctx, "install -d -o "+user+" -g "+user+" "+shQuote(docroot), nil); err != nil {
+	}
+	if len(createdDirs) > 0 {
+		if res, err := c.Run(ctx, "sudo -u "+user+" mkdir -p "+shQuote(docroot), nil); err != nil {
 			t.Fatalf("%s: create %s: %v", site.Domain, docroot, err)
 		} else if res.ExitCode != 0 {
 			t.Fatalf("%s: create %s: exit %d, stderr %q", site.Domain, docroot, res.ExitCode, strings.TrimSpace(res.Stderr))
 		}
 	}
-	// Cleanup even on failure: the probe file, and only the tree we created. The
-	// defer is registered before WriteFile so a failed write still removes dirs.
+	// Cleanup even on failure, as the site user, on a FRESH context (the test
+	// context may already be cancelled or exhausted), failing the test loudly on
+	// any error: the unique probe file, then rmdir — empty-only, never rm -rf —
+	// each level this run created, deepest first. Registered before the probe
+	// write so a failed write still removes the directories.
 	defer func() {
-		_, _ = c.Run(ctx, "rm -f "+shQuote(probe), nil)
-		if created != "" {
-			_, _ = c.Run(ctx, "rm -rf "+shQuote(created), nil)
+		cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if res, err := c.Run(cctx, "sudo -u "+user+" rm -f "+shQuote(probe), nil); err != nil {
+			t.Errorf("%s: cleanup %s: %v", site.Domain, probe, err)
+		} else if res.ExitCode != 0 {
+			t.Errorf("%s: cleanup %s: exit %d, stderr %q", site.Domain, probe, res.ExitCode, strings.TrimSpace(res.Stderr))
+		}
+		for i := len(createdDirs) - 1; i >= 0; i-- {
+			if res, err := c.Run(cctx, "sudo -u "+user+" rmdir "+shQuote(createdDirs[i]), nil); err != nil {
+				t.Errorf("%s: cleanup %s: %v", site.Domain, createdDirs[i], err)
+			} else if res.ExitCode != 0 {
+				t.Errorf("%s: cleanup %s: exit %d, stderr %q", site.Domain, createdDirs[i], res.ExitCode, strings.TrimSpace(res.Stderr))
+			}
 		}
 	}()
-	if err := c.WriteFile(ctx, bssh.FileSpec{
-		Path:    probe,
-		Content: []byte("<?php echo '" + marker + "';\n"),
-		Owner:   srv.SiteUser(site),
-		Group:   srv.SiteUser(site),
-		Mode:    0o644,
-		Sudo:    true,
-	}); err != nil {
+	// Write the marker as the site user via stdin; noclobber (set -C) keeps the
+	// creation exclusive even against a race after the collision check.
+	writeCmd := "sudo -u " + user + " sh -c " + shQuote("set -C; umask 022; cat > "+shQuote(probe))
+	if res, err := c.Run(ctx, writeCmd, []byte("<?php echo '"+marker+"';\n")); err != nil {
 		t.Fatalf("%s: write probe: %v", site.Domain, err)
+	} else if res.ExitCode != 0 {
+		t.Fatalf("%s: write probe %s: exit %d, stderr %q", site.Domain, probe, res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 
 	scheme, port := "http", "80"
@@ -270,7 +341,7 @@ func assertSiteServesOwnContent(ctx context.Context, t *testing.T, c *bssh.Clien
 	}
 	cl := &http.Client{Timeout: 10 * time.Second, Transport: tr,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	url := scheme + "://" + net.JoinHostPort(srv.Host, port) + "/berth-tenant-probe.php"
+	url := scheme + "://" + net.JoinHostPort(srv.Host, port) + "/" + leaf
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		t.Fatalf("%s: build request: %v", site.Domain, err)

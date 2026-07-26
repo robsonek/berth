@@ -71,8 +71,10 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	// BERTH_TEST_SKIP_SSL=true forces a hard skip even for self-signed.
 	sslEnv := os.Getenv("BERTH_TEST_SKIP_SSL")
 	skipSSL := sslEnv == "true" || (sslEnv == "" && !anySiteSelfSigned(srv))
-	// Explicit opt-in to real-DNS SSL testing: only then may a Let's Encrypt
-	// site's HTTPS side be demanded (issuance is skipped without DNS).
+	// Explicit opt-in to real-DNS SSL testing: only then is a Let's Encrypt
+	// site's certificate CA-verified (issuance is skipped without DNS). Whether
+	// a site is probed over HTTPS at all is decided per site from the actual
+	// on-host cert state — see siteHTTPSProbe.
 	sslExplicit := sslEnv == "false"
 
 	// Run the full pipeline.
@@ -129,9 +131,10 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	// 2..n (berth writes no default_server, so nginx answers with the FIRST vhost
 	// for any unmatched name). Stage a tenant-unique PHP marker per site and
 	// demand it back through the host address with the site's own Host header
-	// (and SNI over TLS) — HTTPS eligibility is per site, see siteHTTPSProbe.
+	// (and SNI over TLS) — HTTPS eligibility comes from the on-host cert state,
+	// per site, see siteHTTPSProbe.
 	for _, site := range srv.Sites {
-		useHTTPS, insecureTLS := siteHTTPSProbe(site, skipSSL, sslExplicit)
+		useHTTPS, insecureTLS := siteHTTPSProbe(invCtx, t, client, site, sslExplicit)
 		assertSiteServesOwnContent(invCtx, t, client, srv, site, useHTTPS, insecureTLS)
 	}
 
@@ -154,7 +157,7 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	assertSlowQueryLog(invCtx, t, client, srv)
 	assertBreakGlass(invCtx, t, client, srv)
 	// Each site's post-reload probe rides the scheme its TLS state provably serves.
-	assertDeployReload(invCtx, t, client, srv, skipSSL, sslExplicit)
+	assertDeployReload(invCtx, t, client, srv, sslExplicit)
 
 	// berth's defining contract: an immediate second run must change nothing
 	// (every step satisfied), except preflight which re-runs apt by design.
