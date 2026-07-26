@@ -133,15 +133,26 @@ func (tuning) Requires() []string { return []string{"database"} }
 // in /var/log/mysql, the directory Debian's mariadb packaging already
 // logrotates, so no berth logrotate entry is needed; the new settings load on
 // the restart Apply already performs (checkTuned's liveness gate covers it).
+// The four parity knobs (log file size, tmp/heap table size, max connections,
+// max allowed packet) are conditional blocks: unset renders no directive, so
+// the default output stays byte-identical to the pre-pack-2 render.
 func renderMariaDBTuning(s *config.Server) ([]byte, error) {
 	return templates.Render("mariadb_tuning.cnf.tmpl", struct {
-		BufferPool    string
-		SlowQueryLog  bool
-		LongQueryTime int
+		BufferPool       string
+		LogFileSize      string
+		TmpTableSize     string
+		MaxConnections   int
+		MaxAllowedPacket string
+		SlowQueryLog     bool
+		LongQueryTime    int
 	}{
-		BufferPool:    s.Tuning.MariaDBBufferPoolEff(),
-		SlowQueryLog:  s.Tuning.MariaDBSlowQueryLog,
-		LongQueryTime: s.Tuning.MariaDBLongQueryTimeEff(),
+		BufferPool:       s.Tuning.MariaDBBufferPoolEff(),
+		LogFileSize:      s.Tuning.MariaDBLogFileSize,
+		TmpTableSize:     s.Tuning.MariaDBTmpTableSize,
+		MaxConnections:   s.Tuning.MariaDBMaxConnections,
+		MaxAllowedPacket: s.Tuning.MariaDBMaxAllowedPacket,
+		SlowQueryLog:     s.Tuning.MariaDBSlowQueryLog,
+		LongQueryTime:    s.Tuning.MariaDBLongQueryTimeEff(),
 	})
 }
 

@@ -1,5 +1,18 @@
 [mysqld]
 innodb_buffer_pool_size = {{ .BufferPool }}
+{{- if .LogFileSize }}
+innodb_log_file_size = {{ .LogFileSize }}
+{{- end }}
+{{- if .TmpTableSize }}
+tmp_table_size = {{ .TmpTableSize }}
+max_heap_table_size = {{ .TmpTableSize }}
+{{- end }}
+{{- if .MaxConnections }}
+max_connections = {{ .MaxConnections }}
+{{- end }}
+{{- if .MaxAllowedPacket }}
+max_allowed_packet = {{ .MaxAllowedPacket }}
+{{- end }}
 {{- if .SlowQueryLog }}
 slow_query_log = 1
 slow_query_log_file = /var/log/mysql/mariadb-slow.log
