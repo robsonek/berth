@@ -91,7 +91,7 @@ type BackupsAnswers struct {
 type SiteAnswers struct {
 	Domain     string
 	DeployPath string
-	User       string // "" => derived (or "deploy" for a single site)
+	User       string // "" => ToServer fills in the domain-derived name (YAML stays explicit)
 	DBName     string
 	DBUser     string
 	Repository string

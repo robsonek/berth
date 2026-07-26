@@ -18,7 +18,7 @@ func TestSupervisorRequiresBase(t *testing.T) {
 
 func TestSupervisorCheckSatisfiedWhenInstalledAndUp(t *testing.T) {
 	f := bssh.NewFakeRunner()
-	f.On("dpkg -s supervisor", bssh.Result{ExitCode: 0})
+	f.On("dpkg -s supervisor", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("systemctl is-active supervisor", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled supervisor", bssh.Result{ExitCode: 0})
 	cr, err := Supervisor().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
@@ -32,7 +32,7 @@ func TestSupervisorCheckSatisfiedWhenInstalledAndUp(t *testing.T) {
 
 func TestSupervisorCheckUnsatisfiedWhenNotRunning(t *testing.T) {
 	f := bssh.NewFakeRunner()
-	f.On("dpkg -s supervisor", bssh.Result{ExitCode: 0})
+	f.On("dpkg -s supervisor", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("systemctl is-active supervisor", bssh.Result{ExitCode: 3}) // inactive
 	f.On("systemctl is-enabled supervisor", bssh.Result{ExitCode: 0})
 	cr, err := Supervisor().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)

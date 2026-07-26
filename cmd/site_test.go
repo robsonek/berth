@@ -69,20 +69,21 @@ func TestPrintDeployKeysNotProvisioned(t *testing.T) {
 }
 
 func TestPrintDeployKeysSingleSiteDefaultUser(t *testing.T) {
-	// A single-site config with no explicit user keeps the legacy "deploy"
+	// A single-site config with no explicit user runs as the domain-derived
 	// account — the key path must follow SiteUser, not the raw config field.
 	s := &config.Server{
 		Host:  "203.0.113.10",
 		Sites: []config.Site{{Domain: "a.example.com", DeployPath: "/srv/a", Repository: "git@github.com:acme/a.git"}},
 	}
+	user := config.DerivedSiteUser("a.example.com")
 	f := bssh.NewFakeRunner()
-	f.On("cat /home/deploy/.ssh/id_ed25519.pub", bssh.Result{ExitCode: 0, Stdout: "ssh-ed25519 AAAAC3Nz deploy@github.com\n"})
+	f.On("cat /home/"+user+"/.ssh/id_ed25519.pub", bssh.Result{ExitCode: 0, Stdout: "ssh-ed25519 AAAAC3Nz " + user + "@github.com\n"})
 	var out bytes.Buffer
 	if err := printDeployKeys(context.Background(), &out, s, f, ""); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "deploy@github.com") {
-		t.Errorf("expected the deploy user's key printed:\n%s", out.String())
+	if !strings.Contains(out.String(), user+"@github.com") {
+		t.Errorf("expected the derived user's key printed:\n%s", out.String())
 	}
 }
 

@@ -44,7 +44,7 @@ func (accounts) Name() string       { return "accounts" }
 func (accounts) Requires() []string { return []string{"base"} }
 
 // siteUsers returns the distinct OS users that own/run the sites, in site order.
-// Single-site keeps the legacy shared "deploy"; multi-site isolates per site.
+// Explicit sites[].user wins; otherwise the name derives from the domain.
 func siteUsers(s *config.Server) []string {
 	var users []string
 	seen := map[string]bool{}
@@ -113,6 +113,18 @@ func sudoersValid(ctx context.Context, r bssh.Runner, path string) (bool, error)
 }
 
 func (a accounts) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
+	// Tree-safety preflight first: an existing tree under a different
+	// identity (or a symlinked tree) must refuse BEFORE any account, key or
+	// sudoers is created — an orphan-free failure. appdirs re-asserts this
+	// for --only appdirs runs.
+	for _, site := range s.Sites {
+		if err := assertNoSymlinkDeployTree(ctx, r, site); err != nil {
+			return provision.CheckResult{}, err
+		}
+		if err := assertSiteTreeOwners(ctx, r, s, site); err != nil {
+			return provision.CheckResult{}, err
+		}
+	}
 	operatorKey, err := operatorPublicKey(s.SSH.Key)
 	if err != nil {
 		return provision.CheckResult{}, err
@@ -281,6 +293,14 @@ func (a accounts) changes() []string {
 }
 
 func (a accounts) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
+	for _, site := range s.Sites {
+		if err := assertNoSymlinkDeployTree(ctx, r, site); err != nil {
+			return err
+		}
+		if err := assertSiteTreeOwners(ctx, r, s, site); err != nil {
+			return err
+		}
+	}
 	operatorKey, err := operatorPublicKey(s.SSH.Key)
 	if err != nil {
 		return err

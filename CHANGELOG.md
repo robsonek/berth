@@ -3,6 +3,51 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Changed
+
+- **BREAKING: implicit site users are always derived from the domain** — a
+  single-site config without `sites[].user` used to run the site as a shared
+  `deploy` account; it now gets the same derived `b_<slug>_<hash>` account as
+  multi-site configs, so identity no longer flips when a config grows to two
+  sites or shrinks back to one. To keep an existing installation on the old
+  account, pin it explicitly (`user: deploy`). On hosts already provisioned
+  with the old identity, provisioning refuses loudly with that instruction
+  instead of silently re-owning the tree.
+- `berth init` always writes an explicit `user:` for every site (the derived
+  name when the field was left blank), so the generated YAML shows the
+  account your deployer connects as.
+- nginx vhosts: dropped the dead `fastcgi_split_path_info` directive — the
+  `location ~ \.php$` anchor can never yield PATH_INFO, and nothing read it.
+- `-v/--verbose` is now a real verbose mode: plain output additionally shows
+  each satisfied step's reason and each applied step's change list (it used
+  to merely disable the TUI, exactly like `--no-tty`).
+
+### Added
+
+- **Owner guard for per-site directories** — when `deploy_path`, `shared/`
+  or `shared/tmp` already exists but is owned by a different user than the
+  configured/derived site user, the `accounts` and `appdirs` steps refuse
+  loudly (even with `--force`) with remediation instructions, instead of
+  re-owning the tree and orphaning the previous account, deploy key and
+  sudoers entry.
+
+### Fixed
+
+- Hostname validation no longer accepts non-ASCII letters that merely
+  case-fold into a-z (e.g. U+017F); uppercase site domains still get the
+  dedicated "must be lowercase" hint (`host` and `system.hostname` accept
+  uppercase as before).
+- Package probes (`dpkg -s`) now parse the `Status:` line and require the
+  package to be actually installed, so a package removed but not purged
+  (dpkg state `rc`) no longer counts as installed and gets reinstalled
+  instead of skipped; held-but-installed packages still count as installed.
+- `berth init` no longer prints success and then possibly fails on
+  `.gitignore`: the vestigial CWD `.gitignore` management was removed
+  entirely — secret caches live under `~/.berth` (never in the working
+  directory) and the generated YAML is secret-free by design.
+
 ## [0.17.0] — 2026-07-26
 
 ### Added

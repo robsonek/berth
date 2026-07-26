@@ -117,11 +117,11 @@ func (php) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 		"write PHP tuning drop-in (memory_limit, upload, limits)",
 		"ensure " + phpLogDir,
 	}
-	res, err := r.Run(ctx, "dpkg -s php"+s.PHP.Version+"-fpm", nil)
+	installed, err := pkgInstalled(ctx, r, "php"+s.PHP.Version+"-fpm")
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	if res.ExitCode != 0 {
+	if !installed {
 		return provision.CheckResult{Satisfied: false, Changes: changes}, nil
 	}
 	// The production OPcache drop-in must be the berth-managed one and up to date.
@@ -189,11 +189,11 @@ func (php) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 	// The engine PDO driver must be installed too (a Postgres box with only pdo_mysql
 	// can't run a DB_CONNECTION=pgsql app even though fpm is present).
 	pdoPkg := "php" + s.PHP.Version + "-" + phpPDOExt(s.Database.Engine)
-	pdo, err := r.Run(ctx, "dpkg -s "+pdoPkg, nil)
+	pdo, err := pkgInstalled(ctx, r, pdoPkg)
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	if pdo.ExitCode != 0 {
+	if !pdo {
 		return provision.CheckResult{Satisfied: false, Reason: pdoPkg + " not installed", Changes: changes}, nil
 	}
 	return provision.CheckResult{Satisfied: true, Reason: "php" + s.PHP.Version + "-fpm installed; OPcache and FPM tuning in place"}, nil

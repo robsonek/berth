@@ -70,7 +70,6 @@ server {
     location ~ \.php$ {
         try_files $uri =404;
         fastcgi_pass unix:/run/php/berth-app_example_com.sock;
-        fastcgi_split_path_info ^(.+\.php)(/.+)$;
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
         fastcgi_param HTTPS on;

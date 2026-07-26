@@ -151,7 +151,7 @@ sites:                         # one or more
   - domain: app.example.com            # required
     deploy_path: /var/www/app          # required — absolute path
     user: app                          # optional — derived from the domain when
-                                       # omitted (a lone site keeps the "deploy" user)
+                                       # omitted (pin it to choose the account name)
     repository: git@github.com:acme/app.git   # optional — SSH git URL only; berth
                                        # generates a per-site deploy key for it
                                        # (print it with `berth site key`)
@@ -499,9 +499,10 @@ sites:
     ssl_email: admin@example.com
 ```
 
-A single-site config may keep the legacy top-level `database: { name, user }`
-and the shared `deploy` user; with multiple sites each site needs its own
-`database` block, and the OS users must be distinct.
+A single-site config may keep the legacy top-level `database: { name, user }`;
+with multiple sites each site needs its own `database` block, and the OS
+users must be distinct. A site without `user:` always runs as its derived
+`b_<slug>_<hash>` account, no matter how many sites the config lists.
 
 Each TLS site uses Let's Encrypt by default; set `ssl_mode: selfsigned` on a site
 to generate a self-signed certificate instead (no public DNS or `ssl_email`
@@ -523,12 +524,23 @@ cron, its Supervisor programs, its backup script + cron, and — while
 marker are removed; anything foreign is left alone. nginx and PHP-FPM are
 then reloaded. `--dry-run` previews every planned removal.
 
-> **Warning — pin `sites[].user` before shrinking to one site.** With
-> implicit (derived) users, a config that shrinks to a SINGLE remaining site
-> changes that survivor's OS user to the legacy `deploy` identity — the same
-> rule that governs growing from one site to two. Set `user:` explicitly on
-> every surviving site BEFORE removing, or the next run re-owns the
-> survivor's tree and mints a new deploy key.
+> **Note — site identity never depends on the site count.** A site's OS user
+> is `sites[].user` when set, otherwise derived from the domain — growing or
+> shrinking the config does not re-own anything. berth also refuses to adopt
+> an existing tree silently: when `deploy_path`, `shared/` or `shared/tmp`
+> is owned by a different user than the configured one, provisioning fails
+> loudly. To keep the existing identity, pin `sites[].user` to the current
+> owner (when that owner is a valid, non-reserved site user — otherwise
+> migrate). To actually move a site to a new user: create the target account
+> first (`useradd -m -s /bin/bash <user>` — the derived account does not
+> exist yet at that point), stop the site's queue/daemon processes,
+> `chown -R` the deploy tree, then move the deploy key pair and re-own it —
+> `install -d -o <user> -g <user> -m 700 /home/<user>/.ssh`, move
+> `id_ed25519` and `id_ed25519.pub` there and `chown <user>:<user>` both (a
+> bare `mv` keeps the OLD owner, so the new user could not read its 0600
+> key while every check stays green). Then run a FULL `berth provision`
+> (not `--only`) and finally remove the old account, its sudoers file and
+> its home once everything serves.
 
 **Data and access are deliberately kept** — berth never deletes data
 implicitly. Remove manually if you want them gone:

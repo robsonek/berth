@@ -137,8 +137,8 @@ func TestPHPApplyWritesOpcacheDropIn(t *testing.T) {
 func TestPHPCheckUnsatisfiedWhenOpcacheDropInMissing(t *testing.T) {
 	s := &config.Server{PHP: config.PHP{Version: "8.4"}}
 	f := bssh.NewFakeRunner()
-	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0})                     // installed
-	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{ExitCode: 1}) // drop-in absent
+	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"}) // installed
+	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{ExitCode: 1})                       // drop-in absent
 	cr, err := PHP().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -159,13 +159,13 @@ func TestPHPCheckSatisfiedWhenInstalledAndOpcacheManaged(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
-	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0})
+	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(want), ExitCode: 0})
 	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{Stdout: string(wantTuning), ExitCode: 0})
 	f.On("systemctl is-active php8.4-fpm", bssh.Result{}) // alive
 	f.On(reloadedSinceCmd("php8.4-fpm", opcacheDropInPath("8.4"), phpTuningDropInPath("8.4")), bssh.Result{})
 	f.On("test -d "+shQuote(phpLogDir), bssh.Result{ExitCode: 0})
-	f.On("dpkg -s php8.4-mysql", bssh.Result{ExitCode: 0}) // engine "" -> pdo_mysql, installed
+	f.On("dpkg -s php8.4-mysql", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"}) // engine "" -> pdo_mysql, installed
 	cr, err := PHP().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -196,7 +196,7 @@ func TestPHPCheckUnsatisfiedWhenPDODriverMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
-	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0})
+	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(want), ExitCode: 0})
 	wantTuning, err := renderPHPTuning(s)
 	if err != nil {
@@ -223,7 +223,7 @@ func TestPHPCheckUnsatisfiedWhenLogDirMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
-	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0})
+	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(want), ExitCode: 0})
 	wantTuning, err := renderPHPTuning(s)
 	if err != nil {
@@ -294,7 +294,7 @@ func TestPHPCheckUnsatisfiedWhenTuningDropInMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
-	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0})
+	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(wantOp), ExitCode: 0})
 	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{ExitCode: 1}) // absent
 	cr, err := PHP().Check(context.Background(), provision.RunCtx{}, s, f)
@@ -410,11 +410,11 @@ func TestPHPCheckUnsatisfiedWhenFPMDead(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
-	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0})
+	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(want), ExitCode: 0})
 	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{Stdout: string(wantTuning), ExitCode: 0})
 	f.On("test -d "+shQuote(phpLogDir), bssh.Result{ExitCode: 0})
-	f.On("dpkg -s php8.4-mysql", bssh.Result{ExitCode: 0})
+	f.On("dpkg -s php8.4-mysql", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("systemctl is-active php8.4-fpm", bssh.Result{ExitCode: 3}) // dead
 	cr, err := PHP().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
@@ -441,11 +441,11 @@ func TestPHPCheckUnsatisfiedWhenDropInsNewerThanStamp(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
-	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0})
+	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(want), ExitCode: 0})
 	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{Stdout: string(wantTuning), ExitCode: 0})
 	f.On("test -d "+shQuote(phpLogDir), bssh.Result{ExitCode: 0})
-	f.On("dpkg -s php8.4-mysql", bssh.Result{ExitCode: 0})
+	f.On("dpkg -s php8.4-mysql", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("systemctl is-active php8.4-fpm", bssh.Result{})
 	f.On(reloadedSinceCmd("php8.4-fpm", opcacheDropInPath("8.4"), phpTuningDropInPath("8.4")), bssh.Result{ExitCode: 1})
 	cr, err := PHP().Check(context.Background(), provision.RunCtx{}, s, f)

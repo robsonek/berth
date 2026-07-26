@@ -38,7 +38,7 @@ func stubNginxApplyTail(f *bssh.FakeRunner) {
 
 func TestNginxCheckSatisfiedWhenInstalledAndUp(t *testing.T) {
 	f := bssh.NewFakeRunner()
-	f.On("dpkg -s nginx", bssh.Result{ExitCode: 0})
+	f.On("dpkg -s nginx", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
 	stubDefaultsAbsent(f)
@@ -57,7 +57,7 @@ func TestNginxCheckUnsatisfiedWhenConfNewerThanStamp(t *testing.T) {
 	// daemon on the old config while every byte-level probe reads converged —
 	// only the reload stamp catches it.
 	f := bssh.NewFakeRunner()
-	f.On("dpkg -s nginx", bssh.Result{ExitCode: 0})
+	f.On("dpkg -s nginx", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
 	stubDefaultsAbsent(f)
@@ -88,7 +88,7 @@ func TestNginxCheckUnsatisfiedWhenNotInstalled(t *testing.T) {
 
 func TestNginxCheckUnsatisfiedWhenNotRunning(t *testing.T) {
 	f := bssh.NewFakeRunner()
-	f.On("dpkg -s nginx", bssh.Result{ExitCode: 0})
+	f.On("dpkg -s nginx", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 3}) // inactive
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
 	stubDefaultsAbsent(f)
@@ -103,7 +103,7 @@ func TestNginxCheckUnsatisfiedWhenNotRunning(t *testing.T) {
 
 func TestNginxCheckUnsatisfiedWhenDefaultSiteEnabled(t *testing.T) {
 	f := bssh.NewFakeRunner()
-	f.On("dpkg -s nginx", bssh.Result{ExitCode: 0})
+	f.On("dpkg -s nginx", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
 	// The Debian default catch-all is still enabled.
@@ -146,7 +146,7 @@ func TestNginxApplyDisablesStockDefaults(t *testing.T) {
 func TestNginxCheckSourceNginxRequiresRepo(t *testing.T) {
 	s := &config.Server{Nginx: config.Nginx{Source: "nginx"}}
 	f := bssh.NewFakeRunner()
-	f.On("dpkg -s nginx", bssh.Result{ExitCode: 0})
+	f.On("dpkg -s nginx", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
 	stubDefaultsAbsent(f)
@@ -182,7 +182,7 @@ func TestNginxCheckUnsatisfiedWhenBridgeMissingOrForeign(t *testing.T) {
 	s := &config.Server{Nginx: config.Nginx{Source: "nginx"}}
 	stubs := func(bridge bssh.Result) *bssh.FakeRunner {
 		f := bssh.NewFakeRunner()
-		f.On("dpkg -s nginx", bssh.Result{ExitCode: 0})
+		f.On("dpkg -s nginx", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 		f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
 		f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
 		stubDefaultsAbsent(f)

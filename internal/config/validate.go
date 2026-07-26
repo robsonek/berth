@@ -11,7 +11,13 @@ import (
 )
 
 var (
-	reHostname     = regexp.MustCompile(`^(?i)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
+	// Explicit a-zA-Z on purpose (NOT `(?i)`): Go's case-insensitive matching
+	// uses Unicode simple folding, which lets non-ASCII letters that fold into
+	// a-z (e.g. U+017F LONG S -> s) pass — and the lowercase guard in
+	// Site.validate cannot catch them either (ToLower(U+017F) == U+017F).
+	// Uppercase ASCII still matches here so that guard can keep its friendly
+	// "must be lowercase" message.
+	reHostname     = regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`)
 	reSQLIdent     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
 	rePHPVer       = regexp.MustCompile(`^\d+\.\d+$`)
 	reEmail        = regexp.MustCompile(`^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$`)
@@ -72,6 +78,15 @@ var reservedOSUsers = map[string]bool{
 	"messagebus": true, "sshd": true,
 	"systemd-network": true, "systemd-resolve": true, "systemd-timesync": true,
 	"berth": true,
+}
+
+// IsValidSiteOSUser reports whether name could be configured as sites[].user:
+// a valid Linux username that is not reserved by the system or berth. Steps
+// use it to decide whether an error message may suggest pinning an
+// encountered directory owner as the site user (stat's UNKNOWN placeholder,
+// numeric uids and reserved accounts must never be suggested).
+func IsValidSiteOSUser(name string) bool {
+	return reLinuxUser.MatchString(name) && !reservedOSUsers[name]
 }
 
 // deniedDeployRoots are filesystem trees a deploy_path may never equal or

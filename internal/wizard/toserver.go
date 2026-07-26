@@ -5,6 +5,8 @@ import "github.com/robsonek/berth/internal/config"
 // ToServer maps collected answers into a *config.Server. It is a pure, total
 // mapping — no I/O, no mutation of server-level choices (HTTP/3↔nginx is resolved
 // during orchestration, not here). config.Server.Validate() remains authoritative.
+// A site left without an OS user gets the domain-derived name filled in, so the
+// marshaled YAML always carries an explicit user:.
 func (a Answers) ToServer() *config.Server {
 	srv := &config.Server{
 		Host:     a.Host,
@@ -35,10 +37,18 @@ func (a Answers) ToServer() *config.Server {
 		Backups:        config.Backups{Enabled: a.Backups.Enabled, Retention: a.Backups.RetentionDays, Schedule: a.Backups.Schedule},
 	}
 	for _, sa := range a.Sites {
+		user := sa.User
+		if user == "" {
+			// Emit the derived name explicitly so the generated YAML pins the
+			// site identity: the operator needs the account name for their
+			// deployer config, and a later domain edit must not silently
+			// re-derive it.
+			user = config.DerivedSiteUser(sa.Domain)
+		}
 		site := config.Site{
 			Domain:     sa.Domain,
 			DeployPath: sa.DeployPath,
-			User:       sa.User,
+			User:       user,
 			Repository: sa.Repository,
 			Database:   config.SiteDatabase{Name: sa.DBName, User: sa.DBUser},
 			SSL:        sa.SSL,
