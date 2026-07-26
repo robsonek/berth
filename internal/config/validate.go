@@ -453,12 +453,38 @@ func (b Backups) validate() error {
 	return nil
 }
 
+// maxSiteDomainLen caps a site domain so every on-host artifact name berth
+// derives from it fits the kernel limits. poolName only swaps dots for
+// underscores, so len(pool) == len(domain). The binding budgets today:
+//
+//	unix sockets (sun_path, 107 usable bytes):
+//	  /run/berth-valkey/<pool>/valkey.sock -> 30 + len -> len <= 77 (tightest)
+//	  /run/php/berth-<pool>.sock           -> 20 + len -> len <= 87
+//	filenames (NAME_MAX, 255 bytes):
+//	  berth-valkey-<pool>.service          -> 21 + len -> len <= 234
+//	  berth-backup-<pool> (cron + script)  -> 13 + len
+//	  berth-site-<pool> (scheduler cron)   -> 11 + len
+//
+// The cap is the TRUE universal hard bound, 77 — every accepted domain works
+// with every feature, and every longer one breaks something. The Valkey
+// budget applies unconditionally (never gate this on valkey being enabled: a
+// domain valid only while valkey is off would blow up the day the knob is
+// switched on). Recompute this bound if any prefix above ever grows — there
+// is deliberately no headroom, because headroom rejects working domains.
+// Without the guard a longer (still RFC-valid, up to 253 chars) domain passed
+// validation and then EVERY Apply failed creating the derived artifact,
+// permanently, after services were already reloaded.
+const maxSiteDomainLen = 77
+
 func (st *Site) validate() error {
 	if !reHostname.MatchString(st.Domain) {
 		return fmt.Errorf("domain %q is not a valid hostname", st.Domain)
 	}
 	if st.Domain != strings.ToLower(st.Domain) {
 		return fmt.Errorf("domain %q must be lowercase: certbot lowercases DNS names while nginx and certificate file paths are case-sensitive", st.Domain)
+	}
+	if len(st.Domain) > maxSiteDomainLen {
+		return fmt.Errorf("domain %q is %d characters; berth derives per-site artifact names from it (unix sockets, systemd units, cron files) that must fit kernel path limits — use a domain of at most %d characters", st.Domain, len(st.Domain), maxSiteDomainLen)
 	}
 	if err := ValidateDeployPath(st.DeployPath); err != nil {
 		return err

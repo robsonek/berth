@@ -178,6 +178,44 @@ func TestValidateAcceptsLowercaseDomain(t *testing.T) {
 	}
 }
 
+// TestValidateDomainLengthBoundary pins the derived-artifact length guard.
+// berth derives on-host names from the domain (poolName only swaps dots for
+// underscores, so len(pool) == len(domain)); an over-long but RFC-valid
+// hostname used to pass validation and then EVERY Apply failed permanently
+// creating the derived socket/cron artifacts. The longest accepted length
+// must pass and one more character must fail.
+func TestValidateDomainLengthBoundary(t *testing.T) {
+	// The cap must be the TRUE universal hard bound, not a headroom pick: the
+	// tightest budget is the per-site Valkey socket path against sun_path,
+	// 107 - 30 = 77 (unconditionally, so a config never turns invalid the day
+	// valkey: true is switched on). A lower cap rejects working 71-77 char
+	// domains; recompute before moving this.
+	if maxSiteDomainLen != 77 {
+		t.Fatalf("maxSiteDomainLen = %d, want the universal hard bound 77 (= 107-byte sun_path - 30-byte Valkey socket overhead)", maxSiteDomainLen)
+	}
+	// 63-char label + "." + filler label + ".com" -> total is 68 + len(filler).
+	domain := func(total int) string {
+		return strings.Repeat("a", 63) + "." + strings.Repeat("b", total-68) + ".com"
+	}
+	ok := base()
+	ok.Sites[0].Domain = domain(maxSiteDomainLen)
+	if len(ok.Sites[0].Domain) != maxSiteDomainLen {
+		t.Fatalf("fixture bug: built a %d-char domain, want %d", len(ok.Sites[0].Domain), maxSiteDomainLen)
+	}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("a %d-char domain must validate: %v", maxSiteDomainLen, err)
+	}
+	bad := base()
+	bad.Sites[0].Domain = domain(maxSiteDomainLen + 1)
+	err := bad.Validate()
+	if err == nil {
+		t.Fatalf("a %d-char domain must be rejected: its derived artifact names exceed kernel limits", maxSiteDomainLen+1)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprint(maxSiteDomainLen)) {
+		t.Errorf("the error must state the limit; got %v", err)
+	}
+}
+
 func TestValidateDeployPathDeniesEverySystemRoot(t *testing.T) {
 	// Every entry of the deny-list must be refused both as an exact path (the
 	// depth>=2 rule catches single-component roots) and as a parent of the

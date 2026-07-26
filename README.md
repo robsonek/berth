@@ -494,6 +494,44 @@ issues certificates against the Let's Encrypt staging CA; a later run without
 the flag detects the staging certificate and automatically re-issues it
 against production.
 
+### Removing a site
+
+Delete the site's entry from the YAML and re-run `berth provision`. The next
+run removes everything that *serves* the site: its nginx vhost and enabled
+symlink, its PHP-FPM pool (for the configured PHP version), its scheduler
+cron, its Supervisor programs, its backup script + cron, and — while
+`valkey: true` — its Valkey instance. Only files carrying the berth managed
+marker are removed; anything foreign is left alone. nginx and PHP-FPM are
+then reloaded. `--dry-run` previews every planned removal.
+
+> **Warning — pin `sites[].user` before shrinking to one site.** With
+> implicit (derived) users, a config that shrinks to a SINGLE remaining site
+> changes that survivor's OS user to the legacy `deploy` identity — the same
+> rule that governs growing from one site to two. Set `user:` explicitly on
+> every surviving site BEFORE removing, or the next run re-owns the
+> survivor's tree and mints a new deploy key.
+
+**Data and access are deliberately kept** — berth never deletes data
+implicitly. Remove manually if you want them gone:
+
+- certificates — **required for Let's Encrypt sites**: `certbot delete
+  --cert-name <domain>`. The retained lineage keeps a webroot renewal job
+  whose ACME challenge now lands on the wrong vhost, so `certbot.timer`
+  fails on every renewal attempt until the lineage is deleted. Self-signed
+  certificates are inert; `rm -r /etc/ssl/berth/<domain>` is optional cleanup.
+- database + DB user: `DROP DATABASE`/`DROP USER` (MariaDB) or
+  `dropdb`/`dropuser` (PostgreSQL)
+- the OS account (its home also holds the git deploy key) and its sudoers
+  entry: `deluser --remove-home <user>`, `rm /etc/sudoers.d/<user>`
+- the application tree: `rm -rf <deploy_path>`
+- Valkey state (`/var/lib/berth-valkey/<pool>`) and backup archives
+  (`/var/backups/berth/<pool>/`) are likewise retained
+
+Two related notes: setting `valkey: false` skips the whole Valkey step, so
+orphan instances are cleaned only while it stays `true`; and after changing
+`php.version`, the previous version's FPM unit and pool files are no longer
+managed — clean them up manually.
+
 ## Beyond v1
 
 `berth site:add` (incremental add) and package-manager distribution are planned

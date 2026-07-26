@@ -47,7 +47,7 @@ func assertRuntime(ctx context.Context, t *testing.T, c *bssh.Client, srv *confi
 		}
 
 		if srv.SchedulerEnabled(site) {
-			cron := "/etc/cron.d/berth-" + pool
+			cron := "/etc/cron.d/berth-site-" + pool
 			if perm, err := c.Run(ctx, "stat -c '%U:%G %a' "+cron, nil); err != nil {
 				t.Fatalf("%s: stat cron: %v", site.Domain, err)
 			} else if got := strings.TrimSpace(perm.Stdout); got != "root:root 644" {
