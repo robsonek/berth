@@ -149,6 +149,7 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	assertRuntime(invCtx, t, client, srv)
 	assertOpcacheEffective(invCtx, t, client, srv)
 	assertPHPTuning(invCtx, t, client, srv)
+	assertTuningKnobs(invCtx, t, client, srv)
 	assertAptProvenance(invCtx, t, client, srv)
 	// v0.13 ops quick-wins: per-site client DB credentials, deploy keys, and
 	// the MariaDB slow query log (hostname is asserted in assertSwapSysctl).
