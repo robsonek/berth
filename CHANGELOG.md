@@ -78,6 +78,18 @@ Notable changes to berth. Older releases are documented on the
   stating the limit and the reason; the cap includes the Valkey budget even
   while `valkey` is off, so a valid config never breaks the day the knob is
   switched on.
+- **`cloudflare_only` now locks down every content location** — favicon.ico,
+  robots.txt and `/build/assets/` were reachable directly from origin while the
+  lockdown was on; they are now guarded like the app and PHP locations (the
+  ACME challenge path stays open so certificate issuance/renewal still works).
+- **The PHP location gates on file existence** (`try_files $uri =404;`) so only
+  an existing PHP script is used as `SCRIPT_FILENAME`; a missing `.php` URI
+  follows the existing front-controller 404 path. Both nginx fixes change the
+  managed vhost template, so existing vhosts re-render once on the next run
+  (detected as drift, validated with `nginx -t`, reloaded) and then stay
+  stable.
+- **The composer installer runs from a private temporary directory** instead of
+  a fixed world-writable `/tmp` path, closing a predictable-path/TOCTOU window.
 
 ### Changed
 
@@ -93,6 +105,8 @@ Notable changes to berth. Older releases are documented on the
   `pull_request` trigger fails to fire, the integration suite now proves
   per-site routing with Host-header/SNI probes for every configured site,
   and the `visudo -cf` sudoers gate is pinned by unit tests.
+- **Removed the unused `env.tmpl` template** and its golden test (the `.env`
+  file is built programmatically via `secret.EnvFile`, not from this template).
 
 ## [0.16.0] — 2026-07-26
 
