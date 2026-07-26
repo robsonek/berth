@@ -337,7 +337,10 @@ func TestAccountsApplyGeneratesDeployKeyWhenRepository(t *testing.T) {
 	stubAccountCreate(f, "deploy")
 	f.On("test -e '/home/deploy/.ssh/id_ed25519'", bssh.Result{ExitCode: 1}) // key absent
 	f.On("sudo -u deploy ssh-keygen -t ed25519 -N '' -f '/home/deploy/.ssh/id_ed25519' -C 'deploy@github.com'", bssh.Result{})
-	f.On("sudo -u deploy sh -c 'ssh-keygen -F github.com -f /home/deploy/.ssh/known_hosts >/dev/null 2>&1 || ssh-keyscan github.com >> /home/deploy/.ssh/known_hosts'", bssh.Result{})
+	f.On("test -e '/home/deploy/.ssh/id_ed25519.pub'", bssh.Result{}) // keygen just wrote it
+	kh := "/home/deploy/.ssh/known_hosts"
+	scan := "sudo -u deploy sh -c " + shQuote("ssh-keygen -F "+shQuote("github.com")+" -f "+shQuote(kh)+" >/dev/null 2>&1 || ssh-keyscan "+shQuote("github.com")+" >> "+shQuote(kh))
+	f.On(scan, bssh.Result{})
 
 	stubConsoleLocked(f)
 	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -347,8 +350,8 @@ func TestAccountsApplyGeneratesDeployKeyWhenRepository(t *testing.T) {
 	if !strings.Contains(joined, "ssh-keygen -t ed25519") {
 		t.Errorf("expected ssh-keygen for deploy; calls:\n%s", joined)
 	}
-	if !strings.Contains(joined, "ssh-keyscan github.com") {
-		t.Errorf("expected ssh-keyscan of git host; calls:\n%s", joined)
+	if !calledCmd(f, scan) {
+		t.Errorf("expected the quoted ssh-keyscan of the git host; calls:\n%s", joined)
 	}
 }
 
@@ -446,6 +449,8 @@ func TestAccountsCheckSatisfiedWithDeployKeyPresent(t *testing.T) {
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
 	f.On("test -e '/home/deploy/.ssh/id_ed25519'", bssh.Result{ExitCode: 0})
+	f.On("test -e '/home/deploy/.ssh/id_ed25519.pub'", bssh.Result{ExitCode: 0})
+	f.On("ssh-keygen -F "+shQuote("github.com")+" -f "+shQuote("/home/deploy/.ssh/known_hosts")+" >/dev/null 2>&1", bssh.Result{})
 	stubConsoleLocked(f)
 	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
@@ -453,6 +458,144 @@ func TestAccountsCheckSatisfiedWithDeployKeyPresent(t *testing.T) {
 	}
 	if !cr.Satisfied {
 		t.Errorf("expected satisfied with the deploy key present; got %+v", cr)
+	}
+}
+
+func TestAccountsCheckUnsatisfiedWhenPubMissing(t *testing.T) {
+	// The private key alone is not enough: berth site key prints the .pub and
+	// sends the operator to `berth provision`, which must then actually heal.
+	s := testServerWithKey(t)
+	s.Sites[0].Repository = "git@github.com:owner/repo.git"
+	want := authorizedKeys(testOperatorKey)
+	deploySudoers, err := renderSiteSudoers(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
+	stubAccountExists(f, "deploy", deploySudoers, want)
+	f.On("test -e "+shQuote("/home/deploy/.ssh/id_ed25519"), bssh.Result{})
+	f.On("test -e "+shQuote("/home/deploy/.ssh/id_ed25519.pub"), bssh.Result{ExitCode: 1})
+	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied while the deploy key's .pub is missing")
+	}
+	if !strings.Contains(cr.Reason, ".pub") {
+		t.Errorf("Reason = %q", cr.Reason)
+	}
+}
+
+func TestAccountsCheckUnsatisfiedWhenKnownHostsMissing(t *testing.T) {
+	// Without the git host's known_hosts entry the first deploy fails host-key
+	// verification; the old "Apply re-scans anyway" shortcut was false exactly
+	// when Check reported Satisfied.
+	s := testServerWithKey(t)
+	s.Sites[0].Repository = "git@github.com:owner/repo.git"
+	want := authorizedKeys(testOperatorKey)
+	deploySudoers, err := renderSiteSudoers(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
+	stubAccountExists(f, "deploy", deploySudoers, want)
+	f.On("test -e "+shQuote("/home/deploy/.ssh/id_ed25519"), bssh.Result{})
+	f.On("test -e "+shQuote("/home/deploy/.ssh/id_ed25519.pub"), bssh.Result{})
+	f.On("ssh-keygen -F "+shQuote("github.com")+" -f "+shQuote("/home/deploy/.ssh/known_hosts")+" >/dev/null 2>&1", bssh.Result{ExitCode: 1})
+	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied while the git host's known_hosts entry is missing")
+	}
+	if !strings.Contains(cr.Reason, "known_hosts") {
+		t.Errorf("Reason = %q", cr.Reason)
+	}
+}
+
+func TestAccountsCheckProbesKnownHostsPortToken(t *testing.T) {
+	// A non-22 ssh:// endpoint is stored under "[host]:port"; the probe must
+	// query that token — a bare-host probe would stay unsatisfied forever after
+	// a successful port-aware scan (an unstubbed bare-host command would fail
+	// the FakeRunner here).
+	chdirTemp(t)
+	s := testServerWithKey(t)
+	s.Sites[0].Repository = "ssh://git@git.example.com:2222/owner/repo.git"
+	want := authorizedKeys(testOperatorKey)
+	deploySudoers, err := renderSiteSudoers(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
+	stubAccountExists(f, "deploy", deploySudoers, want)
+	f.On("test -e "+shQuote("/home/deploy/.ssh/id_ed25519"), bssh.Result{})
+	f.On("test -e "+shQuote("/home/deploy/.ssh/id_ed25519.pub"), bssh.Result{})
+	f.On("ssh-keygen -F "+shQuote("[git.example.com]:2222")+" -f "+shQuote("/home/deploy/.ssh/known_hosts")+" >/dev/null 2>&1", bssh.Result{})
+	stubConsoleLocked(f)
+	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("expected satisfied with the [host]:port token present; got %+v", cr)
+	}
+}
+
+func TestAccountsApplyDerivesMissingPub(t *testing.T) {
+	chdirTemp(t)
+	s := testServerWithKey(t)
+	s.Sites[0].Repository = "git@github.com:owner/repo.git"
+	f := bssh.NewFakeRunner()
+	stubAccountCreate(f, "berth")
+	stubAccountCreate(f, "deploy")
+	keyPath := "/home/deploy/.ssh/id_ed25519"
+	f.On("test -e "+shQuote(keyPath), bssh.Result{})                   // private key present -> no keygen -t
+	f.On("test -e "+shQuote(keyPath+".pub"), bssh.Result{ExitCode: 1}) // .pub missing
+	derive := "sudo -u deploy sh -c " + shQuote("ssh-keygen -y -f "+shQuote(keyPath)+" > "+shQuote(keyPath+".pub"))
+	f.On(derive, bssh.Result{})
+	kh := "/home/deploy/.ssh/known_hosts"
+	scan := "sudo -u deploy sh -c " + shQuote("ssh-keygen -F "+shQuote("github.com")+" -f "+shQuote(kh)+" >/dev/null 2>&1 || ssh-keyscan "+shQuote("github.com")+" >> "+shQuote(kh))
+	f.On(scan, bssh.Result{})
+	stubConsoleLocked(f)
+	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if !calledCmd(f, derive) {
+		t.Errorf("expected the .pub to be derived via ssh-keygen -y; calls:\n%s", strings.Join(callCmds(f), "\n"))
+	}
+	// The pair is registered at the git host — it must NEVER be regenerated.
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "ssh-keygen -t") {
+			t.Errorf("the registered key pair must never be regenerated: %q", c.Cmd)
+		}
+	}
+}
+
+func TestAccountsApplyScansGitHostPortAware(t *testing.T) {
+	// known_hosts stores non-22 endpoints under "[host]:port" and ssh-keyscan
+	// needs -p — a port-blind scan on 22 could never converge.
+	chdirTemp(t)
+	s := testServerWithKey(t)
+	s.Sites[0].Repository = "ssh://git@git.example.com:2222/owner/repo.git"
+	f := bssh.NewFakeRunner()
+	stubAccountCreate(f, "berth")
+	stubAccountCreate(f, "deploy")
+	f.On("test -e "+shQuote("/home/deploy/.ssh/id_ed25519"), bssh.Result{})
+	f.On("test -e "+shQuote("/home/deploy/.ssh/id_ed25519.pub"), bssh.Result{})
+	kh := "/home/deploy/.ssh/known_hosts"
+	scan := "sudo -u deploy sh -c " + shQuote("ssh-keygen -F "+shQuote("[git.example.com]:2222")+" -f "+shQuote(kh)+" >/dev/null 2>&1 || ssh-keyscan -p 2222 "+shQuote("git.example.com")+" >> "+shQuote(kh))
+	f.On(scan, bssh.Result{})
+	stubConsoleLocked(f)
+	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if !calledCmd(f, scan) {
+		t.Errorf("expected the port-aware scan; calls:\n%s", strings.Join(callCmds(f), "\n"))
 	}
 }
 

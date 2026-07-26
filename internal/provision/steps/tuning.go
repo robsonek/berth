@@ -154,6 +154,12 @@ func renderMariaDBTuning(s *config.Server) ([]byte, error) {
 // content, so a benign out-of-band `touch` of an otherwise up-to-date drop-in
 // triggers one reconciling restart — intentional, conservative behavior.
 //
+// The timestamp is read with `systemctl show --timestamp=unix` (systemd ≥251;
+// Trixie ships 257), which prints `@<epoch>` — `tr -d @` strips the prefix and
+// the comparison is pure integers. No `date -d` round-trip: date cannot parse
+// some zone abbreviations systemd emits (AEST/ACST), which read as "not loaded"
+// and caused a spurious restart on every run in those timezones.
+//
 // The comparison truncates both the file MTIME and ActiveEnterTimestamp to whole
 // seconds, so in the astronomically rare case where a written-but-unloaded drop-in
 // shares the same wall-clock second as the unit's last (re)start it could read as
@@ -161,7 +167,7 @@ func renderMariaDBTuning(s *config.Server) ([]byte, error) {
 // is sub-second and would have to coincide with an unrelated prior start in the same
 // second. (serviceUp in checkTuned independently covers the down-service case.)
 func serviceConfigLoaded(ctx context.Context, r bssh.Runner, unit, path string) (bool, error) {
-	cmd := `[ "$(stat -c %Y ` + shQuote(path) + ` 2>/dev/null)" -le "$(date -d "$(systemctl show -p ActiveEnterTimestamp --value ` + unit + `)" +%s 2>/dev/null)" ]`
+	cmd := `[ "$(stat -c %Y ` + shQuote(path) + ` 2>/dev/null)" -le "$(systemctl show -p ActiveEnterTimestamp --value --timestamp=unix ` + unit + ` 2>/dev/null | tr -d @)" ]`
 	res, err := r.Run(ctx, cmd, nil)
 	if err != nil {
 		return false, err

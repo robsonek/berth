@@ -496,21 +496,40 @@ func validGitURL(s string) bool {
 	return regexp.MustCompile(`^[\w.-]+@[\w.-]+:[\w./~-]+$`).MatchString(s)
 }
 
-// GitHost extracts the host from a repository URL for known_hosts (Plan 2 uses it).
-func GitHost(repo string) (string, error) {
+// GitEndpoint returns the SSH host and optional port of a repository URL.
+// port is "" for scp-style URLs (git@host:path) and for ssh:// URLs without
+// an explicit port; an explicit :22 also normalizes to "" — OpenSSH stores
+// default-port entries under the bare hostname (ssh-keygen -F "[host]:22"
+// never matches them and ssh-keyscan -p 22 emits bare-host lines), so
+// treating 22 as a "custom" port could never converge. known_hosts stores
+// non-default-port entries under the "[host]:port" token and ssh-keyscan
+// needs -p, so callers that manage known_hosts must use both values —
+// GitHost alone silently loses the port.
+func GitEndpoint(repo string) (host, port string, err error) {
 	if strings.HasPrefix(repo, "http") || strings.HasPrefix(repo, "ssh://") {
 		u, err := url.Parse(repo)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
-		return u.Hostname(), nil
+		port := u.Port()
+		if port == "22" {
+			port = ""
+		}
+		return u.Hostname(), port, nil
 	}
 	at := strings.Index(repo, "@")
 	colon := strings.Index(repo, ":")
 	if at < 0 || colon < 0 || colon < at {
-		return "", fmt.Errorf("cannot parse host from %q", repo)
+		return "", "", fmt.Errorf("cannot parse host from %q", repo)
 	}
-	return repo[at+1 : colon], nil
+	return repo[at+1 : colon], "", nil
+}
+
+// GitHost is a thin host-only convenience over GitEndpoint. Callers that
+// manage known_hosts must use GitEndpoint instead — this drops the port.
+func GitHost(repo string) (string, error) {
+	host, _, err := GitEndpoint(repo)
+	return host, err
 }
 
 // hasControlChars reports whether s contains a newline, carriage return, NUL, or

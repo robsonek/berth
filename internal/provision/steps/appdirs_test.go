@@ -30,12 +30,12 @@ func TestAppDirsCheckSatisfiedWhenAllDirsPresentWithOwners(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On(noSymlinkCmd("/home/deploy/myapp/shared/tmp"), bssh.Result{ExitCode: 0})
 	f.On(noSymlinkCmd(acmeWebroot("app.example.com")), bssh.Result{ExitCode: 0})
-	// deploy_path owned deploy:www-data (nginx can traverse); shared deploy:deploy
-	// (private); acme webroot www-data:www-data.
-	f.On("stat -c %U:%G "+shQuote("/home/deploy/myapp"), bssh.Result{Stdout: "deploy:www-data\n"})
-	f.On("stat -c %U:%G "+shQuote("/home/deploy/myapp/shared"), bssh.Result{Stdout: "deploy:deploy\n"})
-	f.On("stat -c %U:%G "+shQuote("/home/deploy/myapp/shared/tmp"), bssh.Result{Stdout: "deploy:deploy\n"})
-	f.On("stat -c %U:%G "+shQuote("/var/www/berth-acme/app.example.com"), bssh.Result{Stdout: "www-data:www-data\n"})
+	// deploy_path deploy:www-data 0710 (nginx can traverse); shared deploy:deploy
+	// 0700 (private); acme webroot www-data:www-data 0755.
+	f.On("stat -c '%U:%G %a' "+shQuote("/home/deploy/myapp"), bssh.Result{Stdout: "deploy:www-data 710\n"})
+	f.On("stat -c '%U:%G %a' "+shQuote("/home/deploy/myapp/shared"), bssh.Result{Stdout: "deploy:deploy 700\n"})
+	f.On("stat -c '%U:%G %a' "+shQuote("/home/deploy/myapp/shared/tmp"), bssh.Result{Stdout: "deploy:deploy 700\n"})
+	f.On("stat -c '%U:%G %a' "+shQuote("/var/www/berth-acme/app.example.com"), bssh.Result{Stdout: "www-data:www-data 755\n"})
 	cr, err := AppDirs().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -50,7 +50,7 @@ func TestAppDirsCheckUnsatisfiedWhenDirMissing(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On(noSymlinkCmd("/home/deploy/myapp/shared/tmp"), bssh.Result{ExitCode: 0})
 	f.On(noSymlinkCmd(acmeWebroot("app.example.com")), bssh.Result{ExitCode: 0})
-	f.On("stat -c %U:%G "+shQuote("/home/deploy/myapp"), bssh.Result{ExitCode: 1, Stderr: "No such file or directory"})
+	f.On("stat -c '%U:%G %a' "+shQuote("/home/deploy/myapp"), bssh.Result{ExitCode: 1, Stderr: "No such file or directory"})
 	cr, err := AppDirs().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -65,7 +65,7 @@ func TestAppDirsCheckUnsatisfiedWhenWrongOwner(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On(noSymlinkCmd("/home/deploy/myapp/shared/tmp"), bssh.Result{ExitCode: 0})
 	f.On(noSymlinkCmd(acmeWebroot("app.example.com")), bssh.Result{ExitCode: 0})
-	f.On("stat -c %U:%G "+shQuote("/home/deploy/myapp"), bssh.Result{Stdout: "root:root\n"})
+	f.On("stat -c '%U:%G %a' "+shQuote("/home/deploy/myapp"), bssh.Result{Stdout: "root:root 710\n"})
 	cr, err := AppDirs().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -75,16 +75,32 @@ func TestAppDirsCheckUnsatisfiedWhenWrongOwner(t *testing.T) {
 	}
 }
 
+func TestAppDirsCheckUnsatisfiedOnModeDrift(t *testing.T) {
+	s := appdirsServer() // single site -> user "deploy"
+	f := bssh.NewFakeRunner()
+	f.On(noSymlinkCmd("/home/deploy/myapp/shared/tmp"), bssh.Result{ExitCode: 0})
+	f.On(noSymlinkCmd(acmeWebroot("app.example.com")), bssh.Result{ExitCode: 0})
+	// Correct owner but a world-traversable mode: sibling tenants could enter.
+	f.On("stat -c '%U:%G %a' "+shQuote(s.Sites[0].DeployPath), bssh.Result{Stdout: "deploy:www-data 755\n"})
+	res, err := AppDirs().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if res.Satisfied {
+		t.Fatal("a 755 deploy_path must be unsatisfied — 0710 is the tenant-isolation contract")
+	}
+}
+
 func TestAppDirsCheckUnsatisfiedWhenTmpDirMissing(t *testing.T) {
 	s := appdirsServer()
 	f := bssh.NewFakeRunner()
 	f.On(noSymlinkCmd("/home/deploy/myapp/shared/tmp"), bssh.Result{ExitCode: 0})
 	f.On(noSymlinkCmd(acmeWebroot("app.example.com")), bssh.Result{ExitCode: 0})
-	f.On("stat -c %U:%G "+shQuote("/home/deploy/myapp"), bssh.Result{Stdout: "deploy:www-data\n"})
-	f.On("stat -c %U:%G "+shQuote("/home/deploy/myapp/shared"), bssh.Result{Stdout: "deploy:deploy\n"})
+	f.On("stat -c '%U:%G %a' "+shQuote("/home/deploy/myapp"), bssh.Result{Stdout: "deploy:www-data 710\n"})
+	f.On("stat -c '%U:%G %a' "+shQuote("/home/deploy/myapp/shared"), bssh.Result{Stdout: "deploy:deploy 700\n"})
 	// shared/tmp backs the pool's sys_temp_dir/upload_tmp_dir; absent here.
-	f.On("stat -c %U:%G "+shQuote("/home/deploy/myapp/shared/tmp"), bssh.Result{ExitCode: 1, Stderr: "No such file or directory"})
-	f.On("stat -c %U:%G "+shQuote("/var/www/berth-acme/app.example.com"), bssh.Result{Stdout: "www-data:www-data\n"})
+	f.On("stat -c '%U:%G %a' "+shQuote("/home/deploy/myapp/shared/tmp"), bssh.Result{ExitCode: 1, Stderr: "No such file or directory"})
+	f.On("stat -c '%U:%G %a' "+shQuote("/var/www/berth-acme/app.example.com"), bssh.Result{Stdout: "www-data:www-data 755\n"})
 	cr, err := AppDirs().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)

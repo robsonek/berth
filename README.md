@@ -54,7 +54,9 @@ berth site key servers/<name>.yml [domain]     # print each site's git deploy pu
 `berth init` walks you through an interactive wizard and writes a per-server
 config. `berth provision <server>` then connects over SSH and brings the host to
 the desired state through an ordered pipeline of idempotent steps. Re-running is
-always safe; `--dry-run` shows what would change.
+always safe; `--dry-run` shows what would change. berth keeps per-unit reload
+stamps under `/var/lib/berth/`, so a run interrupted between a config write and
+the service reload heals on the next run.
 
 ## Configuration reference
 

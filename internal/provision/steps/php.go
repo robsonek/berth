@@ -157,6 +157,26 @@ func (php) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 	if !tok {
 		return provision.CheckResult{Satisfied: false, Reason: "PHP tuning drop-in not up to date", Changes: changes}, nil
 	}
+	// The FPM daemon must be RUNNING: php-fpm -t validates syntax even when
+	// the daemon is dead, so without this probe every step reports green
+	// while the host serves 502s. Active only (not enabled) — apt enables
+	// the unit at install; requiring enabled here would never converge for
+	// an operator who deliberately disabled boot-start (checkTuned precedent).
+	active, err := serviceActive(ctx, r, fpmService(s))
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	if !active {
+		return provision.CheckResult{Satisfied: false, Reason: fpmService(s) + " not running", Changes: changes}, nil
+	}
+	// And the running master must postdate the drop-ins (write→reload crash window).
+	loaded, err := reloadedSince(ctx, r, fpmService(s), opcacheDropInPath(s.PHP.Version), phpTuningDropInPath(s.PHP.Version))
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	if !loaded {
+		return provision.CheckResult{Satisfied: false, Reason: "running " + fpmService(s) + " predates the managed drop-ins (reload pending)", Changes: changes}, nil
+	}
 	// PHP-FPM does not create the parent dir of the per-site error_log
 	// (/var/log/php/<pool>-fpm.error.log); ensure it exists.
 	dir, err := r.Run(ctx, "test -d "+shQuote(phpLogDir), nil)
@@ -192,6 +212,14 @@ func (php) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 	}
 	v := s.PHP.Version
 	pkgs := phpPackages(v, s.Database.Engine)
+	// Invalidate the FPM reload stamp before the package transaction, not just
+	// before the drop-in writes below: apt can mutate the unit's config too
+	// (conffiles, conf.d links, maintainer scripts). From here until
+	// markReloaded after the successful reload/start below, a crash leaves no
+	// stamp and the next run reconciles with one reload.
+	if err := invalidateReloaded(ctx, r, fpmService(s)); err != nil {
+		return err
+	}
 	if err := m.EnsurePackages(ctx, nil, pkgs...); err != nil {
 		return err
 	}
@@ -228,13 +256,32 @@ func (php) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 		return err
 	} else if res.ExitCode != 0 {
 		removePHPDropIns(ctx, r, v)
-		return fmt.Errorf("php-fpm%s -t failed after writing drop-ins (removed them so the next run re-applies): %s", v, res.Stderr)
+		// -t validates the WHOLE unit, so the failure may live in a pool file
+		// owned by the later site step; fail-fast stops the run before site
+		// could heal it, so point the operator there.
+		return fmt.Errorf("php-fpm%s -t failed after writing drop-ins (removed them so the next run re-applies): %s — if the failure points at a pool file under /etc/php/%s/fpm/pool.d/, fix or remove that file (berth's site step re-renders its pools on the next run)", v, res.Stderr, v)
 	}
-	if res, err := r.Run(ctx, "systemctl reload php"+v+"-fpm", nil); err != nil {
+	active, err := serviceActive(ctx, r, fpmService(s))
+	if err != nil {
+		return err
+	}
+	if !active {
+		// A dead FPM cannot be reloaded; start it so the drop-ins load and
+		// the host stops serving 502s. `start`, NOT `enable --now`: Check is
+		// active-only (enablement is apt's at install), so silently changing
+		// the boot policy of a deliberately disabled unit is not this step's
+		// call.
+		if res, err := r.Run(ctx, "systemctl start "+fpmService(s), nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			removePHPDropIns(ctx, r, v)
+			return fmt.Errorf("start %s failed (removed the drop-ins so the next run re-applies): %s", fpmService(s), res.Stderr)
+		}
+	} else if res, err := r.Run(ctx, "systemctl reload "+fpmService(s), nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
 		removePHPDropIns(ctx, r, v)
 		return fmt.Errorf("reload php%s-fpm failed (removed the drop-ins so the next run re-applies): %s", v, res.Stderr)
 	}
-	return nil
+	return markReloaded(ctx, r, fpmService(s))
 }

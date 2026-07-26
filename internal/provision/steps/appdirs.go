@@ -31,18 +31,6 @@ func AppDirs() provision.Step { return appDirs{} }
 func (appDirs) Name() string       { return "appdirs" }
 func (appDirs) Requires() []string { return []string{"accounts"} }
 
-// dirOwnedBy reports whether path exists and is owned by owner:group.
-func dirOwnedBy(ctx context.Context, r bssh.Runner, path, owner, group string) (bool, error) {
-	res, err := r.Run(ctx, "stat -c %U:%G "+shQuote(path), nil)
-	if err != nil {
-		return false, err
-	}
-	if res.ExitCode != 0 {
-		return false, nil // absent
-	}
-	return strings.TrimSpace(res.Stdout) == owner+":"+group, nil
-}
-
 // noSymlinkInPath reports whether NEITHER path p NOR any of its ancestors is a
 // symlink. berth's root-run `install -d` follows a directory symlink to its
 // target and applies ownership there, so a tenant who owns an ancestor of p
@@ -88,20 +76,23 @@ func (a appDirs) Check(ctx context.Context, _ provision.RunCtx, s *config.Server
 			return provision.CheckResult{}, err
 		}
 		user := s.SiteUser(site)
-		// deploy_path owned by the site user, group www-data (so nginx can reach
-		// public/); shared/ private to the site user.
-		for _, d := range []struct{ path, owner, group string }{
-			{site.DeployPath, user, "www-data"},
-			{site.DeployPath + "/shared", user, user},
-			{site.DeployPath + "/shared/tmp", user, user},
-			{acmeWebroot(site.Domain), "www-data", "www-data"},
+		// Owner AND mode: deploy_path 0710 (<user>:www-data — nginx traverses,
+		// sibling tenants cannot enter), shared/ and shared/tmp 0700 private,
+		// ACME webroot 0755. A drifted mode silently breaks tenant isolation, so
+		// it is probed exactly like ownership (stat prints modes without a
+		// leading zero). Apply's install -d resets both on existing dirs.
+		for _, d := range []struct{ path, meta string }{
+			{site.DeployPath, user + ":www-data 710"},
+			{site.DeployPath + "/shared", user + ":" + user + " 700"},
+			{site.DeployPath + "/shared/tmp", user + ":" + user + " 700"},
+			{acmeWebroot(site.Domain), "www-data:www-data 755"},
 		} {
-			ok, err := dirOwnedBy(ctx, r, d.path, d.owner, d.group)
+			meta, present, err := statOwnerMode(ctx, r, d.path)
 			if err != nil {
 				return provision.CheckResult{}, err
 			}
-			if !ok {
-				return provision.CheckResult{Satisfied: false, Reason: d.path + " missing or not owned by " + d.owner + ":" + d.group, Changes: a.changes()}, nil
+			if !present || meta != d.meta {
+				return provision.CheckResult{Satisfied: false, Reason: d.path + " missing or not " + d.meta, Changes: a.changes()}, nil
 			}
 		}
 	}

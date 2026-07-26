@@ -34,7 +34,7 @@ func cmdIndex(f *bssh.FakeRunner, want string) int {
 	return -1
 }
 
-const mariadbLiveness = `[ "$(stat -c %Y '/etc/mysql/mariadb.conf.d/99-berth.cnf' 2>/dev/null)" -le "$(date -d "$(systemctl show -p ActiveEnterTimestamp --value mariadb.service)" +%s 2>/dev/null)" ]`
+const mariadbLiveness = `[ "$(stat -c %Y '/etc/mysql/mariadb.conf.d/99-berth.cnf' 2>/dev/null)" -le "$(systemctl show -p ActiveEnterTimestamp --value --timestamp=unix mariadb.service 2>/dev/null | tr -d @)" ]`
 
 func mariadbOnlyServer() *config.Server {
 	return &config.Server{Database: config.Database{Engine: "mariadb"}}
