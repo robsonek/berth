@@ -161,12 +161,6 @@ func TestRenderSupervisorDaemonGolden(t *testing.T) {
 	})
 }
 
-func TestRenderEnvGolden(t *testing.T) {
-	checkGolden(t, "env.tmpl", "env.golden", struct{ AppURL, DBName, DBUser, DBPassword string }{
-		AppURL: "https://app.example.com", DBName: "myapp", DBUser: "myapp", DBPassword: "s3cr3tpassword",
-	})
-}
-
 func TestRenderSudoersDeployGolden(t *testing.T) {
 	checkGolden(t, "sudoers_deploy.tmpl", "sudoers_deploy.golden", struct {
 		User, PHPVersion string

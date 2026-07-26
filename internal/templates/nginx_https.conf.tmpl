@@ -62,14 +62,27 @@ server {
 {{- end }}
         try_files $uri $uri/ /index.php?$query_string;
     }
-
-    location = /favicon.ico { access_log off; log_not_found off; }
-    location = /robots.txt  { access_log off; log_not_found off; }
+{{/* cloudflare_only guards every content location below; the acme-challenge location above stays open so LE issuance/renewal still works. */}}
+    location = /favicon.ico {
+{{- if .CloudflareOnly }}
+        if ($berth_cloudflare = 0) { return 444; }
+{{- end }}
+        access_log off; log_not_found off;
+    }
+    location = /robots.txt {
+{{- if .CloudflareOnly }}
+        if ($berth_cloudflare = 0) { return 444; }
+{{- end }}
+        access_log off; log_not_found off;
+    }
 
     # Fingerprinted Vite assets: cache for a year and gzip (static only — keeps
     # compression off dynamic responses, avoiding BREACH; no add_header here so
     # the inherited security headers are preserved).
     location ^~ /build/assets/ {
+{{- if .CloudflareOnly }}
+        if ($berth_cloudflare = 0) { return 444; }
+{{- end }}
         access_log off;
         expires 1y;
         gzip on;
@@ -84,6 +97,7 @@ server {
 {{- if .CloudflareOnly }}
         if ($berth_cloudflare = 0) { return 444; }
 {{- end }}
+        try_files $uri =404;
         fastcgi_pass unix:{{ .Socket }};
         fastcgi_split_path_info ^(.+\.php)(/.+)$;
         include fastcgi_params;
