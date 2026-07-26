@@ -44,6 +44,23 @@ Notable changes to berth. Older releases are documented on the
   entry is stored and probed under the `[host]:port` token and the scan uses
   `ssh-keyscan -p`; previously the port was silently dropped and the first
   deploy failed host-key verification.
+- **Removing a site from the YAML now removes its served artifacts** — the
+  next run deletes the site's nginx vhost (+ enabled symlink), PHP-FPM pool
+  and scheduler cron (marker-guarded, foreign files untouched) and reloads
+  the services, closing the audit finding where a removed tenant stayed
+  publicly served with every run green. `--dry-run` previews every planned
+  removal. Data and access — database, DB user, OS account, sudoers, deploy
+  key, `deploy_path`, certificates — are deliberately kept; the README
+  documents the manual removal procedure.
+- **Scheduler crons moved to `/etc/cron.d/berth-site-<pool>`** — the old
+  `berth-<pool>` form of a domain literally named `backup-…` fell inside the
+  backup-cron sweep's namespace and could be deleted or collide with another
+  domain's backup cron. Existing crons migrate automatically on the next run
+  (the orphan sweep removes the old name, the normal write creates the new).
+- **Removing the last Supervisor program now takes effect on an
+  active-but-disabled supervisord** — the post-removal `reread`/`update` was
+  gated on the unit being enabled too, letting a running worker keep
+  executing removed code.
 
 ### Changed
 
