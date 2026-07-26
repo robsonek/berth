@@ -27,7 +27,7 @@ func valkeyCacheFreshCmd(domain string) string {
 
 // stubValkeyCheckGreen stubs every probe of a fully converged single-site host.
 func stubValkeyCheckGreen(f *bssh.FakeRunner, s *config.Server) {
-	f.On("dpkg -s valkey-server", bssh.Result{ExitCode: 0})
+	f.On("dpkg -s valkey-server", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("systemctl is-enabled valkey-server.service", bssh.Result{ExitCode: 1, Stdout: "disabled\n"})
 	f.On("systemctl is-active valkey-server.service", bssh.Result{ExitCode: 3, Stdout: "inactive\n"})
 	f.On("cat "+shQuote(valkeyDropInPath), bssh.Result{ExitCode: 1}) // legacy tuning drop-in absent

@@ -36,6 +36,10 @@ Notable changes to berth. Older releases are documented on the
   case-fold into a-z (e.g. U+017F); uppercase site domains still get the
   dedicated "must be lowercase" hint (`host` and `system.hostname` accept
   uppercase as before).
+- Package probes (`dpkg -s`) now parse the `Status:` line and require the
+  package to be actually installed, so a package removed but not purged
+  (dpkg state `rc`) no longer counts as installed and gets reinstalled
+  instead of skipped; held-but-installed packages still count as installed.
 
 ## [0.17.0] — 2026-07-26
 

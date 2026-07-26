@@ -45,13 +45,29 @@ func aptInstall(ctx context.Context, r bssh.Runner, pkgs ...string) error {
 	return apt.New(r).EnsurePackages(ctx, nil, pkgs...)
 }
 
-// pkgInstalled reports whether a Debian package is installed (dpkg -s exit 0).
+// pkgInstalled reports whether a Debian package is actually installed.
+// dpkg -s exits 0 for a package that was REMOVED but not purged (state "rc":
+// only conffiles remain), so the Status line decides. Its format is
+// "Status: <want> <eflag> <status>" — only the trailing "<eflag> <status>"
+// matters here: "install ok installed" and "hold ok installed" are both
+// installed (reconciling an operator's hold is apt's business, not
+// provisioning drift), while "deinstall ok config-files" is not.
+// Line-anchored on purpose: a package description merely CONTAINING the
+// phrase (continuation lines start with a space) must not spoof the verdict.
 func pkgInstalled(ctx context.Context, r bssh.Runner, pkg string) (bool, error) {
 	res, err := r.Run(ctx, "dpkg -s "+pkg, nil)
 	if err != nil {
 		return false, err
 	}
-	return res.ExitCode == 0, nil
+	if res.ExitCode != 0 {
+		return false, nil
+	}
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		if rest, ok := strings.CutPrefix(line, "Status: "); ok {
+			return strings.HasSuffix(strings.TrimSpace(rest), " ok installed"), nil
+		}
+	}
+	return false, nil
 }
 
 // serviceUp reports whether a systemd unit is both active and enabled.

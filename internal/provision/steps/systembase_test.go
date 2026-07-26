@@ -19,7 +19,7 @@ func TestSystemBaseRequiresPreflight(t *testing.T) {
 func TestSystemBaseCheckSatisfiedWhenAllInstalled(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	for _, pkg := range basePackages {
-		f.On("dpkg -s "+pkg, bssh.Result{ExitCode: 0})
+		f.On("dpkg -s "+pkg, bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	}
 	want, err := renderAutoUpgrades()
 	if err != nil {
@@ -39,7 +39,7 @@ func TestSystemBaseCheckSatisfiedWhenAllInstalled(t *testing.T) {
 func TestSystemBaseCheckAbortsOnUnmanagedAutoUpgrades(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	for _, pkg := range basePackages {
-		f.On("dpkg -s "+pkg, bssh.Result{ExitCode: 0})
+		f.On("dpkg -s "+pkg, bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	}
 	f.On("dpkg -s git", bssh.Result{ExitCode: 1}) // a base package is missing
 	// An unmanaged 20auto-upgrades already exists (no berth marker).
@@ -61,7 +61,7 @@ func TestSystemBaseCheckAbortsOnUnmanagedAutoUpgrades(t *testing.T) {
 func TestSystemBaseCheckUnsatisfiedWhenMissing(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	for _, pkg := range basePackages {
-		f.On("dpkg -s "+pkg, bssh.Result{ExitCode: 0})
+		f.On("dpkg -s "+pkg, bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	}
 	f.On("dpkg -s git", bssh.Result{ExitCode: 1})                    // git missing
 	f.On("cat "+shQuote(autoUpgradesPath), bssh.Result{ExitCode: 1}) // file absent (cat now runs even when a package is missing)
@@ -93,7 +93,7 @@ func TestBasePackagesIncludeDeployerTools(t *testing.T) {
 func TestSystemBaseCheckUnsatisfiedWhenAutoUpgradesMissing(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	for _, pkg := range basePackages {
-		f.On("dpkg -s "+pkg, bssh.Result{ExitCode: 0})
+		f.On("dpkg -s "+pkg, bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	}
 	f.On("cat "+shQuote(autoUpgradesPath), bssh.Result{ExitCode: 1}) // periodic file absent
 	cr, err := SystemBase().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
@@ -148,7 +148,7 @@ const stockEnabled = "APT::Periodic::Update-Package-Lists \"1\";\nAPT::Periodic:
 func TestSystemBaseCheckAdoptsStockAutoUpgrades(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	for _, pkg := range basePackages {
-		f.On("dpkg -s "+pkg, bssh.Result{ExitCode: 0})
+		f.On("dpkg -s "+pkg, bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	}
 	// The exact debconf-written stock file (no berth marker) ships on
 	// Debian/OVH images; it must be ADOPTED: unsatisfied, no error, no --force.
@@ -165,7 +165,7 @@ func TestSystemBaseCheckAdoptsStockAutoUpgrades(t *testing.T) {
 func TestSystemBaseCheckStillAbortsOnDisabledVariant(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	for _, pkg := range basePackages {
-		f.On("dpkg -s "+pkg, bssh.Result{ExitCode: 0})
+		f.On("dpkg -s "+pkg, bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	}
 	// The "0" values are an explicit operator choice (auto-upgrades OFF):
 	// adoption must NOT apply — abort unless --force, like any foreign file.
