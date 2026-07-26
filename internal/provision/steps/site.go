@@ -380,16 +380,19 @@ func listSupervisorPrograms(ctx context.Context, r bssh.Runner) ([]string, error
 // the marker probe (cat follows symlinks and can block on a FIFO) nor rm.
 // A nonzero find exit (permission, I/O) is a loud error: empty output would
 // otherwise read as "no candidates" and every orphan would be silently
-// skipped forever. All three swept directories exist by the time the site
-// step runs (their owning steps precede it), so a missing dir is not a
-// legitimate quiet case. Filenames with embedded newlines or edge whitespace
-// stay as-is: a mangled path fails safe through the marker re-probe (its cat
-// finds no berth marker), never through rm.
+// skipped forever. A MISSING directory is the one legitimate quiet case
+// (guarded by [ -d ]: exit 0, no output): on a fresh minimal image
+// /etc/cron.d does not exist until site.Apply's own ensureCron installs
+// cron, and a Check error here would fail-fast the engine before that Apply
+// ever ran. Filenames with embedded newlines or edge whitespace stay as-is:
+// a mangled path fails safe through the marker re-probe (its cat finds no
+// berth marker), never through rm.
 func findRegularFiles(ctx context.Context, r bssh.Runner, dir, namePattern string) ([]string, error) {
 	cmd := "find " + shQuote(dir) + " -maxdepth 1 -type f"
 	if namePattern != "" {
 		cmd += " -name " + shQuote(namePattern)
 	}
+	cmd = "if [ -d " + shQuote(dir) + " ]; then " + cmd + "; fi"
 	res, err := r.Run(ctx, cmd, nil)
 	if err != nil {
 		return nil, err
@@ -680,11 +683,11 @@ func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server,
 	// between). An atomic within-directory rename closes it: legacy
 	// berth-managed && new absent -> mv (the rename does not change the
 	// content, so the normal write below is a plain same-bytes rewrite);
-	// legacy berth-managed && new present (a half-migrated host) -> rm the
-	// legacy NOW rather than in the orphan loop. Both happen before any cron
-	// write and before the orphan discovery below, which therefore never sees
-	// the legacy file. /etc/cron.d has no reload window, so this may precede
-	// the stamp invalidations.
+	// legacy berth-managed && new present as BERTH'S OWN file (a half-migrated
+	// host) -> rm the legacy NOW rather than in the orphan loop. Both happen
+	// before any cron write and before the orphan discovery below, which
+	// therefore never sees the legacy file. /etc/cron.d has no reload window,
+	// so this may precede the stamp invalidations.
 	for _, site := range s.Sites {
 		if !s.SchedulerEnabled(site) {
 			continue // no new file will be written; the orphan sweep removes a legacy one
@@ -697,13 +700,25 @@ func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server,
 		if !managed {
 			continue
 		}
-		newPresent, err := fileExists(ctx, r, cronPath(site.Domain))
+		// One cat classifies the NEW path: absent -> atomic rename; berth's own
+		// file (or --force, which will overwrite a foreign one right below) ->
+		// the legacy copy is redundant, remove it now; a FOREIGN file without
+		// --force -> leave the legacy alone: deleting it would leave no working
+		// berth scheduler cron at all, because the managed write below refuses
+		// the foreign file — that loud refusal is the operator's signal, and
+		// the scheduler keeps running via the legacy cron meanwhile.
+		probe, err := r.Run(ctx, "cat "+shQuote(cronPath(site.Domain)), nil)
 		if err != nil {
 			return err
 		}
-		cmd := "mv " + shQuote(legacy) + " " + shQuote(cronPath(site.Domain))
-		if newPresent {
+		var cmd string
+		switch {
+		case probe.ExitCode != 0: // new path absent
+			cmd = "mv " + shQuote(legacy) + " " + shQuote(cronPath(site.Domain))
+		case hasManagedMarker(probe.Stdout) || rc.Force:
 			cmd = "rm -f " + shQuote(legacy)
+		default: // foreign file at the new path
+			continue
 		}
 		if res, err := r.Run(ctx, cmd, nil); err != nil {
 			return err
@@ -799,25 +814,24 @@ func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server,
 		}
 	}
 
-	// Orphan vhosts: the site left the config. The enabled entry is removed
-	// ONLY when it is a symlink resolving to exactly this vhost (an operator's
-	// foreign file or repointed link at that path is not ours to delete); the
-	// berth-marked available file always goes. A leftover the guard skipped is
-	// then a LOUD error, not a note: nginx -t is perfectly happy with a
-	// regular file or hardlink there, so it would keep serving the removed
-	// site silently forever while every run reported green.
+	// Orphan vhosts: the site left the config. The disposition check runs
+	// FIRST and deletes NOTHING when the enabled entry exists but is not
+	// berth's symlink to this vhost (a foreign file, hardlink or repointed
+	// link — exit 3): nginx -t is perfectly happy with such a leftover, so it
+	// would keep serving the removed site silently forever. Because the
+	// berth-marked available file SURVIVES that refusal, discovery re-finds
+	// the orphan on every later run and both Check and Apply repeat the same
+	// actionable error — a stable loud failure, not a one-shot one. When the
+	// entry is ours (or absent/dangling), link and file are removed together.
 	for _, p := range orphanVhosts {
 		link := nginxEnabledPath(strings.TrimPrefix(p, "/etc/nginx/sites-available/"))
-		cmd := "if [ -L " + shQuote(link) + " ] && [ " + shQuote(link) + " -ef " + shQuote(p) + " ]; then rm -f " + shQuote(link) + "; fi && rm -f " + shQuote(p)
+		cmd := "if [ -e " + shQuote(link) + " ] && ! { [ -L " + shQuote(link) + " ] && [ " + shQuote(link) + " -ef " + shQuote(p) + " ]; }; then exit 3; fi; if [ -L " + shQuote(link) + " ]; then rm -f " + shQuote(link) + "; fi; rm -f " + shQuote(p)
 		if res, err := r.Run(ctx, cmd, nil); err != nil {
 			return err
+		} else if res.ExitCode == 3 {
+			return fmt.Errorf("orphan vhost %s: enabled entry %s is a foreign file or hardlink, not berth's symlink — remove it manually; nginx keeps serving the removed site otherwise (the berth-marked vhost file is kept so every run repeats this error)", p, link)
 		} else if res.ExitCode != 0 {
 			return fmt.Errorf("remove orphan vhost %s: %s", p, res.Stderr)
-		}
-		if res, err := r.Run(ctx, "[ ! -e "+shQuote(link)+" ]", nil); err != nil {
-			return err
-		} else if res.ExitCode != 0 {
-			return fmt.Errorf("removed vhost %s but %s still exists (foreign file or hardlink) — remove it manually; nginx keeps serving the removed site until then", p, link)
 		}
 	}
 
