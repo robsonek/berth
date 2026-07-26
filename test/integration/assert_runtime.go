@@ -6,6 +6,8 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
@@ -94,9 +96,10 @@ func assertOpcacheEffective(ctx context.Context, t *testing.T, c *bssh.Client, s
 
 // assertDeployReload validates the deploy-reload contract: each site user is authorized to
 // reload php<ver>-fpm via its narrow sudoers grant; running that graceful reload keeps
-// EVERY site's FPM socket up and a .php request answering (404 fine, never a persistent
-// 5xx gateway error). useHTTPS picks the scheme the box actually serves.
-func assertDeployReload(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server, useHTTPS bool) {
+// EVERY site's FPM socket up and a .php request answering per site (404 fine, never a
+// persistent 5xx gateway error). Each site is probed with its own Host header (and SNI
+// over TLS) on the scheme its TLS state provably serves (siteHTTPSProbe).
+func assertDeployReload(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server, skipSSL, sslExplicit bool) {
 	t.Helper()
 	ver := srv.PHP.Version
 	seen := map[string]bool{}
@@ -115,7 +118,7 @@ func assertDeployReload(ctx context.Context, t *testing.T, c *bssh.Client, srv *
 		}
 	}
 	// After the reload the FPM stack must settle: active, EVERY site socket present, and a
-	// .php request (through FastCGI) returns a non-gateway-error. Retry — reload returns early.
+	// .php request (through FastCGI) answers for EVERY site. Retry — reload returns early.
 	ok := eventually(20*time.Second, func() bool {
 		a, _ := c.Run(ctx, "systemctl is-active php"+ver+"-fpm", nil)
 		if strings.TrimSpace(a.Stdout) != "active" {
@@ -126,26 +129,40 @@ func assertDeployReload(ctx context.Context, t *testing.T, c *bssh.Client, srv *
 			if s.ExitCode != 0 {
 				return false
 			}
+			useHTTPS, insecureTLS := siteHTTPSProbe(site, skipSSL, sslExplicit)
+			if !phpPathServes(srv.Host, site.Domain, useHTTPS, insecureTLS) {
+				return false
+			}
 		}
-		return phpPathServes(srv.Host, useHTTPS)
+		return true
 	})
 	if !ok {
-		t.Errorf("FPM did not settle after the deploy reload (active / all sockets / .php request)")
+		t.Errorf("FPM did not settle after the deploy reload (active / all sockets / .php request per site)")
 	}
 }
 
-// phpPathServes GETs a .php URI (forcing nginx -> FastCGI -> FPM) and reports whether the
-// FPM chain answered: a 404 for the missing script is fine; 502/503/504 means FPM is down.
-func phpPathServes(host string, useHTTPS bool) bool {
+// phpPathServes GETs a .php URI (forcing nginx -> FastCGI -> FPM) through the host
+// address with the tenant's identity forced (Host header; SNI ServerName over TLS)
+// and reports whether the FPM chain answered: a 404 for the missing script is fine;
+// 502/503/504 means FPM is down. This is a reload-LIVENESS probe only — it requests
+// a deliberately missing path and accepts any non-gateway status, so it cannot prove
+// WHICH vhost or pool answered; the per-tenant routing/pool proof lives in
+// assertSiteServesOwnContent.
+func phpPathServes(host, domain string, useHTTPS, insecureTLS bool) bool {
 	scheme := "http"
 	tr := &http.Transport{}
 	if useHTTPS {
 		scheme = "https"
-		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		tr.TLSClientConfig = &tls.Config{ServerName: domain, InsecureSkipVerify: insecureTLS}
 	}
 	cl := &http.Client{Timeout: 10 * time.Second, Transport: tr,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	resp, err := cl.Get(scheme + "://" + host + "/berth-probe.php")
+	req, err := http.NewRequest(http.MethodGet, scheme+"://"+host+"/berth-probe.php", nil)
+	if err != nil {
+		return false
+	}
+	req.Host = domain
+	resp, err := cl.Do(req)
 	if err != nil {
 		return false
 	}
@@ -153,6 +170,131 @@ func phpPathServes(host string, useHTTPS bool) bool {
 	return resp.StatusCode != http.StatusBadGateway &&
 		resp.StatusCode != http.StatusServiceUnavailable &&
 		resp.StatusCode != http.StatusGatewayTimeout
+}
+
+// siteHTTPSProbe reports whether a site's tenant probe can run over HTTPS, and whether
+// certificate verification must be skipped. Eligibility is PER SITE (skipSSL alone is
+// server-wide): self-signed sites always have a cert once the tls step ran, but a
+// Let's Encrypt site may legitimately have none (issuance is skipped without DNS), so
+// its HTTPS probe is demanded only when the operator opted into real-DNS SSL testing
+// (BERTH_TEST_SKIP_SSL=false). Everything else is probed over plain HTTP, where the
+// cert-aware site step serves the HTTP-only vhost.
+func siteHTTPSProbe(site config.Site, skipSSL, sslExplicit bool) (useHTTPS, insecureTLS bool) {
+	switch {
+	case skipSSL || !site.SSL:
+		return false, false
+	case site.CertMode() == "selfsigned":
+		return true, true
+	case sslExplicit:
+		return true, false
+	default:
+		return false, false
+	}
+}
+
+// shQuote single-quotes s for a POSIX shell (mirrors the unexported steps.shQuote).
+// Config validation already rejects shell metacharacters in deploy_path and domains;
+// quoting the staged-probe paths is defense in depth.
+func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// assertSiteServesOwnContent stages a tenant-unique PHP marker under the site's
+// docroot, fetches it through the host address while forcing the tenant's identity
+// (HTTP Host header; SNI ServerName over TLS), and requires the EXACT marker back.
+// A status code cannot prove which vhost answered (berth writes no default_server,
+// so nginx answers with the FIRST vhost for any unmatched name, and every SSL vhost
+// 301s identically), so only tenant-unique content proves routing — and because the
+// marker is executed by PHP-FPM, the response also proves the request hit THIS
+// site's pool/socket, not a sibling's. Over TLS the peer certificate's DNS SANs
+// must additionally include the domain, proving SNI selected the tenant's
+// certificate (berth's self-signed certs carry the domain SAN, so this holds under
+// insecureTLS too).
+//
+// The split for SSL sites is deliberate: their HTTP side 301s to HTTPS by design,
+// and the redirect echoes the REQUEST $host — identical for every vhost — so an
+// HTTP-side check cannot discriminate tenants and is not attempted; the HTTPS
+// marker is the proof. Plain-HTTP tenants (or runs with SSL testing disabled, where
+// the cert-aware site step keeps the HTTP-only vhost) prove routing over HTTP.
+func assertSiteServesOwnContent(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server, site config.Site, useHTTPS, insecureTLS bool) {
+	t.Helper()
+	marker := "berth-tenant-" + config.PoolName(site.Domain)
+	docroot := site.DeployPath + "/current/public"
+	probe := docroot + "/berth-tenant-probe.php"
+
+	// Stage: a pre-deploy box has no current/ tree — create it owned by the site
+	// user (as a deploy would), remembering the deepest component that already
+	// existed so cleanup removes exactly what we created and nothing pre-existing
+	// (a deployed box's current/ tree is never touched).
+	created := ""
+	if res, err := c.Run(ctx, "test -d "+shQuote(docroot), nil); err != nil {
+		t.Fatalf("%s: probe docroot: %v", site.Domain, err)
+	} else if res.ExitCode != 0 {
+		current := site.DeployPath + "/current"
+		if res, err := c.Run(ctx, "test -e "+shQuote(current), nil); err != nil {
+			t.Fatalf("%s: probe current: %v", site.Domain, err)
+		} else if res.ExitCode != 0 {
+			created = current
+		} else {
+			created = docroot
+		}
+		user := srv.SiteUser(site)
+		if res, err := c.Run(ctx, "install -d -o "+user+" -g "+user+" "+shQuote(docroot), nil); err != nil {
+			t.Fatalf("%s: create %s: %v", site.Domain, docroot, err)
+		} else if res.ExitCode != 0 {
+			t.Fatalf("%s: create %s: exit %d, stderr %q", site.Domain, docroot, res.ExitCode, strings.TrimSpace(res.Stderr))
+		}
+	}
+	// Cleanup even on failure: the probe file, and only the tree we created. The
+	// defer is registered before WriteFile so a failed write still removes dirs.
+	defer func() {
+		_, _ = c.Run(ctx, "rm -f "+shQuote(probe), nil)
+		if created != "" {
+			_, _ = c.Run(ctx, "rm -rf "+shQuote(created), nil)
+		}
+	}()
+	if err := c.WriteFile(ctx, bssh.FileSpec{
+		Path:    probe,
+		Content: []byte("<?php echo '" + marker + "';\n"),
+		Owner:   srv.SiteUser(site),
+		Group:   srv.SiteUser(site),
+		Mode:    0o644,
+		Sudo:    true,
+	}); err != nil {
+		t.Fatalf("%s: write probe: %v", site.Domain, err)
+	}
+
+	scheme, port := "http", "80"
+	tr := &http.Transport{}
+	if useHTTPS {
+		scheme, port = "https", "443"
+		tr.TLSClientConfig = &tls.Config{ServerName: site.Domain, InsecureSkipVerify: insecureTLS}
+	}
+	cl := &http.Client{Timeout: 10 * time.Second, Transport: tr,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	url := scheme + "://" + net.JoinHostPort(srv.Host, port) + "/berth-tenant-probe.php"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("%s: build request: %v", site.Domain, err)
+	}
+	req.Host = site.Domain
+	resp, err := cl.Do(req)
+	if err != nil {
+		t.Errorf("%s: GET %s (Host %s): %v", site.Domain, url, site.Domain, err)
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	t.Logf("GET %s (Host %s) -> %d %q", url, site.Domain, resp.StatusCode, body)
+	if resp.StatusCode != http.StatusOK || string(body) != marker {
+		t.Errorf("%s: want 200 %q, got %d %q — tenant routing or pool selection is broken",
+			site.Domain, marker, resp.StatusCode, body)
+	}
+	if useHTTPS {
+		if resp.TLS == nil || len(resp.TLS.PeerCertificates) == 0 {
+			t.Errorf("%s: no TLS peer certificate", site.Domain)
+		} else if err := resp.TLS.PeerCertificates[0].VerifyHostname(site.Domain); err != nil {
+			t.Errorf("%s: SNI served a certificate not valid for the domain: %v", site.Domain, err)
+		}
+	}
 }
 
 // eventually polls check until it returns true or the deadline passes.
