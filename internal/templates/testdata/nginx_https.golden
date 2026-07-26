@@ -46,8 +46,12 @@ server {
         try_files $uri $uri/ /index.php?$query_string;
     }
 
-    location = /favicon.ico { access_log off; log_not_found off; }
-    location = /robots.txt  { access_log off; log_not_found off; }
+    location = /favicon.ico {
+        access_log off; log_not_found off;
+    }
+    location = /robots.txt {
+        access_log off; log_not_found off;
+    }
 
     # Fingerprinted Vite assets: cache for a year and gzip (static only — keeps
     # compression off dynamic responses, avoiding BREACH; no add_header here so
@@ -64,6 +68,7 @@ server {
     error_page 404 /index.php;
 
     location ~ \.php$ {
+        try_files $uri =404;
         fastcgi_pass unix:/run/php/berth-app_example_com.sock;
         fastcgi_split_path_info ^(.+\.php)(/.+)$;
         include fastcgi_params;
