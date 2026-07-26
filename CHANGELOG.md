@@ -20,6 +20,9 @@ Notable changes to berth. Older releases are documented on the
   account your deployer connects as.
 - nginx vhosts: dropped the dead `fastcgi_split_path_info` directive — the
   `location ~ \.php$` anchor can never yield PATH_INFO, and nothing read it.
+- `-v/--verbose` is now a real verbose mode: plain output additionally shows
+  each satisfied step's reason and each applied step's change list (it used
+  to merely disable the TUI, exactly like `--no-tty`).
 
 ### Added
 

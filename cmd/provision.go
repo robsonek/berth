@@ -43,7 +43,7 @@ func newProvisionCmd() *cobra.Command {
 	c.Flags().BoolVar(&f.sslStaging, "ssl-staging", false, "use Let's Encrypt staging")
 	c.Flags().StringVar(&f.only, "only", "", "run only the named phase or step")
 	c.Flags().BoolVar(&f.force, "force", false, "overwrite resources not managed by berth")
-	c.Flags().BoolVarP(&f.verbose, "verbose", "v", false, "verbose output")
+	c.Flags().BoolVarP(&f.verbose, "verbose", "v", false, "plain output with reasons for satisfied steps and changes for applied ones")
 	c.Flags().BoolVar(&f.noTTY, "no-tty", false, "force plain output (no live TUI)")
 	return c
 }
@@ -79,7 +79,7 @@ func runProvision(cmd *cobra.Command, serverPath string, f *provisionFlags) erro
 	if err != nil {
 		return err
 	}
-	r := ui.New(cmd.OutOrStdout(), wantTUI(ui.IsTTY(os.Stdout), f))
+	r := ui.New(cmd.OutOrStdout(), wantTUI(ui.IsTTY(os.Stdout), f), f.verbose)
 	rerr := r.Render(events)
 	// Cancel explicitly BEFORE the deferred client.Close (LIFO would close the
 	// SSH connection first): the engine must not start another step once the
