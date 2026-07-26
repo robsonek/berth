@@ -20,7 +20,7 @@ server {
 {{- end }}
         try_files $uri $uri/ /index.php?$query_string;
     }
-{{/* cloudflare_only guards every content location below; the acme-challenge location above stays open so LE issuance/renewal still works. */}}
+{{/* cloudflare_only guards every content location in this server block (including location / above); the acme-challenge location stays open so LE issuance/renewal still works. */}}
     location = /favicon.ico {
 {{- if .CloudflareOnly }}
         if ($berth_cloudflare = 0) { return 444; }
@@ -57,7 +57,6 @@ server {
 {{- end }}
         try_files $uri =404;
         fastcgi_pass unix:{{ .Socket }};
-        fastcgi_split_path_info ^(.+\.php)(/.+)$;
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
         fastcgi_hide_header X-Powered-By;

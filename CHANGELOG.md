@@ -18,6 +18,8 @@ Notable changes to berth. Older releases are documented on the
 - `berth init` always writes an explicit `user:` for every site (the derived
   name when the field was left blank), so the generated YAML shows the
   account your deployer connects as.
+- nginx vhosts: dropped the dead `fastcgi_split_path_info` directive — the
+  `location ~ \.php$` anchor can never yield PATH_INFO, and nothing read it.
 
 ### Added
 
