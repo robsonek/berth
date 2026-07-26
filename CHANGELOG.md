@@ -86,6 +86,13 @@ Notable changes to berth. Older releases are documented on the
   **After upgrading, run one full `berth provision` first**: the stamps do not
   exist yet, so `--only <step>` can refuse on an unsatisfied prerequisite
   until that first full run creates them.
+- **CI supply-chain and coverage hardening** — GitHub Actions are pinned to
+  commit SHAs (the release workflow holds `contents: write`, so a hijacked
+  mutable action tag could have tampered with published binaries), the CI
+  workflow can be started manually (`workflow_dispatch`) when the
+  `pull_request` trigger fails to fire, the integration suite now proves
+  per-site routing with Host-header/SNI probes for every configured site,
+  and the `visudo -cf` sudoers gate is pinned by unit tests.
 
 ## [0.16.0] — 2026-07-26
 
