@@ -111,6 +111,19 @@ func TestTuningValidateAcceptsEmptyAndValid(t *testing.T) {
 		{PHPUploadMax: "512k"},        // suffixes are case-insensitive
 		{PHPUploadMax: "64G"},         // exactly the 64 GiB bound is accepted (reject is >)
 		{PHPMaxExecutionTime: -1},     // non-positive = unset, lenient
+		{MariaDBLogFileSize: "1G", MariaDBTmpTableSize: "128M", MariaDBMaxConnections: 256, MariaDBMaxAllowedPacket: "64M"},
+		{MariaDBMaxConnections: 10},          // range floor
+		{MariaDBMaxConnections: 100000},      // range ceiling
+		{MariaDBMaxAllowedPacket: "1G"},      // exactly MariaDB's ceiling is accepted (reject is >)
+		{MariaDBMaxAllowedPacket: "1048576"}, // bare bytes
+		{MariaDBMaxAllowedPacket: "1024"},    // exactly MariaDB's 1024-byte floor, bare bytes
+		{MariaDBMaxAllowedPacket: "1k"},      // lowercase suffix; exactly one 1024-byte block
+		{MariaDBLogFileSize: "4M"},           // exactly MariaDB's 4M redo-log floor
+		{MariaDBLogFileSize: "512G"},         // exactly MariaDB's 512G redo-log ceiling
+		{MariaDBLogFileSize: "4100K"},        // K value, 4096-aligned (4100 % 4 == 0)
+		{MariaDBTmpTableSize: "131072k"},     // suffixes are case-insensitive
+		{PHPFPMMaxChildren: 4},               // floor: static pm.max_spare_servers = 4
+		{PHPFPMMaxChildren: 10000},           // ceiling
 	} {
 		if err := tn.validate(); err != nil {
 			t.Errorf("validate(%+v) unexpected error: %v", tn, err)
@@ -136,6 +149,26 @@ func TestTuningValidateRejectsBad(t *testing.T) {
 		{PHPMemoryLimit: "18446744073709551615"}, // would wrap PHP's int64 parse to -1
 		{PHPMaxExecutionTime: 301},               // opinionated 300 s cap
 		{PHPMaxInputVars: 1000001},               // matches the wizard's domain
+		{MariaDBLogFileSize: "1GB"},              // MariaDB uses K/M/G, not GB
+		{MariaDBLogFileSize: "huge"},
+		{MariaDBLogFileSize: "0"},                    // below the 4M minimum (the regex alone allows 0)
+		{MariaDBLogFileSize: "1M"},                   // below MariaDB's 4M minimum
+		{MariaDBLogFileSize: "513G"},                 // above MariaDB's 512G maximum
+		{MariaDBLogFileSize: "4101K"},                // not 4096-aligned: MariaDB would adjust it
+		{MariaDBLogFileSize: "99999999999999999999"}, // overflows uint64: the phpSizeBytes error branch
+		{MariaDBTmpTableSize: "128M; rm -rf /"},
+		{MariaDBMaxConnections: 9},              // below MariaDB's own floor
+		{MariaDBMaxConnections: 100001},         // above MariaDB's own ceiling
+		{MariaDBMaxConnections: -1},             // negative would render verbatim
+		{MariaDBMaxAllowedPacket: "2G"},         // > 1G: server would silently truncate
+		{MariaDBMaxAllowedPacket: "1073741825"}, // 1G + 1 byte
+		{MariaDBMaxAllowedPacket: "64MB"},
+		{MariaDBMaxAllowedPacket: "1"},                    // below MariaDB's 1024-byte floor (server clamps up)
+		{MariaDBMaxAllowedPacket: "1025"},                 // not 1024-aligned: server rounds down
+		{MariaDBMaxAllowedPacket: "99999999999999999999"}, // overflows uint64: the phpSizeBytes error branch
+		{PHPFPMMaxChildren: 3},                            // pm.max_spare_servers = 4 would exceed it: php-fpm -t rejects
+		{PHPFPMMaxChildren: 10001},
+		{PHPFPMMaxChildren: -1},
 	} {
 		if err := tn.validate(); err == nil {
 			t.Errorf("validate(%+v) expected error, got nil", tn)
@@ -173,5 +206,17 @@ func TestTuningMariaDBLongQueryTimeEff(t *testing.T) {
 	}
 	if got := (Tuning{MariaDBLongQueryTime: 10}).MariaDBLongQueryTimeEff(); got != 10 {
 		t.Errorf("explicit long_query_time = %d, want 10", got)
+	}
+}
+
+func TestPHPFPMMaxChildrenEff(t *testing.T) {
+	if got := (Tuning{}).PHPFPMMaxChildrenEff(); got != 10 {
+		t.Errorf("PHPFPMMaxChildrenEff() = %d, want 10", got)
+	}
+	if got := (Tuning{PHPFPMMaxChildren: -1}).PHPFPMMaxChildrenEff(); got != 10 {
+		t.Errorf("PHPFPMMaxChildrenEff(-1) = %d, want 10 (non-positive = unset)", got)
+	}
+	if got := (Tuning{PHPFPMMaxChildren: 16}).PHPFPMMaxChildrenEff(); got != 16 {
+		t.Errorf("PHPFPMMaxChildrenEff(16) = %d, want 16", got)
 	}
 }

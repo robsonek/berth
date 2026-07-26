@@ -82,16 +82,27 @@ func (f Fail2ban) MaxretryEff() int {
 // PHP fields render into the php step's FPM-only conf.d drop-in; PHPUploadMax
 // is the max single-file size, from which post_max_size and nginx
 // client_max_body_size are derived (PHPPostBodyMaxEff).
+// The four MariaDB parity knobs (log file size, tmp table size, max
+// connections, max allowed packet) are unset-by-default: an empty knob
+// renders no directive at all and the engine's stock default stays in
+// force, so they deliberately have no *Eff accessors. PHPFPMMaxChildren is
+// the exception (default 10): the pool file renders pm.max_children
+// unconditionally, so the default must reproduce today's bytes.
 type Tuning struct {
-	ValkeyMaxmemory       string `mapstructure:"valkey_maxmemory" yaml:"valkey_maxmemory,omitempty"`
-	ValkeyMaxmemoryPolicy string `mapstructure:"valkey_maxmemory_policy" yaml:"valkey_maxmemory_policy,omitempty"`
-	MariaDBBufferPool     string `mapstructure:"mariadb_innodb_buffer_pool" yaml:"mariadb_innodb_buffer_pool,omitempty"`
-	MariaDBSlowQueryLog   bool   `mapstructure:"mariadb_slow_query_log" yaml:"mariadb_slow_query_log,omitempty"`
-	MariaDBLongQueryTime  int    `mapstructure:"mariadb_long_query_time" yaml:"mariadb_long_query_time,omitempty"`
-	PHPMemoryLimit        string `mapstructure:"php_memory_limit" yaml:"php_memory_limit,omitempty"`
-	PHPUploadMax          string `mapstructure:"php_upload_max" yaml:"php_upload_max,omitempty"`
-	PHPMaxExecutionTime   int    `mapstructure:"php_max_execution_time" yaml:"php_max_execution_time,omitempty"`
-	PHPMaxInputVars       int    `mapstructure:"php_max_input_vars" yaml:"php_max_input_vars,omitempty"`
+	ValkeyMaxmemory         string `mapstructure:"valkey_maxmemory" yaml:"valkey_maxmemory,omitempty"`
+	ValkeyMaxmemoryPolicy   string `mapstructure:"valkey_maxmemory_policy" yaml:"valkey_maxmemory_policy,omitempty"`
+	MariaDBBufferPool       string `mapstructure:"mariadb_innodb_buffer_pool" yaml:"mariadb_innodb_buffer_pool,omitempty"`
+	MariaDBSlowQueryLog     bool   `mapstructure:"mariadb_slow_query_log" yaml:"mariadb_slow_query_log,omitempty"`
+	MariaDBLongQueryTime    int    `mapstructure:"mariadb_long_query_time" yaml:"mariadb_long_query_time,omitempty"`
+	MariaDBLogFileSize      string `mapstructure:"mariadb_log_file_size" yaml:"mariadb_log_file_size,omitempty"`
+	MariaDBTmpTableSize     string `mapstructure:"mariadb_tmp_table_size" yaml:"mariadb_tmp_table_size,omitempty"`
+	MariaDBMaxConnections   int    `mapstructure:"mariadb_max_connections" yaml:"mariadb_max_connections,omitempty"`
+	MariaDBMaxAllowedPacket string `mapstructure:"mariadb_max_allowed_packet" yaml:"mariadb_max_allowed_packet,omitempty"`
+	PHPMemoryLimit          string `mapstructure:"php_memory_limit" yaml:"php_memory_limit,omitempty"`
+	PHPUploadMax            string `mapstructure:"php_upload_max" yaml:"php_upload_max,omitempty"`
+	PHPMaxExecutionTime     int    `mapstructure:"php_max_execution_time" yaml:"php_max_execution_time,omitempty"`
+	PHPMaxInputVars         int    `mapstructure:"php_max_input_vars" yaml:"php_max_input_vars,omitempty"`
+	PHPFPMMaxChildren       int    `mapstructure:"php_fpm_max_children" yaml:"php_fpm_max_children,omitempty"`
 }
 
 const (
@@ -103,6 +114,7 @@ const (
 	defaultPHPUploadMax          = "32M"
 	defaultPHPMaxExecutionTime   = 30
 	defaultPHPMaxInputVars       = 1000
+	defaultPHPFPMMaxChildren     = 10
 )
 
 // phpSizeMaxBytes bounds the PHP size knobs (64 GiB — far above any sane VPS
@@ -110,6 +122,29 @@ const (
 // ini parser: past that, PHP's shorthand parse wraps to the -1 "unlimited"
 // sentinel, silently removing the limit.
 const phpSizeMaxBytes = 64 << 30
+
+// mariadbMaxAllowedPacketCeiling is MariaDB's hard upper bound for
+// max_allowed_packet (1 GiB). The server silently truncates larger configured
+// values, so berth rejects them loudly instead.
+const mariadbMaxAllowedPacketCeiling = 1 << 30
+
+// mariadbMaxAllowedPacketFloor is MariaDB's lower bound and block size for
+// max_allowed_packet (1024 bytes). The server silently clamps smaller values
+// up to it and rounds non-multiples down to the nearest 1024-byte block, so
+// the effective value would differ from the configured one; berth rejects
+// both loudly instead.
+const mariadbMaxAllowedPacketFloor = 1 << 10
+
+// mariadbLogFileSize{Min,Max,Block} pin innodb_log_file_size to MariaDB's
+// documented domain: 4 MiB to 512 GiB in 4096-byte redo-log blocks. An
+// out-of-domain value risks a poison drop-in — mariadbd failing at startup
+// poisons every subsequent run (the same failure mode the buffer-pool RAM
+// guard exists for) — so berth rejects it before it reaches the host.
+const (
+	mariadbLogFileSizeMin   = 4 << 20
+	mariadbLogFileSizeMax   = 512 << 30
+	mariadbLogFileSizeBlock = 4096
+)
 
 // phpPostHeadroomMinBytes is the minimum multipart-envelope allowance added
 // to php_upload_max when deriving post_max_size / client_max_body_size
@@ -228,6 +263,15 @@ func (t Tuning) PHPMaxInputVarsEff() int {
 		return defaultPHPMaxInputVars
 	}
 	return t.PHPMaxInputVars
+}
+
+// PHPFPMMaxChildrenEff returns the configured per-pool pm.max_children or the
+// default (10). Non-positive means unset.
+func (t Tuning) PHPFPMMaxChildrenEff() int {
+	if t.PHPFPMMaxChildren <= 0 {
+		return defaultPHPFPMMaxChildren
+	}
+	return t.PHPFPMMaxChildren
 }
 
 // System holds optional, opt-in host-level OS provisioning knobs. All default

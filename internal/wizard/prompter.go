@@ -82,6 +82,8 @@ func (h *huhPrompter) ServerAdvanced(a *Answers) error {
 	execTime := strconv.Itoa(a.Tuning.PHPMaxExecutionTime)
 	inputVars := strconv.Itoa(a.Tuning.PHPMaxInputVars)
 	longQuery := strconv.Itoa(a.Tuning.MariaDBLongQueryTime)
+	maxConns := strconv.Itoa(a.Tuning.MariaDBMaxConnections)
+	maxChildren := strconv.Itoa(a.Tuning.PHPFPMMaxChildren)
 	policies := []string{"", "noeviction", "allkeys-lru", "allkeys-lfu", "allkeys-random", "volatile-lru", "volatile-lfu", "volatile-random", "volatile-ttl"}
 	form := huh.NewForm(
 		huh.NewGroup(
@@ -95,12 +97,17 @@ func (h *huhPrompter) ServerAdvanced(a *Answers) error {
 			huh.NewInput().Title("MariaDB innodb_buffer_pool (e.g. 256M, blank=default)").Value(&a.Tuning.MariaDBBufferPool).Validate(optionalMariaDBSize),
 			huh.NewConfirm().Title("MariaDB slow query log?").Value(&a.Tuning.MariaDBSlowQueryLog),
 			huh.NewInput().Title("MariaDB long_query_time (1-86400 s, blank/0=default 2; needs the slow log on)").Value(&longQuery).Validate(optionalInt("tuning.mariadb_long_query_time", 1, 86400)),
+			huh.NewInput().Title("MariaDB innodb_log_file_size (4M-512G, e.g. 1G, blank=engine default 96M)").Value(&a.Tuning.MariaDBLogFileSize).Validate(optionalMariaDBLogSize),
+			huh.NewInput().Title("MariaDB tmp_table_size + max_heap_table_size (e.g. 128M, blank=engine default 16M)").Value(&a.Tuning.MariaDBTmpTableSize).Validate(optionalMariaDBSize),
+			huh.NewInput().Title("MariaDB max_connections (10-100000, blank/0=engine default 151)").Value(&maxConns).Validate(optionalInt("tuning.mariadb_max_connections", 10, 100000)),
+			huh.NewInput().Title("MariaDB max_allowed_packet (e.g. 64M, max 1G, blank=engine default 16M)").Value(&a.Tuning.MariaDBMaxAllowedPacket).Validate(optionalMariaDBPacket),
 		),
 		huh.NewGroup(
 			huh.NewInput().Title("PHP memory_limit (e.g. 256M, blank=default)").Value(&a.Tuning.PHPMemoryLimit).Validate(optionalPHPSize),
 			huh.NewInput().Title("PHP max upload file size, body caps derived (e.g. 32M, blank=default)").Value(&a.Tuning.PHPUploadMax).Validate(optionalPHPSize),
 			huh.NewInput().Title("PHP max_execution_time (1-300 s, blank/0=default)").Value(&execTime).Validate(optionalInt("tuning.php_max_execution_time", 1, 300)),
 			huh.NewInput().Title("PHP max_input_vars (1-1000000, blank/0=default)").Value(&inputVars).Validate(optionalInt("tuning.php_max_input_vars", 1, 1000000)),
+			huh.NewInput().Title("PHP-FPM pm.max_children per site pool (4-10000, blank/0=default 10)").Value(&maxChildren).Validate(optionalInt("tuning.php_fpm_max_children", 4, 10000)),
 		),
 	)
 	if err := form.Run(); err != nil {
@@ -112,6 +119,8 @@ func (h *huhPrompter) ServerAdvanced(a *Answers) error {
 	a.Tuning.PHPMaxExecutionTime, _ = parseIntInRange("tuning.php_max_execution_time", execTime, 1, 300)
 	a.Tuning.PHPMaxInputVars, _ = parseIntInRange("tuning.php_max_input_vars", inputVars, 1, 1000000)
 	a.Tuning.MariaDBLongQueryTime, _ = parseIntInRange("tuning.mariadb_long_query_time", longQuery, 1, 86400)
+	a.Tuning.MariaDBMaxConnections, _ = parseIntInRange("tuning.mariadb_max_connections", maxConns, 10, 100000)
+	a.Tuning.PHPFPMMaxChildren, _ = parseIntInRange("tuning.php_fpm_max_children", maxChildren, 4, 10000)
 	return nil
 }
 

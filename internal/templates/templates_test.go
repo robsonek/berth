@@ -109,8 +109,22 @@ func TestRenderPHPTuningGolden(t *testing.T) {
 }
 
 func TestRenderFPMPoolGolden(t *testing.T) {
-	checkGoldenINI(t, "fpm_pool.conf.tmpl", "fpm_pool.golden", struct{ PoolName, User, Socket, DeployPath string }{
+	checkGoldenINI(t, "fpm_pool.conf.tmpl", "fpm_pool.golden", struct {
+		PoolName, User, Socket, DeployPath string
+		MaxChildren                        int
+	}{
 		PoolName: "app_example_com", User: "webuser", Socket: testSocket, DeployPath: "/home/deploy/myapp",
+		MaxChildren: 10,
+	})
+}
+
+func TestRenderFPMPoolMaxChildrenGolden(t *testing.T) {
+	checkGoldenINI(t, "fpm_pool.conf.tmpl", "fpm_pool_maxchildren.golden", struct {
+		PoolName, User, Socket, DeployPath string
+		MaxChildren                        int
+	}{
+		PoolName: "app_example_com", User: "webuser", Socket: testSocket, DeployPath: "/home/deploy/myapp",
+		MaxChildren: 16,
 	})
 }
 
@@ -197,20 +211,33 @@ func TestRenderBerthValkeyServiceGolden(t *testing.T) {
 	})
 }
 
+// mariadbTuningGoldenData mirrors the render struct in steps.renderMariaDBTuning
+// (test-local copy — keep the fields in sync).
+type mariadbTuningGoldenData struct {
+	BufferPool       string
+	LogFileSize      string
+	TmpTableSize     string
+	MaxConnections   int
+	MaxAllowedPacket string
+	SlowQueryLog     bool
+	LongQueryTime    int
+}
+
 func TestRenderMariaDBTuningGolden(t *testing.T) {
-	checkGolden(t, "mariadb_tuning.cnf.tmpl", "mariadb_tuning.golden", struct {
-		BufferPool    string
-		SlowQueryLog  bool
-		LongQueryTime int
-	}{BufferPool: "256M"})
+	checkGolden(t, "mariadb_tuning.cnf.tmpl", "mariadb_tuning.golden", mariadbTuningGoldenData{BufferPool: "256M"})
 }
 
 func TestRenderMariaDBTuningSlowLogGolden(t *testing.T) {
-	checkGolden(t, "mariadb_tuning.cnf.tmpl", "mariadb_tuning_slowlog.golden", struct {
-		BufferPool    string
-		SlowQueryLog  bool
-		LongQueryTime int
-	}{BufferPool: "256M", SlowQueryLog: true, LongQueryTime: 2})
+	checkGolden(t, "mariadb_tuning.cnf.tmpl", "mariadb_tuning_slowlog.golden", mariadbTuningGoldenData{
+		BufferPool: "256M", SlowQueryLog: true, LongQueryTime: 2,
+	})
+}
+
+func TestRenderMariaDBTuningParityGolden(t *testing.T) {
+	checkGolden(t, "mariadb_tuning.cnf.tmpl", "mariadb_tuning_parity.golden", mariadbTuningGoldenData{
+		BufferPool: "256M", LogFileSize: "1G", TmpTableSize: "128M",
+		MaxConnections: 256, MaxAllowedPacket: "64M", SlowQueryLog: true, LongQueryTime: 2,
+	})
 }
 
 func TestRenderCloudflareGolden(t *testing.T) {
@@ -261,8 +288,12 @@ func TestRenderCertbotDeployHookGolden(t *testing.T) {
 }
 
 func TestFPMPoolIsolatesTempDirs(t *testing.T) {
-	out, err := RenderINI("fpm_pool.conf.tmpl", struct{ PoolName, User, Socket, DeployPath string }{
+	out, err := RenderINI("fpm_pool.conf.tmpl", struct {
+		PoolName, User, Socket, DeployPath string
+		MaxChildren                        int
+	}{
 		PoolName: "app_example_com", User: "webuser", Socket: testSocket, DeployPath: "/home/deploy/myapp",
+		MaxChildren: 10,
 	})
 	if err != nil {
 		t.Fatal(err)

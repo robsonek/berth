@@ -1,0 +1,11 @@
+# managed by berth
+[mysqld]
+innodb_buffer_pool_size = 256M
+innodb_log_file_size = 1G
+tmp_table_size = 128M
+max_heap_table_size = 128M
+max_connections = 256
+max_allowed_packet = 64M
+slow_query_log = 1
+slow_query_log_file = /var/log/mysql/mariadb-slow.log
+long_query_time = 2

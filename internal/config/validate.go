@@ -390,6 +390,48 @@ func (t Tuning) validate() error {
 	if t.MariaDBBufferPool != "" && !reMariaDBSize.MatchString(t.MariaDBBufferPool) {
 		return fmt.Errorf("tuning.mariadb_innodb_buffer_pool %q must be a number optionally suffixed K/M/G (e.g. 256M)", t.MariaDBBufferPool)
 	}
+	if t.MariaDBLogFileSize != "" {
+		if !reMariaDBSize.MatchString(t.MariaDBLogFileSize) {
+			return fmt.Errorf("tuning.mariadb_log_file_size %q must be a number optionally suffixed K/M/G (e.g. 1G)", t.MariaDBLogFileSize)
+		}
+		b, err := phpSizeBytes(t.MariaDBLogFileSize)
+		if err != nil {
+			return fmt.Errorf("tuning.mariadb_log_file_size %q: %v", t.MariaDBLogFileSize, err)
+		}
+		if b < mariadbLogFileSizeMin {
+			return fmt.Errorf("tuning.mariadb_log_file_size %q is below MariaDB's 4M minimum", t.MariaDBLogFileSize)
+		}
+		if b > mariadbLogFileSizeMax {
+			return fmt.Errorf("tuning.mariadb_log_file_size %q exceeds MariaDB's 512G maximum", t.MariaDBLogFileSize)
+		}
+		if b%mariadbLogFileSizeBlock != 0 {
+			return fmt.Errorf("tuning.mariadb_log_file_size %q must be a multiple of 4096 (the redo-log block size)", t.MariaDBLogFileSize)
+		}
+	}
+	if t.MariaDBTmpTableSize != "" && !reMariaDBSize.MatchString(t.MariaDBTmpTableSize) {
+		return fmt.Errorf("tuning.mariadb_tmp_table_size %q must be a number optionally suffixed K/M/G (e.g. 128M)", t.MariaDBTmpTableSize)
+	}
+	if t.MariaDBMaxAllowedPacket != "" {
+		if !reMariaDBSize.MatchString(t.MariaDBMaxAllowedPacket) {
+			return fmt.Errorf("tuning.mariadb_max_allowed_packet %q must be a number optionally suffixed K/M/G (e.g. 64M)", t.MariaDBMaxAllowedPacket)
+		}
+		b, err := phpSizeBytes(t.MariaDBMaxAllowedPacket)
+		if err != nil {
+			return fmt.Errorf("tuning.mariadb_max_allowed_packet %q: %v", t.MariaDBMaxAllowedPacket, err)
+		}
+		if b > mariadbMaxAllowedPacketCeiling {
+			return fmt.Errorf("tuning.mariadb_max_allowed_packet %q exceeds MariaDB's 1G ceiling (the server silently truncates larger values)", t.MariaDBMaxAllowedPacket)
+		}
+		if b < mariadbMaxAllowedPacketFloor {
+			return fmt.Errorf("tuning.mariadb_max_allowed_packet %q is below MariaDB's 1024-byte floor (the server silently clamps it up)", t.MariaDBMaxAllowedPacket)
+		}
+		if b%mariadbMaxAllowedPacketFloor != 0 {
+			return fmt.Errorf("tuning.mariadb_max_allowed_packet %q must be a multiple of 1024 (MariaDB silently rounds down)", t.MariaDBMaxAllowedPacket)
+		}
+	}
+	if t.MariaDBMaxConnections != 0 && (t.MariaDBMaxConnections < 10 || t.MariaDBMaxConnections > 100000) {
+		return fmt.Errorf("tuning.mariadb_max_connections %d out of range (10-100000)", t.MariaDBMaxConnections)
+	}
 	if t.PHPMemoryLimit != "" {
 		if err := validatePHPSize("tuning.php_memory_limit", t.PHPMemoryLimit); err != nil {
 			return err
@@ -405,6 +447,9 @@ func (t Tuning) validate() error {
 	}
 	if t.PHPMaxInputVars > phpMaxInputVarsCeiling {
 		return fmt.Errorf("tuning.php_max_input_vars %d exceeds %d", t.PHPMaxInputVars, phpMaxInputVarsCeiling)
+	}
+	if t.PHPFPMMaxChildren != 0 && (t.PHPFPMMaxChildren < 4 || t.PHPFPMMaxChildren > 10000) {
+		return fmt.Errorf("tuning.php_fpm_max_children %d out of range (4-10000; the static pm.max_spare_servers = 4 must not exceed it)", t.PHPFPMMaxChildren)
 	}
 	if t.MariaDBLongQueryTime != 0 && (t.MariaDBLongQueryTime < 1 || t.MariaDBLongQueryTime > 86400) {
 		return fmt.Errorf("tuning.mariadb_long_query_time %d out of range (1-86400 s)", t.MariaDBLongQueryTime)

@@ -114,10 +114,15 @@ tuning:                        # optional — omit any field to keep its default
   mariadb_innodb_buffer_pool: 256M
   mariadb_slow_query_log: true # default off; log queries slower than the threshold
   mariadb_long_query_time: 2   # seconds (default 2); needs the slow log on
+  mariadb_log_file_size: 1G    # innodb redo log, 4M-512G; omit = engine default (96M)
+  mariadb_tmp_table_size: 128M # sets tmp_table_size AND max_heap_table_size; omit = engine default (16M)
+  mariadb_max_connections: 256 # 10-100000; omit = engine default (151)
+  mariadb_max_allowed_packet: 64M # max 1G; omit = engine default (16M)
   php_memory_limit: 256M
   php_upload_max: 32M          # max single-file upload; body caps derived
   php_max_execution_time: 30   # seconds, 1-300
   php_max_input_vars: 1000     # 1-1000000
+  php_fpm_max_children: 16     # pm.max_children of every site pool, 4-10000 (default 10)
 
 system:                        # optional host-level OS provisioning — all default off
   swap: 2G                     # default off when absent; positive integer + M / G
@@ -240,7 +245,13 @@ berth applies conservative, managed tuning automatically:
   `/var/log/mysql/mariadb-slow.log`. berth creates `/var/log/mysql` itself
   (Debian 13 logs to the journal and no longer ships it — a missing directory
   would silently disable slow logging for the whole server process); the
-  distro logrotate already rotates `/var/log/mysql/*.log`.
+  distro logrotate already rotates `/var/log/mysql/*.log`. Four optional
+  parity knobs — `mariadb_log_file_size` (innodb redo log),
+  `mariadb_tmp_table_size` (sets `tmp_table_size` and `max_heap_table_size`
+  together — the in-memory temp-table limit is the minimum of the two),
+  `mariadb_max_connections`, and `mariadb_max_allowed_packet` (max 1G —
+  MariaDB's hard ceiling) — render into the same drop-in only when set;
+  omitted knobs leave the engine's stock defaults in force.
 - **PHP-FPM** (always) — a managed FPM-only `conf.d` drop-in sets
   `memory_limit`, upload sizing, `max_execution_time`, `max_input_vars` and
   `expose_php = Off`. The CLI SAPI keeps Debian's stock unlimited values, so
@@ -248,6 +259,9 @@ berth applies conservative, managed tuning automatically:
   single-file size: `post_max_size` and nginx `client_max_body_size` are
   derived slightly larger (multipart headroom), so a file of exactly that size
   uploads — note all files in one request share the derived total.
+  `php_fpm_max_children` raises `pm.max_children` of every site's pool
+  (default 10); the remaining `pm` settings stay fixed (`dynamic`, spares
+  2/1/4), which is why the knob is floored at 4.
 
 Every value is overridable; omit a field to keep its default:
 
@@ -258,10 +272,15 @@ tuning:
   mariadb_innodb_buffer_pool: 256M     # default
   mariadb_slow_query_log: false        # default; opt-in slow query log
   mariadb_long_query_time: 2           # default; seconds, needs the slow log on
+  mariadb_log_file_size: 1G            # 4M-512G; omit = engine default (96M)
+  mariadb_tmp_table_size: 128M         # omit = engine default (16M)
+  mariadb_max_connections: 256         # omit = engine default (151); 10-100000
+  mariadb_max_allowed_packet: 64M      # omit = engine default (16M); max 1G
   php_memory_limit: 256M               # default
   php_upload_max: 32M                  # default; max single-file upload; body caps derived
   php_max_execution_time: 30           # default; seconds, 1-300
   php_max_input_vars: 1000             # default; 1-1000000
+  php_fpm_max_children: 16             # default 10; 4-10000
 ```
 
 Each site's Valkey instance serves its cache, session and queue together, so

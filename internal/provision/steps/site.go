@@ -272,12 +272,17 @@ func renderNginxHTTPS(s *config.Server, site config.Site) ([]byte, error) {
 func renderFPMPool(s *config.Server, site config.Site) ([]byte, error) {
 	// PHP-FPM pool files are INI; their parser rejects '#' comment lines, so the
 	// managed marker must use ';' (RenderINI). The pool runs as the site user and
-	// listens on the site's own socket (isolation).
+	// listens on the site's own socket (isolation). pm.max_children comes from
+	// tuning.php_fpm_max_children (one global value, every pool; default 10);
+	// the pm siblings stay static, so validation floors the knob at 4
+	// (pm.max_spare_servers must not exceed pm.max_children).
 	return templates.RenderINI("fpm_pool.conf.tmpl", struct {
 		PoolName, User, Socket, DeployPath string
+		MaxChildren                        int
 	}{
 		PoolName: poolName(site.Domain), User: s.SiteUser(site),
 		Socket: fpmSocket(site.Domain), DeployPath: site.DeployPath,
+		MaxChildren: s.Tuning.PHPFPMMaxChildrenEff(),
 	})
 }
 

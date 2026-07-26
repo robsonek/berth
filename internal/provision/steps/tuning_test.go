@@ -502,3 +502,37 @@ func TestTuningSlowLogOffNeverProbesFile(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderMariaDBTuningParityKnobs(t *testing.T) {
+	s := &config.Server{Tuning: config.Tuning{
+		MariaDBLogFileSize: "1G", MariaDBTmpTableSize: "128M",
+		MariaDBMaxConnections: 256, MariaDBMaxAllowedPacket: "64M",
+	}}
+	b, err := renderMariaDBTuning(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(b)
+	for _, want := range []string{
+		"innodb_log_file_size = 1G\n",
+		"tmp_table_size = 128M\n",
+		"max_heap_table_size = 128M\n", // one knob drives BOTH directives
+		"max_connections = 256\n",
+		"max_allowed_packet = 64M\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	// Unset knobs must render NO directive (engine stock default stays in
+	// force) — this is the byte-identity contract for existing hosts.
+	off, err := renderMariaDBTuning(&config.Server{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, banned := range []string{"innodb_log_file_size", "tmp_table_size", "max_heap_table_size", "max_connections", "max_allowed_packet"} {
+		if strings.Contains(string(off), banned) {
+			t.Errorf("default render must omit %q, got:\n%s", banned, off)
+		}
+	}
+}
