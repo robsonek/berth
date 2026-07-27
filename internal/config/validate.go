@@ -90,7 +90,7 @@ func IsValidSiteOSUser(name string) bool {
 }
 
 // deniedDeployRoots are filesystem trees a deploy_path may never equal or
-// enter. appdirs runs `install -d -o <user> -g www-data -m 0710 <deploy_path>`
+// enter. appdirs runs `install -d -o <user> -g www-data -m 00710 <deploy_path>`
 // as root, and GNU install -d applies -o/-g/-m to an EXISTING directory (and
 // follows a directory symlink to its target), so a deploy_path inside a
 // system tree hands its ownership to the tenant (e.g. /etc -> replaceable
