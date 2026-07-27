@@ -286,7 +286,7 @@ func (a appDirs) Check(ctx context.Context, _ provision.RunCtx, s *config.Server
 
 func (appDirs) changes() []string {
 	return []string{
-		"install -d deploy_path (<user>:www-data 0710) + shared and shared/tmp (<user> 0700)",
+		"install -d deploy_path (<user>:www-data 0710); shared and shared/tmp created as the site user (<user> 0700)",
 		"install -d ACME webroot (owner www-data)",
 	}
 }
@@ -304,22 +304,48 @@ func (appDirs) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 	}
 	for _, site := range s.Sites {
 		user := s.SiteUser(site)
-		// deploy_path: site user owns it, group www-data + mode 0710 lets nginx
-		// traverse to public/ while other site users cannot enter.
-		cmds := []string{
-			fmt.Sprintf("install -d -o %s -g www-data -m 0710 %s", user, shQuote(site.DeployPath)),
-			// shared/ holds .env and is private to the site user.
-			fmt.Sprintf("install -d -o %s -g %s -m 0700 %s", user, user, shQuote(site.DeployPath+"/shared")),
-			// shared/tmp backs the pool's sys_temp_dir/upload_tmp_dir (no shared /tmp).
-			fmt.Sprintf("install -d -o %s -g %s -m 0700 %s", user, user, shQuote(site.DeployPath+"/shared/tmp")),
+		// Modes are five octal digits on purpose: GNU preserves a directory's
+		// setuid/setgid bits under shorter numeric modes, so `-m 0700` could
+		// leave an existing setgid directory at 2700 while Check demands 700 —
+		// an endlessly re-applying step. Five digits clear the bits explicitly.
+		//
+		// Root creates only the two directories whose whole ancestry is
+		// root-controlled (assertSafeAncestry proves it) and whose owner/group
+		// the running account could not set for itself.
+		rootDirs := []string{
+			// deploy_path: site user owns it, group www-data + mode 0710 lets nginx
+			// traverse to public/ while other site users cannot enter.
+			fmt.Sprintf("install -d -o %s -g www-data -m 00710 %s", user, shQuote(site.DeployPath)),
 			// ACME webroot for certbot --webroot.
-			fmt.Sprintf("install -d -o www-data -g www-data -m 0755 %s", shQuote(acmeWebroot(site.Domain))),
+			fmt.Sprintf("install -d -o www-data -g www-data -m 00755 %s", shQuote(acmeWebroot(site.Domain))),
 		}
-		for _, cmd := range cmds {
+		// shared/ and shared/tmp live INSIDE deploy_path, which the site user
+		// owns — a root-run install -d there is racy by construction: the probe
+		// and the mutation are separate SSH commands, and install -d follows a
+		// directory symlink and applies ownership to the target. Creating them
+		// AS the site user removes root from the window: a swapped symlink can
+		// then only reach what the tenant may already touch (chmod of a foreign
+		// target fails EPERM, a dangling one fails EEXIST/ENOENT). -o is gone
+		// because the creating account IS the owner; -g pins the group to the
+		// account's own group, which is the state Check asserts.
+		tenantDirs := []string{
+			// shared/ holds .env and is private to the site user.
+			fmt.Sprintf("sudo -u %s install -d -g %s -m 00700 %s", user, user, shQuote(site.DeployPath+"/shared")),
+			// shared/tmp backs the pool's sys_temp_dir/upload_tmp_dir (no shared /tmp).
+			fmt.Sprintf("sudo -u %s install -d -g %s -m 00700 %s", user, user, shQuote(site.DeployPath+"/shared/tmp")),
+		}
+		for _, cmd := range rootDirs {
 			if res, err := r.Run(ctx, cmd, nil); err != nil {
 				return err
 			} else if res.ExitCode != 0 {
 				return fmt.Errorf("create directories for %s: %s", site.Domain, res.Stderr)
+			}
+		}
+		for _, cmd := range tenantDirs {
+			if res, err := r.Run(ctx, cmd, nil); err != nil {
+				return err
+			} else if res.ExitCode != 0 {
+				return fmt.Errorf("create directories for %s as %s: %s", site.Domain, user, res.Stderr)
 			}
 		}
 	}

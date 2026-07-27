@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -128,22 +129,44 @@ func TestAppDirsApplyCreatesDirsWithIsolatingOwners(t *testing.T) {
 	f.On(noSymlinkCmd("/var/www/myapp/shared/tmp"), bssh.Result{ExitCode: 0})
 	f.On(noSymlinkCmd(acmeWebroot("app.example.com")), bssh.Result{ExitCode: 0})
 	stubSiteTreeAbsent(f, "/var/www/myapp")
-	f.On("install -d -o deploy -g www-data -m 0710 '/var/www/myapp'", bssh.Result{})
-	f.On("install -d -o deploy -g deploy -m 0700 '/var/www/myapp/shared'", bssh.Result{})
-	f.On("install -d -o deploy -g deploy -m 0700 '/var/www/myapp/shared/tmp'", bssh.Result{})
-	f.On("install -d -o www-data -g www-data -m 0755 '/var/www/berth-acme/app.example.com'", bssh.Result{})
+	f.On("install -d -o deploy -g www-data -m 00710 '/var/www/myapp'", bssh.Result{})
+	f.On("sudo -u deploy install -d -g deploy -m 00700 '/var/www/myapp/shared'", bssh.Result{})
+	f.On("sudo -u deploy install -d -g deploy -m 00700 '/var/www/myapp/shared/tmp'", bssh.Result{})
+	f.On("install -d -o www-data -g www-data -m 00755 '/var/www/berth-acme/app.example.com'", bssh.Result{})
 	if err := AppDirs().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 	joined := strings.Join(callCmds(f), "\n")
 	for _, want := range []string{
-		"install -d -o deploy -g www-data -m 0710 '/var/www/myapp'",
-		"install -d -o deploy -g deploy -m 0700 '/var/www/myapp/shared'",
-		"install -d -o deploy -g deploy -m 0700 '/var/www/myapp/shared/tmp'",
-		"install -d -o www-data -g www-data -m 0755 '/var/www/berth-acme/app.example.com'",
+		"install -d -o deploy -g www-data -m 00710 '/var/www/myapp'",
+		"sudo -u deploy install -d -g deploy -m 00700 '/var/www/myapp/shared'",
+		"sudo -u deploy install -d -g deploy -m 00700 '/var/www/myapp/shared/tmp'",
+		"install -d -o www-data -g www-data -m 00755 '/var/www/berth-acme/app.example.com'",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("Apply did not run %q; calls:\n%s", want, joined)
+		}
+	}
+}
+
+func TestAppDirsApplyUsesFiveDigitModes(t *testing.T) {
+	// GNU preserves a directory's setgid bit under numeric modes shorter than
+	// five octal digits, so `-m 0700` can leave an existing 2700 directory at
+	// 2700 while Check demands 700 — the step would then apply forever. A
+	// tenant can trigger it on its own directory with `chmod g+s`.
+	s := appdirsServer()
+	f := bssh.NewFakeRunner()
+	stubAppDirsFresh(f, s) // helper added in Step 1, above
+	if err := AppDirs().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	for _, cmd := range callCmds(f) {
+		if !strings.Contains(cmd, "install -d") {
+			continue
+		}
+		if strings.Contains(cmd, " -m 0700 ") || strings.Contains(cmd, " -m 0710 ") ||
+			strings.Contains(cmd, " -m 0755 ") || strings.Contains(cmd, " -m 700 ") {
+			t.Errorf("mode must be five octal digits to clear setuid/setgid; got %q", cmd)
 		}
 	}
 }
@@ -222,6 +245,23 @@ func stubSiteTreeFresh(f *bssh.FakeRunner, deployPath string) {
 	f.On(noSymlinkCmd(deployPath+"/shared/tmp"), bssh.Result{ExitCode: 0})
 	stubSiteTreeAbsent(f, deployPath)
 	stubSafeAncestry(f, "/", "/home")
+}
+
+// stubAppDirsFresh stubs every probe and mutation of a clean single-site
+// Apply: symlink probes, ancestry, absent owner probes, and the four directory
+// commands. Task 4 adds the group-membership probe here when it introduces it.
+func stubAppDirsFresh(f *bssh.FakeRunner, s *config.Server) {
+	for _, site := range s.Sites {
+		user := s.SiteUser(site)
+		f.On(noSymlinkCmd(site.DeployPath+"/shared/tmp"), bssh.Result{ExitCode: 0})
+		f.On(noSymlinkCmd(acmeWebroot(site.Domain)), bssh.Result{ExitCode: 0})
+		stubSiteTreeAbsent(f, site.DeployPath)
+		f.On(fmt.Sprintf("install -d -o %s -g www-data -m 00710 %s", user, shQuote(site.DeployPath)), bssh.Result{})
+		f.On(fmt.Sprintf("sudo -u %s install -d -g %s -m 00700 %s", user, user, shQuote(site.DeployPath+"/shared")), bssh.Result{})
+		f.On(fmt.Sprintf("sudo -u %s install -d -g %s -m 00700 %s", user, user, shQuote(site.DeployPath+"/shared/tmp")), bssh.Result{})
+		f.On(fmt.Sprintf("install -d -o www-data -g www-data -m 00755 %s", shQuote(acmeWebroot(site.Domain))), bssh.Result{})
+	}
+	stubSafeAncestry(f, "/", "/var", "/var/www", "/var/www/berth-acme")
 }
 
 func TestAppDirsCheckRefusesForeignOwnedDeployPath(t *testing.T) {
@@ -326,21 +366,21 @@ func TestAppDirsApplyMultiSitePerUser(t *testing.T) {
 	for _, u := range []struct{ user, path string }{{u1, "/var/www/one"}, {u2, "/var/www/two"}} {
 		f.On(noSymlinkCmd(u.path+"/shared/tmp"), bssh.Result{ExitCode: 0})
 		stubSiteTreeAbsent(f, u.path)
-		f.On("install -d -o "+u.user+" -g www-data -m 0710 '"+u.path+"'", bssh.Result{})
-		f.On("install -d -o "+u.user+" -g "+u.user+" -m 0700 '"+u.path+"/shared'", bssh.Result{})
-		f.On("install -d -o "+u.user+" -g "+u.user+" -m 0700 '"+u.path+"/shared/tmp'", bssh.Result{})
+		f.On("install -d -o "+u.user+" -g www-data -m 00710 '"+u.path+"'", bssh.Result{})
+		f.On("sudo -u "+u.user+" install -d -g "+u.user+" -m 00700 '"+u.path+"/shared'", bssh.Result{})
+		f.On("sudo -u "+u.user+" install -d -g "+u.user+" -m 00700 '"+u.path+"/shared/tmp'", bssh.Result{})
 	}
 	f.On(noSymlinkCmd(acmeWebroot("one.example.com")), bssh.Result{ExitCode: 0})
 	f.On(noSymlinkCmd(acmeWebroot("two.example.com")), bssh.Result{ExitCode: 0})
-	f.On("install -d -o www-data -g www-data -m 0755 '/var/www/berth-acme/one.example.com'", bssh.Result{})
-	f.On("install -d -o www-data -g www-data -m 0755 '/var/www/berth-acme/two.example.com'", bssh.Result{})
+	f.On("install -d -o www-data -g www-data -m 00755 '/var/www/berth-acme/one.example.com'", bssh.Result{})
+	f.On("install -d -o www-data -g www-data -m 00755 '/var/www/berth-acme/two.example.com'", bssh.Result{})
 	if err := AppDirs().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 	joined := strings.Join(callCmds(f), "\n")
 	// Each site's deploy_path must be owned by its own distinct user.
-	if !strings.Contains(joined, "-o "+u1+" -g www-data -m 0710 '/var/www/one'") ||
-		!strings.Contains(joined, "-o "+u2+" -g www-data -m 0710 '/var/www/two'") {
+	if !strings.Contains(joined, "-o "+u1+" -g www-data -m 00710 '/var/www/one'") ||
+		!strings.Contains(joined, "-o "+u2+" -g www-data -m 00710 '/var/www/two'") {
 		t.Errorf("each site must be owned by its own user; calls:\n%s", joined)
 	}
 }
