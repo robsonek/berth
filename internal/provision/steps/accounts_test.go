@@ -836,9 +836,7 @@ func TestAccountsCheckBreakGlassOffPasswordSetUnsatisfied(t *testing.T) {
 	// reconcile back to locked when the knob is off.
 	chdirTemp(t)
 	s := testServerWithKey(t)
-	if err := secret.SaveCache(s.Host, map[string]string{"console:berth": "OwnedPW123"}); err != nil {
-		t.Fatal(err)
-	}
+	seedCache(t, s, map[string]string{"console:berth": "OwnedPW123"})
 	want := authorizedKeys(testOperatorKey)
 	deploySudoers, err := renderSiteSudoers(s, s.Sites[0])
 	if err != nil {
@@ -973,9 +971,7 @@ func TestAccountsApplyBreakGlassReusesCachedPassword(t *testing.T) {
 	chdirTemp(t)
 	s := testServerWithKey(t)
 	s.System.BreakGlass = true
-	if err := secret.SaveCache(s.Host, map[string]string{"console:berth": "CachedPW123"}); err != nil {
-		t.Fatal(err)
-	}
+	seedCache(t, s, map[string]string{"console:berth": "CachedPW123"})
 	f := stubFullApply(t, s)
 	stubConsoleLocked(f)
 	f.On("chpasswd", bssh.Result{})
@@ -993,9 +989,7 @@ func TestAccountsApplyBreakGlassRefusesTamperedConsolePassword(t *testing.T) {
 	chdirTemp(t)
 	s := testServerWithKey(t)
 	s.System.BreakGlass = true
-	if err := secret.SaveCache(s.Host, map[string]string{"console:berth": "good\nroot:evil"}); err != nil {
-		t.Fatal(err)
-	}
+	seedCache(t, s, map[string]string{"console:berth": "good\nroot:evil"})
 	f := stubFullApply(t, s)
 	stubConsoleLocked(f) // berth console not usable -> the set-password branch runs
 	// chpasswd deliberately NOT stubbed: the guard must refuse before running it.
@@ -1032,9 +1026,7 @@ func TestAccountsCheckBreakGlassOffStaleMarkerUnsatisfied(t *testing.T) {
 	// is already locked; Check must flag it so Apply retries the cleanup.
 	chdirTemp(t)
 	s := testServerWithKey(t)
-	if err := secret.SaveCache(s.Host, map[string]string{"console:berth": "StalePW123"}); err != nil {
-		t.Fatal(err)
-	}
+	seedCache(t, s, map[string]string{"console:berth": "StalePW123"})
 	want := authorizedKeys(testOperatorKey)
 	deploySudoers, err := renderSiteSudoers(s, s.Sites[0])
 	if err != nil {
@@ -1058,9 +1050,7 @@ func TestAccountsCheckBreakGlassOffStaleMarkerUnsatisfied(t *testing.T) {
 func TestAccountsApplyBreakGlassOffCleansStaleMarkerWithoutRelocking(t *testing.T) {
 	chdirTemp(t)
 	s := testServerWithKey(t)
-	if err := secret.SaveCache(s.Host, map[string]string{"console:berth": "StalePW123", "other": "keep"}); err != nil {
-		t.Fatal(err)
-	}
+	seedCache(t, s, map[string]string{"console:berth": "StalePW123", "other": "keep"})
 	f := stubFullApply(t, s)
 	stubConsoleLocked(f) // already locked: the crash happened after passwd -l
 	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -1365,9 +1355,7 @@ func TestAccountsApplyRefusesNonMemberAfterEnsureUser(t *testing.T) {
 func TestAccountsApplyBreakGlassOffLocksOwnedPassword(t *testing.T) {
 	chdirTemp(t)
 	s := testServerWithKey(t)
-	if err := secret.SaveCache(s.Host, map[string]string{"console:berth": "OwnedPW123", "other": "keep"}); err != nil {
-		t.Fatal(err)
-	}
+	seedCache(t, s, map[string]string{"console:berth": "OwnedPW123", "other": "keep"})
 	f := stubFullApply(t, s)
 	f.On("passwd -S berth", bssh.Result{ExitCode: 0, Stdout: "berth P 07/24/2026 0 99999 7 -1\n"})
 	f.On("passwd -l berth", bssh.Result{})

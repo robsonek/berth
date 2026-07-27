@@ -306,9 +306,7 @@ func TestDatabaseCheckSatisfiedDoesNotReseedExistingEnv(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
 	s.Valkey = true
-	if err := secret.SaveCache(s.Host, map[string]string{s.SiteDBUser(s.Sites[0]): "pw123"}); err != nil {
-		t.Fatal(err)
-	}
+	seedCache(t, s, map[string]string{s.SiteDBUser(s.Sites[0]): "pw123"})
 	f := bssh.NewFakeRunner()
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present, driver matches
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
@@ -380,12 +378,10 @@ func TestDatabaseCheckSatisfiedWithFullCache(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
 	dbUser := s.SiteDBUser(s.Sites[0])
-	if err := secret.SaveCache(s.Host, map[string]string{
+	seedCache(t, s, map[string]string{
 		dbUser:             "pw123",
 		"appkey:" + dbUser: "base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
 	f := bssh.NewFakeRunner()
 	stubGreenRemote(f, s)
 	f.On(appKeyProbe(s), bssh.Result{ExitCode: 0}) // live env holds a berth-format APP_KEY
@@ -406,9 +402,7 @@ func TestDatabaseCheckSatisfiedWhenEnvAppKeyNotBerthFormat(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
 	dbUser := s.SiteDBUser(s.Sites[0])
-	if err := secret.SaveCache(s.Host, map[string]string{dbUser: "pw123"}); err != nil {
-		t.Fatal(err)
-	}
+	seedCache(t, s, map[string]string{dbUser: "pw123"})
 	f := bssh.NewFakeRunner()
 	stubGreenRemote(f, s)
 	f.On(appKeyProbe(s), bssh.Result{ExitCode: 1})
@@ -430,9 +424,7 @@ func TestDatabaseCheckSatisfiedWhenFirstAppKeyLineNotBerthFormat(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
 	dbUser := s.SiteDBUser(s.Sites[0])
-	if err := secret.SaveCache(s.Host, map[string]string{dbUser: "pw123"}); err != nil {
-		t.Fatal(err)
-	}
+	seedCache(t, s, map[string]string{dbUser: "pw123"})
 	f := bssh.NewFakeRunner()
 	stubGreenRemote(f, s)
 	f.On(appKeyProbe(s), bssh.Result{ExitCode: 3})
@@ -449,9 +441,7 @@ func TestDatabaseCheckUnsatisfiedWhenAppKeyBackupMissing(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
 	dbUser := s.SiteDBUser(s.Sites[0])
-	if err := secret.SaveCache(s.Host, map[string]string{dbUser: "pw123"}); err != nil {
-		t.Fatal(err)
-	}
+	seedCache(t, s, map[string]string{dbUser: "pw123"})
 	f := bssh.NewFakeRunner()
 	stubGreenRemote(f, s)
 	f.On(appKeyProbe(s), bssh.Result{ExitCode: 0}) // berth-format APP_KEY live, no local backup
@@ -472,9 +462,7 @@ func TestDatabaseCheckFailsWhenAppKeyProbeErrors(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
 	dbUser := s.SiteDBUser(s.Sites[0])
-	if err := secret.SaveCache(s.Host, map[string]string{dbUser: "pw123"}); err != nil {
-		t.Fatal(err)
-	}
+	seedCache(t, s, map[string]string{dbUser: "pw123"})
 	f := bssh.NewFakeRunner()
 	stubGreenRemote(f, s)
 	f.On(appKeyProbe(s), bssh.Result{ExitCode: 2, Stderr: "grep: input: Permission denied"})
@@ -1160,9 +1148,7 @@ func TestDatabaseApplyRecoversAppKeyFromCache(t *testing.T) {
 	s := databaseServer()
 	const wantKey = "base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 	dbUser := s.SiteDBUser(s.Sites[0])
-	if err := secret.SaveCache(s.Host, map[string]string{dbUser: "cachedpw", "appkey:" + dbUser: wantKey}); err != nil {
-		t.Fatal(err)
-	}
+	seedCache(t, s, map[string]string{dbUser: "cachedpw", "appkey:" + dbUser: wantKey})
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // no .env -> re-seed path
@@ -1246,9 +1232,7 @@ func TestDatabaseApplyRejectsMalformedCachedAppKey(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
 	dbUser := s.SiteDBUser(s.Sites[0])
-	if err := secret.SaveCache(s.Host, map[string]string{"appkey:" + dbUser: "base64:tampered"}); err != nil {
-		t.Fatal(err)
-	}
+	seedCache(t, s, map[string]string{"appkey:" + dbUser: "base64:tampered"})
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
@@ -1324,12 +1308,10 @@ func TestDatabaseApplyRegistersFreshPasswordBeforeAppKeyRecoveryFails(t *testing
 	chdirTemp(t)
 	s := databaseServer()
 	dbUser := s.SiteDBUser(s.Sites[0])
-	if err := secret.SaveCache(s.Host, map[string]string{
+	seedCache(t, s, map[string]string{
 		dbUser:             "Hunter22pw",
 		"appkey:" + dbUser: "garbage-not-an-app-key",
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
 	red := secret.NewRedactor()
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})

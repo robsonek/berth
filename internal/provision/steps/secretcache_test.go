@@ -7,10 +7,23 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
 	"github.com/robsonek/berth/internal/secret"
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
+
+// seedCache seeds a v1 envelope bound to the server's endpoint — the only
+// on-disk format production code reads.
+func seedCache(t *testing.T, s *config.Server, secrets map[string]string) {
+	t.Helper()
+	if err := secret.SaveEnvelope(s.CacheKey(), secret.Envelope{
+		Endpoint: &secret.Endpoint{Host: s.Host, Port: s.SSH.Port},
+		Secrets:  secrets,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // These pin the verified-cache wiring in the SECRET CONSUMERS (spec §6:
 // "accounts/database: wywołania po CacheKey; VerifyEnvelope przed użyciem

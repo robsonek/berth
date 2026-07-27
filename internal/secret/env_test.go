@@ -35,7 +35,10 @@ func cacheHome(t *testing.T) string {
 
 func TestSaveAndLoadCacheRoundTrip(t *testing.T) {
 	berth := cacheHome(t)
-	if err := SaveCache("srv", map[string]string{"DB_PASSWORD": "x"}); err != nil {
+	if err := SaveEnvelope("srv", Envelope{
+		Endpoint: &Endpoint{Host: "srv", Port: 22},
+		Secrets:  map[string]string{"DB_PASSWORD": "x"},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := LoadCache("srv")
@@ -97,7 +100,10 @@ func TestSaveCacheTightensPermissiveModes(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(berth, "h.secrets.json"), []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := SaveCache("h", map[string]string{"k": "v"}); err != nil {
+	if err := SaveEnvelope("h", Envelope{
+		Endpoint: &Endpoint{Host: "h", Port: 22},
+		Secrets:  map[string]string{"k": "v"},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if di, _ := os.Stat(berth); di == nil || di.Mode().Perm() != 0o700 {
