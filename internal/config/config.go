@@ -560,7 +560,13 @@ func Load(path string) (*Server, error) {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
 	var s Server
-	if err := v.Unmarshal(&s, viper.DecodeHook(mapstructure.ComposeDecodeHookFunc(
+	// UnmarshalExact, not Unmarshal: an unknown key must be an error, never a
+	// silent default. A typo in a safety-relevant key — cloudflare_only, a
+	// backup setting, a per-site policy — would otherwise leave the operator
+	// convinced they configured something berth never read. The strictness is
+	// cheap while only test configs exist and becomes a breaking change once
+	// real ones do, which is why it lands before the first deployment.
+	if err := v.UnmarshalExact(&s, viper.DecodeHook(mapstructure.ComposeDecodeHookFunc(
 		mapstructure.StringToTimeDurationHookFunc(),
 		mapstructure.StringToSliceHookFunc(","),
 		stringToQueueConfigHook,

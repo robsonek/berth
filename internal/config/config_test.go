@@ -243,3 +243,59 @@ func TestSiteUserDerivation(t *testing.T) {
 		t.Errorf("multi-site: SiteUser = %q, want %q", got, want)
 	}
 }
+
+// writeCfg writes a config file into a temp dir and returns its path.
+func writeCfg(t *testing.T, body string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "server.yml")
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestLoadRejectsUnknownKeys(t *testing.T) {
+	// Strict decoding: an unknown key must be an error, never a silent default.
+	// A typo in a safety-relevant key would otherwise leave the operator
+	// convinced they configured something berth never read. All four nesting
+	// levels are covered because viper flattens the tree and it is not obvious
+	// from the call site that every level is checked.
+	base := `host: 203.0.113.10
+ssh:
+  user: root
+  key: ~/.ssh/id_ed25519
+php:
+  version: "8.5"
+database:
+  engine: mariadb
+  name: myapp
+  user: myapp
+sites:
+  - domain: app.example.com
+    deploy_path: /var/www/app
+`
+	for name, body := range map[string]string{
+		"root key":            base + "clouflare_only: true\n",
+		"nested block key":    strings.Replace(base, "  user: root\n", "  user: root\n  prot: 2222\n", 1),
+		"site key":            base + "    schedular: false\n",
+		"block inside a site": base + "    databse:\n      name: other\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Load(writeCfg(t, body))
+			if err == nil {
+				t.Fatal("Load() accepted an unknown key; a typo must not fall back to the default")
+			}
+			if !strings.Contains(err.Error(), "parse config") {
+				t.Errorf("err = %v, want the parse-stage rejection", err)
+			}
+		})
+	}
+}
+
+func TestLoadStillAcceptsEveryKnownKey(t *testing.T) {
+	// The counterweight to the test above: strictness must not reject a config
+	// that only uses documented keys. valid.yml exercises the common ones.
+	if _, err := Load("testdata/valid.yml"); err != nil {
+		t.Fatalf("a fully known config must still load; got %v", err)
+	}
+}
