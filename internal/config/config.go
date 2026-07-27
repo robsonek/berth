@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 
-	mapstructure "github.com/go-viper/mapstructure/v2"
 	"github.com/spf13/viper"
 )
 
@@ -584,11 +583,11 @@ func Load(path string) (*Server, error) {
 	// convinced they configured something berth never read. The strictness is
 	// cheap while only test configs exist and becomes a breaking change once
 	// real ones do, which is why it lands before the first deployment.
-	if err := v.UnmarshalExact(&s, viper.DecodeHook(mapstructure.ComposeDecodeHookFunc(
-		mapstructure.StringToTimeDurationHookFunc(),
-		mapstructure.StringToSliceHookFunc(","),
-		stringToQueueConfigHook,
-	))); err != nil {
+	// Exactly one custom hook: the queue string shorthand. No schema field is
+	// a time.Duration or []string, and keeping the stock hooks for those
+	// types would silently grant any FUTURE such field an alias spelling
+	// (comma-split strings) from day one.
+	if err := v.UnmarshalExact(&s, viper.DecodeHook(stringToQueueConfigHook)); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	if err := s.Validate(); err != nil {
