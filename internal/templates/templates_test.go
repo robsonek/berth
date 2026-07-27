@@ -274,6 +274,21 @@ func TestRenderBackupLogrotateGolden(t *testing.T) {
 	checkGolden(t, "backup_logrotate.conf.tmpl", "backup_logrotate.golden", nil)
 }
 
+func TestRenderBackupManifestGolden(t *testing.T) {
+	checkGolden(t, "backup_manifest.tmpl", "backup_manifest.golden", struct {
+		BerthVersion, Domain, Pool, Engine, DBName, DBUser, SiteUser, DeployPath string
+	}{
+		BerthVersion: "v9.9.9",
+		Domain:       "app.example.com",
+		Pool:         "app_example_com",
+		Engine:       "mariadb",
+		DBName:       "myapp",
+		DBUser:       "myapp",
+		SiteUser:     "b_appexamplecom_dd46c94b",
+		DeployPath:   "/home/deploy/myapp",
+	})
+}
+
 func TestRenderManifestGolden(t *testing.T) {
 	checkGolden(t, "manifest.tmpl", "manifest.golden", struct{ Version, ProvisionedAt string }{
 		Version: "v9.9.9", ProvisionedAt: "2026-01-02T03:04:05Z",
