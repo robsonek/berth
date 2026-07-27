@@ -1242,6 +1242,34 @@ func TestDatabaseApplyLeavesOperatorClientAuthAlone(t *testing.T) {
 	}
 }
 
+func TestDatabaseApplyRefusesCorruptCachedPasswordBeforeContainmentProbe(t *testing.T) {
+	// Check's shape validation can be short-circuited by earlier unsatisfied
+	// returns (database missing, cache missing the APP_KEY backup, ...), so
+	// Apply can reach the containment probe with a manually corrupted cache
+	// value. One whose FIRST LINE is empty would feed grep -F -f - an EMPTY
+	// pattern — which matches EVERY line (exit 0) and would rewrite an
+	// operator-customized client-auth file. The probe's contract requires the
+	// caller to shape-validate, so Apply must refuse loudly BEFORE probing.
+	chdirTemp(t)
+	s := databaseServer()
+	dbUser := s.SiteDBUser(s.Sites[0])
+	seedCache(t, s, map[string]string{dbUser: "\nsneaky"})
+	f := bssh.NewFakeRunner()
+	stubDivergedEnv(f, s, "ValidPW123", "base64:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=")
+	err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "outside the allowed charset") {
+		t.Fatalf("Apply() = %v, want the charset refusal for a corrupt cached password", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "IFS= read -r old") {
+			t.Fatalf("the containment probe must never run with an unvalidated cached password; saw %q", c.Cmd)
+		}
+	}
+	if writtenContent(f, "/home/deploy/.my.cnf") != nil {
+		t.Fatal("the client-auth file must not be rewritten on the refusal path")
+	}
+}
+
 func TestDatabaseApplyFailsWhenClientAuthProbeErrors(t *testing.T) {
 	// grep exit >= 2 is an I/O failure, not "old credential absent" — silently
 	// skipping the refresh would strand the client file with no signal.

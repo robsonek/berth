@@ -535,6 +535,16 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 				return err
 			}
 		}
+		// The containment probe's contract requires a shape-validated password
+		// (a value whose FIRST line is empty would feed grep -F an EMPTY
+		// pattern, which matches EVERY line and would rewrite an
+		// operator-customized file). Check validates the same value, but its
+		// earlier unsatisfied-returns can hand a corrupted cache straight to
+		// Apply — so the tripwire fires here too, loudly, exactly as
+		// newPassword refuses.
+		if oldPW != "" && !reDBPassword.MatchString(oldPW) {
+			return fmt.Errorf("cached password for %s is outside the allowed charset; refusing to use it", dbUser)
+		}
 		// A reconciled role password strands ~/.my.cnf|~/.pgpass on the old
 		// credential (seed-if-absent). Rewrite ONLY a file that provably holds
 		// berth's old cached password — an operator-customized file (no old
