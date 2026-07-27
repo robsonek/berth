@@ -32,7 +32,7 @@ func testServerWithKey(t *testing.T) *config.Server {
 	return &config.Server{
 		SSH:   config.SSH{Key: writeOperatorKey(t)},
 		PHP:   config.PHP{Version: "8.4"},
-		Sites: []config.Site{{Domain: "app.example.com", DeployPath: "/home/deploy/app", User: "deploy"}},
+		Sites: []config.Site{{Domain: "app.example.com", DeployPath: "/var/www/app", User: "deploy"}},
 	}
 }
 
@@ -64,7 +64,7 @@ func stubAccountCreate(f *bssh.FakeRunner, user string) {
 func stubFullApply(t *testing.T, s *config.Server) *bssh.FakeRunner {
 	t.Helper()
 	f := bssh.NewFakeRunner()
-	stubSiteTreeFresh(f, "/home/deploy/app")
+	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
 	return f
@@ -79,7 +79,7 @@ func TestAccountsRequiresBase(t *testing.T) {
 func TestAccountsCheckUnsatisfiedWhenUserMissing(t *testing.T) {
 	s := testServerWithKey(t)
 	f := bssh.NewFakeRunner()
-	stubSiteTreeFresh(f, "/home/deploy/app")
+	stubSiteTreeFresh(f, "/var/www/app")
 	f.On("id berth", bssh.Result{ExitCode: 1}) // berth missing
 	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
@@ -99,7 +99,7 @@ func TestAccountsCheckSatisfiedWhenAllPresent(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
-	stubSiteTreeFresh(f, "/home/deploy/app")
+	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want) // user pinned "deploy"
 	stubConsoleLocked(f)
@@ -116,7 +116,7 @@ func TestAccountsCheckUnsatisfiedWhenSudoersDrifted(t *testing.T) {
 	s := testServerWithKey(t)
 	want := authorizedKeys(testOperatorKey)
 	f := bssh.NewFakeRunner()
-	stubSiteTreeFresh(f, "/home/deploy/app")
+	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	// deploy's sudoers carries the managed marker but has stale content (e.g. an
 	// out-of-date program list) — Check must content-drift detect and report
@@ -205,7 +205,7 @@ func TestAccountsApplyCreatesUsersAndWritesSudoers(t *testing.T) {
 	chdirTemp(t)
 	s := testServerWithKey(t)
 	f := bssh.NewFakeRunner()
-	stubSiteTreeFresh(f, "/home/deploy/app")
+	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
 
@@ -290,7 +290,7 @@ func TestAccountsApplyRefusesForeignAuthorizedKeys(t *testing.T) {
 	// the write path itself must refuse to clobber a file berth does not manage.
 	s := testServerWithKey(t)
 	f := bssh.NewFakeRunner()
-	stubSiteTreeFresh(f, "/home/deploy/app")
+	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
 	f.On("cat "+shQuote(sudoersBerthPath), bssh.Result{ExitCode: 1})
@@ -314,7 +314,7 @@ func TestAccountsApplyOverwritesForeignAuthorizedKeysWithForce(t *testing.T) {
 	chdirTemp(t)
 	s := testServerWithKey(t)
 	f := bssh.NewFakeRunner()
-	stubSiteTreeFresh(f, "/home/deploy/app")
+	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
 	f.On("cat "+shQuote(sudoersBerthPath), bssh.Result{ExitCode: 1})
@@ -342,7 +342,7 @@ func TestAccountsApplyGeneratesDeployKeyWhenRepository(t *testing.T) {
 	s := testServerWithKey(t)
 	s.Sites[0].Repository = "git@github.com:owner/repo.git"
 	f := bssh.NewFakeRunner()
-	stubSiteTreeFresh(f, "/home/deploy/app")
+	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
 	f.On("test -e '/home/deploy/.ssh/id_ed25519'", bssh.Result{ExitCode: 1}) // key absent
@@ -369,7 +369,7 @@ func TestAccountsApplySkipsDeployKeyWithoutRepository(t *testing.T) {
 	chdirTemp(t)
 	s := testServerWithKey(t) // no repository
 	f := bssh.NewFakeRunner()
-	stubSiteTreeFresh(f, "/home/deploy/app")
+	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
 
@@ -432,7 +432,7 @@ func TestAccountsCheckUnsatisfiedWhenDeployKeyMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
-	stubSiteTreeFresh(f, "/home/deploy/app")
+	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
 	f.On("test -e '/home/deploy/.ssh/id_ed25519'", bssh.Result{ExitCode: 1}) // key missing
@@ -458,7 +458,7 @@ func TestAccountsCheckSatisfiedWithDeployKeyPresent(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
-	stubSiteTreeFresh(f, "/home/deploy/app")
+	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
 	f.On("test -e '/home/deploy/.ssh/id_ed25519'", bssh.Result{ExitCode: 0})
@@ -485,7 +485,7 @@ func TestAccountsCheckUnsatisfiedWhenPubMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
-	stubSiteTreeFresh(f, "/home/deploy/app")
+	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
 	f.On("test -e "+shQuote("/home/deploy/.ssh/id_ed25519"), bssh.Result{})
@@ -514,7 +514,7 @@ func TestAccountsCheckUnsatisfiedWhenKnownHostsMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
-	stubSiteTreeFresh(f, "/home/deploy/app")
+	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
 	f.On("test -e "+shQuote("/home/deploy/.ssh/id_ed25519"), bssh.Result{})
@@ -546,7 +546,7 @@ func TestAccountsCheckProbesKnownHostsPortToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
-	stubSiteTreeFresh(f, "/home/deploy/app")
+	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
 	f.On("test -e "+shQuote("/home/deploy/.ssh/id_ed25519"), bssh.Result{})
@@ -567,7 +567,7 @@ func TestAccountsApplyDerivesMissingPub(t *testing.T) {
 	s := testServerWithKey(t)
 	s.Sites[0].Repository = "git@github.com:owner/repo.git"
 	f := bssh.NewFakeRunner()
-	stubSiteTreeFresh(f, "/home/deploy/app")
+	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
 	keyPath := "/home/deploy/.ssh/id_ed25519"
@@ -600,7 +600,7 @@ func TestAccountsApplyScansGitHostPortAware(t *testing.T) {
 	s := testServerWithKey(t)
 	s.Sites[0].Repository = "ssh://git@git.example.com:2222/owner/repo.git"
 	f := bssh.NewFakeRunner()
-	stubSiteTreeFresh(f, "/home/deploy/app")
+	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
 	f.On("test -e "+shQuote("/home/deploy/.ssh/id_ed25519"), bssh.Result{})
@@ -632,7 +632,7 @@ func TestAccountsCheckBreakGlassOnPasswordMissingUnsatisfied(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
-	stubSiteTreeFresh(f, "/home/deploy/app")
+	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
 	stubConsoleLocked(f)
@@ -659,7 +659,7 @@ func TestAccountsCheckBreakGlassOffPasswordSetUnsatisfied(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
-	stubSiteTreeFresh(f, "/home/deploy/app")
+	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
 	f.On("passwd -S berth", bssh.Result{ExitCode: 0, Stdout: "berth P 07/24/2026 0 99999 7 -1\n"})
@@ -683,7 +683,7 @@ func TestAccountsCheckBreakGlassOffForeignPasswordSatisfied(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
-	stubSiteTreeFresh(f, "/home/deploy/app")
+	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
 	f.On("passwd -S berth", bssh.Result{ExitCode: 0, Stdout: "berth P 07/24/2026 0 99999 7 -1\n"})
@@ -729,7 +729,7 @@ func TestAccountsCheckBreakGlassSatisfiedBothWays(t *testing.T) {
 				t.Fatal(err)
 			}
 			f := bssh.NewFakeRunner()
-			stubSiteTreeFresh(f, "/home/deploy/app")
+			stubSiteTreeFresh(f, "/var/www/app")
 			stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 			stubAccountExists(f, "deploy", deploySudoers, want)
 			f.On("passwd -S berth", bssh.Result{ExitCode: 0, Stdout: "berth " + tc.status + " 07/24/2026 0 99999 7 -1\n"})
@@ -852,7 +852,7 @@ func TestAccountsCheckBreakGlassOffStaleMarkerUnsatisfied(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
-	stubSiteTreeFresh(f, "/home/deploy/app")
+	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
 	stubConsoleLocked(f)
@@ -1029,8 +1029,8 @@ func TestAccountsApplyFailsLoudWhenVisudoRejects(t *testing.T) {
 func TestAccountsCheckRefusesForeignOwnedTree(t *testing.T) {
 	s := testServerWithKey(t)
 	f := bssh.NewFakeRunner()
-	f.On(noSymlinkCmd("/home/deploy/app/shared/tmp"), bssh.Result{ExitCode: 0})
-	f.On(ownerProbeCmd("/home/deploy/app"), bssh.Result{Stdout: "b_old_12345678 1003 directory\n"})
+	f.On(noSymlinkCmd("/var/www/app/shared/tmp"), bssh.Result{ExitCode: 0})
+	f.On(ownerProbeCmd("/var/www/app"), bssh.Result{Stdout: "b_old_12345678 1003 directory\n"})
 	_, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err == nil || !strings.Contains(err.Error(), "sites[].user") {
 		t.Fatalf("Check() err = %v, want an owner-mismatch refusal", err)
@@ -1042,8 +1042,8 @@ func TestAccountsApplyRefusesBeforeCreatingAccounts(t *testing.T) {
 	// a mismatch never mints an orphan account, deploy key or sudoers entry.
 	s := testServerWithKey(t)
 	f := bssh.NewFakeRunner()
-	f.On(noSymlinkCmd("/home/deploy/app/shared/tmp"), bssh.Result{ExitCode: 0})
-	f.On(ownerProbeCmd("/home/deploy/app"), bssh.Result{Stdout: "b_old_12345678 1003 directory\n"})
+	f.On(noSymlinkCmd("/var/www/app/shared/tmp"), bssh.Result{ExitCode: 0})
+	f.On(ownerProbeCmd("/var/www/app"), bssh.Result{Stdout: "b_old_12345678 1003 directory\n"})
 	err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
 	if err == nil || !strings.Contains(err.Error(), "sites[].user") {
 		t.Fatalf("Apply() = %v, want an owner-mismatch refusal", err)
@@ -1062,7 +1062,7 @@ func TestAccountsRefusesSymlinkedDeployTree(t *testing.T) {
 	// (Codex plan-review finding #3).
 	s := testServerWithKey(t)
 	f := bssh.NewFakeRunner()
-	f.On(noSymlinkCmd("/home/deploy/app/shared/tmp"), bssh.Result{ExitCode: 1})
+	f.On(noSymlinkCmd("/var/www/app/shared/tmp"), bssh.Result{ExitCode: 1})
 	_, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("Check() err = %v, want a symlink refusal", err)

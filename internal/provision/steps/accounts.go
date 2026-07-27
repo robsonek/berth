@@ -125,6 +125,14 @@ func (a accounts) Check(ctx context.Context, rc provision.RunCtx, s *config.Serv
 			return provision.CheckResult{}, err
 		}
 	}
+	// ensureUser creates /home/<user> as root, so /home itself must be
+	// root-controlled — otherwise the account's home could be pre-planted as a
+	// symlink and root's install -d would chown its target. "/home/x" is a
+	// deliberate path PATTERN, not a real account: ancestorsOf derives
+	// ["/", "/home"] from it, which is exactly the chain the probe must cover.
+	if err := assertSafeAncestry(ctx, r, "berth accounts", "/home/x"); err != nil {
+		return provision.CheckResult{}, err
+	}
 	operatorKey, err := operatorPublicKey(s.SSH.Key)
 	if err != nil {
 		return provision.CheckResult{}, err
@@ -300,6 +308,14 @@ func (a accounts) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serv
 		if err := assertSiteTreeOwners(ctx, r, s, site); err != nil {
 			return err
 		}
+	}
+	// ensureUser creates /home/<user> as root, so /home itself must be
+	// root-controlled — otherwise the account's home could be pre-planted as a
+	// symlink and root's install -d would chown its target. "/home/x" is a
+	// deliberate path PATTERN, not a real account: ancestorsOf derives
+	// ["/", "/home"] from it, which is exactly the chain the probe must cover.
+	if err := assertSafeAncestry(ctx, r, "berth accounts", "/home/x"); err != nil {
+		return err
 	}
 	operatorKey, err := operatorPublicKey(s.SSH.Key)
 	if err != nil {

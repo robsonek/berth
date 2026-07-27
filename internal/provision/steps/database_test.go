@@ -19,7 +19,7 @@ func databaseServer() *config.Server {
 		Database: config.Database{Engine: "mariadb", Name: "myapp", User: "myapp", Source: "debian"},
 		Sites: []config.Site{{
 			Domain:     "app.example.com",
-			DeployPath: "/home/deploy/myapp",
+			DeployPath: "/var/www/myapp",
 			User:       "deploy",
 			SSL:        true,
 		}},

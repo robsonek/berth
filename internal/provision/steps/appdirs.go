@@ -3,6 +3,8 @@ package steps
 import (
 	"context"
 	"fmt"
+	"path"
+	"strconv"
 	"strings"
 
 	"github.com/robsonek/berth/internal/config"
@@ -79,13 +81,123 @@ func assertNoSymlinkDeployTree(ctx context.Context, r bssh.Runner, site config.S
 	return assertNoSymlinkAt(ctx, r, site.Domain, site.DeployPath+"/shared/tmp")
 }
 
-// assertNoSymlinkTargets is the appdirs-wide variant: the deploy tree plus
-// the site's ACME webroot.
+// assertNoSymlinkTargets is the appdirs-wide variant: the root-controlled
+// ancestry requirement for the two directories root itself creates, then the
+// deploy tree and the site's ACME webroot.
+//
+// Ancestry goes FIRST: it is the broadest condition (an unsafe ancestor makes
+// every verdict below it meaningless) and it costs one round-trip.
 func assertNoSymlinkTargets(ctx context.Context, r bssh.Runner, s *config.Server, site config.Site) error {
+	if err := assertSafeAncestry(ctx, r, site.Domain, site.DeployPath, acmeWebroot(site.Domain)); err != nil {
+		return err
+	}
 	if err := assertNoSymlinkDeployTree(ctx, r, site); err != nil {
 		return err
 	}
 	return assertNoSymlinkAt(ctx, r, site.Domain, acmeWebroot(site.Domain))
+}
+
+// ancestorsOf returns every ancestor of p from / down to path.Dir(p)
+// inclusive: /var/www/app -> ["/", "/var", "/var/www"].
+//
+// / is included on purpose: it is a component like any other, and a
+// non-root-owned or writable root directory would let an unprivileged user
+// replace an existing top-level entry (or create a missing one) after the
+// probe — the very class this gate exists to catch.
+func ancestorsOf(p string) []string {
+	out := []string{"/"}
+	dir := path.Dir(p)
+	if dir == "/" || dir == "." {
+		return out
+	}
+	cur := ""
+	for _, part := range strings.Split(strings.TrimPrefix(dir, "/"), "/") {
+		cur += "/" + part
+		out = append(out, cur)
+	}
+	return out
+}
+
+// assertSafeAncestry refuses when any EXISTING ancestor of any given path is
+// not a root-controlled directory: it must be a real directory (not a symlink
+// or other type), owned by uid 0, and neither group- nor other-writable.
+//
+// This is the premise the root-run mutations rest on. berth still creates
+// deploy_path and the ACME webroot as root (they need an owner and group the
+// running account is not), and root's `install -d` follows a directory symlink
+// and applies ownership to the target. That is only safe while nobody but root
+// can replace a component of the path: the symlink probe checks a component's
+// TYPE, never its OWNERSHIP, so a tenant-owned ancestor (ValidateDeployPath
+// permits e.g. /srv/apps/site) would let the tenant swap the final component
+// after the probe and redirect the chown. Absent components pass — root
+// creates them, and what root creates is root-owned.
+//
+// Deliberately NOT bypassable with --force: --force is for adopting berth's
+// own unmanaged files, never for lowering a guard that gates a root chown.
+func assertSafeAncestry(ctx context.Context, r bssh.Runner, domain string, paths ...string) error {
+	seen := map[string]bool{}
+	var probe []string
+	for _, p := range paths {
+		for _, a := range ancestorsOf(p) {
+			if !seen[a] {
+				seen[a] = true
+				probe = append(probe, a)
+			}
+		}
+	}
+	if len(probe) == 0 {
+		return nil
+	}
+	var q []string
+	for _, p := range probe {
+		q = append(q, shQuote(p))
+	}
+	// One round-trip regardless of depth. Exit 91 is the probe's own signal
+	// that stat failed on an existing component — a hard error, never "absent"
+	// (fail-open here would defeat the whole guard). %F goes last: file types
+	// contain spaces, and validated paths cannot.
+	cmd := "export LC_ALL=C; for p in " + strings.Join(q, " ") +
+		"; do if [ -e \"$p\" ] || [ -L \"$p\" ]; then stat -c '%n %u %a %F' \"$p\" || exit 91; fi; done"
+	res, err := r.Run(ctx, cmd, nil)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("probing the directory ancestry for %s failed: %s", domain, strings.TrimSpace(res.Stderr))
+	}
+	for _, line := range strings.Split(strings.TrimSpace(res.Stdout), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			return fmt.Errorf("unexpected ancestry probe output for %s: %q", domain, line)
+		}
+		name, uid, modeStr, ftype := fields[0], fields[1], fields[2], strings.Join(fields[3:], " ")
+		if ftype != "directory" {
+			return fmt.Errorf("refusing to manage site %s: %s is a %s, not a directory — berth creates directories under it as root, so every component must be a root-owned directory; inspect and fix it before re-running", domain, name, ftype)
+		}
+		if uid != "0" {
+			return fmt.Errorf("refusing to manage site %s: %s is owned by uid %s, not root — a non-root owner can replace the directory berth is about to create as root and redirect its ownership; chown it to root or choose a deploy_path under a root-owned tree such as /var/www", domain, name, uid)
+		}
+		mode, err := strconv.ParseUint(modeStr, 8, 32)
+		if err != nil {
+			return fmt.Errorf("unexpected mode %q for %s while probing ancestry of site %s", modeStr, name, domain)
+		}
+		if mode&0o022 != 0 {
+			return fmt.Errorf("refusing to manage site %s: %s is group- or other-writable (mode %s) — anyone in that group can replace the directory berth is about to create as root; chmod g-w,o-w it before re-running", domain, name, modeStr)
+		}
+		// Searchability is a convergence requirement, not a security one: the
+		// site user creates its own shared/ and shared/tmp, and www-data must
+		// reach the ACME webroot and the site's public/. Neither is in root's
+		// group, so an unsearchable ancestor (e.g. root-owned 0700) makes every
+		// run fail with EACCES and the step never converges. Refuse with the
+		// remedy instead.
+		if mode&0o001 == 0 {
+			return fmt.Errorf("refusing to manage site %s: %s (mode %s) cannot be traversed by the site user or by www-data, so berth could create the directories but the site could never use them; run `chmod o+x %s` before re-running", domain, name, modeStr, name)
+		}
+	}
+	return nil
 }
 
 // assertSiteTreeOwners fails loudly when an EXISTING per-site directory
