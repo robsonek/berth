@@ -1215,6 +1215,35 @@ func TestAccountsRefusesSymlinkedDeployTree(t *testing.T) {
 	}
 }
 
+func TestAccountsRefusesTenantOwnedHomeAncestryEvenWithForce(t *testing.T) {
+	// Wiring, not gate logic (that is covered via appdirs): accounts must call
+	// assertSafeAncestry on the /home chain in BOTH Check and Apply — ensureUser
+	// creates /home/<user> as root, so a non-root-owned /home would let its
+	// owner redirect that creation. An unused FakeRunner stub never fails a
+	// suite, so only a refusal assertion catches a dropped call.
+	s := testServerWithKey(t)
+	for _, rc := range []provision.RunCtx{{}, {Force: true}} {
+		f := bssh.NewFakeRunner()
+		f.On(noSymlinkCmd("/var/www/app/shared/tmp"), bssh.Result{ExitCode: 0})
+		stubSiteTreeAbsent(f, "/var/www/app")
+		f.On(safeAncestryCmd("/", "/home"),
+			bssh.Result{Stdout: "/ 0 755 directory\n/home 1001 755 directory\n"})
+		_, err := Accounts(secret.NewRedactor()).Check(context.Background(), rc, s, f)
+		if err == nil || !strings.Contains(err.Error(), "/home is owned by uid 1001") {
+			t.Fatalf("Force=%v: Check() err = %v, want the /home ancestry refusal", rc.Force, err)
+		}
+		err = Accounts(secret.NewRedactor()).Apply(context.Background(), rc, s, f)
+		if err == nil || !strings.Contains(err.Error(), "/home is owned by uid 1001") {
+			t.Fatalf("Force=%v: Apply() err = %v, want the /home ancestry refusal", rc.Force, err)
+		}
+		for _, c := range f.Calls() {
+			if strings.HasPrefix(c.Cmd, "useradd") || strings.Contains(c.Cmd, "install -d") {
+				t.Errorf("Force=%v: nothing may be created on an unsafe /home ancestry; ran %q", rc.Force, c.Cmd)
+			}
+		}
+	}
+}
+
 func TestAccountsApplyOnlyTenantMutatesItsOwnHome(t *testing.T) {
 	chdirTemp(t)
 	s := testServerWithKey(t)
