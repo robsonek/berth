@@ -164,7 +164,7 @@ func TestOwnSSHDirHardErrorsWhenStatFailsOnExistingEntry(t *testing.T) {
 		f := bssh.NewFakeRunner()
 		f.On(sshDirOwnerCmd("deploy"), out)
 		err := assertOwnSSHDir(context.Background(), f, "deploy")
-		if err == nil || !strings.Contains(err.Error(), "probing the owner") {
+		if err == nil || !strings.Contains(err.Error(), "probing the owner and type") {
 			t.Fatalf("exit %d: err = %v, want a hard error, not an \"absent\" pass", out.ExitCode, err)
 		}
 	}

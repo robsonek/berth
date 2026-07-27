@@ -20,6 +20,13 @@ Notable changes to berth. Older releases are documented on the
   to the account. Removing or moving the entry aside is the fix, and the
   message says so.
 
+  One arrangement that used to work is now refused: a `~/.ssh` symlinked to a
+  directory the account can already write (a home on a separate mount, say)
+  provisioned successfully before, because the account-run `install -d` simply
+  followed the link. berth needs a real directory there, so such a host now
+  gets the refusal too — replace the symlink with a directory, or point
+  `sites[].user` at an account whose home layout berth manages.
+
 ## [0.19.0] — 2026-07-27
 
 ### Fixed

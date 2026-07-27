@@ -614,7 +614,7 @@ func assertOwnSSHDir(ctx context.Context, r bssh.Runner, user string) error {
 		return nil // genuinely absent — about to be created
 	}
 	if res.ExitCode != 0 {
-		return fmt.Errorf("probing the owner of %s failed: %s", sshDir, strings.TrimSpace(res.Stderr))
+		return fmt.Errorf("probing the owner and type of %s failed: %s", sshDir, strings.TrimSpace(res.Stderr))
 	}
 	fields := strings.Fields(strings.TrimSpace(res.Stdout))
 	if len(fields) < 2 {
