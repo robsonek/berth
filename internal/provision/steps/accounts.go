@@ -541,11 +541,14 @@ func userHome(ctx context.Context, r bssh.Runner, user string) (string, error) {
 // still works if <user> is one of its supplementary groups.
 //
 // mustExist distinguishes two callers. With false (Check, and appdirs, where
-// --only appdirs may legitimately run before the account exists) a failing
-// probe passes: the mutation that follows fails with its own clear error and
-// cannot succeed either way, so this is not fail-open. With true (Apply, right
-// after ensureUser) a failing probe is a hard error — the account was just
-// created, so it must be resolvable.
+// --only appdirs may legitimately run before the account exists) a genuinely
+// unresolvable account passes: the mutation that follows fails with its own
+// clear error and cannot succeed either way, so this is not fail-open. But
+// `id -nG` also fails on transient NSS or I/O trouble, so a failing probe for
+// an account that still resolves is a hard error — passing on it would skip
+// the guard silently. With true (Apply, right after ensureUser) any failing
+// probe is a hard error — the account was just created, so it must be
+// resolvable.
 func assertGroupMembership(ctx context.Context, r bssh.Runner, user string, mustExist bool) error {
 	res, err := r.Run(ctx, "LC_ALL=C id -nG "+shQuote(user), nil)
 	if err != nil {
@@ -555,7 +558,16 @@ func assertGroupMembership(ctx context.Context, r bssh.Runner, user string, must
 		if mustExist {
 			return fmt.Errorf("cannot resolve the groups of account %s right after creating it: %s", user, strings.TrimSpace(res.Stderr))
 		}
-		return nil // no such account yet
+		// Tell "no such account yet" apart from a probe that failed for
+		// another reason: only the former may pass.
+		exists, err := userExists(ctx, r, user)
+		if err != nil {
+			return err
+		}
+		if exists {
+			return fmt.Errorf("account %s exists but probing its groups failed: %s", user, strings.TrimSpace(res.Stderr))
+		}
+		return nil // genuinely no such account yet
 	}
 	for _, g := range strings.Fields(res.Stdout) {
 		if g == user {
@@ -568,16 +580,26 @@ func assertGroupMembership(ctx context.Context, r bssh.Runner, user string, must
 // assertOwnSSHDir refuses when an existing ~/.ssh belongs to someone other
 // than the account. berth now creates that directory AS the account (root must
 // not mutate a path inside a tenant-owned home), and the account cannot re-own
-// a directory it does not own — a state root used to repair silently. Absent
-// passes: it is about to be created.
+// a directory it does not own — a state root used to repair silently. Only a
+// genuinely absent entry passes (it is about to be created); the probe keeps
+// absence and failure distinguishable — exit 92 is its own "absent" signal
+// (the existence test counts a dangling symlink as present), and a failing
+// stat on an existing entry surfaces as exit 91, a hard error, mirroring
+// assertSafeAncestry. Reading a probe failure as "absent" would skip the
+// guard silently and leave the operator with the raw EPERM it exists to
+// prevent.
 func assertOwnSSHDir(ctx context.Context, r bssh.Runner, user string) error {
 	sshDir := "/home/" + user + "/.ssh"
-	res, err := r.Run(ctx, "LC_ALL=C stat -c '%U' "+shQuote(sshDir), nil)
+	q := shQuote(sshDir)
+	res, err := r.Run(ctx, "export LC_ALL=C; if [ -e "+q+" ] || [ -L "+q+" ]; then stat -c '%U' "+q+" || exit 91; else exit 92; fi", nil)
 	if err != nil {
 		return err
 	}
+	if res.ExitCode == 92 {
+		return nil // genuinely absent — about to be created
+	}
 	if res.ExitCode != 0 {
-		return nil // absent
+		return fmt.Errorf("probing the owner of %s failed: %s", sshDir, strings.TrimSpace(res.Stderr))
 	}
 	if owner := strings.TrimSpace(res.Stdout); owner != user {
 		return fmt.Errorf("%s exists but is owned by %s, not %s; berth creates it as the account itself and cannot re-own it — run `chown -R %s:%s %s` on the host and re-run", sshDir, owner, user, user, user, sshDir)

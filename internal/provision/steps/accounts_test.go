@@ -53,7 +53,7 @@ func stubAccountExists(f *bssh.FakeRunner, user string, sudoers, want []byte) {
 func stubAccountCreate(f *bssh.FakeRunner, user string) {
 	f.On("id "+user, bssh.Result{ExitCode: 1})
 	f.On(groupProbeCmd(user), bssh.Result{Stdout: user + "\n"})
-	f.On(sshDirOwnerCmd(user), bssh.Result{ExitCode: 1, Stderr: "stat: cannot statx: No such file or directory"})
+	f.On(sshDirOwnerCmd(user), bssh.Result{ExitCode: 92}) // ~/.ssh absent
 	f.On("useradd -m -s /bin/bash "+user, bssh.Result{})
 	f.On("getent passwd "+user, bssh.Result{Stdout: fmt.Sprintf("%s:x:1000:1000::/home/%s:/bin/bash\n", user, user)})
 	f.On(fmt.Sprintf("install -d -o %s -g %s -m 00700 ", user, user)+shQuote(fmt.Sprintf("/home/%s", user)), bssh.Result{})
@@ -66,9 +66,12 @@ func stubAccountCreate(f *bssh.FakeRunner, user string) {
 
 // groupProbeCmd / sshDirOwnerCmd mirror the production probes so FakeRunner
 // stubs match. Keep in lockstep with assertGroupMembership / assertOwnSSHDir.
+// The ~/.ssh probe signals absence with exit 92 and a failed stat on an
+// existing entry with exit 91.
 func groupProbeCmd(user string) string { return "LC_ALL=C id -nG " + shQuote(user) }
 func sshDirOwnerCmd(user string) string {
-	return "LC_ALL=C stat -c '%U' " + shQuote("/home/"+user+"/.ssh")
+	q := shQuote("/home/" + user + "/.ssh")
+	return "export LC_ALL=C; if [ -e " + q + " ] || [ -L " + q + " ]; then stat -c '%U' " + q + " || exit 91; else exit 92; fi"
 }
 
 func TestGroupMembershipAcceptsEponymousPrimaryGroup(t *testing.T) {
@@ -103,10 +106,27 @@ func TestGroupMembershipRefusesNonMember(t *testing.T) {
 func TestGroupMembershipPassesWhenAccountMissingAndNotRequired(t *testing.T) {
 	// --only appdirs on a host without the account yet: the mutation fails on
 	// its own with a clear error, so this guard must not invent a second one.
+	// The guard re-probes the account itself before passing (fail-closed).
 	f := bssh.NewFakeRunner()
 	f.On(groupProbeCmd("deploy"), bssh.Result{ExitCode: 1, Stderr: "id: 'deploy': no such user"})
+	f.On("id deploy", bssh.Result{ExitCode: 1})
 	if err := assertGroupMembership(context.Background(), f, "deploy", false); err != nil {
 		t.Fatalf("a missing account must not trip this guard; got %v", err)
+	}
+}
+
+func TestGroupMembershipHardErrorsWhenProbeFailsButAccountExists(t *testing.T) {
+	// `id -nG` also fails on transient NSS or I/O trouble, not only on a
+	// missing account. Passing on such a failure would skip the guard silently
+	// (fail-open) and the operator would hit the raw EPERM it exists to
+	// prevent — so when the account itself still resolves, the failed group
+	// probe must be a hard error.
+	f := bssh.NewFakeRunner()
+	f.On(groupProbeCmd("deploy"), bssh.Result{ExitCode: 1, Stderr: "id: cannot find name for group ID 1000"})
+	f.On("id deploy", bssh.Result{ExitCode: 0})
+	err := assertGroupMembership(context.Background(), f, "deploy", false)
+	if err == nil || !strings.Contains(err.Error(), "probing its groups failed") {
+		t.Fatalf("err = %v, want a hard error naming the failed group probe", err)
 	}
 }
 
@@ -122,13 +142,30 @@ func TestGroupMembershipHardErrorsWhenAccountRequired(t *testing.T) {
 
 func TestOwnSSHDirAcceptsAbsentAndOwned(t *testing.T) {
 	for _, out := range []bssh.Result{
-		{ExitCode: 1, Stderr: "stat: cannot statx: No such file or directory"},
+		{ExitCode: 92}, // the probe's own "absent" signal
 		{Stdout: "deploy\n"},
 	} {
 		f := bssh.NewFakeRunner()
 		f.On(sshDirOwnerCmd("deploy"), out)
 		if err := assertOwnSSHDir(context.Background(), f, "deploy"); err != nil {
 			t.Fatalf("absent or account-owned ~/.ssh must pass; got %v", err)
+		}
+	}
+}
+
+func TestOwnSSHDirHardErrorsWhenStatFailsOnExistingEntry(t *testing.T) {
+	// Exit 91 is the probe's own "stat failed on an existing entry" signal
+	// (mirroring assertSafeAncestry); any other unexpected exit is equally a
+	// hard error. Reading either as "absent" would skip the guard silently.
+	for _, out := range []bssh.Result{
+		{ExitCode: 91, Stderr: "stat: cannot read file system information"},
+		{ExitCode: 1, Stderr: "sh: some transient failure"},
+	} {
+		f := bssh.NewFakeRunner()
+		f.On(sshDirOwnerCmd("deploy"), out)
+		err := assertOwnSSHDir(context.Background(), f, "deploy")
+		if err == nil || !strings.Contains(err.Error(), "probing the owner") {
+			t.Fatalf("exit %d: err = %v, want a hard error, not an \"absent\" pass", out.ExitCode, err)
 		}
 	}
 }
@@ -170,9 +207,9 @@ func TestAccountsCheckUnsatisfiedWhenUserMissing(t *testing.T) {
 	// on this fresh host neither exists, which the mustExist=false regime passes.
 	for _, u := range []string{"berth", "deploy"} {
 		f.On(groupProbeCmd(u), bssh.Result{ExitCode: 1, Stderr: "id: no such user"})
-		f.On(sshDirOwnerCmd(u), bssh.Result{ExitCode: 1, Stderr: "stat: cannot statx: No such file or directory"})
+		f.On(sshDirOwnerCmd(u), bssh.Result{ExitCode: 92}) // ~/.ssh absent
+		f.On("id "+u, bssh.Result{ExitCode: 1})            // both accounts missing
 	}
-	f.On("id berth", bssh.Result{ExitCode: 1}) // berth missing
 	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
