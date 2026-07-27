@@ -31,6 +31,17 @@ func Pipeline(s *config.Server, red *secret.Redactor, skipSSL bool) []provision.
 	if !skipSSL && anySiteSSL(s) {
 		steps = append(steps, TLS())
 	}
+	// manifest LAST: it attests that the FULL pipeline for this config
+	// completed on this binary's version, so nothing may run after it — and
+	// it is NOT registered when --skip-ssl artificially truncated a pipeline
+	// that would otherwise carry TLS (the attestation would be a lie).
+	// Semantics note: "completed" includes runs that ended with warnings
+	// (e.g. the documented LE DNS-mismatch skip) — warnings never affect the
+	// exit code by contract, and future migrations branch on VERSION, not on
+	// certificate state.
+	if !(skipSSL && anySiteSSL(s)) {
+		steps = append(steps, Manifest())
+	}
 	return steps
 }
 
