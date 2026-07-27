@@ -33,7 +33,7 @@ func cacheHome(t *testing.T) string {
 	return filepath.Join(home, ".berth")
 }
 
-func TestSaveAndLoadCacheRoundTrip(t *testing.T) {
+func TestSaveEnvelopeAndLoadCacheRoundTrip(t *testing.T) {
 	berth := cacheHome(t)
 	if err := SaveEnvelope("srv", Envelope{
 		Endpoint: &Endpoint{Host: "srv", Port: 22},
@@ -74,7 +74,10 @@ func TestLoadCacheMalformedIsError(t *testing.T) {
 	}
 }
 
-func TestLoadCacheNullIsEmptyNotNil(t *testing.T) {
+func TestLoadCacheNullFailsLoud(t *testing.T) {
+	// A raw `null` file is a shape only the pre-release flat writer produced;
+	// with that format gone it must be rejected with advice, never read as an
+	// empty cache (which would silently regenerate secrets).
 	berth := cacheHome(t)
 	if err := os.MkdirAll(berth, 0o700); err != nil {
 		t.Fatal(err)
@@ -82,17 +85,13 @@ func TestLoadCacheNullIsEmptyNotNil(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(berth, "h.secrets.json"), []byte("null"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	m, err := LoadCache("h")
-	if err != nil {
-		t.Fatalf("null cache must not error: %v", err)
+	_, err := LoadCache("h")
+	if err == nil || !strings.Contains(err.Error(), "pre-release") {
+		t.Fatalf("a null cache must fail loud with advice; got %v", err)
 	}
-	if m == nil {
-		t.Fatal("null cache must yield a non-nil map")
-	}
-	m["k"] = "v" // must not panic
 }
 
-func TestSaveCacheTightensPermissiveModes(t *testing.T) {
+func TestSaveEnvelopeTightensPermissiveModes(t *testing.T) {
 	berth := cacheHome(t)
 	if err := os.MkdirAll(berth, 0o755); err != nil {
 		t.Fatal(err)

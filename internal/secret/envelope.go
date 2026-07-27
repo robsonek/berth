@@ -30,8 +30,7 @@ func (e *Endpoint) valid() bool {
 	return e != nil && e.Host != "" && e.Port >= 1 && e.Port <= 65535
 }
 
-// Envelope is the versioned on-disk cache format (v1). A legacy pre-v1 cache
-// is a bare JSON object of secrets; LoadEnvelope reads both. MigratedTo turns
+// Envelope is the versioned on-disk cache format (v1). MigratedTo turns
 // an envelope into a tombstone: a non-secret marker left at the old host-keyed
 // path after a migration to an id-keyed file, so a stale config still keyed by
 // host fails loudly instead of regenerating (or silently disowning) secrets.
@@ -53,70 +52,55 @@ func cachePath(key string) (string, error) {
 	return filepath.Join(dir, key+".secrets.json"), nil
 }
 
-// LoadEnvelope reads a secrets cache. Returns (nil, false, nil) when the file
-// has never been written. legacy=true means a pre-v1 flat map was read (its
-// secrets are in Envelope.Secrets, Version is 0, Endpoint nil) — the identity
-// step upgrades it on its next Apply.
-//
-// Envelope detection keys on a NUMERIC "version" member only: a legacy cache
-// can legally contain a secret literally named "version" (DB user names are
-// direct cache keys and the SQL identifier grammar accepts it), and such a
-// value is a JSON string, not a number.
-func LoadEnvelope(key string) (*Envelope, bool, error) {
+// LoadEnvelope reads a secrets cache. Returns (nil, nil) when the file has
+// never been written.
+func LoadEnvelope(key string) (*Envelope, error) {
 	path, err := cachePath(key)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, false, nil
+		return nil, nil
 	}
 	if err != nil {
-		return nil, false, fmt.Errorf("read %s: %w", path, err)
+		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	var probe struct {
 		Version any `json:"version"`
 	}
 	if err := json.Unmarshal(b, &probe); err != nil {
-		return nil, false, fmt.Errorf("parse %s: %w", path, err)
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	switch v := probe.Version.(type) {
 	case nil, string:
-		// Legacy flat map (absent version, or a secret named "version").
-		var m map[string]string
-		if err := json.Unmarshal(b, &m); err != nil {
-			return nil, false, fmt.Errorf("parse %s: %w", path, err)
-		}
-		if m == nil {
-			m = map[string]string{}
-		}
-		return &Envelope{Secrets: m}, true, nil
+		return nil, fmt.Errorf("%s: not a berth secret-cache envelope (pre-release flat format?); no released berth wrote this for a real host — remove or move the file aside, then re-run provision (secrets re-seed from the host's live shared/.env)", path)
 	case float64:
 		if v != envelopeVersion {
 			if v > envelopeVersion {
-				return nil, false, fmt.Errorf("%s: cache version %v is from a newer berth; upgrade this binary", path, v)
+				return nil, fmt.Errorf("%s: cache version %v is from a newer berth; upgrade this binary", path, v)
 			}
-			return nil, false, fmt.Errorf("%s: unsupported cache version %v", path, v)
+			return nil, fmt.Errorf("%s: unsupported cache version %v", path, v)
 		}
 	default:
-		return nil, false, fmt.Errorf("%s: cache \"version\" member has an unexpected JSON type", path)
+		return nil, fmt.Errorf("%s: cache \"version\" member has an unexpected JSON type", path)
 	}
 	var env Envelope
 	if err := json.Unmarshal(b, &env); err != nil {
-		return nil, false, fmt.Errorf("parse %s: %w", path, err)
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	if !env.Endpoint.valid() {
-		return nil, false, fmt.Errorf("%s: v1 cache envelope is missing a valid endpoint", path)
+		return nil, fmt.Errorf("%s: v1 cache envelope is missing a valid endpoint", path)
 	}
 	if env.Secrets == nil {
 		env.Secrets = map[string]string{}
 	}
-	return &env, false, nil
+	return &env, nil
 }
 
-// SaveEnvelope atomically writes a v1 envelope (same temp+rename and
-// mode-tightening contract as the legacy SaveCache). The endpoint is
-// mandatory: an envelope without one could never be verified again.
+// SaveEnvelope writes a v1 envelope (atomic temp+rename write, 0700 dir /
+// 0600 file). The endpoint is mandatory: an envelope without one could never
+// be verified again.
 func SaveEnvelope(key string, env Envelope) error {
 	if !env.Endpoint.valid() {
 		return fmt.Errorf("save cache %s: envelope requires a valid endpoint (host + port 1-65535)", key)
@@ -191,10 +175,10 @@ func writeCacheBytes(key string, b []byte) error {
 
 // VerifyEnvelope guards every secret consumer (defense in depth behind the
 // identity step): a tombstone must never serve secrets, and a bound endpoint
-// must match the config's. Legacy and absent caches verify clean — the
-// identity step is responsible for upgrading/binding them.
-func VerifyEnvelope(env *Envelope, legacy bool, host string, port int) error {
-	if env == nil || legacy {
+// must match the config's. An absent cache verifies clean — the identity
+// step is responsible for binding it.
+func VerifyEnvelope(env *Envelope, host string, port int) error {
+	if env == nil {
 		return nil
 	}
 	if env.MigratedTo != "" {
@@ -206,19 +190,16 @@ func VerifyEnvelope(env *Envelope, legacy bool, host string, port int) error {
 	return nil
 }
 
-// MigrateCache moves a legacy host-keyed cache to an id-keyed file (atomic
-// rename), upgrades it to a v1 envelope bound to the given endpoint, and
-// leaves a tombstone at the old path so a stale host-keyed config fails
+// MigrateCache moves a host-keyed cache to an id-keyed file (atomic rename)
+// and leaves a tombstone at the old path so a stale host-keyed config fails
 // loudly instead of silently regenerating or disowning secrets. It takes BOTH
 // per-key locks in deterministic (lexical) order: a single lock would let a
 // concurrent host-keyed run recreate a divergent cache mid-migration.
 //
-// A host-keyed source that is ALREADY a v1 envelope bound to a different
-// endpoint is refused BEFORE the rename: that cache belongs to another
-// machine reachable through the same hostname (the exact ambiguity `id`
-// exists for), and adopting it would merge a stranger's secrets under this
-// id. A legacy source has no endpoint to compare — accepted, single-endpoint
-// rule applies.
+// A host-keyed source bound to a different endpoint is refused BEFORE the
+// rename: that cache belongs to another machine reachable through the same
+// hostname (the exact ambiguity `id` exists for), and adopting it would merge
+// a stranger's secrets under this id.
 func MigrateCache(id, host string, port int) error {
 	if id == host {
 		return nil
@@ -229,11 +210,11 @@ func MigrateCache(id, host string, port int) error {
 	}
 	defer release()
 
-	target, _, err := LoadEnvelope(id)
+	target, err := LoadEnvelope(id)
 	if err != nil {
 		return err
 	}
-	source, sourceLegacy, err := LoadEnvelope(host)
+	source, err := LoadEnvelope(host)
 	if err != nil {
 		return err
 	}
@@ -244,11 +225,11 @@ func MigrateCache(id, host string, port int) error {
 	if target != nil || !sourceIsReal {
 		return nil // already migrated (or nothing to migrate)
 	}
-	if !sourceLegacy && (source.Endpoint.Host != host || source.Endpoint.Port != port) {
+	if source.Endpoint.Host != host || source.Endpoint.Port != port {
 		return fmt.Errorf("the host-keyed cache %s.secrets.json is bound to endpoint %s, not %s:%d — it belongs to a different machine behind the same hostname; give THAT machine its own `id` (do not adopt its secrets under %q)", host, source.Endpoint, host, port, id)
 	}
 	// Rename first (crash-safe: a re-run sees the id-keyed file and no real
-	// source), then upgrade in place, then tombstone the old path.
+	// source), then tombstone the old path.
 	srcPath, err := cachePath(host)
 	if err != nil {
 		return err
@@ -261,10 +242,7 @@ func MigrateCache(id, host string, port int) error {
 		return fmt.Errorf("migrate cache %s -> %s: %w", srcPath, dstPath, err)
 	}
 	ep := &Endpoint{Host: host, Port: port}
-	env := Envelope{Endpoint: ep, Secrets: source.Secrets}
-	if !sourceLegacy {
-		env.Endpoint = source.Endpoint // keep an already-bound endpoint
-	}
+	env := Envelope{Endpoint: source.Endpoint, Secrets: source.Secrets}
 	if err := SaveEnvelope(id, env); err != nil {
 		return err
 	}

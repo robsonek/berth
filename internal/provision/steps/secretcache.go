@@ -9,13 +9,13 @@ import (
 // verifies its envelope binding (tombstone, endpoint) against the config —
 // defense in depth behind the identity step, which normally settles both
 // before any secret consumer runs (it is always-selected, --only included).
-// Legacy and absent caches verify clean; identity upgrades them.
+// An absent cache verifies clean; identity binds it.
 func loadVerifiedSecrets(s *config.Server) (map[string]string, error) {
-	env, legacy, err := secret.LoadEnvelope(s.CacheKey())
+	env, err := secret.LoadEnvelope(s.CacheKey())
 	if err != nil {
 		return nil, err
 	}
-	if err := secret.VerifyEnvelope(env, legacy, s.Host, s.SSH.Port); err != nil {
+	if err := secret.VerifyEnvelope(env, s.Host, s.SSH.Port); err != nil {
 		return nil, err
 	}
 	if env == nil {

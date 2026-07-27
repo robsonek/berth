@@ -91,8 +91,8 @@ func TestSaveSecretsWritesEnvelopeUnderID(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(home, ".berth", "prod-db-1a2b.secrets.json")); err != nil {
 		t.Fatalf("secrets must land under the ID key: %v", err)
 	}
-	env, legacy, err := secret.LoadEnvelope("prod-db-1a2b")
-	if err != nil || legacy || env.Version != 1 || env.Endpoint.Host != s.Host || env.Endpoint.Port != 22 || env.Secrets["k"] != "v" {
-		t.Fatalf("saved envelope wrong: %+v legacy=%v err=%v", env, legacy, err)
+	env, err := secret.LoadEnvelope("prod-db-1a2b")
+	if err != nil || env.Version != 1 || env.Endpoint.Host != s.Host || env.Endpoint.Port != 22 || env.Secrets["k"] != "v" {
+		t.Fatalf("saved envelope wrong: %+v err=%v", env, err)
 	}
 }

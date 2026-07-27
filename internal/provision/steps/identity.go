@@ -13,11 +13,11 @@ import (
 
 // Identity reconciles the LOCAL secret-cache identity before any remote
 // mutation: it binds the cache to the config's declared server id (or the
-// host, pre-P14 compatibility), upgrades legacy flat caches to the versioned
-// envelope, migrates host-keyed files to id-keyed ones (leaving a tombstone so
-// a stale host-keyed config fails loudly instead of regenerating or disowning
-// secrets — a lost console:berth marker can leave a usable root-equivalent
-// password behind), and verifies the recorded endpoint against the config.
+// host when no id is declared), migrates host-keyed files to id-keyed ones
+// (leaving a tombstone so a stale host-keyed config fails loudly instead of
+// regenerating or disowning secrets — a lost console:berth marker can leave
+// a usable root-equivalent password behind), and verifies the recorded
+// endpoint against the config.
 // It runs FIRST in the pipeline and implements AlwaysRun so it is also
 // selected under --only: later steps consume cached secrets, so their
 // identity must be settled before preflight's apt update touches the host.
@@ -46,7 +46,7 @@ func tombstoneAdvice(key, migratedTo string) error {
 
 func (identity) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
 	key := s.CacheKey()
-	env, legacy, err := secret.LoadEnvelope(key)
+	env, err := secret.LoadEnvelope(key)
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
@@ -58,8 +58,7 @@ func (identity) Check(ctx context.Context, rc provision.RunCtx, s *config.Server
 	migrated := s.ID != "" && s.ID != s.Host
 	var hostEnv *secret.Envelope
 	if migrated {
-		var hostLegacy bool
-		hostEnv, hostLegacy, err = secret.LoadEnvelope(s.Host)
+		hostEnv, err = secret.LoadEnvelope(s.Host)
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
@@ -68,12 +67,11 @@ func (identity) Check(ctx context.Context, rc provision.RunCtx, s *config.Server
 			return provision.CheckResult{}, fmt.Errorf("both %s.secrets.json and %s.secrets.json exist under ~/.berth — refusing to guess which holds this machine's secrets; keep the correct one under the id and remove (or tombstone) the other", s.ID, s.Host)
 		}
 		if hostReal {
-			// A v1 host-keyed cache bound to ANOTHER endpoint belongs to a
+			// A host-keyed cache bound to ANOTHER endpoint belongs to a
 			// different machine behind the same hostname — refusing here (and
 			// in MigrateCache, before its rename) keeps a stranger's secrets
-			// from being adopted under this id. Legacy sources carry no
-			// endpoint to compare.
-			if !hostLegacy && (hostEnv.Endpoint.Host != s.Host || hostEnv.Endpoint.Port != s.SSH.Port) {
+			// from being adopted under this id.
+			if hostEnv.Endpoint.Host != s.Host || hostEnv.Endpoint.Port != s.SSH.Port {
 				return provision.CheckResult{}, fmt.Errorf("the host-keyed cache %s.secrets.json is bound to endpoint %s, not %s:%d — it belongs to a different machine behind the same hostname; give THAT machine its own `id` (do not adopt its secrets under %q)", s.Host, hostEnv.Endpoint, s.Host, s.SSH.Port, s.ID)
 			}
 			return provision.CheckResult{Satisfied: false, Reason: "host-keyed secret cache pending migration to id " + s.ID, Changes: identityChanges(s)}, nil
@@ -82,19 +80,16 @@ func (identity) Check(ctx context.Context, rc provision.RunCtx, s *config.Server
 	if env == nil {
 		return provision.CheckResult{Satisfied: false, Reason: "secret cache not yet bound to this server identity", Changes: identityChanges(s)}, nil
 	}
-	if legacy {
-		return provision.CheckResult{Satisfied: false, Reason: "legacy secret cache pending upgrade to the v1 envelope", Changes: identityChanges(s)}, nil
-	}
 	ep := endpointOf(s)
 	if env.Endpoint.Host != ep.Host || env.Endpoint.Port != ep.Port {
 		if !rc.Force {
-			return provision.CheckResult{}, secret.VerifyEnvelope(env, false, ep.Host, ep.Port)
+			return provision.CheckResult{}, secret.VerifyEnvelope(env, ep.Host, ep.Port)
 		}
 		return provision.CheckResult{Satisfied: false, Reason: fmt.Sprintf("re-bind cache endpoint %s -> %s (--force)", env.Endpoint, ep), Changes: identityChanges(s)}, nil
 	}
 	if migrated && hostEnv == nil {
 		// The advisory tombstone protects mixed id/no-id configs; converge it.
-		return provision.CheckResult{Satisfied: false, Reason: "tombstone for the legacy host key missing", Changes: identityChanges(s)}, nil
+		return provision.CheckResult{Satisfied: false, Reason: "tombstone for the old host key missing", Changes: identityChanges(s)}, nil
 	}
 	return provision.CheckResult{Satisfied: true, Reason: "secret cache bound to " + key + " @ " + env.Endpoint.String()}, nil
 }
@@ -102,7 +97,7 @@ func (identity) Check(ctx context.Context, rc provision.RunCtx, s *config.Server
 func identityChanges(s *config.Server) []string {
 	return []string{
 		"bind the local secret cache to " + s.CacheKey() + " @ " + endpointOf(s).String(),
-		"upgrade/migrate legacy cache files (tombstone the old host key)",
+		"migrate a host-keyed cache file (tombstone the old host key)",
 	}
 }
 
@@ -139,7 +134,7 @@ func (identity) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server
 		}
 	}()
 
-	env, legacy, err := secret.LoadEnvelope(key)
+	env, err := secret.LoadEnvelope(key)
 	if err != nil {
 		return err
 	}
@@ -152,13 +147,9 @@ func (identity) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server
 		if err := secret.SaveEnvelope(key, secret.Envelope{Endpoint: ep, Secrets: map[string]string{}}); err != nil {
 			return err
 		}
-	case legacy:
-		if err := secret.SaveEnvelope(key, secret.Envelope{Endpoint: ep, Secrets: env.Secrets}); err != nil {
-			return err
-		}
 	case env.Endpoint.Host != ep.Host || env.Endpoint.Port != ep.Port:
 		if !rc.Force {
-			return secret.VerifyEnvelope(env, false, ep.Host, ep.Port)
+			return secret.VerifyEnvelope(env, ep.Host, ep.Port)
 		}
 		env.Endpoint = ep
 		if err := secret.SaveEnvelope(key, *env); err != nil {
@@ -166,7 +157,7 @@ func (identity) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server
 		}
 	}
 	if migrated {
-		hostEnv, _, err := secret.LoadEnvelope(s.Host)
+		hostEnv, err := secret.LoadEnvelope(s.Host)
 		if err != nil {
 			return err
 		}
