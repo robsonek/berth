@@ -16,7 +16,11 @@ Notable changes to berth. Older releases are documented on the
   read.** The identity step no longer upgrades legacy flat caches; a flat
   file under `~/.berth/` is rejected with advice. No released berth wrote
   that format for a host that still exists. The legacy-format test writer
-  (`secret.SaveCache`) is gone with it.
+  (`secret.SaveCache`) is gone with it. A console password set by a
+  pre-envelope berth loses its ownership marker with the discarded cache, so
+  `break_glass: false` will leave it untouched — lock it manually with
+  `passwd -l berth` or copy the `console:berth` entry into the new cache
+  first.
 - Removed the three on-host migration shims for artifacts renamed during
   pre-release development: the scheduler cron (`berth-<pool>` →
   `berth-site-<pool>`), the sshd drop-in (`berth.conf` → `00-berth.conf`)

@@ -74,7 +74,7 @@ func LoadEnvelope(key string) (*Envelope, error) {
 	}
 	switch v := probe.Version.(type) {
 	case nil, string:
-		return nil, fmt.Errorf("%s: not a berth secret-cache envelope (pre-release flat format?); no released berth wrote this for a real host — remove or move the file aside, then re-run provision (secrets re-seed from the host's live shared/.env)", path)
+		return nil, fmt.Errorf("%s: not a berth secret-cache envelope (pre-release flat format?); no released berth wrote this for a real host — remove or move the file aside, then re-run provision (database secrets re-seed from the host's live shared/.env). If system.break_glass was ever enabled on this machine, the discarded file held the console-password ownership marker: lock the account manually (passwd -l berth) or copy the console:berth entry into the new cache first", path)
 	case float64:
 		if v != envelopeVersion {
 			if v > envelopeVersion {

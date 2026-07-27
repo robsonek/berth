@@ -299,27 +299,39 @@ func TestLoadStillAcceptsEveryKnownKey(t *testing.T) {
 func TestLoadRejectsLegacyTopLevelDatabaseNameUser(t *testing.T) {
 	// The pre-release top-level database.name/user fields are gone; a config
 	// still carrying them must fail loudly at parse time (UnmarshalExact),
-	// never silently ignore the keys.
-	dir := t.TempDir()
-	path := filepath.Join(dir, "legacy.yml")
-	yml := `host: 203.0.113.10
+	// never silently ignore the keys. Each key must be rejected on its own —
+	// restoring only one of them may not regress silently.
+	cases := []struct {
+		name    string
+		legacy  string // lines injected into the top-level database block
+		wantKey string // the offending key the error must name
+	}{
+		{"both-keys", "  name: myapp\n  user: myapp\n", "name"},
+		{"name-only", "  name: myapp\n", "name"},
+		{"user-only", "  user: myapp\n", "user"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "legacy.yml")
+			yml := `host: 203.0.113.10
 php:
   version: "8.5"
 database:
   engine: mariadb
-  name: myapp
-  user: myapp
-sites:
+` + c.legacy + `sites:
   - domain: app.example.com
     deploy_path: /var/www/app
     database: {name: myapp, user: myapp}
 `
-	if err := os.WriteFile(path, []byte(yml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	_, err := Load(path)
-	if err == nil || !strings.Contains(err.Error(), "name") {
-		t.Fatalf("legacy top-level database.name must fail to load with an unknown-key error, got %v", err)
+			if err := os.WriteFile(path, []byte(yml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), c.wantKey) {
+				t.Fatalf("legacy top-level database.%s must fail to load with an unknown-key error naming it, got %v", c.wantKey, err)
+			}
+		})
 	}
 }
 

@@ -155,7 +155,7 @@ sites:                         # one or more
     repository: git@github.com:acme/app.git   # optional — SSH git URL only; berth
                                        # generates a per-site deploy key for it
                                        # (print it with `berth site key`)
-    database: { name: app, user: app }        # per-site DB (required with 2+ sites)
+    database: { name: app, user: app }        # per-site DB (required for every site)
     ssl: true
     ssl_mode: selfsigned               # letsencrypt (default) | selfsigned —
                                        # cloudflare_only requires selfsigned (or ssl: false)

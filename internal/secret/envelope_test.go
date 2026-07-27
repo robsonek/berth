@@ -48,10 +48,27 @@ func TestLoadEnvelopeAbsentIsNilNotError(t *testing.T) {
 
 func TestLoadEnvelopeRejectsPreEnvelopeFlatMap(t *testing.T) {
 	berth := cacheHome(t)
-	writeRawCache(t, berth, "h", `{"appuser": "pw1"}`)
-	_, err := LoadEnvelope("h")
-	if err == nil || !strings.Contains(err.Error(), "pre-release") {
-		t.Fatalf("a flat pre-envelope cache must be rejected with advice, got %v", err)
+	cases := []struct{ name, body string }{
+		// The common flat shape: no "version" member at all.
+		{"no-version-key", `{"appuser": "pw1"}`},
+		// A flat cache holding a secret literally named "version" (a legal
+		// SQL identifier): the probe sees a string, not the envelope number.
+		{"string-version-secret", `{"version":"s3cret-pw","console:berth":"c"}`},
+	}
+	for _, c := range cases {
+		writeRawCache(t, berth, c.name, c.body)
+		_, err := LoadEnvelope(c.name)
+		if err == nil {
+			t.Errorf("%s: a flat pre-envelope cache must be rejected with advice, got nil", c.name)
+			continue
+		}
+		// The advice must be safe for a cache that held the break-glass
+		// ownership marker: name the manual lock and the marker entry.
+		for _, want := range []string{"pre-release", "passwd -l berth", "console:berth"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: err = %v, want mention of %q", c.name, err, want)
+			}
+		}
 	}
 }
 
