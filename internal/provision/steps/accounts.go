@@ -577,21 +577,36 @@ func assertGroupMembership(ctx context.Context, r bssh.Runner, user string, must
 	return fmt.Errorf("account %s is not a member of group %q, so it cannot own its directories with that group; run `usermod -aG %s %s` on the host (or pin a different sites[].user) and re-run", user, user, user, user)
 }
 
-// assertOwnSSHDir refuses when an existing ~/.ssh belongs to someone other
-// than the account. berth now creates that directory AS the account (root must
-// not mutate a path inside a tenant-owned home), and the account cannot re-own
-// a directory it does not own — a state root used to repair silently. Only a
-// genuinely absent entry passes (it is about to be created); the probe keeps
-// absence and failure distinguishable — exit 92 is its own "absent" signal
-// (the existence test counts a dangling symlink as present), and a failing
-// stat on an existing entry surfaces as exit 91, a hard error, mirroring
-// assertSafeAncestry. Reading a probe failure as "absent" would skip the
-// guard silently and leave the operator with the raw EPERM it exists to
-// prevent.
+// assertOwnSSHDir refuses when an existing ~/.ssh is not a real directory
+// belonging to the account. berth creates it AS the account (root must not
+// mutate a path inside a tenant-owned home), and the account can neither re-own
+// a directory it does not own nor make a symlink into one — states root used to
+// repair silently.
+//
+// The probe deliberately does NOT pass -L, so it reports the entry itself
+// rather than what a symlink points at, and the TYPE is checked before the
+// owner. Both halves of that matter:
+//
+//   - Without the type check, a symlink owned by the account passes, because a
+//     symlink's own owner IS the account. The account-run install -d then
+//     follows it and dies with a raw EPERM when the target is root-owned.
+//   - With -L the probe would report the TARGET's owner, so a ~/.ssh pointing
+//     at, say, /etc/ssh would produce the foreign-owner refusal below — whose
+//     remedy is a chown. Following that advice would re-own the target to the
+//     tenant: the escalation handed over inside a help message. Hence the type
+//     refusal never suggests a chown; it says to remove the entry.
+//
+// Only a genuinely absent entry passes (it is about to be created). The probe
+// keeps absence and failure distinguishable: exit 92 is its own "absent" signal
+// (the existence test counts a dangling symlink as present) and a failing stat
+// on an existing entry surfaces as exit 91, a hard error, mirroring
+// assertSafeAncestry. Reading a probe failure as "absent" would skip the guard
+// silently and leave the operator with the raw EPERM it exists to prevent.
+// %F goes last in the format: file types contain spaces, owner names cannot.
 func assertOwnSSHDir(ctx context.Context, r bssh.Runner, user string) error {
 	sshDir := "/home/" + user + "/.ssh"
 	q := shQuote(sshDir)
-	res, err := r.Run(ctx, "export LC_ALL=C; if [ -e "+q+" ] || [ -L "+q+" ]; then stat -c '%U' "+q+" || exit 91; else exit 92; fi", nil)
+	res, err := r.Run(ctx, "export LC_ALL=C; if [ -e "+q+" ] || [ -L "+q+" ]; then stat -c '%U %F' "+q+" || exit 91; else exit 92; fi", nil)
 	if err != nil {
 		return err
 	}
@@ -601,7 +616,15 @@ func assertOwnSSHDir(ctx context.Context, r bssh.Runner, user string) error {
 	if res.ExitCode != 0 {
 		return fmt.Errorf("probing the owner of %s failed: %s", sshDir, strings.TrimSpace(res.Stderr))
 	}
-	if owner := strings.TrimSpace(res.Stdout); owner != user {
+	fields := strings.Fields(strings.TrimSpace(res.Stdout))
+	if len(fields) < 2 {
+		return fmt.Errorf("unexpected stat output probing %s: %q", sshDir, strings.TrimSpace(res.Stdout))
+	}
+	owner, ftype := fields[0], strings.Join(fields[1:], " ")
+	if ftype != "directory" {
+		return fmt.Errorf("%s exists but is a %s, not a directory; berth keeps authorized_keys and the deploy key there and creates it as the account itself — remove or move that entry aside before re-running (do not chown it: for a symlink that would re-own whatever it points at)", sshDir, ftype)
+	}
+	if owner != user {
 		return fmt.Errorf("%s exists but is owned by %s, not %s; berth creates it as the account itself and cannot re-own it — run `chown -R %s:%s %s` on the host and re-run", sshDir, owner, user, user, user, sshDir)
 	}
 	return nil
