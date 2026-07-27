@@ -30,7 +30,6 @@ func stubValkeyCheckGreen(f *bssh.FakeRunner, s *config.Server) {
 	f.On("dpkg -s valkey-server", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("systemctl is-enabled valkey-server.service", bssh.Result{ExitCode: 1, Stdout: "disabled\n"})
 	f.On("systemctl is-active valkey-server.service", bssh.Result{ExitCode: 3, Stdout: "inactive\n"})
-	f.On("cat "+shQuote(valkeyDropInPath), bssh.Result{ExitCode: 1}) // legacy tuning drop-in absent
 	site := s.Sites[0]
 	want, _ := renderValkeyUnit(s, site)
 	f.On("cat "+shQuote(valkeyUnitPath(site.Domain)), bssh.Result{ExitCode: 0, Stdout: string(want)})
@@ -171,20 +170,6 @@ func TestValkeyCheckAbortsOnUnmanagedUnit(t *testing.T) {
 	}
 }
 
-func TestValkeyCheckUnsatisfiedWhenLegacyTuningDropInPresent(t *testing.T) {
-	s := valkeyServer()
-	f := bssh.NewFakeRunner()
-	stubValkeyCheckGreen(f, s)
-	f.On("cat "+shQuote(valkeyDropInPath), bssh.Result{ExitCode: 0, Stdout: managedMarker + "\n[Service]\nExecStart=\n"})
-	cr, err := Valkey().Check(context.Background(), provision.RunCtx{}, s, f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cr.Satisfied {
-		t.Error("expected unsatisfied while the legacy berth-managed tuning drop-in remains")
-	}
-}
-
 func TestValkeyPathHelpers(t *testing.T) {
 	if got := valkeyInstanceUnit("app.example.com"); got != "berth-valkey-app_example_com.service" {
 		t.Errorf("valkeyInstanceUnit = %q", got)
@@ -260,7 +245,6 @@ func TestValkeyApplyConvergesFreshFleet(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})
 	f.On("systemctl disable --now valkey-server.service", bssh.Result{})
-	f.On("cat "+shQuote(valkeyDropInPath), bssh.Result{ExitCode: 1})                  // legacy: absent
 	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0})                                // no instances yet
 	f.On("cat "+shQuote(valkeyUnitPath("app.example.com")), bssh.Result{ExitCode: 1}) // write-guard: absent
 	f.On("systemctl daemon-reload", bssh.Result{})
@@ -330,7 +314,6 @@ func TestValkeyApplyRestartsDriftedUnit(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})
 	f.On("systemctl disable --now valkey-server.service", bssh.Result{})
-	f.On("cat "+shQuote(valkeyDropInPath), bssh.Result{ExitCode: 1})
 	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0, Stdout: valkeyUnitPath("app.example.com") + "\n"})
 	// Managed unit with stale content -> drift -> rewrite + restart.
 	f.On("cat "+shQuote(valkeyUnitPath("app.example.com")),
@@ -363,7 +346,6 @@ func TestValkeyApplyHealsWedgedInstance(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})
 	f.On("systemctl disable --now valkey-server.service", bssh.Result{})
-	f.On("cat "+shQuote(valkeyDropInPath), bssh.Result{ExitCode: 1})
 	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0, Stdout: valkeyUnitPath("app.example.com") + "\n"})
 	want, _ := renderValkeyUnit(s, s.Sites[0])
 	f.On("cat "+shQuote(valkeyUnitPath("app.example.com")), bssh.Result{ExitCode: 0, Stdout: string(want)}) // up to date
@@ -405,7 +387,6 @@ func TestValkeyApplyReloadsStaleManagerCache(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})
 	f.On("systemctl disable --now valkey-server.service", bssh.Result{})
-	f.On("cat "+shQuote(valkeyDropInPath), bssh.Result{ExitCode: 1})
 	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0, Stdout: valkeyUnitPath("app.example.com") + "\n"})
 	want, _ := renderValkeyUnit(s, s.Sites[0])
 	f.On("cat "+shQuote(valkeyUnitPath("app.example.com")), bssh.Result{ExitCode: 0, Stdout: string(want)}) // up to date
@@ -444,7 +425,6 @@ func TestValkeyApplyFailsLoudWhenInstanceStaysDead(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})
 	f.On("systemctl disable --now valkey-server.service", bssh.Result{})
-	f.On("cat "+shQuote(valkeyDropInPath), bssh.Result{ExitCode: 1})
 	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0, Stdout: valkeyUnitPath("app.example.com") + "\n"})
 	want, _ := renderValkeyUnit(s, s.Sites[0])
 	f.On("cat "+shQuote(valkeyUnitPath("app.example.com")), bssh.Result{ExitCode: 0, Stdout: string(want)})
@@ -470,16 +450,12 @@ func TestValkeyApplyFailsLoudWhenInstanceStaysDead(t *testing.T) {
 	}
 }
 
-func TestValkeyApplySweepsOrphanAndLegacyDropIn(t *testing.T) {
+func TestValkeyApplySweepsOrphan(t *testing.T) {
 	s := valkeyServer()
 	orphan := "/etc/systemd/system/berth-valkey-gone_example_com.service"
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})
 	f.On("systemctl disable --now valkey-server.service", bssh.Result{})
-	// Legacy berth-managed tuning drop-in present -> removed (+ rmdir attempt).
-	f.On("cat "+shQuote(valkeyDropInPath), bssh.Result{ExitCode: 0, Stdout: managedMarker + "\n[Service]\n"})
-	f.On("rm -f "+shQuote(valkeyDropInPath), bssh.Result{})
-	f.On("rmdir --ignore-fail-on-non-empty "+shQuote(valkeyDropInDir), bssh.Result{})
 	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0, Stdout: orphan + "\n"})
 	f.On("cat "+shQuote(orphan), bssh.Result{ExitCode: 0, Stdout: managedMarker + "\n[Service]\n"})
 	f.On("systemctl disable --now berth-valkey-gone_example_com.service", bssh.Result{})
@@ -495,17 +471,14 @@ func TestValkeyApplySweepsOrphanAndLegacyDropIn(t *testing.T) {
 	if err := Valkey().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
-	var sawOrphanRm, sawLegacyRm bool
+	var sawOrphanRm bool
 	for _, c := range f.Calls() {
-		switch c.Cmd {
-		case "rm -f " + shQuote(orphan):
+		if c.Cmd == "rm -f "+shQuote(orphan) {
 			sawOrphanRm = true
-		case "rm -f " + shQuote(valkeyDropInPath):
-			sawLegacyRm = true
 		}
 	}
-	if !sawOrphanRm || !sawLegacyRm {
-		t.Errorf("expected orphan and legacy drop-in removal; orphan=%v legacy=%v", sawOrphanRm, sawLegacyRm)
+	if !sawOrphanRm {
+		t.Error("expected the orphan unit to be removed")
 	}
 }
 
@@ -515,7 +488,6 @@ func TestValkeyApplyLeavesForeignOrphanUnit(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})
 	f.On("systemctl disable --now valkey-server.service", bssh.Result{})
-	f.On("cat "+shQuote(valkeyDropInPath), bssh.Result{ExitCode: 1})
 	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0, Stdout: orphan + "\n"})
 	f.On("cat "+shQuote(orphan), bssh.Result{ExitCode: 0, Stdout: "[Unit]\nDescription=hand-written\n"}) // no marker
 	f.On("cat "+shQuote(valkeyUnitPath("app.example.com")), bssh.Result{ExitCode: 1})
@@ -556,7 +528,6 @@ func TestValkeyApplyRestartsStaleBinary(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})
 	f.On("systemctl disable --now valkey-server.service", bssh.Result{})
-	f.On("cat "+shQuote(valkeyDropInPath), bssh.Result{ExitCode: 1})
 	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0, Stdout: valkeyUnitPath("app.example.com") + "\n"})
 	want, _ := renderValkeyUnit(s, s.Sites[0])
 	f.On("cat "+shQuote(valkeyUnitPath("app.example.com")), bssh.Result{ExitCode: 0, Stdout: string(want)}) // up to date
