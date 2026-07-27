@@ -18,7 +18,7 @@ func tlsServer() *config.Server {
 		PHP:  config.PHP{Version: "8.4", Source: "auto"},
 		Sites: []config.Site{{
 			Domain:     "app.example.com",
-			DeployPath: "/home/deploy/myapp",
+			DeployPath: "/var/www/myapp",
 			SSL:        true,
 			SSLEmail:   "ops@example.com",
 		}},
