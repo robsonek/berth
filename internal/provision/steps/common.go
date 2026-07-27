@@ -206,6 +206,9 @@ func assertManagedWritable(ctx context.Context, r bssh.Runner, force bool, path 
 // credential-bearing .berth.* behind, and repeated failures accumulate them
 // (after a successful mv the path is gone, so the trap is a no-op).
 func writeFileAsUser(ctx context.Context, r bssh.Runner, user, path string, mode os.FileMode, content []byte) error {
+	if mode.Perm() == 0 {
+		return fmt.Errorf("refusing to write %s with mode 0: pass an explicit mode (a zero mode would leave the file unreadable even by its owner)", path)
+	}
 	dir := gopath.Dir(path)
 	inner := fmt.Sprintf(`umask 077; t=$(mktemp %s) && trap 'rm -f "$t"' EXIT INT TERM && cat > "$t" && chmod %o "$t" && mv -fT -- "$t" %s`,
 		shQuote(dir+"/.berth.XXXXXX"), mode.Perm(), shQuote(path))

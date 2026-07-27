@@ -140,6 +140,20 @@ func TestWriteFileAsUserStagesInsideTheTargetDirectory(t *testing.T) {
 	}
 }
 
+func TestWriteFileAsUserRefusesZeroMode(t *testing.T) {
+	// A zero mode would chmod 0 and lock the owner out of its own file. The
+	// root primitive silently defaults to 0644; this helper must not guess —
+	// a wrong mode on a credential file is exactly what should be loud.
+	f := bssh.NewFakeRunner()
+	err := writeFileAsUser(context.Background(), f, "deploy", "/var/www/app/shared/.env", 0, []byte("K=V\n"))
+	if err == nil || !strings.Contains(err.Error(), "mode 0") {
+		t.Fatalf("err = %v, want a refusal naming the zero mode", err)
+	}
+	if len(f.Calls()) != 0 {
+		t.Errorf("nothing may run when the mode is refused; got %v", callCmds(f))
+	}
+}
+
 func TestWriteFileAsUserSurfacesFailure(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On(writeAsUserCmd("deploy", "/var/www/app/shared/.env", 0o600),
