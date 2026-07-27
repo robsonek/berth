@@ -530,6 +530,52 @@ func TestSafeAncestryHardErrorsOnProbeFailure(t *testing.T) {
 	}
 }
 
+func TestAppDirsApplyOnlyTenantMutatesTenantTerritory(t *testing.T) {
+	s := appdirsServer()
+	f := bssh.NewFakeRunner()
+	stubAppDirsFresh(f, s)
+	if err := AppDirs().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	assertOnlyTenantMutates(t, f, "deploy",
+		"/var/www/myapp/shared",
+		"/var/www/myapp/shared/tmp",
+	)
+	// A step that skipped the directories entirely would satisfy the assertion
+	// above, so require the exact tenant-run creations too.
+	joined := strings.Join(callCmds(f), "\n")
+	for _, want := range []string{
+		"sudo -u deploy install -d -g deploy -m 00700 '/var/www/myapp/shared'",
+		"sudo -u deploy install -d -g deploy -m 00700 '/var/www/myapp/shared/tmp'",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing tenant-run creation %q; calls:\n%s", want, joined)
+		}
+	}
+}
+
+func TestAppDirsRefusesNonMemberAccount(t *testing.T) {
+	// Guard wiring, not guard logic: if the assertGroupMembership call is ever
+	// dropped from appdirs' preflight, the suite must go red. Unused stubs do
+	// not fail a test, so only a positive assertion on the refusal catches it.
+	s := appdirsServer()
+	for _, phase := range []string{"check", "apply"} {
+		f := bssh.NewFakeRunner()
+		stubAppDirsFresh(f, s)
+		// Override the membership probe: the account is in no group of its own.
+		f.On(groupProbeCmd("deploy"), bssh.Result{Stdout: "www-data staff\n"})
+		var err error
+		if phase == "check" {
+			_, err = AppDirs().Check(context.Background(), provision.RunCtx{}, s, f)
+		} else {
+			err = AppDirs().Apply(context.Background(), provision.RunCtx{}, s, f)
+		}
+		if err == nil || !strings.Contains(err.Error(), "usermod -aG") {
+			t.Fatalf("%s: err = %v, want the membership refusal to surface", phase, err)
+		}
+	}
+}
+
 func TestAppDirsRefusesTenantOwnedAncestryEvenWithForce(t *testing.T) {
 	s := &config.Server{Sites: []config.Site{
 		{Domain: "app.example.com", DeployPath: "/srv/apps/site", User: "deploy"},

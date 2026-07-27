@@ -1178,6 +1178,50 @@ func TestAccountsRefusesSymlinkedDeployTree(t *testing.T) {
 	}
 }
 
+func TestAccountsApplyOnlyTenantMutatesItsOwnHome(t *testing.T) {
+	chdirTemp(t)
+	s := testServerWithKey(t)
+	f := bssh.NewFakeRunner()
+	stubSiteTreeFresh(f, "/var/www/app")
+	stubSafeAncestry(f, "/", "/home")
+	stubAccountCreate(f, "berth")
+	stubAccountCreate(f, "deploy")
+	stubConsoleLocked(f)
+	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	for _, u := range []string{"berth", "deploy"} {
+		assertOnlyTenantMutates(t, f, u, "/home/"+u+"/.ssh", authorizedKeysPath(u))
+	}
+	joined := strings.Join(callCmds(f), "\n")
+	for _, want := range []string{
+		"sudo -u deploy install -d -g deploy -m 00700 '/home/deploy/.ssh'",
+		// /home/<user> itself is root's job: its parent /home is root-controlled.
+		"install -d -o deploy -g deploy -m 00700 '/home/deploy'",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing %q in calls:\n%s", want, joined)
+		}
+	}
+}
+
+func TestAccountsApplyRefusesNonMemberAfterEnsureUser(t *testing.T) {
+	// Same idea for accounts' step-1b loop: dropping it must go red.
+	chdirTemp(t)
+	s := testServerWithKey(t)
+	f := bssh.NewFakeRunner()
+	stubSiteTreeFresh(f, "/var/www/app")
+	stubSafeAncestry(f, "/", "/home")
+	stubAccountCreate(f, "berth")
+	stubAccountCreate(f, "deploy")
+	// deploy exists after ensureUser but belongs to no group of its own.
+	f.On(groupProbeCmd("deploy"), bssh.Result{Stdout: "www-data staff\n"})
+	err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "usermod -aG") {
+		t.Fatalf("err = %v, want the membership refusal from the post-ensureUser loop", err)
+	}
+}
+
 func TestAccountsApplyBreakGlassOffLocksOwnedPassword(t *testing.T) {
 	chdirTemp(t)
 	s := testServerWithKey(t)

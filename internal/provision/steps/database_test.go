@@ -166,6 +166,29 @@ func TestDatabaseApplyGeneratesPersistsAndEnsures(t *testing.T) {
 	}
 }
 
+func TestDatabaseApplyOnlyTenantMutatesSharedEnv(t *testing.T) {
+	// shared/.env is inside tenant territory: no privileged write may target it.
+	chdirTemp(t)
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
+	stubClientAuthAbsent(f, s, ".my.cnf")
+	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On(writeAsUserCmd("deploy", envPath(s), 0o600), bssh.Result{})
+	f.On(writeAsUserCmd("deploy", clientAuthPath(s, s.Sites[0], ".my.cnf"), 0o600), bssh.Result{})
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	assertOnlyTenantMutates(t, f, "deploy", envPath(s), clientAuthPath(s, s.Sites[0], ".my.cnf"))
+	if len(writtenContent(f, envPath(s))) == 0 {
+		t.Fatal("the .env must still be seeded")
+	}
+	if len(writtenContent(f, clientAuthPath(s, s.Sites[0], ".my.cnf"))) == 0 {
+		t.Fatal("the client-auth file must still be seeded")
+	}
+}
+
 func TestDatabaseApplySeedsRedisWhenValkey(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()

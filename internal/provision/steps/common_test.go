@@ -87,6 +87,47 @@ func writtenContent(f *bssh.FakeRunner, path string) []byte {
 	return nil
 }
 
+// mutatingVerbs are the command words that CHANGE the filesystem. A root-run
+// occurrence of any of them against tenant territory is the bug this package
+// closed, so the guard matches the verb anywhere in the command (catching
+// `/usr/bin/install -d`, `sudo install -d`, `chown`, a bare `mkdir`, …) rather
+// than a single literal prefix.
+var mutatingVerbs = []string{"install ", "mkdir ", "chown ", "chmod ", "rm ", "ln ", "mv "}
+
+// assertOnlyTenantMutates fails when any recorded command mutates one of the
+// given paths without running as user, or when any privileged WriteFile targets
+// one. Read-only probes (stat, test, cat, id) are ignored — they cannot hand
+// anything over. Paths must be absolute and are matched shell-quoted, the form
+// every step emits.
+func assertOnlyTenantMutates(t *testing.T, f *bssh.FakeRunner, user string, paths ...string) {
+	t.Helper()
+	prefix := "sudo -u " + user + " "
+	for _, c := range f.Calls() {
+		for _, p := range paths {
+			if !strings.Contains(c.Cmd, shQuote(p)) {
+				continue
+			}
+			mutating := false
+			for _, verb := range mutatingVerbs {
+				if strings.Contains(c.Cmd, verb) {
+					mutating = true
+					break
+				}
+			}
+			if mutating && !strings.HasPrefix(c.Cmd, prefix) {
+				t.Errorf("mutation of tenant-owned %s must run as %s; got %q", p, user, c.Cmd)
+			}
+		}
+	}
+	for _, w := range f.Writes() {
+		for _, p := range paths {
+			if w.Path == p {
+				t.Errorf("%s must not be written through the privileged WriteFile path; got %+v", p, w)
+			}
+		}
+	}
+}
+
 func TestWriteFileAsUserRunsEntirelyAsTheAccount(t *testing.T) {
 	// The content sentinel must not collide with the path ("authorized_keys"
 	// contains "key"), or the leak assertion below would always fire.
