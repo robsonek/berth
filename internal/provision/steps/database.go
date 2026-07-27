@@ -82,6 +82,19 @@ func clientAuthPath(s *config.Server, site config.Site, name string) string {
 	return "/home/" + s.SiteUser(site) + "/" + name
 }
 
+// clientAuthContainsScript builds the script that reports (exit 0) whether
+// the client-auth file at path contains berth's OLD cached password. The
+// password arrives via SSH stdin, `read` puts it in a shell variable, and
+// printf pipes it to grep as the PATTERN (-f -) while the auth file is grep's
+// named INPUT — pattern-from-pipe and data-from-file ride separate fds in
+// this direction, and the secret never touches argv or stdout (-q). The
+// caller shape-validates the password (alphanumeric), so single-pattern
+// fixed-string semantics hold. Shared with the real-shell test in
+// database_test.go so the tested bytes are the production bytes.
+func clientAuthContainsScript(path string) string {
+	return "IFS= read -r old; printf '%s\\n' \"$old\" | grep -qF -f - " + shQuote(path)
+}
+
 // envCredentialPresent reports whether the FIRST DB_PASSWORD line of a site's
 // shared/.env carries a charset-valid value — the same line passwordFromEnv
 // reads, so Check and Apply always judge the same credential (a valid value on
@@ -95,6 +108,51 @@ func envCredentialPresent(ctx context.Context, r bssh.Runner, site config.Site) 
 		return false, err
 	}
 	return res.ExitCode == 0, nil
+}
+
+// envValueMatchScript builds the exact shell script envValueMatches runs:
+// `read` consumes the expected KEY=value line from stdin FIRST, the live env
+// line is captured and trimmed separately (explicit grep exit mapping), and
+// the comparison is plain quoted shell string equality — no grep pattern
+// semantics, no pattern-file/input fd sharing. Shared with the real-shell
+// test in database_test.go so the tested bytes are the production bytes.
+// `sed 's/[[:space:]]*$//'` in the C locale trims exactly the ASCII set
+// passwordFromEnv trims, and the $(...) substitutions already strip trailing
+// newlines — so a trailing-whitespace env line compares equal to the trimmed
+// cached value (Check must never flag drift Apply cannot clear).
+func envValueMatchScript(path, key string) string {
+	return "IFS= read -r want; " +
+		"line=$(grep -m1 '^" + key + "=' " + shQuote(path) + "); s=$?; " +
+		"if [ $s -eq 1 ]; then exit 3; elif [ $s -ne 0 ]; then exit 2; fi; " +
+		`line=$(printf '%s' "$line" | sed 's/[[:space:]]*$//'); ` +
+		`[ "$line" = "$want" ] && exit 0; exit 1`
+}
+
+// envValueMatches reports whether the FIRST <key>= line of a site's live
+// shared/.env carries EXACTLY the expected value (modulo trailing ASCII
+// whitespace, the same set passwordFromEnv trims). The expected value travels
+// via STDIN (read into a shell variable — never argv, never stdout); the
+// comparison is shell string equality, so no grep pattern semantics apply.
+// The caller MUST have shape-validated expected (reDBPassword / reAppKey):
+// a value with CR/LF could otherwise smuggle a second line past `read`, and
+// a corrupt cache must fail loudly, not compare.
+// Exit map: 0 = match; 1 = present but different; 3 = no <key>= line
+// (treated as mismatch — the earlier presence probes make it unreachable,
+// but a race must re-trigger Apply's loud handling, never error here);
+// 2 = I/O error (hard Go error, never silent drift).
+func envValueMatches(ctx context.Context, r bssh.Runner, site config.Site, key, expected string) (bool, error) {
+	res, err := r.Run(ctx, envValueMatchScript(sharedEnvPath(site), key), []byte(key+"="+expected+"\n"))
+	if err != nil {
+		return false, err
+	}
+	switch res.ExitCode {
+	case 0:
+		return true, nil
+	case 1, 3:
+		return false, nil
+	default:
+		return false, fmt.Errorf("probe %s agreement in %s: %s", key, sharedEnvPath(site), res.Stderr)
+	}
 }
 
 // envDBConnection reads the first DB_CONNECTION line of a site's shared/.env.
@@ -252,33 +310,82 @@ func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Serve
 		if berthKey && cache[appKeyCacheKey(s.SiteDBUser(site))] == "" {
 			return d.unsatisfied(eng, "local secret cache missing the APP_KEY backup for "+site.Domain), nil
 		}
+		// Value agreement between the live .env and the local cache: a restored
+		// (older) .env would otherwise leave the role on the cache's password and
+		// the cache holding a WRONG APP_KEY forever, with every run green —
+		// Apply's passwordFromEnv branch reconciles the role and the cache toward
+		// .env once triggered. Cached values are shape-validated BEFORE they ride
+		// stdin: the strict charsets exclude CR/LF (nothing can smuggle a second
+		// line past the script's `read`), and a corrupt cache must fail loudly,
+		// never compare (mirroring newPassword/recoverOrNewAppKey's refusals).
+		cachedPW := cache[s.SiteDBUser(site)]
+		d.redactor.Add(cachedPW)
+		if !reDBPassword.MatchString(cachedPW) {
+			return provision.CheckResult{}, fmt.Errorf("cached password for %s is outside the allowed charset; refusing to use it", s.SiteDBUser(site))
+		}
+		match, err := envValueMatches(ctx, r, site, dbPasswordKey, cachedPW)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if !match {
+			return d.unsatisfied(eng, "DB credential for "+site.Domain+" disagrees between shared/.env and the local cache"), nil
+		}
+		// An operator-shaped APP_KEY berth does not back up must NOT be compared
+		// (berthKey false): it would flag drift Apply never clears — the exact
+		// brick envHasBerthAppKey's comment warns about.
+		if berthKey && cache[appKeyCacheKey(s.SiteDBUser(site))] != "" {
+			cachedKey := cache[appKeyCacheKey(s.SiteDBUser(site))]
+			d.redactor.Add(cachedKey)
+			if !reAppKey.MatchString(cachedKey) {
+				return provision.CheckResult{}, fmt.Errorf("cached APP_KEY for %s is malformed; refusing to use it", s.SiteDBUser(site))
+			}
+			match, err = envValueMatches(ctx, r, site, appKeyKey, cachedKey)
+			if err != nil {
+				return provision.CheckResult{}, err
+			}
+			if !match {
+				return d.unsatisfied(eng, "APP_KEY for "+site.Domain+" disagrees between shared/.env and the local cache"), nil
+			}
+		}
 	}
 	return provision.CheckResult{Satisfied: true, Reason: eng.ServerPackage() + " installed (" + s.Database.Source + "); per-site databases, users and credentials present"}, nil
 }
 
+// envBerthAppKeyScript builds the exact shell script envHasBerthAppKey runs.
+// Trailing ASCII whitespace is trimmed off the matched line BEFORE the shape
+// grep — appKeyFromEnv trims the same set before caching, so without it a
+// berth key with a trailing space would read as non-berth here and silently
+// skip both the cache requirement and the agreement comparison for exactly
+// the keys Apply DOES back up. The trim rides a pipeline stage (not the
+// capture) so `s=$?` keeps grep's exit status. Shared with the real-shell
+// test in database_test.go so the tested bytes are the production bytes.
+func envBerthAppKeyScript(path string) string {
+	return "line=$(grep -m1 '^" + appKeyKey + "=' " + shQuote(path) + "); s=$?; " +
+		"if [ $s -eq 1 ]; then exit 1; elif [ $s -ne 0 ]; then exit 2; fi; " +
+		`printf '%s' "$line" | sed 's/[[:space:]]*$//' | grep -Eq '^` + appKeyKey + `=` + appKeyShape + `$' && exit 0; exit 3`
+}
+
 // envHasBerthAppKey reports whether the FIRST APP_KEY line of a site's live
 // shared/.env carries a value in EXACTLY the shape berth generates
-// (appKeyShape — the same string reAppKey compiles; they MUST stay identical),
-// which is the only shape berth backs up. FIRST-line on purpose: it must match
+// (appKeyShape — the same string reAppKey compiles; they MUST stay identical,
+// modulo the trailing-whitespace trim appKeyFromEnv also applies), which is
+// the only shape berth backs up. FIRST-line on purpose: it must match
 // appKeyFromEnv's `grep -m1` read (phpdotenv's first-occurrence-wins) exactly,
 // or a duplicate-key env — e.g. an empty first "APP_KEY=" and a berth-format
 // key on a later line — would make Check demand a cache entry Apply never
 // writes: endless drift. Deliberately exact-shape, not "any APP_KEY line": an
 // operator-managed env can hold a Laravel-legal key berth does not back up
-// (no "base64:" prefix, or an AES-128 22-char key), and appKeyFromEnv refuses
-// those loudly as malformed when Apply runs. If Check flagged them
-// unsatisfied, Apply would fail on EVERY subsequent run — bricking the step
-// for such hosts with no operator recourse (the key cannot be rotated without
-// data loss). Probe-match ⟹ Apply caches the key (converges); probe-miss ⟹
-// Apply treats it as absent or fails loud exactly as today. Exit-code only
-// (-q, and $line never printed) so the key never enters stdout. Exit map:
-// 0 = first line is a berth-format key; 1 = no APP_KEY line; 3 = first line
-// present but not berth-format; 2 (or anything else) = loud I/O error.
+// (no "base64:" prefix, or an AES-128 22-char key), and appKeyFromEnv treats
+// those as absent when Apply runs (never cached). If Check flagged them
+// unsatisfied, it would demand a cache entry Apply never writes — the same
+// endless drift (the key cannot be rotated without data loss). Probe-match ⟹
+// Apply caches the key (converges); probe-miss ⟹ Apply treats it as absent
+// exactly as today. Exit-code only (-q, and $line never printed) so the key
+// never enters stdout. Exit map: 0 = first line is a berth-format key;
+// 1 = no APP_KEY line; 3 = first line present but not berth-format;
+// 2 (or anything else) = loud I/O error.
 func envHasBerthAppKey(ctx context.Context, r bssh.Runner, site config.Site) (bool, error) {
-	env := shQuote(sharedEnvPath(site))
-	res, err := r.Run(ctx, "line=$(grep -m1 '^"+appKeyKey+"=' "+env+"); s=$?; "+
-		"if [ $s -eq 1 ]; then exit 1; elif [ $s -ne 0 ]; then exit 2; fi; "+
-		`printf '%s' "$line" | grep -Eq '^`+appKeyKey+`=`+appKeyShape+`$' && exit 0; exit 3`, nil)
+	res, err := r.Run(ctx, envBerthAppKeyScript(sharedEnvPath(site)), nil)
 	if err != nil {
 		return false, err
 	}
@@ -344,6 +451,11 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	}
 	for _, site := range s.Sites {
 		dbName, dbUser := s.SiteDBName(site), s.SiteDBUser(site)
+		// The client-auth reconciliation below must compare against what the
+		// cache held BEFORE this run backfills it toward .env, so the pre-Apply
+		// value is captured (and registered as a secret) up front.
+		oldPW := cache[dbUser]
+		d.redactor.Add(oldPW)
 		envExists, err := fileExists(ctx, r, sharedEnvPath(site))
 		if err != nil {
 			return err
@@ -405,6 +517,7 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 		if err != nil {
 			return err
 		}
+		user := s.SiteUser(site)
 		if !authExists {
 			// Seed-if-absent, like shared/.env: the password is reused (never
 			// rotated) and the operator may customize the file, so a present
@@ -418,9 +531,28 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 			// the staged file INSIDE it, planting an account-owned file in a
 			// directory of the tenant's choosing. Writing as the account removes
 			// the privilege from that path.
-			user := s.SiteUser(site)
 			if err := writeFileAsUser(ctx, r, user, authPath, 0o600, eng.ClientAuthFile(dbName, dbUser, pw)); err != nil {
 				return err
+			}
+		}
+		// A reconciled role password strands ~/.my.cnf|~/.pgpass on the old
+		// credential (seed-if-absent). Rewrite ONLY a file that provably holds
+		// berth's old cached password — an operator-customized file (no old
+		// credential inside) is left alone, the same respect shared/.env gets.
+		// The old password rides SSH stdin into the probe; a probe I/O failure
+		// (grep exit >= 2) is loud, never read as "old credential absent".
+		if oldPW != "" && oldPW != pw && authExists {
+			res, err := r.Run(ctx, clientAuthContainsScript(authPath), []byte(oldPW+"\n"))
+			if err != nil {
+				return err
+			}
+			if res.ExitCode > 1 {
+				return fmt.Errorf("probe old credential in %s: %s", authPath, res.Stderr)
+			}
+			if res.ExitCode == 0 {
+				if err := writeFileAsUser(ctx, r, user, authPath, 0o600, eng.ClientAuthFile(dbName, dbUser, pw)); err != nil {
+					return err
+				}
 			}
 		}
 		cache[dbUser] = pw
@@ -468,14 +600,19 @@ func (d database) passwordFromEnv(ctx context.Context, r bssh.Runner, site confi
 }
 
 // appKeyFromEnv reads APP_KEY from a site's existing shared/.env, mirroring
-// passwordFromEnv but LENIENT on absence: a berth-seeded .env always has it, yet
-// an operator-managed .env may not, so a missing key returns ("", nil) — it
+// passwordFromEnv but LENIENT: a berth-seeded .env always has it, yet an
+// operator-managed .env may not, so a missing key returns ("", nil) — it
 // simply is not backed up. A present-but-EMPTY "APP_KEY=" line (stock Laravel's
-// placeholder) also counts as absent rather than erroring, so operator envs
-// still provision. A PRESENT but malformed key IS an error (a corrupt key must
-// never be silently cached), and so is a grep failure (exit >= 2) — an I/O
-// error must never read as "absent". Reading it keeps the cached key in sync
-// with the live file, exactly as cache[dbUser]=pw does for the password.
+// placeholder) counts as absent too, and so does a PRESENT key in a shape berth
+// does not generate: distinguishing an operator-managed Laravel-legal key (no
+// "base64:" prefix, an AES-128 22-char key) from a corrupt berth key is
+// impossible from shape alone, and erroring bricked Apply on operator-keyed
+// hosts for ANY trigger — a key berth cannot recognize is simply not berth's
+// to back up (it is never cached either, so nothing corrupt is laundered into
+// the cache, and envHasBerthAppKey renders the same verdict in Check). A grep
+// failure (exit >= 2) stays a hard error — an I/O error must never read as
+// "absent". Reading the key keeps the cached copy in sync with the live file,
+// exactly as cache[dbUser]=pw does for the password.
 func (d database) appKeyFromEnv(ctx context.Context, r bssh.Runner, site config.Site) (string, error) {
 	env := sharedEnvPath(site)
 	res, err := r.Run(ctx, "grep -m1 '^"+appKeyKey+"=' "+shQuote(env), nil)
@@ -491,11 +628,8 @@ func (d database) appKeyFromEnv(ctx context.Context, r bssh.Runner, site config.
 	}
 	line := strings.TrimRight(res.Stdout, " \t\n\v\f\r")
 	k := strings.TrimPrefix(line, appKeyKey+"=")
-	if k == "" || k == line {
+	if k == "" || k == line || !reAppKey.MatchString(k) {
 		return "", nil
-	}
-	if !reAppKey.MatchString(k) {
-		return "", fmt.Errorf("%s in %s is malformed; refusing to cache it", appKeyKey, env)
 	}
 	return k, nil
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -316,6 +318,7 @@ func TestDatabaseCheckSatisfiedDoesNotReseedExistingEnv(t *testing.T) {
 	f.On(mariadbGrantProbe, bssh.Result{Stdout: "1\n"})
 	f.On("test -e "+shQuote("/home/deploy/.my.cnf"), bssh.Result{ExitCode: 0}) // client creds already seeded
 	f.On(appKeyProbe(s), bssh.Result{ExitCode: 1})                             // no berth-format APP_KEY -> no backup required
+	f.On(envValueMatchScript(envPath(s), "DB_PASSWORD"), bssh.Result{ExitCode: 0})
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -346,11 +349,44 @@ func stubGreenRemote(f *bssh.FakeRunner, s *config.Server) {
 
 // appKeyProbe is Check's exact-shape APP_KEY probe command for the test
 // server's env (exit-code only, FIRST-line semantics; must match
-// envHasBerthAppKey verbatim).
+// envHasBerthAppKey verbatim — kept a literal, not a call into the production
+// builder, so an accidental command change still trips these stubs).
 func appKeyProbe(s *config.Server) string {
 	return "line=$(grep -m1 '^APP_KEY=' " + shQuote(envPath(s)) + "); s=$?; " +
 		"if [ $s -eq 1 ]; then exit 1; elif [ $s -ne 0 ]; then exit 2; fi; " +
-		`printf '%s' "$line" | grep -Eq '^APP_KEY=base64:[A-Za-z0-9+/]{43}=$' && exit 0; exit 3`
+		`printf '%s' "$line" | sed 's/[[:space:]]*$//' | grep -Eq '^APP_KEY=base64:[A-Za-z0-9+/]{43}=$' && exit 0; exit 3`
+}
+
+// Pins the real shell semantics of envHasBerthAppKey's script — in particular
+// that a berth-shaped key with trailing ASCII whitespace still reads as a
+// berth key: appKeyFromEnv trims that whitespace before caching, so a
+// no-trim probe would silently skip both the cache requirement and the
+// agreement comparison for exactly the keys Apply DOES back up.
+func TestEnvBerthAppKeyShellScript(t *testing.T) {
+	dir := t.TempDir()
+	env := filepath.Join(dir, ".env")
+	const key = "base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	cases := []struct {
+		name, fileLine string
+		exit           int
+	}{
+		{"berth-key", "APP_KEY=" + key + "\n", 0},
+		{"berth-key-trailing-ws", "APP_KEY=" + key + " \t\n", 0},
+		{"non-berth-key", "APP_KEY=base64:short\n", 3},
+		{"empty-placeholder", "APP_KEY=\n", 3},
+		{"missing-key", "OTHER=x\n", 1},
+		{"first-line-wins", "APP_KEY=\nAPP_KEY=" + key + "\n", 3},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if err := os.WriteFile(env, []byte(c.fileLine), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got := shellExit(t, envBerthAppKeyScript(env), ""); got != c.exit {
+				t.Fatalf("exit = %d, want %d", got, c.exit)
+			}
+		})
+	}
 }
 
 func TestDatabaseCheckUnsatisfiedWhenCacheMissingCredential(t *testing.T) {
@@ -375,6 +411,8 @@ func TestDatabaseCheckUnsatisfiedWhenCacheMissingCredential(t *testing.T) {
 }
 
 func TestDatabaseCheckSatisfiedWithFullCache(t *testing.T) {
+	// This is also the values-AGREE pin for the agreement probes: both stubs
+	// answer 0 (live .env == cache), so the step must stay green.
 	chdirTemp(t)
 	s := databaseServer()
 	dbUser := s.SiteDBUser(s.Sites[0])
@@ -385,6 +423,8 @@ func TestDatabaseCheckSatisfiedWithFullCache(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	stubGreenRemote(f, s)
 	f.On(appKeyProbe(s), bssh.Result{ExitCode: 0}) // live env holds a berth-format APP_KEY
+	f.On(envValueMatchScript(envPath(s), "DB_PASSWORD"), bssh.Result{ExitCode: 0})
+	f.On(envValueMatchScript(envPath(s), "APP_KEY"), bssh.Result{ExitCode: 0})
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -406,6 +446,7 @@ func TestDatabaseCheckSatisfiedWhenEnvAppKeyNotBerthFormat(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	stubGreenRemote(f, s)
 	f.On(appKeyProbe(s), bssh.Result{ExitCode: 1})
+	f.On(envValueMatchScript(envPath(s), "DB_PASSWORD"), bssh.Result{ExitCode: 0})
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -428,6 +469,7 @@ func TestDatabaseCheckSatisfiedWhenFirstAppKeyLineNotBerthFormat(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	stubGreenRemote(f, s)
 	f.On(appKeyProbe(s), bssh.Result{ExitCode: 3})
+	f.On(envValueMatchScript(envPath(s), "DB_PASSWORD"), bssh.Result{ExitCode: 0})
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -469,6 +511,145 @@ func TestDatabaseCheckFailsWhenAppKeyProbeErrors(t *testing.T) {
 	_, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err == nil || !strings.Contains(err.Error(), "Permission denied") {
 		t.Fatalf("Check() = %v, want a hard error surfacing the probe stderr", err)
+	}
+}
+
+// A restored (older) .env whose DB_PASSWORD disagrees with the local cache
+// must re-trigger Apply — this is the order-insensitive-restore probe: after
+// a disaster-recovery restore lands an older .env over a freshly provisioned
+// host, every presence probe stays green, and only value agreement can flag
+// that the role/cache and the file the app reads have parted ways.
+func TestDatabaseCheckFlagsEnvCachePasswordDisagreement(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	dbUser := s.SiteDBUser(s.Sites[0])
+	seedCache(t, s, map[string]string{
+		dbUser:             "cachedPW1",
+		"appkey:" + dbUser: "base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+	})
+	f := bssh.NewFakeRunner()
+	stubGreenRemote(f, s)
+	f.On(appKeyProbe(s), bssh.Result{ExitCode: 0})
+	f.On(envValueMatchScript(envPath(s), "DB_PASSWORD"), bssh.Result{ExitCode: 1}) // present but different
+	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Fatal("a .env/cache password disagreement must be unsatisfied")
+	}
+	if !strings.Contains(cr.Reason, "disagrees") {
+		t.Errorf("Reason = %q, want it to name the disagreement", cr.Reason)
+	}
+	// The expected value travels via stdin ONLY — never the command string.
+	var probed bool
+	for _, c := range f.Calls() {
+		if c.Cmd == envValueMatchScript(envPath(s), "DB_PASSWORD") {
+			probed = true
+			if got := string(c.Stdin); got != "DB_PASSWORD=cachedPW1\n" {
+				t.Errorf("probe stdin = %q, want %q", got, "DB_PASSWORD=cachedPW1\n")
+			}
+		}
+		if strings.Contains(c.Cmd, "cachedPW1") {
+			t.Errorf("the cached secret leaked into a command string: %q", c.Cmd)
+		}
+	}
+	if !probed {
+		t.Fatal("the DB_PASSWORD agreement probe never ran")
+	}
+}
+
+func TestDatabaseCheckFlagsEnvCacheAppKeyDisagreement(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	dbUser := s.SiteDBUser(s.Sites[0])
+	seedCache(t, s, map[string]string{
+		dbUser:             "cachedPW1",
+		"appkey:" + dbUser: "base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+	})
+	f := bssh.NewFakeRunner()
+	stubGreenRemote(f, s)
+	f.On(appKeyProbe(s), bssh.Result{ExitCode: 0})
+	f.On(envValueMatchScript(envPath(s), "DB_PASSWORD"), bssh.Result{ExitCode: 0}) // password agrees
+	f.On(envValueMatchScript(envPath(s), "APP_KEY"), bssh.Result{ExitCode: 1})     // APP_KEY does not
+	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Fatal("a .env/cache APP_KEY disagreement must be unsatisfied")
+	}
+	if !strings.Contains(cr.Reason, "APP_KEY") || !strings.Contains(cr.Reason, "disagrees") {
+		t.Errorf("Reason = %q, want it to name the APP_KEY disagreement", cr.Reason)
+	}
+}
+
+// shellExit runs a production-built probe script through the local /bin/sh
+// with the given stdin and returns its exit code — a FakeRunner stub can only
+// echo back what we assume, so these tests pin the ACTUAL shell semantics.
+func shellExit(t *testing.T, script, stdin string) int {
+	t.Helper()
+	cmd := exec.Command("/bin/sh", "-c", script)
+	cmd.Stdin = strings.NewReader(stdin)
+	err := cmd.Run()
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return 0
+}
+
+// Pins the actual shell semantics of envValueMatches' script — a FakeRunner
+// stub can only echo back what we assume, and the first draft of this
+// command was a plausible-looking pipeline that could never match.
+func TestEnvValueMatchesShellScript(t *testing.T) {
+	dir := t.TempDir()
+	env := filepath.Join(dir, ".env")
+	cases := []struct {
+		name, fileLine, want string
+		exit                 int
+	}{
+		{"match", "DB_PASSWORD=abc123\n", "abc123", 0},
+		{"match-trailing-ws", "DB_PASSWORD=abc123 \t\n", "abc123", 0},
+		{"mismatch", "DB_PASSWORD=other999\n", "abc123", 1},
+		{"missing-key", "OTHER=x\n", "abc123", 3},
+		{"first-line-wins", "DB_PASSWORD=abc123\nDB_PASSWORD=other999\n", "abc123", 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if err := os.WriteFile(env, []byte(c.fileLine), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got := shellExit(t, envValueMatchScript(env, "DB_PASSWORD"), "DB_PASSWORD="+c.want+"\n")
+			if got != c.exit {
+				t.Fatalf("exit = %d, want %d", got, c.exit)
+			}
+		})
+	}
+}
+
+func TestDatabaseCheckSkipsAgreementWhenCacheEmpty(t *testing.T) {
+	// With no cached credential Check already returns the missing-cache reason
+	// BEFORE any agreement probe: there is nothing to compare, and probing with
+	// an empty expected value would be a meaningless secret-shaped remote call.
+	chdirTemp(t)
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	stubGreenRemote(f, s)
+	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied || !strings.Contains(cr.Reason, "local secret cache missing") {
+		t.Fatalf("want the missing-cache reason, got %+v", cr)
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "IFS= read -r want") {
+			t.Fatalf("no agreement probe may run with an empty cache; saw %q", c.Cmd)
+		}
 	}
 }
 
@@ -975,6 +1156,154 @@ func TestDatabaseApplyClientAuthFileNeverRewritten(t *testing.T) {
 	}
 }
 
+// stubDivergedEnv stubs an Apply fixture where the restored .env disagrees
+// with the seeded cache: install done, .env present with NEW password and NEW
+// berth APP_KEY, client-auth file already seeded (holding whatever the cache
+// held), SQL stubbed.
+func stubDivergedEnv(f *bssh.FakeRunner, s *config.Server, newPW, newKey string) {
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=" + newPW + "\n"})
+	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "APP_KEY=" + newKey + "\n"})
+	f.On("test -e "+shQuote("/home/deploy/.my.cnf"), bssh.Result{ExitCode: 0})
+	f.On("mysql --protocol=socket", bssh.Result{})
+}
+
+// Divergence heals end to end: Check flags it (pinned above), Apply ALTERs
+// the role to the .env password, backfills the cache, and refreshes a
+// client-auth file that provably held the old berth credential.
+func TestDatabaseApplyReconcilesRoleAndCacheTowardEnv(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	dbUser := s.SiteDBUser(s.Sites[0])
+	const oldKey = "base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	const newKey = "base64:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="
+	seedCache(t, s, map[string]string{dbUser: "OldPass1", "appkey:" + dbUser: oldKey})
+	f := bssh.NewFakeRunner()
+	stubDivergedEnv(f, s, "NewPass2", newKey)
+	f.On(clientAuthContainsScript("/home/deploy/.my.cnf"), bssh.Result{ExitCode: 0}) // file holds the OLD berth credential
+	f.On(writeAsUserCmd("deploy", "/home/deploy/.my.cnf", 0o600), bssh.Result{})
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	// The role reconciles toward the live .env, and no secret rides argv.
+	var sawEnsureUser bool
+	for _, c := range f.Calls() {
+		if strings.HasPrefix(c.Cmd, "mysql") && strings.Contains(string(c.Stdin), "NewPass2") {
+			sawEnsureUser = true
+		}
+		if c.Cmd == clientAuthContainsScript("/home/deploy/.my.cnf") {
+			if got := string(c.Stdin); got != "OldPass1\n" {
+				t.Errorf("containment probe stdin = %q, want the OLD cached password", got)
+			}
+		}
+		if strings.Contains(c.Cmd, "OldPass1") || strings.Contains(c.Cmd, "NewPass2") {
+			t.Errorf("a secret leaked into a command string: %q", c.Cmd)
+		}
+	}
+	if !sawEnsureUser {
+		t.Fatal("EnsureUser must move the role to the .env password")
+	}
+	// The stranded client-auth file is refreshed with the NEW credential.
+	auth := string(writtenContent(f, "/home/deploy/.my.cnf"))
+	if !strings.Contains(auth, "NewPass2") {
+		t.Errorf("~/.my.cnf must be rewritten with the reconciled credential; got %q", auth)
+	}
+	// The cache backfills to the .env values — the next Check goes green.
+	cache, err := secret.LoadCache(s.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cache[dbUser] != "NewPass2" {
+		t.Errorf("cache password = %q, want the .env value", cache[dbUser])
+	}
+	if cache["appkey:"+dbUser] != newKey {
+		t.Errorf("cache APP_KEY = %q, want the .env value", cache["appkey:"+dbUser])
+	}
+}
+
+func TestDatabaseApplyLeavesOperatorClientAuthAlone(t *testing.T) {
+	// The same divergence, but the client-auth file does NOT contain berth's
+	// old credential — an operator customized it, and berth keeps the same
+	// seed-if-absent respect shared/.env gets: probe, then hands off.
+	chdirTemp(t)
+	s := databaseServer()
+	dbUser := s.SiteDBUser(s.Sites[0])
+	seedCache(t, s, map[string]string{dbUser: "OldPass1"})
+	f := bssh.NewFakeRunner()
+	stubDivergedEnv(f, s, "NewPass2", "base64:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=")
+	f.On(clientAuthContainsScript("/home/deploy/.my.cnf"), bssh.Result{ExitCode: 1}) // old credential NOT inside
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if writtenContent(f, "/home/deploy/.my.cnf") != nil {
+		t.Fatal("an operator-customized client-auth file must never be rewritten")
+	}
+}
+
+func TestDatabaseApplyFailsWhenClientAuthProbeErrors(t *testing.T) {
+	// grep exit >= 2 is an I/O failure, not "old credential absent" — silently
+	// skipping the refresh would strand the client file with no signal.
+	chdirTemp(t)
+	s := databaseServer()
+	dbUser := s.SiteDBUser(s.Sites[0])
+	seedCache(t, s, map[string]string{dbUser: "OldPass1"})
+	f := bssh.NewFakeRunner()
+	stubDivergedEnv(f, s, "NewPass2", "base64:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=")
+	f.On(clientAuthContainsScript("/home/deploy/.my.cnf"), bssh.Result{ExitCode: 2, Stderr: "grep: /home/deploy/.my.cnf: I/O error"})
+	err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "I/O error") {
+		t.Fatalf("Apply() = %v, want a hard error surfacing the probe stderr", err)
+	}
+}
+
+func TestDatabaseApplySkipsContainmentProbeWhenCacheAgrees(t *testing.T) {
+	// No divergence (cache already holds the .env password): the containment
+	// probe must not run at all — the reconciliation is strictly for the
+	// password-moved case.
+	chdirTemp(t)
+	s := databaseServer()
+	dbUser := s.SiteDBUser(s.Sites[0])
+	seedCache(t, s, map[string]string{dbUser: "SamePass1"})
+	f := bssh.NewFakeRunner()
+	stubDivergedEnv(f, s, "SamePass1", "base64:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=")
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "IFS= read -r old") {
+			t.Fatalf("no containment probe may run when cache and .env agree; saw %q", c.Cmd)
+		}
+	}
+}
+
+// Pins the real shell semantics of clientAuthContainsScript: the OLD password
+// arrives via stdin, `read` puts it in a shell variable, printf pipes it to
+// grep as the PATTERN (-f -) while the auth file is grep's named INPUT —
+// pattern-from-pipe and data-from-file are separate fds in this direction.
+func TestClientAuthContainsShellScript(t *testing.T) {
+	dir := t.TempDir()
+	auth := filepath.Join(dir, ".my.cnf")
+	cases := []struct {
+		name, content, old string
+		exit               int
+	}{
+		{"contains", "[client]\nuser = myapp\npassword = OldPass1\n", "OldPass1", 0},
+		{"not-contains", "[client]\nuser = myapp\npassword = OperatorPW9\n", "OldPass1", 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if err := os.WriteFile(auth, []byte(c.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got := shellExit(t, clientAuthContainsScript(auth), c.old+"\n"); got != c.exit {
+				t.Fatalf("exit = %d, want %d", got, c.exit)
+			}
+		})
+	}
+}
+
 func TestDatabaseCheckUnsatisfiedWhenClientAuthMissing(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
@@ -1213,7 +1542,13 @@ func TestDatabaseApplyBackfillsAppKeyFromExistingEnv(t *testing.T) {
 	}
 }
 
-func TestDatabaseApplyRejectsMalformedEnvAppKey(t *testing.T) {
+func TestDatabaseApplySkipsNonBerthEnvAppKey(t *testing.T) {
+	// A present APP_KEY in a shape berth does not generate (no "base64:"
+	// prefix, wrong length, an operator's AES-128 key) is simply not berth's
+	// to back up: shape alone cannot distinguish an operator-managed
+	// Laravel-legal key from a corrupt berth key, and the old hard error
+	// bricked Apply on operator-keyed hosts for ANY trigger. The key must be
+	// treated as absent — never cached, never fatal.
 	chdirTemp(t)
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
@@ -1222,9 +1557,17 @@ func TestDatabaseApplyRejectsMalformedEnvAppKey(t *testing.T) {
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=existingpw\n"})
 	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "APP_KEY=base64:short\n"})
-	err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
-	if err == nil || !strings.Contains(err.Error(), "malformed") {
-		t.Fatalf("Apply() = %v, want a malformed-APP_KEY refusal", err)
+	f.On("test -e "+shQuote("/home/deploy/.my.cnf"), bssh.Result{ExitCode: 0})
+	f.On("mysql --protocol=socket", bssh.Result{})
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() = %v; a non-berth APP_KEY must not brick Apply", err)
+	}
+	cache, err := secret.LoadCache(s.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cache["appkey:"+s.SiteDBUser(s.Sites[0])]; got != "" {
+		t.Errorf("a non-berth APP_KEY must never be cached; got %q", got)
 	}
 }
 
