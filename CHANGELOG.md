@@ -3,6 +3,30 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Changed
+
+- **BREAKING: the legacy top-level `database.name` / `database.user` spelling
+  is gone.** Every site now carries its own `database: {name, user}` block
+  (the wizard has always written it this way). A config still using the
+  top-level spelling fails to load naming the unknown key — move the two
+  values into the site's block.
+- **BREAKING: pre-v0.22 (pre-envelope) local secret caches are no longer
+  read.** The identity step no longer upgrades legacy flat caches; a flat
+  file under `~/.berth/` is rejected with advice. No released berth wrote
+  that format for a host that still exists. The legacy-format test writer
+  (`secret.SaveCache`) is gone with it.
+- Removed the three on-host migration shims for artifacts renamed during
+  pre-release development: the scheduler cron (`berth-<pool>` →
+  `berth-site-<pool>`), the sshd drop-in (`berth.conf` → `00-berth.conf`)
+  and the pre-per-site valkey tuning drop-in. The removed-site cron sweep
+  now matches `berth-site-*` exactly. Every box berth has ever provisioned
+  is disposable and is reset before the first real deployment; no surviving
+  host carries any of these paths.
+- Dropped two dead config decode hooks (`time.Duration`, comma-`[]string`) so
+  no future field silently gains an alias spelling.
+
 ## [0.23.0] — 2026-07-27
 
 ### Fixed
