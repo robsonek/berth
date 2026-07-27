@@ -5,6 +5,21 @@ Notable changes to berth. Older releases are documented on the
 
 ## [Unreleased]
 
+### Added
+
+- **Host provisioning manifest** — a new terminal `manifest` step records
+  `/var/lib/berth/manifest` (`VERSION`, plus `PROVISIONED_AT` = when that
+  version first fully provisioned the host), so future upgrades can branch
+  on "last fully provisioned by" instead of probing the filesystem. Partial
+  (`--only`) runs neither read nor write it, and a pipeline truncated by
+  `--skip-ssl` does not attest at all.
+- **Per-site backup manifest** — `/var/backups/berth/<pool>/manifest` records
+  the berth version, engine, database/user names, site user and deploy path
+  the archives were made under; the offsite copy of a backup directory is now
+  self-describing. The recorded version makes the backups step re-apply once
+  after every berth upgrade (byte-identical rewrites of its other files, no
+  reload).
+
 ### Changed
 
 - **BREAKING: the legacy top-level `database.name` / `database.user` spelling
@@ -30,6 +45,25 @@ Notable changes to berth. Older releases are documented on the
   host carries any of these paths.
 - Dropped two dead config decode hooks (`time.Duration`, comma-`[]string`) so
   no future field silently gains an alias spelling.
+
+### Fixed
+
+- **Restores are order-insensitive.** The `database` step now detects when
+  the live `shared/.env` and the local secret cache hold DIFFERENT values for
+  the DB password or `APP_KEY` (e.g. an older `.env` restored over a freshly
+  provisioned host) and reconciles toward `.env`: the role's password is
+  reset and the cache re-synced. Previously that state stayed green forever —
+  the app locked out of its database and the cache permanently poisoned with
+  a wrong `APP_KEY`. The README's Full-restore order now documents the
+  reconciling second run. Reconciliation also refreshes a `~/.my.cnf` /
+  `~/.pgpass` that provably held berth's previous credential (an
+  operator-customized file is left alone).
+- An operator-managed `APP_KEY` whose shape berth does not recognize no
+  longer hard-errors the `database` step's apply — it is treated as "not
+  berth's to back up" (previously any apply on such a host failed).
+- A cached DB password or `APP_KEY` whose shape is corrupt (a hand-edited or
+  tampered `~/.berth/` cache) now fails the `database` step's check loudly
+  instead of riding into the value comparison or onto the host.
 
 ## [0.23.0] — 2026-07-27
 
