@@ -65,6 +65,61 @@ func removePHPDropIns(ctx context.Context, r bssh.Runner, ver string) {
 	_, _ = r.Run(ctx, "rm -f "+shQuote(opcacheDropInPath(ver))+" "+shQuote(phpTuningDropInPath(ver)), nil)
 }
 
+// phpBlameValidateFailure assigns blame for a failed unit-wide php-fpm -t by
+// difference, without parsing validator output: remove berth's two drop-ins
+// (strictly — the differential is an experiment and its intervention must be
+// certain, unlike the best-effort removePHPDropIns cleanup) and run -t again.
+//   - Passes now  → the fault is berth's own rendered files: keep them removed
+//     and fail loudly (the next run re-applies them).
+//   - Still fails → the fault lives outside the drop-ins (a pool under
+//     pool.d/ owned by the later site step, or a foreign file): restore the
+//     drop-ins, skip start/reload/stamp and — on a full run — warn and let
+//     the pipeline reach site, which re-renders its pools, validates and
+//     reloads; site's markReloaded on the shared per-unit stamp blesses the
+//     restored drop-ins in the same run. Under --only there is no later site
+//     execution, so deferring would report Applied with no reload ever
+//     happening: fail hard instead.
+//
+// Drop-in ini files have no include mechanism, so removing them cannot mask
+// a pool-file fault (unlike nginx's sites bridge — see nginx.Apply).
+func phpBlameValidateFailure(ctx context.Context, rc provision.RunCtx, r bssh.Runner, v, firstStderr string, ini, tini []byte) error {
+	rm := "rm -f " + shQuote(opcacheDropInPath(v)) + " " + shQuote(phpTuningDropInPath(v))
+	rmRes, err := r.Run(ctx, rm, nil)
+	if err != nil {
+		return err
+	}
+	if rmRes.ExitCode != 0 {
+		return fmt.Errorf("php-fpm%s -t failed after writing drop-ins (%s) and removing them for fault isolation failed too (%s); fix the removal failure and re-run", v, firstStderr, rmRes.Stderr)
+	}
+	second, err := r.Run(ctx, "php-fpm"+v+" -t", nil)
+	if err != nil {
+		return err
+	}
+	if second.ExitCode == 0 {
+		// The unit validates WITHOUT berth's drop-ins, so the fault is proven
+		// to be berth's own rendered files — say so instead of the pool.d
+		// hint, which on this path is demonstrably wrong.
+		return fmt.Errorf("php-fpm%s -t failed after writing drop-ins and passes without them, so berth's own drop-ins are at fault (likely a berth bug — please report it): %s — removed them so the next run re-applies", v, firstStderr)
+	}
+	// The verdict quotes the SECOND run's stderr: the validator's view without
+	// berth's files is what proves the fault is external.
+	if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
+		Path: opcacheDropInPath(v), Content: ini, Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
+	}); err != nil {
+		return fmt.Errorf("restore OPcache drop-in after fault isolation: %w", err)
+	}
+	if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
+		Path: phpTuningDropInPath(v), Content: tini, Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
+	}); err != nil {
+		return fmt.Errorf("restore PHP tuning drop-in after fault isolation: %w", err)
+	}
+	if !rc.FullRun {
+		return fmt.Errorf("php-fpm%s -t fails even without berth's drop-ins (%s); the failing file likely lives under /etc/php/%s/fpm/pool.d/ — run a full provision (no --only) so the site step can re-render its pool files", v, second.Stderr, v)
+	}
+	rc.Warnf("php-fpm%s -t fails outside berth's drop-ins (validator says: %s); skipping the FPM reload — the site step will re-render its pool files, validate and reload; if the offending file is not berth-managed the run will fail there with details", v, second.Stderr)
+	return nil
+}
+
 // phpPDOExt is the PHP PDO extension for a database engine: pgsql for postgres,
 // else mysql. A Postgres app needs pdo_pgsql; installing the wrong one leaves the
 // box unable to connect.
@@ -255,11 +310,13 @@ func (php) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 	if res, err := r.Run(ctx, "php-fpm"+v+" -t", nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
-		removePHPDropIns(ctx, r, v)
 		// -t validates the WHOLE unit, so the failure may live in a pool file
-		// owned by the later site step; fail-fast stops the run before site
-		// could heal it, so point the operator there.
-		return fmt.Errorf("php-fpm%s -t failed after writing drop-ins (removed them so the next run re-applies): %s — if the failure points at a pool file under /etc/php/%s/fpm/pool.d/, fix or remove that file (berth's site step re-renders its pools on the next run)", v, res.Stderr, v)
+		// owned by the later site step; fail-fast would stop the run before
+		// site could heal it. Assign blame by difference: retest without
+		// berth's drop-ins, and either fail on our own files or defer the
+		// reload to site (which re-renders its pools, validates and reloads —
+		// its shared unit stamp then blesses the restored drop-ins too).
+		return phpBlameValidateFailure(ctx, rc, r, v, res.Stderr, ini, tini)
 	}
 	active, err := serviceActive(ctx, r, fpmService(s))
 	if err != nil {

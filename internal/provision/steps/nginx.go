@@ -125,7 +125,7 @@ func (n nginx) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 }
 
 func (nginx) changes(s *config.Server) []string {
-	return []string{"install nginx (" + s.Nginx.Source + ")", "run workers as www-data", "disable stock default site(s)", "systemctl enable --now nginx"}
+	return []string{"install nginx (" + s.Nginx.Source + ")", "run workers as www-data", "disable stock default site(s)", "systemctl enable nginx, then start or reload once nginx -t passes"}
 }
 
 // nginxRunsAsWWWData reports whether nginx.conf sets the worker user to www-data.
@@ -182,28 +182,57 @@ func (nginx) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r
 	if err := disableStockDefaults(ctx, r); err != nil {
 		return err
 	}
-	if res, err := r.Run(ctx, "systemctl enable --now nginx", nil); err != nil {
+	// Enable WITHOUT starting: enablement does not depend on config validity,
+	// while `enable --now` on a dead nginx with a broken vhost would fail on
+	// the start before the validation below could defer the failure to the
+	// site step (the unit-validation deadlock, P13). Start/reload happen only
+	// after -t passes.
+	if res, err := r.Run(ctx, "systemctl enable nginx", nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("enable nginx: %s", res.Stderr)
 	}
-	// Reload so a disabled default site stops answering on an already-running
-	// nginx (enable --now is a no-op when nginx is already up). Validate first.
 	if res, err := r.Run(ctx, "nginx -t", nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
-		// -t validates the WHOLE unit, so the failure may live in a vhost
-		// owned by the later site step; fail-fast stops the run before site
-		// could heal it, so point the operator there.
-		return fmt.Errorf("nginx -t failed after disabling stock defaults: %s — if the failure points at a vhost under /etc/nginx/sites-available/, fix or remove that file (berth's site step re-renders its vhosts on the next run)", res.Stderr)
+		// -t validates the WHOLE unit while this step's own writes are fixed,
+		// known-good content — the failure is a vhost owned by the later site
+		// step or a foreign file. No blame differential here (unlike php):
+		// removing the sites bridge would unload sites-enabled/* entirely and
+		// misattribute a vhost fault to berth's own file. On a full run,
+		// defer: skip start/reload/stamp (the stamp stays invalidated, so
+		// Check keeps reporting honestly) and let site re-render its vhosts,
+		// validate and reload — its shared unit stamp blesses this step's
+		// files too. Under --only site never runs, so deferring would report
+		// Applied with the old config still serving: fail hard instead.
+		if !rc.FullRun {
+			return fmt.Errorf("nginx -t failed after disabling stock defaults: %s — if the failure points at a vhost under /etc/nginx/sites-available/, fix or remove that file, or run a full provision (no --only) so the site step can re-render its vhosts", res.Stderr)
+		}
+		rc.Warnf("nginx -t fails (validator says: %s); berth's own nginx files are fixed content, so the failure is most likely a vhost under /etc/nginx/sites-available/ or a foreign conf.d file; skipping the nginx reload — the site step will re-render its vhosts, validate and reload", res.Stderr)
+		return nil
 	}
-	if res, err := r.Run(ctx, "systemctl reload nginx", nil); err != nil {
+	active, err := serviceActive(ctx, r, "nginx")
+	if err != nil {
 		return err
-	} else if res.ExitCode != 0 {
-		return fmt.Errorf("reload nginx: %s", res.Stderr)
+	}
+	if !active {
+		// A dead nginx cannot be reloaded; start it (config just validated).
+		if res, err := r.Run(ctx, "systemctl start nginx", nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("start nginx: %s", res.Stderr)
+		}
+	} else {
+		// Reload so a disabled default site stops answering on an
+		// already-running nginx.
+		if res, err := r.Run(ctx, "systemctl reload nginx", nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("reload nginx: %s", res.Stderr)
+		}
 	}
 	// No nginx-config mutation follows (every write/removal above precedes the
-	// validate+reload), so the stamp may bless the running config.
+	// validate+start/reload), so the stamp may bless the running config.
 	return markReloaded(ctx, r, "nginx")
 }
 

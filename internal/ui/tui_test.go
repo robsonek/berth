@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -52,3 +53,27 @@ var errTest = errString("boom")
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+func TestReducerCollectsWarningsWithoutChangingStatus(t *testing.T) {
+	m := newStepModel()
+	m = m.apply(provision.Event{Step: "php", Kind: provision.EventStarted})
+	m = m.apply(provision.Event{Step: "php", Kind: provision.EventApplied,
+		Warnings: []string{"reload deferred to site"}})
+
+	if m.status("php") != "applied" {
+		t.Errorf("php status = %q, want applied (a warning must not change it)", m.status("php"))
+	}
+	if m.failed() {
+		t.Error("a warning must not mark the run failed")
+	}
+	view := m.view()
+	if !strings.Contains(view, "⚠ php: reload deferred to site") {
+		t.Errorf("view must show the warning; got:\n%s", view)
+	}
+
+	// No warnings → no warning block at all.
+	clean := newStepModel().apply(provision.Event{Step: "php", Kind: provision.EventApplied})
+	if strings.Contains(clean.view(), "⚠") {
+		t.Errorf("view must not show a warning marker without warnings:\n%s", clean.view())
+	}
+}

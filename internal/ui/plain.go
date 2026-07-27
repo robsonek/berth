@@ -42,6 +42,7 @@ func (p *PlainRenderer) Render(events <-chan provision.Event) error {
 					fmt.Fprintf(p.w, "      + %s\n", c)
 				}
 			}
+			p.printWarnings(e)
 		case provision.EventPlanned:
 			changes := e.Changes
 			if e.Sensitive {
@@ -50,8 +51,19 @@ func (p *PlainRenderer) Render(events <-chan provision.Event) error {
 			fmt.Fprintf(p.w, "plan  %s: %v\n", e.Step, changes)
 		case provision.EventFailed:
 			fmt.Fprintf(p.w, "FAIL  %s: %v\n", e.Step, e.Err)
+			p.printWarnings(e)
 			failure = e.Err
 		}
 	}
 	return failure
+}
+
+// printWarnings emits one stable `warn  ` line per warning attached to a
+// terminal event, in both verbose modes: a warning is operator-facing signal
+// (e.g. a unit validation deferred to the site step), not verbose detail.
+// Warnf normalizes messages to a single line, keeping the prefix contract.
+func (p *PlainRenderer) printWarnings(e provision.Event) {
+	for _, w := range e.Warnings {
+		fmt.Fprintf(p.w, "warn  %s: %s\n", e.Step, w)
+	}
 }

@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -328,38 +329,256 @@ func TestPHPApplyRefusesForeignTuningDropIn(t *testing.T) {
 	}
 }
 
-func TestPHPApplyRemovesDropInsOnTestFailure(t *testing.T) {
-	// A failed php-fpm -t after the writes must remove BOTH drop-ins: leaving
-	// them would make the next run's Check falsely Satisfied (bytes match)
-	// while the running master never loaded the new content.
-	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
-	rm := "rm -f " + shQuote(opcacheDropInPath("8.4")) + " " + shQuote(phpTuningDropInPath("8.4"))
+// phpDifferentialRunner stubs the common Apply prefix up to the first
+// php-fpm -t for the fault-isolation differential tests (version 8.4,
+// source debian, drop-ins absent).
+func phpDifferentialRunner() *bssh.FakeRunner {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{}) // stamp invalidation up front
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{ExitCode: 1})
 	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{ExitCode: 1})
-	f.On("php-fpm8.4 -t", bssh.Result{ExitCode: 1, Stderr: "syntax error"})
-	f.On(rm, bssh.Result{})
+	return f
+}
 
-	err := PHP().Apply(context.Background(), provision.RunCtx{}, s, f)
+// strictRMCmd is the checked drop-in removal the differential performs.
+const strictRMCmd8_4 = "rm -f '/etc/php/8.4/fpm/conf.d/99-berth-opcache.ini' '/etc/php/8.4/fpm/conf.d/99-berth-tuning.ini'"
+
+func callIdx(f *bssh.FakeRunner, want string, nth int) int {
+	seen := 0
+	for i, c := range f.Calls() {
+		if c.Cmd == want {
+			if seen == nth {
+				return i
+			}
+			seen++
+		}
+	}
+	return -1
+}
+
+func TestPHPApplyRemovesDropInsOnOwnFault(t *testing.T) {
+	// -t fails with the drop-ins present and passes without them: the fault is
+	// berth's own rendered files. Keep them removed (leaving them would make
+	// the next run's Check falsely Satisfied while the master never loaded
+	// them) and fail loudly with today's message.
+	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
+	f := phpDifferentialRunner()
+	f.OnSeq("php-fpm8.4 -t",
+		bssh.Result{ExitCode: 1, Stderr: "syntax error"},
+		bssh.Result{}) // passes once berth's drop-ins are gone
+	f.On(strictRMCmd8_4, bssh.Result{})
+
+	err := PHP().Apply(context.Background(), provision.RunCtx{FullRun: true}, s, f)
 	if err == nil || !strings.Contains(err.Error(), "-t failed") {
 		t.Fatalf("err = %v, want the -t failure", err)
 	}
-	// php-fpm -t validates the WHOLE unit, so the failure may be a pool file
-	// owned by the LATER site step — the error must point the operator there.
-	if !strings.Contains(err.Error(), "/etc/php/8.4/fpm/pool.d/") {
-		t.Errorf("err = %v, want a remediation hint naming the pool directory", err)
+	// The differential PROVED the fault is berth's own rendering — the error
+	// must say so, and must not point at pool.d (wrong on this path).
+	if !strings.Contains(err.Error(), "berth's own drop-ins are at fault") {
+		t.Errorf("err = %v, want the proven own-fault verdict", err)
 	}
-	var removed bool
+	if strings.Contains(err.Error(), "pool.d") {
+		t.Errorf("err = %v, must not hint at pool.d when the fault is proven to be berth's", err)
+	}
+	if callIdx(f, strictRMCmd8_4, 0) < 0 {
+		t.Error("Apply must remove both drop-ins after a failed php-fpm -t")
+	}
+	if got := len(f.Writes()); got != 2 {
+		t.Errorf("own fault must not restore the drop-ins; writes = %d, want 2 (initial only)", got)
+	}
 	for _, c := range f.Calls() {
-		if c.Cmd == rm {
-			removed = true
+		if c.Cmd == "systemctl reload php8.4-fpm" || c.Cmd == "systemctl start php8.4-fpm" || c.Cmd == markReloadedCmd("php8.4-fpm") {
+			t.Errorf("%q must not run after a failed php-fpm -t", c.Cmd)
 		}
 	}
-	if !removed {
-		t.Error("Apply must remove both drop-ins after a failed php-fpm -t")
+}
+
+func TestPHPApplyDefersOutsideFaultToSite(t *testing.T) {
+	// -t fails both with AND without berth's drop-ins: the fault lives in a
+	// file a later step owns (a pool under pool.d/). Restore the drop-ins,
+	// skip start/reload/stamp and warn — the site step re-renders its pools,
+	// validates and reloads, and its shared unit stamp blesses the restored
+	// drop-ins in the same run.
+	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
+	f := phpDifferentialRunner()
+	f.OnSeq("php-fpm8.4 -t",
+		bssh.Result{ExitCode: 1, Stderr: "bad with drop-ins"},
+		bssh.Result{ExitCode: 1, Stderr: "bad without drop-ins"})
+	f.On(strictRMCmd8_4, bssh.Result{})
+
+	var warned []string
+	rc := provision.RunCtx{FullRun: true, Warn: func(msg string) { warned = append(warned, msg) }}
+	if err := PHP().Apply(context.Background(), rc, s, f); err != nil {
+		t.Fatalf("outside fault must defer, not fail: %v", err)
+	}
+	if len(warned) != 1 {
+		t.Fatalf("want exactly one warning, got %q", warned)
+	}
+	// The warning must carry the SECOND validator run's stderr — the verdict
+	// obtained without berth's files — and point at the site step.
+	if !strings.Contains(warned[0], "bad without drop-ins") || strings.Contains(warned[0], "bad with drop-ins") {
+		t.Errorf("warning must quote the second -t stderr; got %q", warned[0])
+	}
+	if !strings.Contains(warned[0], "site step") {
+		t.Errorf("warning must defer to the site step; got %q", warned[0])
+	}
+	// Restore: both drop-ins written again with identical managed content.
+	w := f.Writes()
+	if len(w) != 4 {
+		t.Fatalf("want 4 writes (2 initial + 2 restore), got %d", len(w))
+	}
+	if w[2].Path != w[0].Path || string(w[2].Content) != string(w[0].Content) ||
+		w[3].Path != w[1].Path || string(w[3].Content) != string(w[1].Content) {
+		t.Error("restore must rewrite the same drop-ins with the same managed bytes")
+	}
+	// Ordering: first -t → strict rm → second -t → restore (the restore's
+	// write-guard cat is its first remote call, so its index pins the phase).
+	if !(callIdx(f, "php-fpm8.4 -t", 0) < callIdx(f, strictRMCmd8_4, 0) &&
+		callIdx(f, strictRMCmd8_4, 0) < callIdx(f, "php-fpm8.4 -t", 1)) {
+		t.Errorf("differential order wrong: %+v", f.Calls())
+	}
+	if !(callIdx(f, "php-fpm8.4 -t", 1) < callIdx(f, "cat "+shQuote(opcacheDropInPath("8.4")), 1)) {
+		t.Errorf("restore must start only after the second -t; calls: %+v", f.Calls())
+	}
+	for _, c := range f.Calls() {
+		switch c.Cmd {
+		case "systemctl reload php8.4-fpm", "systemctl start php8.4-fpm",
+			"systemctl is-active php8.4-fpm", markReloadedCmd("php8.4-fpm"):
+			t.Errorf("%q must not run when the reload is deferred to site", c.Cmd)
+		}
+	}
+}
+
+func TestPHPApplyFailsWhenStrictRemovalFails(t *testing.T) {
+	// If the drop-ins cannot be removed, the differential cannot establish
+	// the "without berth's files" condition — no verdict may be issued.
+	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
+	f := phpDifferentialRunner()
+	f.On("php-fpm8.4 -t", bssh.Result{ExitCode: 1, Stderr: "syntax error"})
+	f.On(strictRMCmd8_4, bssh.Result{ExitCode: 1, Stderr: "rm: cannot remove"})
+
+	var warned []string
+	rc := provision.RunCtx{FullRun: true, Warn: func(msg string) { warned = append(warned, msg) }}
+	err := PHP().Apply(context.Background(), rc, s, f)
+	if err == nil || !strings.Contains(err.Error(), "syntax error") || !strings.Contains(err.Error(), "rm: cannot remove") {
+		t.Fatalf("err = %v, want both the -t failure and the removal failure", err)
+	}
+	if n := callIdx(f, "php-fpm8.4 -t", 1); n >= 0 {
+		t.Error("no second -t may run when the removal failed")
+	}
+	if len(f.Writes()) != 2 || len(warned) != 0 {
+		t.Errorf("no restore and no warning on an unestablished differential; writes=%d warned=%q", len(f.Writes()), warned)
+	}
+}
+
+func TestPHPApplyPropagatesRemovalTransportError(t *testing.T) {
+	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
+	f := phpDifferentialRunner()
+	f.On("php-fpm8.4 -t", bssh.Result{ExitCode: 1, Stderr: "syntax error"})
+	f.OnError(strictRMCmd8_4, errors.New("connection lost"))
+
+	err := PHP().Apply(context.Background(), provision.RunCtx{FullRun: true}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "connection lost") {
+		t.Fatalf("err = %v, want the transport error propagated", err)
+	}
+}
+
+// errOnNthRunner delegates to a FakeRunner but injects a transport error on
+// the nth occurrence of one command — FakeRunner's OnError applies to every
+// occurrence, which cannot model "the second -t dies mid-differential".
+type errOnNthRunner struct {
+	*bssh.FakeRunner
+	cmd  string
+	nth  int
+	err  error
+	seen int
+}
+
+func (r *errOnNthRunner) Run(ctx context.Context, cmd string, stdin []byte) (bssh.Result, error) {
+	if cmd == r.cmd {
+		r.seen++
+		if r.seen == r.nth {
+			return bssh.Result{}, r.err
+		}
+	}
+	return r.FakeRunner.Run(ctx, cmd, stdin)
+}
+
+func TestPHPApplyPropagatesSecondValidatorTransportError(t *testing.T) {
+	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
+	f := phpDifferentialRunner()
+	f.On("php-fpm8.4 -t", bssh.Result{ExitCode: 1, Stderr: "syntax error"})
+	f.On(strictRMCmd8_4, bssh.Result{})
+	r := &errOnNthRunner{FakeRunner: f, cmd: "php-fpm8.4 -t", nth: 2, err: errors.New("connection lost")}
+
+	var warned []string
+	rc := provision.RunCtx{FullRun: true, Warn: func(m string) { warned = append(warned, m) }}
+	err := PHP().Apply(context.Background(), rc, s, r)
+	if err == nil || !strings.Contains(err.Error(), "connection lost") {
+		t.Fatalf("err = %v, want the transport error from the second -t propagated", err)
+	}
+	if len(f.Writes()) != 2 || len(warned) != 0 {
+		t.Errorf("no restore and no warning after a dead second -t; writes=%d warned=%q", len(f.Writes()), warned)
+	}
+}
+
+func TestPHPApplyPropagatesRestoreFailure(t *testing.T) {
+	// A foreign file materializing at the drop-in path between the strict
+	// removal and the restore must hit the managed-write guard: propagate,
+	// emit no warning (the step did not reach a deferred state).
+	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
+	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
+	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{})
+	f.OnSeq("cat "+shQuote(opcacheDropInPath("8.4")),
+		bssh.Result{ExitCode: 1},                             // initial write guard: absent
+		bssh.Result{ExitCode: 0, Stdout: "intruder content"}) // restore guard: foreign file
+	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{ExitCode: 1})
+	f.OnSeq("php-fpm8.4 -t",
+		bssh.Result{ExitCode: 1, Stderr: "bad A"},
+		bssh.Result{ExitCode: 1, Stderr: "bad B"})
+	f.On(strictRMCmd8_4, bssh.Result{})
+
+	var warned []string
+	rc := provision.RunCtx{FullRun: true, Warn: func(msg string) { warned = append(warned, msg) }}
+	err := PHP().Apply(context.Background(), rc, s, f)
+	if err == nil || !strings.Contains(err.Error(), "not managed by berth") {
+		t.Fatalf("err = %v, want the managed-write refusal from the restore", err)
+	}
+	if len(warned) != 0 {
+		t.Errorf("no warning may be emitted when the restore failed: %q", warned)
+	}
+}
+
+func TestPHPApplyOutsideFaultUnderOnlyFailsHard(t *testing.T) {
+	// Deferring to site is honest only when site is guaranteed to run later
+	// (a full pipeline). Under --only (FullRun=false) returning nil would
+	// report Applied and exit 0 with no reload ever happening — fail instead,
+	// with the drop-ins restored so on-disk state stays the desired one.
+	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
+	f := phpDifferentialRunner()
+	f.OnSeq("php-fpm8.4 -t",
+		bssh.Result{ExitCode: 1, Stderr: "bad A"},
+		bssh.Result{ExitCode: 1, Stderr: "bad B"})
+	f.On(strictRMCmd8_4, bssh.Result{})
+
+	var warned []string
+	rc := provision.RunCtx{FullRun: false, Warn: func(msg string) { warned = append(warned, msg) }}
+	err := PHP().Apply(context.Background(), rc, s, f)
+	if err == nil || !strings.Contains(err.Error(), "full provision") {
+		t.Fatalf("err = %v, want a hard error telling the operator to run a full provision", err)
+	}
+	if !strings.Contains(err.Error(), "/etc/php/8.4/fpm/pool.d/") {
+		t.Errorf("err = %v, want the pool directory named", err)
+	}
+	if len(warned) != 0 {
+		t.Errorf("no warning under --only, got %q", warned)
+	}
+	if len(f.Writes()) != 4 {
+		t.Errorf("drop-ins must still be restored before failing; writes = %d, want 4", len(f.Writes()))
 	}
 }
 
@@ -543,8 +762,10 @@ func TestPHPApplyNoStampWhenValidationFails(t *testing.T) {
 	f.On("php-fpm8.4 -t", bssh.Result{ExitCode: 1, Stderr: "bad ini"})
 	f.On(rm, bssh.Result{})
 
+	// RunCtx{} means FullRun=false: both -t runs fail (same stub), so this
+	// exercises the hard-error path of the differential — still no stamp.
 	err := PHP().Apply(context.Background(), provision.RunCtx{}, s, f)
-	if err == nil || !strings.Contains(err.Error(), "-t failed") {
+	if err == nil || !strings.Contains(err.Error(), "-t fail") {
 		t.Fatalf("err = %v, want the -t failure", err)
 	}
 	for _, c := range f.Calls() {
@@ -580,5 +801,70 @@ func TestPHPApplyRemovesDropInsOnReloadFailure(t *testing.T) {
 	}
 	if !removed {
 		t.Error("Apply must remove both drop-ins after a failed reload")
+	}
+}
+
+func TestPHPDeferralConvergesViaSiteSharedStamp(t *testing.T) {
+	// The central P13 invariant, composed across steps: php.Apply defers
+	// (drop-ins restored, NO stamp), site.Apply heals its pool and marks the
+	// SAME per-unit stamp, and php.Check — probing that same stamp — reports
+	// Satisfied. FakeRunner cannot emulate mtime ordering, so the stamp probe
+	// result is stubbed; what this test pins is the unit-name identity across
+	// steps (php would never converge if its probe and site's mark used
+	// different stamp paths) and the no-mark/mark division of labor. The
+	// mtime semantics are proven live (design §7).
+	s := siteServer() // PHP 8.4 (stock), one site, scheduler on
+	f := bssh.NewFakeRunner()
+
+	// --- Act 1: php.Apply — a pool file is broken, fault outside the drop-ins.
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
+	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
+	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{ExitCode: 1})
+	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{ExitCode: 1})
+	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{})
+	f.OnSeq("php-fpm8.4 -t",
+		bssh.Result{ExitCode: 1, Stderr: "pool broken"},
+		bssh.Result{ExitCode: 1, Stderr: "pool broken"},
+		bssh.Result{}) // third call: site's validation after healing the pool
+	f.On(strictRMCmd8_4, bssh.Result{})
+
+	var warned []string
+	rc := provision.RunCtx{FullRun: true, Warn: func(m string) { warned = append(warned, m) }}
+	if err := PHP().Apply(context.Background(), rc, s, f); err != nil {
+		t.Fatalf("php.Apply must defer, not fail: %v", err)
+	}
+	if len(warned) != 1 {
+		t.Fatalf("want one php warning, got %q", warned)
+	}
+	if callIdx(f, markReloadedCmd(fpmService(s)), 0) >= 0 {
+		t.Fatal("php.Apply must NOT mark the FPM stamp on the deferral path")
+	}
+
+	// --- Act 2: site.Apply — re-renders the pool, validates, reloads, marks.
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+	if err := Site().Apply(context.Background(), rc, s, f); err != nil {
+		t.Fatalf("site.Apply must heal: %v", err)
+	}
+	if callIdx(f, markReloadedCmd(fpmService(s)), 0) < 0 {
+		t.Fatal("site.Apply must mark the shared FPM unit stamp after its reload")
+	}
+
+	// --- Act 3: php.Check against the post-site state: the restored drop-in
+	// bytes read back verbatim and the shared stamp is fresh → Satisfied.
+	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
+	replayWritesAsReads(f, f.Writes())
+	f.On("systemctl is-active php8.4-fpm", bssh.Result{})
+	f.On(reloadedSinceCmd(fpmService(s), opcacheDropInPath("8.4"), phpTuningDropInPath("8.4")), bssh.Result{})
+	f.On("test -d "+shQuote(phpLogDir), bssh.Result{ExitCode: 0})
+	f.On("dpkg -s php8.4-mysql", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
+	cr, err := PHP().Check(context.Background(), rc, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("php.Check must be satisfied once site reloaded and stamped the shared unit; got %+v", cr)
 	}
 }

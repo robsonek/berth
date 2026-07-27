@@ -845,7 +845,11 @@ func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server,
 	if res, err := r.Run(ctx, "nginx -t", nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
-		return fmt.Errorf("nginx -t failed, refusing to reload: %s", res.Stderr)
+		// Terminal diagnosis: php/nginx defer unit-validation failures here
+		// (P13), and this step just re-rendered every site-owned vhost — the
+		// validator's path points at an unmanaged file, unit config owned by
+		// an earlier berth step, certificate state, or a berth template bug.
+		return fmt.Errorf("nginx -t failed, refusing to reload: %s — berth just re-rendered every site-owned vhost, so inspect the file the validator names (an unmanaged file, unit config owned by an earlier berth step, certificate state, or a berth template bug); fix or remove it", res.Stderr)
 	}
 	if res, err := r.Run(ctx, "systemctl reload nginx", nil); err != nil {
 		return err
@@ -890,7 +894,8 @@ func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server,
 	if res, err := r.Run(ctx, "php-fpm"+s.PHP.Version+" -t", nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
-		return fmt.Errorf("php-fpm%s -t failed, refusing to reload: %s", s.PHP.Version, res.Stderr)
+		// Terminal diagnosis — same contract as the nginx -t failure above.
+		return fmt.Errorf("php-fpm%s -t failed, refusing to reload: %s — berth just re-rendered every site-owned pool, so inspect the file the validator names (an unmanaged file, unit config owned by an earlier berth step, or a berth template bug); fix or remove it", s.PHP.Version, res.Stderr)
 	}
 	if res, err := r.Run(ctx, "systemctl reload "+fpmService(s), nil); err != nil {
 		return err

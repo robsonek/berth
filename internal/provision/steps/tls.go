@@ -179,7 +179,7 @@ func (st tls) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 			}
 			// Fresh issue on a box without DNS yet: skip with a warning (the
 			// operator may be staging behind a proxy); do not abort the run.
-			fmt.Printf("berth: skipping TLS for %s: it does not resolve to %s\n", site.Domain, s.Host)
+			rc.Warnf("skipping TLS for %s: it does not resolve to %s", site.Domain, s.Host)
 			continue
 		}
 		if err := st.issue(ctx, rc, s, site, r, needsReplace); err != nil {

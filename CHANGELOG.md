@@ -3,6 +3,47 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Fixed
+
+- **A broken file owned by the `site` step no longer deadlocks the whole
+  pipeline.** `php-fpm -t` and `nginx -t` validate the entire unit, and the
+  `php`/`nginx` steps run before `site` — so a broken FPM pool or nginx vhost
+  used to fail those earlier steps forever, while fail-fast never let `site`
+  re-render the very file at fault (manual removal on the host was the only
+  way out; `--only site` refused too because its prerequisites read
+  unsatisfied). On a full run the two steps now hand the failure to `site`:
+  `php` first proves the fault is outside its own drop-ins (removes them,
+  re-validates, restores them — if the unit validates *without* them the
+  failure is berth's own rendering and the step still fails loudly), `nginx`
+  skips the check-by-removal entirely (removing its sites-include would
+  unload every vhost and misattribute the fault), and both skip the reload
+  and its stamp, emit a warning and let the pipeline continue. `site` then
+  re-renders everything it owns, validates and reloads — one run heals a
+  drifted pool/vhost end to end, and a genuinely foreign broken file now
+  fails in `site` with the validator's message naming it. Under `--only`
+  the old hard failure remains (there is no later `site` to defer to).
+  Note the deliberate trade-off: because the run now continues past the
+  warning, the steps between `nginx` and `site` (composer, valkey,
+  supervisor, appdirs, database, tuning) apply their changes *before* a
+  foreign-file failure surfaces at `site` — previously the run stopped
+  before them. All of those steps are idempotent and independent of the
+  broken unit, but the point at which the error is reported moves later.
+- `nginx` is now enabled without being started until its config validates
+  (`systemctl enable` + validate + start-or-reload, mirroring the FPM
+  pattern): a dead nginx next to a broken vhost used to die in
+  `enable --now` before validation could even assign blame.
+- The "skipping TLS: domain does not resolve" notice goes through the
+  renderers as a proper warning instead of a raw print that bypassed them.
+
+### Added
+
+- Warnings are now part of the provisioning output contract: plain mode
+  prints stable `warn  <step>: <message>` lines, the TUI shows a yellow `⚠`
+  list. Warnings never change the exit code — a run that healed itself exits
+  0, a run that could not still fails at the failing step.
+
 ## [0.20.0] — 2026-07-27
 
 ### Changed

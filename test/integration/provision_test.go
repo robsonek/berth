@@ -88,6 +88,12 @@ func TestProvisionFreshDebian13(t *testing.T) {
 		t.Fatalf("pipeline pre-flight: %v", err)
 	}
 	for ev := range events {
+		// Warnings ride on terminal events (e.g. a unit-validation failure
+		// deferred to the site step); surface them so a live run's log shows
+		// the deferral happened.
+		for _, w := range ev.Warnings {
+			t.Logf("warning %s: %s", ev.Step, w)
+		}
 		switch ev.Kind {
 		case provision.EventFailed:
 			t.Fatalf("step %q failed: %v", ev.Step, ev.Err)

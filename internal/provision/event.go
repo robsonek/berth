@@ -18,5 +18,13 @@ type Event struct {
 	Reason    string
 	Changes   []string
 	Sensitive bool // Changes may contain secrets → renderers must redact
-	Err       error
+	// Warnings collected during the step's Apply (RunCtx.Warnf), attached to
+	// the terminal event (EventApplied or EventFailed) rather than emitted as
+	// separate events: the channel buffer is sized for exactly one Started +
+	// one terminal event per step, and that no-extra-sends property is what
+	// keeps the engine goroutine from blocking when nobody consumes (the TUI
+	// stops reading after ctrl+c). Never set on EventSatisfied/EventPlanned —
+	// Check does not warn.
+	Warnings []string
+	Err      error
 }
