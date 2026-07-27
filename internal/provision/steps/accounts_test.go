@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -60,6 +61,7 @@ func stubAccountCreate(f *bssh.FakeRunner, user string) {
 	f.On(fmt.Sprintf("sudo -u %s install -d -g %s -m 00700 ", user, user)+shQuote(fmt.Sprintf("/home/%s/.ssh", user)), bssh.Result{})
 	f.On("cat "+shQuote(sudoersPath(user)), bssh.Result{ExitCode: 1})
 	f.On("cat "+shQuote(authorizedKeysPath(user)), bssh.Result{ExitCode: 1})
+	f.On(writeAsUserCmd(user, authorizedKeysPath(user), 0o600), bssh.Result{})
 }
 
 // groupProbeCmd / sshDirOwnerCmd mirror the production probes so FakeRunner
@@ -323,10 +325,13 @@ func TestAccountsApplyCreatesUsersAndWritesSudoers(t *testing.T) {
 	if !ok || !strings.Contains(string(deploySudo.Content), "deploy ALL=(root) NOPASSWD") {
 		t.Errorf("deploy sudoers wrong/missing: %+v", deploySudo)
 	}
+	// The authorized_keys write now runs as the account (writeFileAsUser), so
+	// the mode is pinned by the stubbed command string and content is asserted
+	// mechanism-agnostically via writtenContent.
+	want := authorizedKeys(testOperatorKey)
 	for _, u := range []string{"berth", "deploy"} {
-		ak, ok := writes[authorizedKeysPath(u)]
-		if !ok || !strings.Contains(string(ak.Content), testOperatorKey) || ak.Mode != 0o600 {
-			t.Errorf("%s authorized_keys wrong: %+v", u, ak)
+		if got := writtenContent(f, authorizedKeysPath(u)); !bytes.Equal(got, want) {
+			t.Errorf("%s authorized_keys content = %q, want %q", u, got, want)
 		}
 	}
 }
@@ -368,7 +373,7 @@ func TestAccountsApplyMultiSiteIsolatesUsers(t *testing.T) {
 		if !strings.Contains(string(sd.Content), u+" ALL=(root)") {
 			t.Errorf("sudoers for site %d must reference its own user %s: %s", i, u, sd.Content)
 		}
-		if _, ok := writes[authorizedKeysPath(u)]; !ok {
+		if writtenContent(f, authorizedKeysPath(u)) == nil {
 			t.Errorf("authorized_keys for %s not written", u)
 		}
 	}
@@ -393,10 +398,8 @@ func TestAccountsApplyRefusesForeignAuthorizedKeys(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "not managed by berth") {
 		t.Fatalf("err = %v, want the unmanaged-file refusal", err)
 	}
-	for _, w := range f.Writes() {
-		if w.Path == authorizedKeysPath("deploy") {
-			t.Error("a foreign authorized_keys must not be overwritten without --force")
-		}
+	if writtenContent(f, authorizedKeysPath("deploy")) != nil {
+		t.Error("a foreign authorized_keys must not be overwritten without --force")
 	}
 }
 
@@ -416,13 +419,7 @@ func TestAccountsApplyOverwritesForeignAuthorizedKeysWithForce(t *testing.T) {
 	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{Force: true}, s, f); err != nil {
 		t.Fatalf("Apply() with --force error = %v", err)
 	}
-	var overwritten bool
-	for _, w := range f.Writes() {
-		if w.Path == authorizedKeysPath("deploy") {
-			overwritten = true
-		}
-	}
-	if !overwritten {
+	if writtenContent(f, authorizedKeysPath("deploy")) == nil {
 		t.Error("--force must overwrite the foreign authorized_keys")
 	}
 }

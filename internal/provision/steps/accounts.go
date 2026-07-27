@@ -618,9 +618,11 @@ func installAuthorizedKey(ctx context.Context, r bssh.Runner, force bool, user s
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("create %s as %s: %s", sshDir, user, res.Stderr)
 	}
-	if err := writeManagedFile(ctx, r, force, bssh.FileSpec{
-		Path: authorizedKeysPath(user), Content: want,
-		Owner: user, Group: user, Mode: 0o600, Sudo: true,
+	// authorized_keys lives inside ~/.ssh, which the account owns — see
+	// writeFileAsUser for why a root write through that directory is an
+	// escalation path and not a mere overwrite.
+	if err := writeManagedFileAsUser(ctx, r, force, user, bssh.FileSpec{
+		Path: authorizedKeysPath(user), Content: want, Mode: 0o600,
 	}); err != nil {
 		return fmt.Errorf("write %s authorized_keys: %w", user, err)
 	}

@@ -2,6 +2,10 @@ package steps
 
 import (
 	"context"
+	"fmt"
+	"os"
+	gopath "path"
+	"strings"
 	"testing"
 
 	bssh "github.com/robsonek/berth/internal/ssh"
@@ -54,5 +58,118 @@ func TestPkgInstalledRequiresInstalledStatus(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("%s: pkgInstalled() = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// writeAsUserCmd mirrors writeFileAsUser's command so FakeRunner stubs match.
+// Keep in lockstep with writeFileAsUser.
+func writeAsUserCmd(user, p string, mode os.FileMode) string {
+	dir := gopath.Dir(p)
+	inner := fmt.Sprintf(`umask 077; t=$(mktemp %s) && trap 'rm -f "$t"' EXIT INT TERM && cat > "$t" && chmod %o "$t" && mv -fT -- "$t" %s`,
+		shQuote(dir+"/.berth.XXXXXX"), mode.Perm(), shQuote(p))
+	return "sudo -u " + user + " sh -c " + shQuote(inner)
+}
+
+// writtenContent returns the bytes berth wrote to path, whichever mechanism it
+// used: the root WriteFile path or the tenant-run stdin writer. Tests assert on
+// CONTENT and should not care which one a given file uses.
+func writtenContent(f *bssh.FakeRunner, path string) []byte {
+	for _, w := range f.Writes() {
+		if w.Path == path {
+			return w.Content
+		}
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, shQuote(path)) && strings.Contains(c.Cmd, "mv -f") {
+			return c.Stdin
+		}
+	}
+	return nil
+}
+
+func TestWriteFileAsUserRunsEntirelyAsTheAccount(t *testing.T) {
+	// The content sentinel must not collide with the path ("authorized_keys"
+	// contains "key"), or the leak assertion below would always fire.
+	const secret = "s3cr3t-material\n"
+	f := bssh.NewFakeRunner()
+	f.On(writeAsUserCmd("deploy", "/home/deploy/.ssh/authorized_keys", 0o600), bssh.Result{})
+	if err := writeFileAsUser(context.Background(), f, "deploy", "/home/deploy/.ssh/authorized_keys", 0o600, []byte(secret)); err != nil {
+		t.Fatalf("writeFileAsUser() error = %v", err)
+	}
+	calls := f.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("want exactly one call, got %d: %v", len(calls), callCmds(f))
+	}
+	if !strings.HasPrefix(calls[0].Cmd, "sudo -u deploy ") {
+		t.Errorf("the whole sequence must run as the account; got %q", calls[0].Cmd)
+	}
+	if string(calls[0].Stdin) != secret {
+		t.Errorf("content must ride on stdin; stdin=%q cmd=%q", calls[0].Stdin, calls[0].Cmd)
+	}
+	if strings.Contains(calls[0].Cmd, "s3cr3t") {
+		t.Error("content must never appear in the command string")
+	}
+	if len(f.Writes()) != 0 {
+		t.Error("writeFileAsUser must not fall back to the root WriteFile path")
+	}
+}
+
+func TestWriteFileAsUserStagesInsideTheTargetDirectory(t *testing.T) {
+	// The temp file must be a sibling of the target so the closing rename is
+	// atomic (same filesystem), and it must be created by the account.
+	f := bssh.NewFakeRunner()
+	f.On(writeAsUserCmd("deploy", "/var/www/app/shared/.env", 0o600), bssh.Result{})
+	if err := writeFileAsUser(context.Background(), f, "deploy", "/var/www/app/shared/.env", 0o600, []byte("K=V\n")); err != nil {
+		t.Fatal(err)
+	}
+	got := f.Calls()[0].Cmd
+	for _, want := range []string{
+		"mktemp", "/var/www/app/shared/.berth.XXXXXX",
+		// -T is the security-relevant part: without it a destination that
+		// resolves to a directory would move the file INSIDE that directory.
+		"mv -fT --",
+		// The trap keeps a failed write from leaving a credential behind. Assert
+		// a QUOTE-FREE fragment: the inner script is shQuote'd as a whole, so
+		// every single quote inside it becomes '\'' and the literal
+		// `trap 'rm -f "$t"'` never appears in the final command string.
+		"EXIT INT TERM",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("command missing %q: %s", want, got)
+		}
+	}
+}
+
+func TestWriteFileAsUserSurfacesFailure(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On(writeAsUserCmd("deploy", "/var/www/app/shared/.env", 0o600),
+		bssh.Result{ExitCode: 1, Stderr: "mv: cannot move: Permission denied"})
+	err := writeFileAsUser(context.Background(), f, "deploy", "/var/www/app/shared/.env", 0o600, []byte("x"))
+	if err == nil || !strings.Contains(err.Error(), "Permission denied") {
+		t.Fatalf("err = %v, want the stderr surfaced", err)
+	}
+}
+
+func TestWriteManagedFileAsUserKeepsTheDriftGuard(t *testing.T) {
+	// A pre-existing file without berth's marker must still abort unless force:
+	// the write mechanism changed, the drift policy did not.
+	path := "/home/deploy/.ssh/authorized_keys"
+	spec := bssh.FileSpec{Path: path, Content: []byte(managedMarker + "\nkey\n"), Mode: 0o600}
+	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(path), bssh.Result{Stdout: "ssh-rsa AAAAMANUAL manual@ops\n"})
+	err := writeManagedFileAsUser(context.Background(), f, false, "deploy", spec)
+	if err == nil || !strings.Contains(err.Error(), "not managed by berth") {
+		t.Fatalf("err = %v, want the unmanaged-file refusal", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.HasPrefix(c.Cmd, "sudo -u") {
+			t.Errorf("no write may run once the guard refuses; ran %q", c.Cmd)
+		}
+	}
+	f2 := bssh.NewFakeRunner()
+	f2.On("cat "+shQuote(path), bssh.Result{Stdout: "ssh-rsa AAAAMANUAL manual@ops\n"})
+	f2.On(writeAsUserCmd("deploy", path, 0o600), bssh.Result{})
+	if err := writeManagedFileAsUser(context.Background(), f2, true, "deploy", spec); err != nil {
+		t.Fatalf("with force the write must proceed; got %v", err)
 	}
 }
