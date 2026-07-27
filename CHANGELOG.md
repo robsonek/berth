@@ -3,6 +3,51 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Fixed
+
+- **Closed privilege-escalation races in per-site provisioning.**
+  Directories and files inside territory a site user owns — `shared/`,
+  `shared/tmp`, `shared/.env`, each account's `~/.ssh`, its `authorized_keys`
+  and its database client-auth file (`~/.my.cnf` / `~/.pgpass`) — were created
+  and written by root. The safety probe and the mutation are separate
+  commands, so a compromised site could swap a path component for a symlink in
+  between, by either of two routes: `install -d` follows a directory symlink
+  and applies ownership to its target, and the root write path stages its file
+  inside the destination directory and hands the result the site user as
+  owner. Both are enough to plant an account-owned file in a root-only
+  directory and have root read or execute it later. All of these are now
+  created and written by the owning account itself, so the operation carries no
+  privilege the account does not already have.
+- **Root file writes now target an exact path.** `mv` was invoked without
+  `--no-target-directory`, so a destination that resolved to a directory moved
+  the staged file inside it rather than replacing it. Every remaining root
+  write now hits the named path or fails.
+- **Root-run directory creation now requires a root-controlled ancestry.**
+  berth still creates `deploy_path` and the ACME webroot as root; every
+  existing component above them — including `/` — must be a root-owned
+  directory that is neither group- nor other-writable, and must be traversable
+  by the site user and by `www-data`. Otherwise provisioning refuses, naming
+  the path, its owner and its mode. Without this a `deploy_path` such as
+  `/srv/apps/site` under a non-root `/srv/apps` remained redirectable, and an
+  unsearchable ancestor would have made the step re-apply forever. Not
+  bypassable with `--force`.
+- Directory modes are now given as five octal digits, which clears any
+  setuid/setgid bit. Shorter numeric modes leave those bits untouched on
+  directories, so a site user could park its own `shared/` at mode `2700` and
+  make the step re-apply on every run without ever converging.
+
+### Changed
+
+- Two states berth used to repair silently now refuse with the exact remedy,
+  because the owning account — unlike root — cannot fix them itself:
+  an account that is not a member of its own eponymous group
+  (`usermod -aG <user> <user>`), and an existing `~/.ssh` owned by somebody
+  else (`chown -R <user>:<user> /home/<user>/.ssh`). Both are reported before
+  anything is mutated. Hosts provisioned by earlier versions are unaffected
+  unless they were hand-edited into one of these states.
+
 ## [0.18.0] — 2026-07-27
 
 ### Changed

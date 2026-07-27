@@ -35,14 +35,17 @@ func (appDirs) Requires() []string { return []string{"accounts"} }
 
 // noSymlinkInPath reports whether every EXISTING component of p — each prefix
 // from the first component under / down to p itself — is a real directory:
-// not a symlink and not any other file type. berth's root-run `install -d`
-// follows a directory symlink to its target and applies ownership there, so a
-// tenant who owns an ancestor of p (e.g. their own prior deploy_path after a
-// migration) could plant a symlink to redirect the chown at /etc. A
-// non-directory ancestor must be refused too: it would make the owner guard's
-// stat fail with ENOTDIR and read as "absent" — fail-open. A non-existent
-// component passes, so a fresh path is created normally. (`test -d` follows
-// symlinks, but `test ! -L` short-circuits first.)
+// not a symlink and not any other file type. This is NOT what makes the step
+// race-free: root-run mutations are confined to paths with a root-controlled
+// ancestry (assertSafeAncestry) and everything inside tenant territory is
+// created and written by the tenant itself, which is what closes the swap
+// window. The probe's job is to turn a planted symlink into an early,
+// actionable refusal instead of a raw EPERM, and to stop the owner guard's stat
+// from reading an inode THROUGH a tenant-planted symlink. A non-directory
+// ancestor must be refused too: it would make that stat fail with ENOTDIR and
+// read as "absent" — fail-open. A non-existent component passes, so a fresh
+// path is created normally. (`test -d` follows symlinks, but `test ! -L`
+// short-circuits first.)
 func noSymlinkInPath(ctx context.Context, r bssh.Runner, p string) (bool, error) {
 	parts := strings.Split(strings.TrimPrefix(p, "/"), "/")
 	cur := ""
@@ -67,7 +70,7 @@ func assertNoSymlinkAt(ctx context.Context, r bssh.Runner, domain, p string) err
 		return err
 	}
 	if !ok {
-		return fmt.Errorf("refusing to create directories for %s: a component of %s is a symlink or not a directory; a tenant may have planted a symlink so root's install -d chowns the target — remove the offending path before re-running", domain, p)
+		return fmt.Errorf("refusing to create directories for %s: a component of %s is a symlink or not a directory — remove the offending path before re-running", domain, p)
 	}
 	return nil
 }
@@ -134,7 +137,7 @@ func ancestorsOf(p string) []string {
 //
 // Deliberately NOT bypassable with --force: --force is for adopting berth's
 // own unmanaged files, never for lowering a guard that gates a root chown.
-func assertSafeAncestry(ctx context.Context, r bssh.Runner, domain string, paths ...string) error {
+func assertSafeAncestry(ctx context.Context, r bssh.Runner, subject string, paths ...string) error {
 	seen := map[string]bool{}
 	var probe []string
 	for _, p := range paths {
@@ -163,7 +166,7 @@ func assertSafeAncestry(ctx context.Context, r bssh.Runner, domain string, paths
 		return err
 	}
 	if res.ExitCode != 0 {
-		return fmt.Errorf("probing the directory ancestry for %s failed: %s", domain, strings.TrimSpace(res.Stderr))
+		return fmt.Errorf("probing the directory ancestry for %s failed: %s", subject, strings.TrimSpace(res.Stderr))
 	}
 	for _, line := range strings.Split(strings.TrimSpace(res.Stdout), "\n") {
 		if strings.TrimSpace(line) == "" {
@@ -171,21 +174,21 @@ func assertSafeAncestry(ctx context.Context, r bssh.Runner, domain string, paths
 		}
 		fields := strings.Fields(line)
 		if len(fields) < 4 {
-			return fmt.Errorf("unexpected ancestry probe output for %s: %q", domain, line)
+			return fmt.Errorf("unexpected ancestry probe output for %s: %q", subject, line)
 		}
 		name, uid, modeStr, ftype := fields[0], fields[1], fields[2], strings.Join(fields[3:], " ")
 		if ftype != "directory" {
-			return fmt.Errorf("refusing to manage site %s: %s is a %s, not a directory — berth creates directories under it as root, so every component must be a root-owned directory; inspect and fix it before re-running", domain, name, ftype)
+			return fmt.Errorf("refusing to provision %s: %s is a %s, not a directory — berth creates directories under it as root, so every component must be a root-owned directory; inspect and fix it before re-running", subject, name, ftype)
 		}
 		if uid != "0" {
-			return fmt.Errorf("refusing to manage site %s: %s is owned by uid %s, not root — a non-root owner can replace the directory berth is about to create as root and redirect its ownership; chown it to root or choose a deploy_path under a root-owned tree such as /var/www", domain, name, uid)
+			return fmt.Errorf("refusing to provision %s: %s is owned by uid %s, not root — a non-root owner can replace the directory berth is about to create as root and redirect its ownership; chown it to root or choose a deploy_path under a root-owned tree such as /var/www", subject, name, uid)
 		}
 		mode, err := strconv.ParseUint(modeStr, 8, 32)
 		if err != nil {
-			return fmt.Errorf("unexpected mode %q for %s while probing ancestry of site %s", modeStr, name, domain)
+			return fmt.Errorf("unexpected mode %q for %s while probing ancestry for %s", modeStr, name, subject)
 		}
 		if mode&0o022 != 0 {
-			return fmt.Errorf("refusing to manage site %s: %s is group- or other-writable (mode %s) — anyone in that group can replace the directory berth is about to create as root; chmod g-w,o-w it before re-running", domain, name, modeStr)
+			return fmt.Errorf("refusing to provision %s: %s is group- or other-writable (mode %s) — anyone in that group can replace the directory berth is about to create as root; chmod g-w,o-w it before re-running", subject, name, modeStr)
 		}
 		// Searchability is a convergence requirement, not a security one: the
 		// site user creates its own shared/ and shared/tmp, and www-data must
@@ -194,7 +197,7 @@ func assertSafeAncestry(ctx context.Context, r bssh.Runner, domain string, paths
 		// run fail with EACCES and the step never converges. Refuse with the
 		// remedy instead.
 		if mode&0o001 == 0 {
-			return fmt.Errorf("refusing to manage site %s: %s (mode %s) cannot be traversed by the site user or by www-data, so berth could create the directories but the site could never use them; run `chmod o+x %s` before re-running", domain, name, modeStr, name)
+			return fmt.Errorf("refusing to provision %s: %s (mode %s) cannot be traversed by the site user or by www-data, so berth could create the directories but the site could never use them; run `chmod o+x %s` before re-running", subject, name, modeStr, name)
 		}
 	}
 	return nil
@@ -224,8 +227,11 @@ func assertSiteTreeOwners(ctx context.Context, r bssh.Runner, s *config.Server, 
 		if res.ExitCode != 0 {
 			// Absent. The path-chain assertion already proved every existing
 			// component is a real directory, so a nonzero exit here means
-			// ENOENT — barring a mid-run race or IO failure (consciously
-			// accepted; tracked with the deferred TOCTOU item).
+			// ENOENT — barring IO failure or a tenant swapping a symlink in
+			// between (two separate SSH commands). That residual race can only
+			// skew THIS verdict (adopt vs refuse); it can never hand anything
+			// over, because no root-run mutation targets a tenant-controlled
+			// path any more.
 			continue
 		}
 		fields := strings.Fields(strings.TrimSpace(res.Stdout))
