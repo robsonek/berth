@@ -3,8 +3,6 @@ package steps
 import (
 	"context"
 	"fmt"
-	"path"
-	"strconv"
 	"strings"
 
 	"github.com/robsonek/berth/internal/config"
@@ -105,27 +103,6 @@ func assertNoSymlinkTargets(ctx context.Context, r bssh.Runner, s *config.Server
 	return assertNoSymlinkAt(ctx, r, site.Domain, acmeWebroot(site.Domain))
 }
 
-// ancestorsOf returns every ancestor of p from / down to path.Dir(p)
-// inclusive: /var/www/app -> ["/", "/var", "/var/www"].
-//
-// / is included on purpose: it is a component like any other, and a
-// non-root-owned or writable root directory would let an unprivileged user
-// replace an existing top-level entry (or create a missing one) after the
-// probe — the very class this gate exists to catch.
-func ancestorsOf(p string) []string {
-	out := []string{"/"}
-	dir := path.Dir(p)
-	if dir == "/" || dir == "." {
-		return out
-	}
-	cur := ""
-	for _, part := range strings.Split(strings.TrimPrefix(dir, "/"), "/") {
-		cur += "/" + part
-		out = append(out, cur)
-	}
-	return out
-}
-
 // assertSafeAncestry refuses when any EXISTING ancestor of any given path is
 // not a root-controlled directory: it must be a real directory (not a symlink
 // or other type), owned by uid 0, and neither group- nor other-writable.
@@ -143,66 +120,26 @@ func ancestorsOf(p string) []string {
 // Deliberately NOT bypassable with --force: --force is for adopting berth's
 // own unmanaged files, never for lowering a guard that gates a root chown.
 func assertSafeAncestry(ctx context.Context, r bssh.Runner, subject string, paths ...string) error {
-	seen := map[string]bool{}
-	var probe []string
-	for _, p := range paths {
-		for _, a := range ancestorsOf(p) {
-			if !seen[a] {
-				seen[a] = true
-				probe = append(probe, a)
-			}
-		}
-	}
-	if len(probe) == 0 {
-		return nil
-	}
-	var q []string
-	for _, p := range probe {
-		q = append(q, shQuote(p))
-	}
-	// One round-trip regardless of depth. Exit 91 is the probe's own signal
-	// that stat failed on an existing component — a hard error, never "absent"
-	// (fail-open here would defeat the whole guard). %F goes last: file types
-	// contain spaces, and validated paths cannot.
-	cmd := "export LC_ALL=C; for p in " + strings.Join(q, " ") +
-		"; do if [ -e \"$p\" ] || [ -L \"$p\" ]; then stat -c '%n %u %a %F' \"$p\" || exit 91; fi; done"
-	res, err := r.Run(ctx, cmd, nil)
+	// The security half — real directory, uid 0, not group/other-writable — is
+	// the write primitive's contract and lives in internal/ssh, so there is one
+	// probe and one parser rather than two copies that can drift. The returned
+	// components let this step add its own requirement without a second
+	// round-trip.
+	comps, err := bssh.AssertRootControlledAncestry(ctx, r, subject, paths...)
 	if err != nil {
 		return err
 	}
-	if res.ExitCode != 0 {
-		return fmt.Errorf("probing the directory ancestry for %s failed: %s", subject, strings.TrimSpace(res.Stderr))
-	}
-	for _, line := range strings.Split(strings.TrimSpace(res.Stdout), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 4 {
-			return fmt.Errorf("unexpected ancestry probe output for %s: %q", subject, line)
-		}
-		name, uid, modeStr, ftype := fields[0], fields[1], fields[2], strings.Join(fields[3:], " ")
-		if ftype != "directory" {
-			return fmt.Errorf("refusing to provision %s: %s is a %s, not a directory — berth creates directories under it as root, so every component must be a root-owned directory; inspect and fix it before re-running", subject, name, ftype)
-		}
-		if uid != "0" {
-			return fmt.Errorf("refusing to provision %s: %s is owned by uid %s, not root — a non-root owner can replace the directory berth is about to create as root and redirect its ownership; chown it to root or choose a deploy_path under a root-owned tree such as /var/www", subject, name, uid)
-		}
-		mode, err := strconv.ParseUint(modeStr, 8, 32)
-		if err != nil {
-			return fmt.Errorf("unexpected mode %q for %s while probing ancestry for %s", modeStr, name, subject)
-		}
-		if mode&0o022 != 0 {
-			return fmt.Errorf("refusing to provision %s: %s is group- or other-writable (mode %s) — anyone in that group can replace the directory berth is about to create as root; chmod g-w,o-w it before re-running", subject, name, modeStr)
-		}
-		// Searchability is a convergence requirement, not a security one: the
-		// site user creates its own shared/ and shared/tmp, and www-data must
-		// reach the ACME webroot and the site's public/. Neither is in root's
-		// group, so an unsearchable ancestor (e.g. root-owned 0700) makes every
-		// run fail with EACCES and the step never converges. Refuse with the
-		// remedy instead.
-		if mode&0o001 == 0 {
-			return fmt.Errorf("refusing to provision %s: %s (mode %s) cannot be traversed by the site user or by www-data, so berth could create the directories but the site could never use them; run `chmod o+x %s` before re-running", subject, name, modeStr, name)
+	for _, c := range comps {
+		// Searchability is a CONVERGENCE requirement, not a security one, which
+		// is why it stays here instead of moving into the primitive: the site
+		// user creates its own shared/ and shared/tmp, and www-data must reach
+		// the ACME webroot and the site's public/. Neither is in root's group,
+		// so an unsearchable ancestor (e.g. root-owned 0700) makes every run
+		// fail with EACCES and the step never converges. The privileged write
+		// path has no such need — root traverses its own 0700 directories fine —
+		// so requiring o+x there would refuse legitimate system trees.
+		if c.Mode&0o001 == 0 {
+			return fmt.Errorf("refusing to provision %s: %s (mode %o) cannot be traversed by the site user or by www-data, so berth could create the directories but the site could never use them; run `chmod o+x %s` before re-running", subject, c.Path, c.Mode, c.Path)
 		}
 	}
 	return nil

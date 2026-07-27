@@ -56,7 +56,15 @@ func (f *FakeRunner) Run(_ context.Context, cmd string, stdin []byte) (Result, e
 	return Result{}, fmt.Errorf("FakeRunner: unstubbed command %q", cmd)
 }
 
+// WriteFile records the spec after applying the same STATIC contract the live
+// client enforces. Without this a unit test would happily accept a FileSpec that
+// production rejects, and the difference would only surface on a real host. The
+// ancestry probe is deliberately not simulated here — it depends on live state,
+// so tests that need it stub the probe command like any other.
 func (f *FakeRunner) WriteFile(_ context.Context, fs FileSpec) error {
+	if err := validateRootDestination(fs); err != nil {
+		return err
+	}
 	f.writes = append(f.writes, fs)
 	return nil
 }

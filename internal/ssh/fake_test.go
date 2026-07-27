@@ -28,7 +28,7 @@ func TestFakeRunnerUnexpectedCmdErrors(t *testing.T) {
 
 func TestFakeRunnerWriteFileRecorded(t *testing.T) {
 	f := NewFakeRunner()
-	err := f.WriteFile(context.Background(), FileSpec{Path: "/etc/x", Content: []byte("y"), Mode: 0o644})
+	err := f.WriteFile(context.Background(), FileSpec{Path: "/etc/x", Content: []byte("y"), Mode: 0o644, Sudo: true})
 	if err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}

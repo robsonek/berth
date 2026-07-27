@@ -271,6 +271,21 @@ func (c *Client) exec(ctx context.Context, cmd string, stdin []byte) (Result, er
 // WriteFile writes content with ownership/mode via an unpredictable temp file
 // and a privileged `install` (which copies + sets owner/group/mode in one step).
 func (c *Client) WriteFile(ctx context.Context, f FileSpec) error {
+	// Cancellation still wins over everything: the rest of this package returns
+	// ctx.Err() immediately on a dead context, and a caller checking for that
+	// must not get a different error class because a spec was also malformed.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Contract first, host second: both checks must reject before anything is
+	// staged, because the staging itself is what an attacker-controlled
+	// destination directory abuses.
+	if err := validateRootDestination(f); err != nil {
+		return err
+	}
+	if _, err := AssertRootControlledAncestry(ctx, c, f.Path, f.Path); err != nil {
+		return err
+	}
 	// Unpredictable temp path (avoids /tmp symlink/predictable-name races). Uses
 	// exec (not Run) so the temp file is owned by the connecting user and the
 	// subsequent SFTP upload can write to it.
