@@ -51,9 +51,9 @@ func stubAccountCreate(f *bssh.FakeRunner, user string) {
 	f.On("id "+user, bssh.Result{ExitCode: 1})
 	f.On("useradd -m -s /bin/bash "+user, bssh.Result{})
 	f.On("getent passwd "+user, bssh.Result{Stdout: fmt.Sprintf("%s:x:1000:1000::/home/%s:/bin/bash\n", user, user)})
-	f.On(fmt.Sprintf("install -d -o %s -g %s -m 700 ", user, user)+shQuote(fmt.Sprintf("/home/%s", user)), bssh.Result{})
+	f.On(fmt.Sprintf("install -d -o %s -g %s -m 00700 ", user, user)+shQuote(fmt.Sprintf("/home/%s", user)), bssh.Result{})
 	f.On("visudo -cf "+shQuote(sudoersPath(user)), bssh.Result{ExitCode: 0})
-	f.On(fmt.Sprintf("install -d -o %s -g %s -m 700 ", user, user)+shQuote(fmt.Sprintf("/home/%s/.ssh", user)), bssh.Result{})
+	f.On(fmt.Sprintf("sudo -u %s install -d -g %s -m 00700 ", user, user)+shQuote(fmt.Sprintf("/home/%s/.ssh", user)), bssh.Result{})
 	f.On("cat "+shQuote(sudoersPath(user)), bssh.Result{ExitCode: 1})
 	f.On("cat "+shQuote(authorizedKeysPath(user)), bssh.Result{ExitCode: 1})
 }
@@ -215,7 +215,7 @@ func TestAccountsApplyCreatesUsersAndWritesSudoers(t *testing.T) {
 	}
 
 	joined := strings.Join(callCmds(f), "\n")
-	for _, want := range []string{"useradd -m -s /bin/bash berth", "useradd -m -s /bin/bash deploy", "getent passwd deploy", "install -d -o deploy -g deploy -m 700 " + shQuote("/home/deploy")} {
+	for _, want := range []string{"useradd -m -s /bin/bash berth", "useradd -m -s /bin/bash deploy", "getent passwd deploy", "install -d -o deploy -g deploy -m 00700 " + shQuote("/home/deploy")} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing %q in calls:\n%s", want, joined)
 		}
@@ -389,7 +389,7 @@ func TestEnsureUserCreatesAndLocksHome(t *testing.T) {
 	f.On("id app", bssh.Result{ExitCode: 1})
 	f.On("useradd -m -s /bin/bash app", bssh.Result{})
 	f.On("getent passwd app", bssh.Result{Stdout: "app:x:1002:1002::/home/app:/bin/bash\n"})
-	f.On("install -d -o app -g app -m 700 "+shQuote("/home/app"), bssh.Result{})
+	f.On("install -d -o app -g app -m 00700 "+shQuote("/home/app"), bssh.Result{})
 	if err := ensureUser(context.Background(), f, "app"); err != nil {
 		t.Fatalf("ensureUser() error = %v", err)
 	}

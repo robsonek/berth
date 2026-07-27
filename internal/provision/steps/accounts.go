@@ -478,8 +478,9 @@ func ensureUser(ctx context.Context, r bssh.Runner, user string) error {
 		return fmt.Errorf("user %s already exists with home %q, not %q — it is likely a reserved system account; choose a different sites[].user", user, home, want)
 	}
 	// Private, present home (idempotent: create if missing, own it, lock to
-	// 0700) so one site user cannot traverse into another's home.
-	if res, err := r.Run(ctx, fmt.Sprintf("install -d -o %s -g %s -m 700 %s", user, user, shQuote("/home/"+user)), nil); err != nil {
+	// 0700) so one site user cannot traverse into another's home. Five-digit
+	// mode: shorter numeric modes preserve setuid/setgid on directories.
+	if res, err := r.Run(ctx, fmt.Sprintf("install -d -o %s -g %s -m 00700 %s", user, user, shQuote("/home/"+user)), nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("lock home for %s: %s", user, res.Stderr)
@@ -522,12 +523,20 @@ func writeValidatedSudoers(ctx context.Context, r bssh.Runner, force bool, path 
 
 // installAuthorizedKey creates ~/.ssh and writes the managed authorized_keys
 // (guarded: a pre-existing hand-installed file is never clobbered without force).
+//
+// The directory is created AS THE ACCOUNT, not as root: /home/<user> belongs to
+// the account, so a root-run install -d here could be redirected by a symlink
+// planted between the guard probe and the mutation — install -d follows a
+// directory symlink and would apply ownership to its target. Running as the
+// account removes the privilege from the race window. ensureUser's
+// /home/<user> stays root-run: its parent /home is root-controlled (proved by
+// assertSafeAncestry), so no tenant can plant anything along that path.
 func installAuthorizedKey(ctx context.Context, r bssh.Runner, force bool, user string, want []byte) error {
 	sshDir := fmt.Sprintf("/home/%s/.ssh", user)
-	if res, err := r.Run(ctx, fmt.Sprintf("install -d -o %s -g %s -m 700 %s", user, user, shQuote(sshDir)), nil); err != nil {
+	if res, err := r.Run(ctx, fmt.Sprintf("sudo -u %s install -d -g %s -m 00700 %s", user, user, shQuote(sshDir)), nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
-		return fmt.Errorf("create %s: %s", sshDir, res.Stderr)
+		return fmt.Errorf("create %s as %s: %s", sshDir, user, res.Stderr)
 	}
 	if err := writeManagedFile(ctx, r, force, bssh.FileSpec{
 		Path: authorizedKeysPath(user), Content: want,
