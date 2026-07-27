@@ -12,8 +12,14 @@ import (
 func TestPipelineHonorsToggles(t *testing.T) {
 	s := &config.Server{Valkey: false, Queue: false, Sites: []config.Site{{}}}
 	names := stepNames(steps.Pipeline(s, secret.NewRedactor(), true))
-	if contains(names, "valkey") || contains(names, "supervisor") || contains(names, "tls") {
+	if contains(names, "supervisor") || contains(names, "tls") {
 		t.Errorf("disabled steps present: %v", names)
+	}
+	// valkey is ALWAYS registered: with valkey:false its disabled mode sweeps
+	// instances a previous valkey:true provision left behind (P14) — omitting
+	// the step entirely made the flip an undeclared state transition.
+	if !contains(names, "valkey") {
+		t.Errorf("valkey step must be registered even when disabled: %v", names)
 	}
 	if indexOf(names, "appdirs") > indexOf(names, "database") {
 		t.Error("appdirs must come before database (secrets need shared/ first)")

@@ -65,12 +65,14 @@ type Step interface {
 	Apply(ctx context.Context, rc RunCtx, s *config.Server, r bssh.Runner) error
 }
 
-// AlwaysRun is an optional Step trait. A step that implements it with AlwaysRun()
-// == true deliberately re-applies every run (e.g. preflight's `apt-get update`)
-// and reports Satisfied:false by design. Such a step is NOT a durable-state
-// prerequisite: the dependency gate for `--only` walks it for ordering but does
-// not treat its unsatisfied Check as a missing prerequisite, and an `--only` run
-// still executes it.
+// AlwaysRun is an optional Step trait marking a step as ALWAYS SELECTED for
+// execution: an `--only` run still executes it ahead of the target, and the
+// dependency gate walks it for ordering without treating its unsatisfied
+// Check as a missing prerequisite. Two kinds of steps use it: ones that
+// deliberately re-apply every run and report Satisfied:false by design
+// (preflight's `apt-get update`), and ones whose work must settle on every
+// invocation but whose Check reports honestly (identity's local secret-cache
+// reconciliation, which is Satisfied once converged).
 type AlwaysRun interface {
 	AlwaysRun() bool
 }

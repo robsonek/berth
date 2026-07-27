@@ -31,7 +31,8 @@ func writeOperatorKey(t *testing.T) string {
 
 func testServerWithKey(t *testing.T) *config.Server {
 	return &config.Server{
-		SSH:   config.SSH{Key: writeOperatorKey(t)},
+		Host:  "app.example.com",
+		SSH:   config.SSH{Key: writeOperatorKey(t), Port: 22},
 		PHP:   config.PHP{Version: "8.4"},
 		Sites: []config.Site{{Domain: "app.example.com", DeployPath: "/var/www/app", User: "deploy"}},
 	}
@@ -76,6 +77,7 @@ func sshDirOwnerCmd(user string) string {
 
 func TestGroupMembershipAcceptsEponymousPrimaryGroup(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On(groupProbeCmd("deploy"), bssh.Result{Stdout: "deploy\n"})
 	if err := assertGroupMembership(context.Background(), f, "deploy", true); err != nil {
 		t.Fatalf("membership in the eponymous group must pass; got %v", err)
@@ -86,6 +88,7 @@ func TestGroupMembershipAcceptsSupplementaryGroup(t *testing.T) {
 	// A pinned account whose PRIMARY group differs is fine as long as <user>
 	// is one of its groups: chgrp needs membership, not primacy.
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On(groupProbeCmd("deploy"), bssh.Result{Stdout: "www-data deploy\n"})
 	if err := assertGroupMembership(context.Background(), f, "deploy", true); err != nil {
 		t.Fatalf("a supplementary eponymous group must pass; got %v", err)
@@ -96,6 +99,7 @@ func TestGroupMembershipRefusesNonMember(t *testing.T) {
 	// Root could chgrp to a group it is not in; the account cannot. Refuse with
 	// the remedy instead of leaking a raw EPERM out of install.
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On(groupProbeCmd("deploy"), bssh.Result{Stdout: "www-data staff\n"})
 	err := assertGroupMembership(context.Background(), f, "deploy", true)
 	if err == nil || !strings.Contains(err.Error(), "usermod -aG") {
@@ -108,6 +112,7 @@ func TestGroupMembershipPassesWhenAccountMissingAndNotRequired(t *testing.T) {
 	// its own with a clear error, so this guard must not invent a second one.
 	// The guard re-probes the account itself before passing (fail-closed).
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On(groupProbeCmd("deploy"), bssh.Result{ExitCode: 1, Stderr: "id: 'deploy': no such user"})
 	f.On("id deploy", bssh.Result{ExitCode: 1})
 	if err := assertGroupMembership(context.Background(), f, "deploy", false); err != nil {
@@ -122,6 +127,7 @@ func TestGroupMembershipHardErrorsWhenProbeFailsButAccountExists(t *testing.T) {
 	// prevent — so when the account itself still resolves, the failed group
 	// probe must be a hard error.
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On(groupProbeCmd("deploy"), bssh.Result{ExitCode: 1, Stderr: "id: cannot find name for group ID 1000"})
 	f.On("id deploy", bssh.Result{ExitCode: 0})
 	err := assertGroupMembership(context.Background(), f, "deploy", false)
@@ -134,6 +140,7 @@ func TestGroupMembershipHardErrorsWhenAccountRequired(t *testing.T) {
 	// Called after ensureUser, a failing probe is a real failure, not a
 	// transient state: the account was just created.
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On(groupProbeCmd("deploy"), bssh.Result{ExitCode: 1, Stderr: "id: 'deploy': no such user"})
 	if err := assertGroupMembership(context.Background(), f, "deploy", true); err == nil {
 		t.Fatal("a missing account must be a hard error once it is required to exist")
@@ -146,6 +153,7 @@ func TestOwnSSHDirAcceptsAbsentAndOwned(t *testing.T) {
 		{Stdout: "deploy directory\n"},
 	} {
 		f := bssh.NewFakeRunner()
+		f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 		f.On(sshDirOwnerCmd("deploy"), out)
 		if err := assertOwnSSHDir(context.Background(), f, "deploy"); err != nil {
 			t.Fatalf("absent or account-owned ~/.ssh must pass; got %v", err)
@@ -162,6 +170,7 @@ func TestOwnSSHDirHardErrorsWhenStatFailsOnExistingEntry(t *testing.T) {
 		{ExitCode: 1, Stderr: "sh: some transient failure"},
 	} {
 		f := bssh.NewFakeRunner()
+		f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 		f.On(sshDirOwnerCmd("deploy"), out)
 		err := assertOwnSSHDir(context.Background(), f, "deploy")
 		if err == nil || !strings.Contains(err.Error(), "probing the owner and type") {
@@ -174,6 +183,7 @@ func TestOwnSSHDirRefusesForeignOwner(t *testing.T) {
 	// Previously root re-owned a hand-created root-owned ~/.ssh. The account
 	// cannot, so refuse with the exact chown to run.
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On(sshDirOwnerCmd("deploy"), bssh.Result{Stdout: "root directory\n"})
 	err := assertOwnSSHDir(context.Background(), f, "deploy")
 	if err == nil || !strings.Contains(err.Error(), "chown -R deploy:deploy") {
@@ -193,6 +203,7 @@ func TestOwnSSHDirRefusesSymlinkWithoutSuggestingChown(t *testing.T) {
 	// directory to the tenant — the escalation delivered inside a help message.
 	for _, ftype := range []string{"symbolic link", "regular file"} {
 		f := bssh.NewFakeRunner()
+		f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 		f.On(sshDirOwnerCmd("deploy"), bssh.Result{Stdout: "deploy " + ftype + "\n"})
 		err := assertOwnSSHDir(context.Background(), f, "deploy")
 		if err == nil || !strings.Contains(err.Error(), ftype) {
@@ -218,6 +229,7 @@ func TestOwnSSHDirRefusesSymlinkWithoutSuggestingChown(t *testing.T) {
 func stubFullApply(t *testing.T, s *config.Server) *bssh.FakeRunner {
 	t.Helper()
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
@@ -233,6 +245,7 @@ func TestAccountsRequiresBase(t *testing.T) {
 func TestAccountsCheckUnsatisfiedWhenUserMissing(t *testing.T) {
 	s := testServerWithKey(t)
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/app")
 	// The Check-side guards probe every managed account before the drift loop;
 	// on this fresh host neither exists, which the mustExist=false regime passes.
@@ -259,6 +272,7 @@ func TestAccountsCheckSatisfiedWhenAllPresent(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want) // user pinned "deploy"
@@ -276,6 +290,7 @@ func TestAccountsCheckUnsatisfiedWhenSudoersDrifted(t *testing.T) {
 	s := testServerWithKey(t)
 	want := authorizedKeys(testOperatorKey)
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	// deploy's sudoers carries the managed marker but has stale content (e.g. an
@@ -365,6 +380,7 @@ func TestAccountsApplyCreatesUsersAndWritesSudoers(t *testing.T) {
 	chdirTemp(t)
 	s := testServerWithKey(t)
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
@@ -416,6 +432,7 @@ func TestAccountsApplyMultiSiteIsolatesUsers(t *testing.T) {
 		t.Fatalf("multi-site users must be distinct and derived; got %q, %q", u1, u2)
 	}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.5"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/one")
 	stubSiteTreeFresh(f, "/var/www/two")
 	stubAccountCreate(f, "berth")
@@ -453,6 +470,7 @@ func TestAccountsApplyRefusesForeignAuthorizedKeys(t *testing.T) {
 	// the write path itself must refuse to clobber a file berth does not manage.
 	s := testServerWithKey(t)
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
@@ -475,6 +493,7 @@ func TestAccountsApplyOverwritesForeignAuthorizedKeysWithForce(t *testing.T) {
 	chdirTemp(t)
 	s := testServerWithKey(t)
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
@@ -497,6 +516,7 @@ func TestAccountsApplyGeneratesDeployKeyWhenRepository(t *testing.T) {
 	s := testServerWithKey(t)
 	s.Sites[0].Repository = "git@github.com:owner/repo.git"
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
@@ -524,6 +544,7 @@ func TestAccountsApplySkipsDeployKeyWithoutRepository(t *testing.T) {
 	chdirTemp(t)
 	s := testServerWithKey(t) // no repository
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
@@ -541,6 +562,7 @@ func TestAccountsApplySkipsDeployKeyWithoutRepository(t *testing.T) {
 
 func TestEnsureUserCreatesAndLocksHome(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On("id app", bssh.Result{ExitCode: 1})
 	f.On("useradd -m -s /bin/bash app", bssh.Result{})
 	f.On("getent passwd app", bssh.Result{Stdout: "app:x:1002:1002::/home/app:/bin/bash\n"})
@@ -555,6 +577,7 @@ func TestEnsureUserCreatesAndLocksHome(t *testing.T) {
 // blind chmod of a path that does not exist.
 func TestEnsureUserRejectsForeignHome(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On("id sync", bssh.Result{ExitCode: 0})
 	f.On("getent passwd sync", bssh.Result{Stdout: "sync:x:4:65534:sync:/bin:/bin/sync\n"})
 	err := ensureUser(context.Background(), f, "sync")
@@ -587,6 +610,7 @@ func TestAccountsCheckUnsatisfiedWhenDeployKeyMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
@@ -613,6 +637,7 @@ func TestAccountsCheckSatisfiedWithDeployKeyPresent(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
@@ -640,6 +665,7 @@ func TestAccountsCheckUnsatisfiedWhenPubMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
@@ -669,6 +695,7 @@ func TestAccountsCheckUnsatisfiedWhenKnownHostsMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
@@ -701,6 +728,7 @@ func TestAccountsCheckProbesKnownHostsPortToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
@@ -722,6 +750,7 @@ func TestAccountsApplyDerivesMissingPub(t *testing.T) {
 	s := testServerWithKey(t)
 	s.Sites[0].Repository = "git@github.com:owner/repo.git"
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
@@ -755,6 +784,7 @@ func TestAccountsApplyScansGitHostPortAware(t *testing.T) {
 	s := testServerWithKey(t)
 	s.Sites[0].Repository = "ssh://git@git.example.com:2222/owner/repo.git"
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
@@ -787,6 +817,7 @@ func TestAccountsCheckBreakGlassOnPasswordMissingUnsatisfied(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
@@ -814,6 +845,7 @@ func TestAccountsCheckBreakGlassOffPasswordSetUnsatisfied(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
@@ -838,6 +870,7 @@ func TestAccountsCheckBreakGlassOffForeignPasswordSatisfied(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
@@ -884,6 +917,7 @@ func TestAccountsCheckBreakGlassSatisfiedBothWays(t *testing.T) {
 				t.Fatal(err)
 			}
 			f := bssh.NewFakeRunner()
+			f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 			stubSiteTreeFresh(f, "/var/www/app")
 			stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 			stubAccountExists(f, "deploy", deploySudoers, want)
@@ -1007,6 +1041,7 @@ func TestAccountsCheckBreakGlassOffStaleMarkerUnsatisfied(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
@@ -1102,6 +1137,7 @@ func twoSiteApplyFixture(t *testing.T) (*config.Server, *bssh.FakeRunner, string
 	}
 	u1, u2 := s.SiteUser(s.Sites[0]), s.SiteUser(s.Sites[1])
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/one")
 	stubSiteTreeFresh(f, "/var/www/two")
 	stubAccountCreate(f, "berth")
@@ -1184,6 +1220,7 @@ func TestAccountsApplyFailsLoudWhenVisudoRejects(t *testing.T) {
 func TestAccountsCheckRefusesForeignOwnedTree(t *testing.T) {
 	s := testServerWithKey(t)
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On(noSymlinkCmd("/var/www/app/shared/tmp"), bssh.Result{ExitCode: 0})
 	f.On(ownerProbeCmd("/var/www/app"), bssh.Result{Stdout: "b_old_12345678 1003 directory\n"})
 	_, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
@@ -1202,6 +1239,7 @@ func TestAccountsCheckRefusesForeignSSHDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubSafeAncestry(f, "/", "/home")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
@@ -1219,6 +1257,7 @@ func TestAccountsApplyRefusesBeforeCreatingAccounts(t *testing.T) {
 	// a mismatch never mints an orphan account, deploy key or sudoers entry.
 	s := testServerWithKey(t)
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On(noSymlinkCmd("/var/www/app/shared/tmp"), bssh.Result{ExitCode: 0})
 	f.On(ownerProbeCmd("/var/www/app"), bssh.Result{Stdout: "b_old_12345678 1003 directory\n"})
 	err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
@@ -1239,6 +1278,7 @@ func TestAccountsRefusesSymlinkedDeployTree(t *testing.T) {
 	// (Codex plan-review finding #3).
 	s := testServerWithKey(t)
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On(noSymlinkCmd("/var/www/app/shared/tmp"), bssh.Result{ExitCode: 1})
 	_, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err == nil || !strings.Contains(err.Error(), "symlink") {
@@ -1255,6 +1295,7 @@ func TestAccountsRefusesTenantOwnedHomeAncestryEvenWithForce(t *testing.T) {
 	s := testServerWithKey(t)
 	for _, rc := range []provision.RunCtx{{}, {Force: true}} {
 		f := bssh.NewFakeRunner()
+		f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 		f.On(noSymlinkCmd("/var/www/app/shared/tmp"), bssh.Result{ExitCode: 0})
 		stubSiteTreeAbsent(f, "/var/www/app")
 		f.On(safeAncestryCmd("/", "/home"),
@@ -1279,6 +1320,7 @@ func TestAccountsApplyOnlyTenantMutatesItsOwnHome(t *testing.T) {
 	chdirTemp(t)
 	s := testServerWithKey(t)
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubSafeAncestry(f, "/", "/home")
 	stubAccountCreate(f, "berth")
@@ -1307,6 +1349,7 @@ func TestAccountsApplyRefusesNonMemberAfterEnsureUser(t *testing.T) {
 	chdirTemp(t)
 	s := testServerWithKey(t)
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubSafeAncestry(f, "/", "/home")
 	stubAccountCreate(f, "berth")

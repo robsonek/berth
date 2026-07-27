@@ -189,7 +189,7 @@ func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	// holds only while the LOCAL cache carries them, so the cache is part of
 	// this step's convergence, probed per site below. Read-only load — never
 	// LockCache here (it creates files; Check must stay side-effect-free).
-	cache, err := secret.LoadCache(s.Host)
+	cache, err := loadVerifiedSecrets(s)
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
@@ -333,12 +333,12 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	// sites do not clobber each other's cached passwords. A cache that cannot
 	// be READ is a hard error, not an empty map — saving over it would clobber
 	// every credential it held (LoadCache treats only never-written as empty).
-	release, err := secret.LockCache(s.Host)
+	release, err := secret.LockCache(s.CacheKey())
 	if err != nil {
 		return fmt.Errorf("lock local secret cache: %w", err)
 	}
 	defer release()
-	cache, err := secret.LoadCache(s.Host)
+	cache, err := loadVerifiedSecrets(s)
 	if err != nil {
 		return fmt.Errorf("load local secret cache: %w", err)
 	}
@@ -377,7 +377,7 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 			// (the accounts step does the same before chpasswd): a crash after
 			// the remote seed can no longer strand a secret that exists only on
 			// the host.
-			if err := secret.SaveCache(s.Host, cache); err != nil {
+			if err := saveSecrets(s, cache); err != nil {
 				return fmt.Errorf("cache database secrets before seeding: %w", err)
 			}
 			// The remote write itself is atomic, so a crash before EnsureUser
@@ -422,7 +422,7 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 			cache[appKeyCacheKey(dbUser)] = appKey
 		}
 	}
-	if err := secret.SaveCache(s.Host, cache); err != nil {
+	if err := saveSecrets(s, cache); err != nil {
 		return fmt.Errorf("cache database secrets: %w", err)
 	}
 	return nil

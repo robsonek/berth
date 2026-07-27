@@ -395,6 +395,16 @@ func (st Site) CertMode() string {
 // site is isolated under its own account regardless of how many sites the
 // config lists. (Before v0.18 a lone site implicitly kept a shared "deploy"
 // account; pin sites[].user: deploy to keep that identity.)
+// CacheKey is the local secret-cache key: the declared server ID when set,
+// else the host (pre-P14 compatibility). Every LockCache/LoadEnvelope/
+// SaveEnvelope call must go through this — never s.Host directly.
+func (s *Server) CacheKey() string {
+	if s.ID != "" {
+		return s.ID
+	}
+	return s.Host
+}
+
 func (s *Server) SiteUser(site Site) string {
 	if site.User != "" {
 		return site.User
@@ -528,6 +538,14 @@ func DerivedSiteUser(domain string) string {
 }
 
 type Server struct {
+	// ID is the operator-declared stable identity of the MACHINE (not a
+	// display name): the local secret cache is keyed by it, so different
+	// machines behind one hostname get separate credential caches and one
+	// machine addressed by several configs shares a single cache (give every
+	// config of that machine the same id — and, in v1, the same current
+	// host:port). Optional; when empty the cache falls back to the host key
+	// (pre-P14 behavior). Immutable once set — changing it orphans the cache.
+	ID             string   `mapstructure:"id" yaml:"id,omitempty"`
 	Host           string   `mapstructure:"host" yaml:"host"`
 	SSH            SSH      `mapstructure:"ssh" yaml:"ssh"`
 	PHP            PHP      `mapstructure:"php" yaml:"php"`

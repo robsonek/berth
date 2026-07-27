@@ -46,7 +46,7 @@ func assertBreakGlass(ctx context.Context, t *testing.T, c *bssh.Client, srv *co
 		// whole point. (An operator-set pre-existing password without a cache
 		// entry is a valid state for the STEP, but not one this suite's own
 		// flow can produce.)
-		cache, err := secret.LoadCache(srv.Host)
+		cache, err := secret.LoadCache(srv.CacheKey())
 		if err != nil {
 			t.Fatalf("load local secret cache: %v", err)
 		}

@@ -574,3 +574,22 @@ func TestIsValidSiteOSUser(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateServerID(t *testing.T) {
+	ok := []string{"", "ab", "prod-web-1a2b3c", "a.b_c-9", "x0"}
+	for _, id := range ok {
+		s := base()
+		s.ID = id
+		if err := s.Validate(); err != nil {
+			t.Errorf("id %q must validate: %v", id, err)
+		}
+	}
+	bad := []string{"a", "A-upper", "-lead", "trail-", "spa ce", "zażółć", strings.Repeat("x", 65)}
+	for _, id := range bad {
+		s := base()
+		s.ID = id
+		if err := s.Validate(); err == nil {
+			t.Errorf("id %q must be rejected", id)
+		}
+	}
+}

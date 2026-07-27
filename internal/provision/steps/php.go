@@ -166,6 +166,11 @@ func useSury(p config.PHP) (bool, error) {
 }
 
 func (php) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
+	// Version-exclusivity guard first — a hard error, not unsatisfied, and
+	// deliberately not bypassable with --force (see assertPHPVersionExclusive).
+	if err := assertPHPVersionExclusive(ctx, r, s); err != nil {
+		return provision.CheckResult{}, err
+	}
 	changes := []string{
 		"install php" + s.PHP.Version + " + extensions",
 		"write production OPcache drop-in",
@@ -255,6 +260,11 @@ func (php) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 }
 
 func (php) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
+	// Guard BEFORE repo setup, the reload-stamp invalidation and apt: a
+	// version-conflict refusal must leave the host untouched.
+	if err := assertPHPVersionExclusive(ctx, r, s); err != nil {
+		return err
+	}
 	sury, err := useSury(s.PHP)
 	if err != nil {
 		return err

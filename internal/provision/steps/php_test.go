@@ -46,6 +46,7 @@ func TestPHPApplyRefusesForeignOpcacheDropIn(t *testing.T) {
 	// by Apply without --force.
 	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{})                            // stamp invalidation up front
@@ -65,6 +66,7 @@ func TestPHPApplyRefusesForeignOpcacheDropIn(t *testing.T) {
 func TestPHPApplyWritesOpcacheDropIn(t *testing.T) {
 	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}} // stock -> no Surý repo
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{}) // stamp invalidation up front
@@ -138,6 +140,7 @@ func TestPHPApplyWritesOpcacheDropIn(t *testing.T) {
 func TestPHPCheckUnsatisfiedWhenOpcacheDropInMissing(t *testing.T) {
 	s := &config.Server{PHP: config.PHP{Version: "8.4"}}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"}) // installed
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{ExitCode: 1})                       // drop-in absent
 	cr, err := PHP().Check(context.Background(), provision.RunCtx{}, s, f)
@@ -160,6 +163,7 @@ func TestPHPCheckSatisfiedWhenInstalledAndOpcacheManaged(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(want), ExitCode: 0})
 	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{Stdout: string(wantTuning), ExitCode: 0})
@@ -197,6 +201,7 @@ func TestPHPCheckUnsatisfiedWhenPDODriverMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(want), ExitCode: 0})
 	wantTuning, err := renderPHPTuning(s)
@@ -224,6 +229,7 @@ func TestPHPCheckUnsatisfiedWhenLogDirMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(want), ExitCode: 0})
 	wantTuning, err := renderPHPTuning(s)
@@ -295,6 +301,7 @@ func TestPHPCheckUnsatisfiedWhenTuningDropInMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(wantOp), ExitCode: 0})
 	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{ExitCode: 1}) // absent
@@ -312,6 +319,7 @@ func TestPHPApplyRefusesForeignTuningDropIn(t *testing.T) {
 	// not be clobbered by Apply without --force.
 	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{})                                 // stamp invalidation up front
@@ -334,6 +342,7 @@ func TestPHPApplyRefusesForeignTuningDropIn(t *testing.T) {
 // source debian, drop-ins absent).
 func phpDifferentialRunner() *bssh.FakeRunner {
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{}) // stamp invalidation up front
@@ -530,6 +539,7 @@ func TestPHPApplyPropagatesRestoreFailure(t *testing.T) {
 	// emit no warning (the step did not reach a deferred state).
 	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{})
@@ -589,6 +599,7 @@ func TestPHPApplyInvalidatesBeforePackageInstall(t *testing.T) {
 	// stamp blessing a running master that never loaded apt's changes.
 	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{})
@@ -629,6 +640,7 @@ func TestPHPCheckUnsatisfiedWhenFPMDead(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(want), ExitCode: 0})
 	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{Stdout: string(wantTuning), ExitCode: 0})
@@ -660,6 +672,7 @@ func TestPHPCheckUnsatisfiedWhenDropInsNewerThanStamp(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(want), ExitCode: 0})
 	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{Stdout: string(wantTuning), ExitCode: 0})
@@ -681,6 +694,7 @@ func TestPHPApplyStartsDeadFPMAndStamps(t *testing.T) {
 	// enable --now — the boot policy is not this step's call) and stamp.
 	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{}) // stamp invalidation up front
@@ -716,6 +730,7 @@ func TestPHPApplyStartsDeadFPMAndStamps(t *testing.T) {
 func TestPHPApplyReloadsLiveFPMAndStamps(t *testing.T) {
 	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{}) // stamp invalidation up front
@@ -754,6 +769,7 @@ func TestPHPApplyNoStampWhenValidationFails(t *testing.T) {
 	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
 	rm := "rm -f " + shQuote(opcacheDropInPath("8.4")) + " " + shQuote(phpTuningDropInPath("8.4"))
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{}) // stamp invalidation up front
@@ -779,6 +795,7 @@ func TestPHPApplyRemovesDropInsOnReloadFailure(t *testing.T) {
 	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
 	rm := "rm -f " + shQuote(opcacheDropInPath("8.4")) + " " + shQuote(phpTuningDropInPath("8.4"))
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{}) // stamp invalidation up front
@@ -815,6 +832,7 @@ func TestPHPDeferralConvergesViaSiteSharedStamp(t *testing.T) {
 	// mtime semantics are proven live (design §7).
 	s := siteServer() // PHP 8.4 (stock), one site, scheduler on
 	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
 
 	// --- Act 1: php.Apply — a pool file is broken, fault outside the drop-ins.
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs("8.4"), " "), bssh.Result{})
