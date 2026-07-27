@@ -91,12 +91,18 @@ func writtenContent(f *bssh.FakeRunner, path string) []byte {
 // occurrence of any of them against tenant territory is the bug this package
 // closed, so the guard matches the verb anywhere in the command (catching
 // `/usr/bin/install -d`, `sudo install -d`, `chown`, a bare `mkdir`, …) rather
-// than a single literal prefix. "mv " and "rm " also match writeFileAsUser's
-// own tenant command (`… mv -fT -- …`, `trap 'rm -f …'`) — harmless there, the
-// sudo -u prefix clears it, and load-bearing: a regression moving that write
-// into a root `sh -c '… mv …'` fires the command half, not only the WriteFile
-// half. Do not trim them as dead weight.
-var mutatingVerbs = []string{"install ", "mkdir ", "chown ", "chmod ", "rm ", "ln ", "mv "}
+// than a single literal prefix. Redirect- and copy-based file writers are
+// covered too: "cat >", "cp ", "tee ", "touch " and "truncate " catch a write
+// that plants or replaces a file without any directory verb. "mv ", "rm " and
+// "cat >" also match writeFileAsUser's own tenant command (`… mv -fT -- …`,
+// `trap 'rm -f …'`, `cat > "$t"`) — harmless there, the sudo -u prefix clears
+// it, and load-bearing: a regression moving that write into a root
+// `sh -c '… cat > …'` fires the command half, not only the WriteFile half.
+// Do not trim them as dead weight.
+var mutatingVerbs = []string{
+	"install ", "mkdir ", "chown ", "chmod ", "rm ", "ln ", "mv ",
+	"cat >", "cp ", "tee ", "touch ", "truncate ",
+}
 
 // assertOnlyTenantMutates fails when any recorded command mutates one of the
 // given paths — or anything beneath them — without running as user, or when
@@ -184,6 +190,30 @@ func TestAssertOnlyTenantMutatesCoversSubtree(t *testing.T) {
 	}
 	if got := tenantMutationViolations(f3, "deploy", guarded); len(got) != 0 {
 		t.Fatalf("a tenant-run child mutation must not fire; got %v", got)
+	}
+}
+
+func TestTenantMutationGuardCatchesRedirectAndCopyWriters(t *testing.T) {
+	// berth's own tenant writer is a cat-redirect chain (writeFileAsUser), so
+	// the most plausible future regression is that same chain running as root
+	// without the sudo -u prefix — and it contains none of the classic
+	// directory verbs. The guard must fire on redirect- and copy-based
+	// writers too, not only on install/mkdir/chown.
+	guarded := "/var/www/myapp/shared"
+	for _, cmd := range []string{
+		// A bare root redirect into a guarded path.
+		`sh -c "cat > ` + shQuote(guarded+"/.env") + `"`,
+		// A non-install mutator copying a file into place as root.
+		"cp /tmp/staged.env " + shQuote(guarded+"/.env"),
+	} {
+		f := bssh.NewFakeRunner()
+		f.On(cmd, bssh.Result{})
+		if _, err := f.Run(context.Background(), cmd, nil); err != nil {
+			t.Fatal(err)
+		}
+		if got := tenantMutationViolations(f, "deploy", guarded); len(got) != 1 {
+			t.Fatalf("a root-run %q must fire exactly once; got %v", cmd, got)
+		}
 	}
 }
 
