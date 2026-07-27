@@ -34,6 +34,7 @@ func TestAppDirsCheckSatisfiedWhenAllDirsPresentWithOwners(t *testing.T) {
 	f.On(noSymlinkCmd("/var/www/myapp/shared/tmp"), bssh.Result{ExitCode: 0})
 	f.On(noSymlinkCmd(acmeWebroot("app.example.com")), bssh.Result{ExitCode: 0})
 	stubSiteTreeOwned(f, "/var/www/myapp", "deploy")
+	f.On(groupProbeCmd("deploy"), bssh.Result{Stdout: "deploy\n"})
 	// deploy_path deploy:www-data 0710 (nginx can traverse); shared deploy:deploy
 	// 0700 (private); acme webroot www-data:www-data 0755.
 	f.On("stat -c '%U:%G %a' "+shQuote("/var/www/myapp"), bssh.Result{Stdout: "deploy:www-data 710\n"})
@@ -56,6 +57,7 @@ func TestAppDirsCheckUnsatisfiedWhenDirMissing(t *testing.T) {
 	f.On(noSymlinkCmd("/var/www/myapp/shared/tmp"), bssh.Result{ExitCode: 0})
 	f.On(noSymlinkCmd(acmeWebroot("app.example.com")), bssh.Result{ExitCode: 0})
 	stubSiteTreeAbsent(f, "/var/www/myapp")
+	f.On(groupProbeCmd("deploy"), bssh.Result{Stdout: "deploy\n"})
 	f.On("stat -c '%U:%G %a' "+shQuote("/var/www/myapp"), bssh.Result{ExitCode: 1, Stderr: "No such file or directory"})
 	cr, err := AppDirs().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
@@ -86,6 +88,7 @@ func TestAppDirsCheckUnsatisfiedOnModeDrift(t *testing.T) {
 	f.On(noSymlinkCmd("/var/www/myapp/shared/tmp"), bssh.Result{ExitCode: 0})
 	f.On(noSymlinkCmd(acmeWebroot("app.example.com")), bssh.Result{ExitCode: 0})
 	stubSiteTreeOwned(f, "/var/www/myapp", "deploy")
+	f.On(groupProbeCmd("deploy"), bssh.Result{Stdout: "deploy\n"})
 	// Correct owner but a world-traversable mode: sibling tenants could enter.
 	f.On("stat -c '%U:%G %a' "+shQuote(s.Sites[0].DeployPath), bssh.Result{Stdout: "deploy:www-data 755\n"})
 	res, err := AppDirs().Check(context.Background(), provision.RunCtx{}, s, f)
@@ -108,6 +111,7 @@ func TestAppDirsCheckUnsatisfiedWhenTmpDirMissing(t *testing.T) {
 	f.On(ownerProbeCmd("/var/www/myapp"), bssh.Result{Stdout: "deploy 1000 directory\n"})
 	f.On(ownerProbeCmd("/var/www/myapp/shared"), bssh.Result{Stdout: "deploy 1000 directory\n"})
 	f.On(ownerProbeCmd("/var/www/myapp/shared/tmp"), bssh.Result{ExitCode: 1, Stderr: "stat: cannot statx: No such file or directory"})
+	f.On(groupProbeCmd("deploy"), bssh.Result{Stdout: "deploy\n"})
 	f.On("stat -c '%U:%G %a' "+shQuote("/var/www/myapp"), bssh.Result{Stdout: "deploy:www-data 710\n"})
 	f.On("stat -c '%U:%G %a' "+shQuote("/var/www/myapp/shared"), bssh.Result{Stdout: "deploy:deploy 700\n"})
 	// shared/tmp backs the pool's sys_temp_dir/upload_tmp_dir; absent here.
@@ -129,6 +133,7 @@ func TestAppDirsApplyCreatesDirsWithIsolatingOwners(t *testing.T) {
 	f.On(noSymlinkCmd("/var/www/myapp/shared/tmp"), bssh.Result{ExitCode: 0})
 	f.On(noSymlinkCmd(acmeWebroot("app.example.com")), bssh.Result{ExitCode: 0})
 	stubSiteTreeAbsent(f, "/var/www/myapp")
+	f.On(groupProbeCmd("deploy"), bssh.Result{Stdout: "deploy\n"})
 	f.On("install -d -o deploy -g www-data -m 00710 '/var/www/myapp'", bssh.Result{})
 	f.On("sudo -u deploy install -d -g deploy -m 00700 '/var/www/myapp/shared'", bssh.Result{})
 	f.On("sudo -u deploy install -d -g deploy -m 00700 '/var/www/myapp/shared/tmp'", bssh.Result{})
@@ -248,14 +253,15 @@ func stubSiteTreeFresh(f *bssh.FakeRunner, deployPath string) {
 }
 
 // stubAppDirsFresh stubs every probe and mutation of a clean single-site
-// Apply: symlink probes, ancestry, absent owner probes, and the four directory
-// commands. Task 4 adds the group-membership probe here when it introduces it.
+// Apply: symlink probes, ancestry, absent owner probes, the group-membership
+// probe, and the four directory commands.
 func stubAppDirsFresh(f *bssh.FakeRunner, s *config.Server) {
 	for _, site := range s.Sites {
 		user := s.SiteUser(site)
 		f.On(noSymlinkCmd(site.DeployPath+"/shared/tmp"), bssh.Result{ExitCode: 0})
 		f.On(noSymlinkCmd(acmeWebroot(site.Domain)), bssh.Result{ExitCode: 0})
 		stubSiteTreeAbsent(f, site.DeployPath)
+		f.On(groupProbeCmd(user), bssh.Result{Stdout: user + "\n"})
 		f.On(fmt.Sprintf("install -d -o %s -g www-data -m 00710 %s", user, shQuote(site.DeployPath)), bssh.Result{})
 		f.On(fmt.Sprintf("sudo -u %s install -d -g %s -m 00700 %s", user, user, shQuote(site.DeployPath+"/shared")), bssh.Result{})
 		f.On(fmt.Sprintf("sudo -u %s install -d -g %s -m 00700 %s", user, user, shQuote(site.DeployPath+"/shared/tmp")), bssh.Result{})
@@ -340,6 +346,7 @@ func TestAppDirsPreflightsEverySiteBeforeActing(t *testing.T) {
 	f.On(noSymlinkCmd(acmeWebroot("one.example.com")), bssh.Result{ExitCode: 0})
 	f.On(noSymlinkCmd(acmeWebroot("two.example.com")), bssh.Result{ExitCode: 0})
 	stubSiteTreeAbsent(f, "/var/www/one") // site 1: fresh — mere drift
+	f.On(groupProbeCmd("one_user"), bssh.Result{Stdout: "one_user\n"})
 	f.On(ownerProbeCmd("/var/www/two"), bssh.Result{Stdout: "somebody_else 1002 directory\n"})
 	_, err := AppDirs().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err == nil || !strings.Contains(err.Error(), "two.example.com") {
@@ -366,6 +373,7 @@ func TestAppDirsApplyMultiSitePerUser(t *testing.T) {
 	for _, u := range []struct{ user, path string }{{u1, "/var/www/one"}, {u2, "/var/www/two"}} {
 		f.On(noSymlinkCmd(u.path+"/shared/tmp"), bssh.Result{ExitCode: 0})
 		stubSiteTreeAbsent(f, u.path)
+		f.On(groupProbeCmd(u.user), bssh.Result{Stdout: u.user + "\n"})
 		f.On("install -d -o "+u.user+" -g www-data -m 00710 '"+u.path+"'", bssh.Result{})
 		f.On("sudo -u "+u.user+" install -d -g "+u.user+" -m 00700 '"+u.path+"/shared'", bssh.Result{})
 		f.On("sudo -u "+u.user+" install -d -g "+u.user+" -m 00700 '"+u.path+"/shared/tmp'", bssh.Result{})

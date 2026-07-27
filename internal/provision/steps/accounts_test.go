@@ -40,6 +40,8 @@ func testServerWithKey(t *testing.T) *config.Server {
 // account (user present, sudoers content up to date, authorized_keys up to date).
 func stubAccountExists(f *bssh.FakeRunner, user string, sudoers, want []byte) {
 	f.On("id "+user, bssh.Result{ExitCode: 0})
+	f.On(groupProbeCmd(user), bssh.Result{Stdout: user + "\n"})
+	f.On(sshDirOwnerCmd(user), bssh.Result{Stdout: user + "\n"})
 	f.On("cat "+shQuote(sudoersPath(user)), bssh.Result{Stdout: string(sudoers), ExitCode: 0})
 	f.On("cat "+shQuote(authorizedKeysPath(user)), bssh.Result{Stdout: string(want), ExitCode: 0})
 }
@@ -49,6 +51,8 @@ func stubAccountExists(f *bssh.FakeRunner, user string, sudoers, want []byte) {
 // ssh dir; write-guard reads report both managed files absent).
 func stubAccountCreate(f *bssh.FakeRunner, user string) {
 	f.On("id "+user, bssh.Result{ExitCode: 1})
+	f.On(groupProbeCmd(user), bssh.Result{Stdout: user + "\n"})
+	f.On(sshDirOwnerCmd(user), bssh.Result{ExitCode: 1, Stderr: "stat: cannot statx: No such file or directory"})
 	f.On("useradd -m -s /bin/bash "+user, bssh.Result{})
 	f.On("getent passwd "+user, bssh.Result{Stdout: fmt.Sprintf("%s:x:1000:1000::/home/%s:/bin/bash\n", user, user)})
 	f.On(fmt.Sprintf("install -d -o %s -g %s -m 00700 ", user, user)+shQuote(fmt.Sprintf("/home/%s", user)), bssh.Result{})
@@ -56,6 +60,86 @@ func stubAccountCreate(f *bssh.FakeRunner, user string) {
 	f.On(fmt.Sprintf("sudo -u %s install -d -g %s -m 00700 ", user, user)+shQuote(fmt.Sprintf("/home/%s/.ssh", user)), bssh.Result{})
 	f.On("cat "+shQuote(sudoersPath(user)), bssh.Result{ExitCode: 1})
 	f.On("cat "+shQuote(authorizedKeysPath(user)), bssh.Result{ExitCode: 1})
+}
+
+// groupProbeCmd / sshDirOwnerCmd mirror the production probes so FakeRunner
+// stubs match. Keep in lockstep with assertGroupMembership / assertOwnSSHDir.
+func groupProbeCmd(user string) string { return "LC_ALL=C id -nG " + shQuote(user) }
+func sshDirOwnerCmd(user string) string {
+	return "LC_ALL=C stat -c '%U' " + shQuote("/home/"+user+"/.ssh")
+}
+
+func TestGroupMembershipAcceptsEponymousPrimaryGroup(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On(groupProbeCmd("deploy"), bssh.Result{Stdout: "deploy\n"})
+	if err := assertGroupMembership(context.Background(), f, "deploy", true); err != nil {
+		t.Fatalf("membership in the eponymous group must pass; got %v", err)
+	}
+}
+
+func TestGroupMembershipAcceptsSupplementaryGroup(t *testing.T) {
+	// A pinned account whose PRIMARY group differs is fine as long as <user>
+	// is one of its groups: chgrp needs membership, not primacy.
+	f := bssh.NewFakeRunner()
+	f.On(groupProbeCmd("deploy"), bssh.Result{Stdout: "www-data deploy\n"})
+	if err := assertGroupMembership(context.Background(), f, "deploy", true); err != nil {
+		t.Fatalf("a supplementary eponymous group must pass; got %v", err)
+	}
+}
+
+func TestGroupMembershipRefusesNonMember(t *testing.T) {
+	// Root could chgrp to a group it is not in; the account cannot. Refuse with
+	// the remedy instead of leaking a raw EPERM out of install.
+	f := bssh.NewFakeRunner()
+	f.On(groupProbeCmd("deploy"), bssh.Result{Stdout: "www-data staff\n"})
+	err := assertGroupMembership(context.Background(), f, "deploy", true)
+	if err == nil || !strings.Contains(err.Error(), "usermod -aG") {
+		t.Fatalf("err = %v, want a refusal carrying the usermod remedy", err)
+	}
+}
+
+func TestGroupMembershipPassesWhenAccountMissingAndNotRequired(t *testing.T) {
+	// --only appdirs on a host without the account yet: the mutation fails on
+	// its own with a clear error, so this guard must not invent a second one.
+	f := bssh.NewFakeRunner()
+	f.On(groupProbeCmd("deploy"), bssh.Result{ExitCode: 1, Stderr: "id: 'deploy': no such user"})
+	if err := assertGroupMembership(context.Background(), f, "deploy", false); err != nil {
+		t.Fatalf("a missing account must not trip this guard; got %v", err)
+	}
+}
+
+func TestGroupMembershipHardErrorsWhenAccountRequired(t *testing.T) {
+	// Called after ensureUser, a failing probe is a real failure, not a
+	// transient state: the account was just created.
+	f := bssh.NewFakeRunner()
+	f.On(groupProbeCmd("deploy"), bssh.Result{ExitCode: 1, Stderr: "id: 'deploy': no such user"})
+	if err := assertGroupMembership(context.Background(), f, "deploy", true); err == nil {
+		t.Fatal("a missing account must be a hard error once it is required to exist")
+	}
+}
+
+func TestOwnSSHDirAcceptsAbsentAndOwned(t *testing.T) {
+	for _, out := range []bssh.Result{
+		{ExitCode: 1, Stderr: "stat: cannot statx: No such file or directory"},
+		{Stdout: "deploy\n"},
+	} {
+		f := bssh.NewFakeRunner()
+		f.On(sshDirOwnerCmd("deploy"), out)
+		if err := assertOwnSSHDir(context.Background(), f, "deploy"); err != nil {
+			t.Fatalf("absent or account-owned ~/.ssh must pass; got %v", err)
+		}
+	}
+}
+
+func TestOwnSSHDirRefusesForeignOwner(t *testing.T) {
+	// Previously root re-owned a hand-created root-owned ~/.ssh. The account
+	// cannot, so refuse with the exact chown to run.
+	f := bssh.NewFakeRunner()
+	f.On(sshDirOwnerCmd("deploy"), bssh.Result{Stdout: "root\n"})
+	err := assertOwnSSHDir(context.Background(), f, "deploy")
+	if err == nil || !strings.Contains(err.Error(), "chown -R deploy:deploy") {
+		t.Fatalf("err = %v, want a refusal carrying the chown remedy", err)
+	}
 }
 
 // stubFullApply stubs a complete Apply pass for the single-site test server
@@ -80,6 +164,12 @@ func TestAccountsCheckUnsatisfiedWhenUserMissing(t *testing.T) {
 	s := testServerWithKey(t)
 	f := bssh.NewFakeRunner()
 	stubSiteTreeFresh(f, "/var/www/app")
+	// The Check-side guards probe every managed account before the drift loop;
+	// on this fresh host neither exists, which the mustExist=false regime passes.
+	for _, u := range []string{"berth", "deploy"} {
+		f.On(groupProbeCmd(u), bssh.Result{ExitCode: 1, Stderr: "id: no such user"})
+		f.On(sshDirOwnerCmd(u), bssh.Result{ExitCode: 1, Stderr: "stat: cannot statx: No such file or directory"})
+	}
 	f.On("id berth", bssh.Result{ExitCode: 1}) // berth missing
 	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
@@ -1034,6 +1124,28 @@ func TestAccountsCheckRefusesForeignOwnedTree(t *testing.T) {
 	_, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err == nil || !strings.Contains(err.Error(), "sites[].user") {
 		t.Fatalf("Check() err = %v, want an owner-mismatch refusal", err)
+	}
+}
+
+func TestAccountsCheckRefusesForeignSSHDir(t *testing.T) {
+	// A fully provisioned host reports Satisfied and never enters Apply, so the
+	// guard has to live in Check or the operator never learns about the state.
+	s := testServerWithKey(t)
+	want := authorizedKeys(testOperatorKey)
+	deploySudoers, err := renderSiteSudoers(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	stubSiteTreeFresh(f, "/var/www/app")
+	stubSafeAncestry(f, "/", "/home")
+	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
+	stubAccountExists(f, "deploy", deploySudoers, want)
+	// …but deploy's ~/.ssh belongs to root (hand-created by an operator).
+	f.On(sshDirOwnerCmd("deploy"), bssh.Result{Stdout: "root\n"})
+	_, err = Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "chown -R deploy:deploy") {
+		t.Fatalf("Check() err = %v, want the foreign-~/.ssh refusal with its remedy", err)
 	}
 }
 

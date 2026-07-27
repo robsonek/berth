@@ -258,6 +258,13 @@ func (a appDirs) Check(ctx context.Context, _ provision.RunCtx, s *config.Server
 		if err := assertSiteTreeOwners(ctx, r, s, site); err != nil {
 			return provision.CheckResult{}, err
 		}
+		// The site user creates shared/ and shared/tmp itself and can only
+		// chgrp to a group it belongs to; a non-member account would fail with
+		// a raw EPERM mid-Apply. mustExist=false: --only appdirs may run
+		// before accounts creates the user.
+		if err := assertGroupMembership(ctx, r, s.SiteUser(site), false); err != nil {
+			return provision.CheckResult{}, err
+		}
 	}
 	for _, site := range s.Sites {
 		user := s.SiteUser(site)
@@ -299,6 +306,9 @@ func (appDirs) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 			return err
 		}
 		if err := assertSiteTreeOwners(ctx, r, s, site); err != nil {
+			return err
+		}
+		if err := assertGroupMembership(ctx, r, s.SiteUser(site), false); err != nil {
 			return err
 		}
 	}

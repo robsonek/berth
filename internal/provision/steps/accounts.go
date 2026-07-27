@@ -133,6 +133,19 @@ func (a accounts) Check(ctx context.Context, rc provision.RunCtx, s *config.Serv
 	if err := assertSafeAncestry(ctx, r, "berth accounts", "/home/x"); err != nil {
 		return provision.CheckResult{}, err
 	}
+	// Both guards belong in Check, not only in Apply: a Satisfied step never
+	// enters Apply, so a host whose ~/.ssh is root-owned would otherwise never
+	// hear about it — and dry-run would print "satisfied" for a state that needs
+	// a manual chown. mustExist=false: on a fresh host the accounts do not exist
+	// yet and Apply creates them.
+	for _, u := range managedAccounts(s) {
+		if err := assertGroupMembership(ctx, r, u, false); err != nil {
+			return provision.CheckResult{}, err
+		}
+		if err := assertOwnSSHDir(ctx, r, u); err != nil {
+			return provision.CheckResult{}, err
+		}
+	}
 	operatorKey, err := operatorPublicKey(s.SSH.Key)
 	if err != nil {
 		return provision.CheckResult{}, err
@@ -330,6 +343,19 @@ func (a accounts) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serv
 		}
 	}
 
+	// 1b) Re-assert with mustExist: the accounts were just created, so an
+	// unresolvable one is a real failure. From here on berth creates ~/.ssh and
+	// writes authorized_keys AS the account, so a state only root could repair
+	// must be reported with its remedy, not hit as a raw EPERM mid-Apply.
+	for _, u := range managedAccounts(s) {
+		if err := assertGroupMembership(ctx, r, u, true); err != nil {
+			return err
+		}
+		if err := assertOwnSSHDir(ctx, r, u); err != nil {
+			return err
+		}
+	}
+
 	// 2) berth: full NOPASSWD sudo.
 	if err := writeValidatedSudoers(ctx, r, rc.Force, sudoersBerthPath, []byte(sudoersBerthBody)); err != nil {
 		return err
@@ -503,6 +529,60 @@ func userHome(ctx context.Context, r bssh.Runner, user string) (string, error) {
 		return "", fmt.Errorf("unexpected passwd entry for %s: %q", user, res.Stdout)
 	}
 	return fields[5], nil
+}
+
+// assertGroupMembership refuses when the account is not a member of the group
+// berth pins its directories to (the eponymous <user> group).
+//
+// This exists because the privilege split narrowed one thing: root could chgrp
+// a directory to any EXISTING group, member or not, while the account itself
+// can only chgrp to a group it belongs to. Membership — not primacy — is the
+// real prerequisite: a pinned sites[].user whose primary group is www-data
+// still works if <user> is one of its supplementary groups.
+//
+// mustExist distinguishes two callers. With false (Check, and appdirs, where
+// --only appdirs may legitimately run before the account exists) a failing
+// probe passes: the mutation that follows fails with its own clear error and
+// cannot succeed either way, so this is not fail-open. With true (Apply, right
+// after ensureUser) a failing probe is a hard error — the account was just
+// created, so it must be resolvable.
+func assertGroupMembership(ctx context.Context, r bssh.Runner, user string, mustExist bool) error {
+	res, err := r.Run(ctx, "LC_ALL=C id -nG "+shQuote(user), nil)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		if mustExist {
+			return fmt.Errorf("cannot resolve the groups of account %s right after creating it: %s", user, strings.TrimSpace(res.Stderr))
+		}
+		return nil // no such account yet
+	}
+	for _, g := range strings.Fields(res.Stdout) {
+		if g == user {
+			return nil
+		}
+	}
+	return fmt.Errorf("account %s is not a member of group %q, so it cannot own its directories with that group; run `usermod -aG %s %s` on the host (or pin a different sites[].user) and re-run", user, user, user, user)
+}
+
+// assertOwnSSHDir refuses when an existing ~/.ssh belongs to someone other
+// than the account. berth now creates that directory AS the account (root must
+// not mutate a path inside a tenant-owned home), and the account cannot re-own
+// a directory it does not own — a state root used to repair silently. Absent
+// passes: it is about to be created.
+func assertOwnSSHDir(ctx context.Context, r bssh.Runner, user string) error {
+	sshDir := "/home/" + user + "/.ssh"
+	res, err := r.Run(ctx, "LC_ALL=C stat -c '%U' "+shQuote(sshDir), nil)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return nil // absent
+	}
+	if owner := strings.TrimSpace(res.Stdout); owner != user {
+		return fmt.Errorf("%s exists but is owned by %s, not %s; berth creates it as the account itself and cannot re-own it — run `chown -R %s:%s %s` on the host and re-run", sshDir, owner, user, user, user, sshDir)
+	}
+	return nil
 }
 
 // writeValidatedSudoers writes a sudoers drop-in (mode 0440, guarded against
