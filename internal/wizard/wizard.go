@@ -12,9 +12,12 @@
 package wizard
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -144,28 +147,58 @@ func defaults() Answers {
 // Run presents the interactive wizard and returns the collected answers.
 func Run() (Answers, error) { return run(newHuhPrompter()) }
 
+// validConfigName guards the RAW config name shared by the prompt validator
+// and the authoritative Write below: the name becomes servers/<name>.yml, so
+// path separators, dot-prefixes and a leading dash must never reach
+// filepath.Join (which would CLEAN "../x" and hide the escape from any
+// post-join check).
+func validConfigName(name string) error {
+	if !reConfigName.MatchString(name) {
+		return fmt.Errorf("config name %q must match [A-Za-z0-9][A-Za-z0-9._-]* (no path separators, no leading dot or dash)", name)
+	}
+	if strings.Contains(name, "..") {
+		return fmt.Errorf("config name %q must not contain \"..\"", name)
+	}
+	return nil
+}
+
+var reConfigName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
 // Write validates the answers and writes servers/<name>.yml, refusing to clobber.
 func (a Answers) Write() (string, error) {
-	if err := required("config name")(a.Name); err != nil {
+	if err := validConfigName(a.Name); err != nil {
 		return "", err
 	}
 	srv := a.ToServer()
 	if err := srv.Validate(); err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll("servers", 0o755); err != nil {
-		return "", err
-	}
-	path := filepath.Join("servers", a.Name+".yml")
-	if _, err := os.Stat(path); err == nil {
-		return "", fmt.Errorf("%s already exists; refusing to overwrite", path)
-	}
+	// Marshal before touching the filesystem: a render error must not leave
+	// an empty file behind.
 	b, err := yaml.Marshal(srv)
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(path, b, 0o644); err != nil {
+	if err := os.MkdirAll("servers", 0o755); err != nil {
 		return "", err
+	}
+	path := filepath.Join("servers", a.Name+".yml")
+	// O_EXCL closes the stat->write race two concurrent wizards would hit.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if errors.Is(err, os.ErrExist) {
+		return "", fmt.Errorf("%s already exists; refusing to overwrite", path)
+	}
+	if err != nil {
+		return "", fmt.Errorf("create %s: %w", path, err)
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		os.Remove(path) // never leave a truncated config behind
+		return "", fmt.Errorf("write %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(path)
+		return "", fmt.Errorf("close %s: %w", path, err)
 	}
 	return path, nil
 }

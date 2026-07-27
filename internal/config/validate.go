@@ -7,6 +7,7 @@ import (
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -224,6 +225,37 @@ func ValidFingerprint(fp string) error {
 		return fmt.Errorf("ssh.fingerprint %q is not a valid SHA256 fingerprint", fp)
 	}
 	return nil
+}
+
+// ParseSwapBytes converts a swap size ("2G", "512M", case-insensitive) to
+// bytes. Units are binary (M = MiB, G = GiB) to match `fallocate -l` and
+// `stat -c %s`. Authoritative for the whole program: System.validate calls it
+// at config load, the wizard's per-field validator delegates to it, and the
+// system step keeps only a thin defensive wrapper. Sizes above 1 TiB are
+// rejected — reSwapSize does not bound the digit count, so an absurd size
+// would otherwise overflow the multiplication (or reach fallocate and fail
+// remotely instead of at validation).
+func ParseSwapBytes(size string) (int64, error) {
+	if !reSwapSize.MatchString(size) {
+		return 0, fmt.Errorf("swap %q must be a positive number suffixed M or G (e.g. 2G)", size)
+	}
+	s := strings.ToUpper(size)
+	num, err := strconv.ParseInt(s[:len(s)-1], 10, 64)
+	if err != nil || num <= 0 {
+		return 0, fmt.Errorf("invalid swap size %q", size)
+	}
+	const tib = int64(1) << 40
+	var bytes int64
+	switch s[len(s)-1] {
+	case 'M':
+		bytes = num * (1 << 20)
+	case 'G':
+		bytes = num * (1 << 30)
+	}
+	if num > (tib>>20) || bytes > tib || bytes <= 0 { // the num-cap alone suffices (no wrapping product is reachable below it); the byte checks are belt
+		return 0, fmt.Errorf("swap %q exceeds the 1 TiB cap (and no realistic VPS wants more)", size)
+	}
+	return bytes, nil
 }
 
 // ValidateServerID guards the optional top-level `id` (the secret-cache key:
@@ -498,8 +530,10 @@ func (t Tuning) validate() error {
 // A non-empty Timezone must match reTimezone; the value reaches timedatectl
 // set-timezone verbatim.
 func (sy System) validate() error {
-	if sy.Swap != "" && !reSwapSize.MatchString(sy.Swap) {
-		return fmt.Errorf("system.swap %q must be a positive size suffixed M or G (e.g. 512M, 2G)", sy.Swap)
+	if sy.Swap != "" {
+		if _, err := ParseSwapBytes(sy.Swap); err != nil {
+			return fmt.Errorf("system.swap: %w", err)
+		}
 	}
 	if sy.Timezone != "" && !reTimezone.MatchString(sy.Timezone) {
 		return fmt.Errorf("system.timezone %q must be an IANA zone name like Europe/Warsaw (letters, digits, _ + -, at most two /)", sy.Timezone)

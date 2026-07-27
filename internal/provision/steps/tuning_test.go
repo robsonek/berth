@@ -434,7 +434,7 @@ func TestTuningApplySlowLogEnsuresDirBeforeRestart(t *testing.T) {
 	stubServiceActive(f, mariadbUnit)
 	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
 	f.On("test -f /var/log/mysql/mariadb-slow.log", bssh.Result{ExitCode: 1})
-	f.On("install -d -m 2750 -o mysql -g adm /var/log/mysql", bssh.Result{})
+	f.On("install -d -m 02750 -o mysql -g adm /var/log/mysql", bssh.Result{})
 	f.On("systemctl restart mariadb.service", bssh.Result{})
 	if err := Tuning().Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -442,7 +442,7 @@ func TestTuningApplySlowLogEnsuresDirBeforeRestart(t *testing.T) {
 	installIdx, restartIdx := -1, -1
 	for i, c := range f.Calls() {
 		switch c.Cmd {
-		case "install -d -m 2750 -o mysql -g adm /var/log/mysql":
+		case "install -d -m 02750 -o mysql -g adm /var/log/mysql":
 			installIdx = i
 		case "systemctl restart mariadb.service":
 			restartIdx = i

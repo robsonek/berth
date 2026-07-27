@@ -14,6 +14,47 @@ type Options struct {
 	Only       string // run only this step (after verifying its transitive deps)
 	Force      bool   // overwrite resources not managed by berth (drift policy)
 	SSLStaging bool   // use Let's Encrypt staging in the TLS step
+	// Redact masks registered secrets in EVERY engine output: each event's
+	// Reason/Changes/Warnings, event errors, and the synchronous pre-flight
+	// error Run returns. Pass the SAME *secret.Redactor the steps were built
+	// with (steps register secrets on it as they acquire them); nil = no-op.
+	// This is the engine's output policy — the renderers' [redacted] literal
+	// for Sensitive changes remains an independent second layer.
+	Redact Redactor
+}
+
+// Redactor is the minimal masking dependency Options needs (satisfied by
+// *secret.Redactor without importing that package here).
+type Redactor interface{ Apply(string) string }
+
+// redactedError wraps an error so its printed text is masked while errors.Is
+// and errors.As keep working through Unwrap — cmd.Execute prints the returned
+// error a second time, so masking only the event stream would still leak.
+type redactedError struct {
+	orig error
+	msg  string
+}
+
+func (e *redactedError) Error() string { return e.msg }
+func (e *redactedError) Unwrap() error { return e.orig }
+
+// RedactError masks err's text via red, preserving the original for
+// Is/As/Unwrap. nil-safe on both arguments. Exported so cmd can apply the
+// same policy at the command boundary (renderer-internal errors, defence in
+// depth for double-wrapped event errors — masking is a no-op the second time
+// for berth's `*`-free secret domain).
+func RedactError(red Redactor, err error) error {
+	if err == nil {
+		return nil
+	}
+	if red == nil {
+		return err
+	}
+	masked := red.Apply(err.Error())
+	if masked == err.Error() {
+		return err // nothing to hide — keep the original shape
+	}
+	return &redactedError{orig: err, msg: masked}
 }
 
 // Engine runs steps in registration order.
@@ -31,10 +72,38 @@ func (e *Engine) Run(ctx context.Context, s *config.Server, r bssh.Runner, opt O
 	rc := RunCtx{Force: opt.Force, SSLStaging: opt.SSLStaging, FullRun: opt.Only == ""}
 	if opt.Only != "" {
 		if err := e.checkDependencies(ctx, rc, s, r, opt.Only); err != nil {
-			return nil, err
+			// The engine's SECOND output channel — the synchronous pre-flight
+			// error — is masked here too, not only the event stream.
+			return nil, RedactError(opt.Redact, err)
 		}
 	}
 	ch := make(chan Event, len(e.steps)*2+1)
+	// emit is the single exit for every event: whatever path produced it
+	// (step transition, interruption, trailing failure), all operator-visible
+	// text is masked before it reaches the channel.
+	emit := func(ev Event) {
+		if opt.Redact != nil {
+			ev.Reason = opt.Redact.Apply(ev.Reason)
+			// Masked copies, not in-place writes: the slices came from the
+			// step's CheckResult and a step could legitimately retain them.
+			if len(ev.Changes) > 0 {
+				masked := make([]string, len(ev.Changes))
+				for i, c := range ev.Changes {
+					masked[i] = opt.Redact.Apply(c)
+				}
+				ev.Changes = masked
+			}
+			if len(ev.Warnings) > 0 {
+				masked := make([]string, len(ev.Warnings))
+				for i, w := range ev.Warnings {
+					masked[i] = opt.Redact.Apply(w)
+				}
+				ev.Warnings = masked
+			}
+			ev.Err = RedactError(opt.Redact, ev.Err)
+		}
+		ch <- ev
+	}
 	go func() {
 		defer close(ch)
 		for _, step := range e.steps {
@@ -51,22 +120,22 @@ func (e *Engine) Run(ctx context.Context, s *config.Server, r bssh.Runner, opt O
 			// a skipped step is never reported as interrupted.
 			select {
 			case <-ctx.Done():
-				ch <- Event{Step: step.Name(), Kind: EventFailed, Err: fmt.Errorf("interrupted before %s: %w", step.Name(), ctx.Err())}
+				emit(Event{Step: step.Name(), Kind: EventFailed, Err: fmt.Errorf("interrupted before %s: %w", step.Name(), ctx.Err())})
 				return
 			default:
 			}
-			ch <- Event{Step: step.Name(), Kind: EventStarted}
+			emit(Event{Step: step.Name(), Kind: EventStarted})
 			cr, err := step.Check(ctx, rc, s, r)
 			if err != nil {
-				ch <- Event{Step: step.Name(), Kind: EventFailed, Err: fmt.Errorf("%s: check: %w", step.Name(), err)}
+				emit(Event{Step: step.Name(), Kind: EventFailed, Err: fmt.Errorf("%s: check: %w", step.Name(), err)})
 				return
 			}
 			if cr.Satisfied {
-				ch <- Event{Step: step.Name(), Kind: EventSatisfied, Reason: cr.Reason}
+				emit(Event{Step: step.Name(), Kind: EventSatisfied, Reason: cr.Reason})
 				continue
 			}
 			if opt.DryRun {
-				ch <- Event{Step: step.Name(), Kind: EventPlanned, Reason: cr.Reason, Changes: cr.Changes, Sensitive: cr.Sensitive}
+				emit(Event{Step: step.Name(), Kind: EventPlanned, Reason: cr.Reason, Changes: cr.Changes, Sensitive: cr.Sensitive})
 				continue
 			}
 			// Warnings ride on the step's terminal event instead of being sent
@@ -79,17 +148,17 @@ func (e *Engine) Run(ctx context.Context, s *config.Server, r bssh.Runner, opt O
 			applyRC := rc
 			applyRC.Warn = func(msg string) { warnings = append(warnings, msg) }
 			if err := step.Apply(ctx, applyRC, s, r); err != nil {
-				ch <- Event{Step: step.Name(), Kind: EventFailed, Warnings: warnings, Err: fmt.Errorf("%s: apply: %w", step.Name(), err)}
+				emit(Event{Step: step.Name(), Kind: EventFailed, Warnings: warnings, Err: fmt.Errorf("%s: apply: %w", step.Name(), err)})
 				return
 			}
-			ch <- Event{Step: step.Name(), Kind: EventApplied, Changes: cr.Changes, Sensitive: cr.Sensitive, Warnings: warnings}
+			emit(Event{Step: step.Name(), Kind: EventApplied, Changes: cr.Changes, Sensitive: cr.Sensitive, Warnings: warnings})
 		}
 		// A signal that lands during the last step has no next step to observe
 		// it. Emit a trailing failure so an interrupted run never exits 0, even
 		// when all remaining work happened to complete.
 		select {
 		case <-ctx.Done():
-			ch <- Event{Step: "pipeline", Kind: EventFailed, Err: fmt.Errorf("interrupted: %w", ctx.Err())}
+			emit(Event{Step: "pipeline", Kind: EventFailed, Err: fmt.Errorf("interrupted: %w", ctx.Err())})
 		default:
 		}
 	}()

@@ -160,11 +160,31 @@ func writeCacheBytes(key string, b []byte) error {
 		tmp.Close()
 		return fmt.Errorf("write %s: %w", tmpPath, err)
 	}
+	// fsync file THEN directory: the cache is persisted BEFORE the remote
+	// side effect it recovers (a generated password), so a power loss right
+	// after the rename must not leave an empty or missing file. Returning an
+	// error after the rename is safe — a retry rewrites the cache
+	// idempotently.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("fsync %s: %w", tmpPath, err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close %s: %w", tmpPath, err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("replace %s: %w", path, err)
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open %s for fsync: %w", dir, err)
+	}
+	if err := d.Sync(); err != nil {
+		d.Close()
+		return fmt.Errorf("fsync %s: %w", dir, err)
+	}
+	if err := d.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", dir, err)
 	}
 	return nil
 }

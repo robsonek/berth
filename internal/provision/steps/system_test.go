@@ -87,6 +87,7 @@ func TestFstabSwapState(t *testing.T) {
 
 func TestSwapActiveErrorsOnNonZeroExit(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("swapon --show=NAME --noheadings", bssh.Result{ExitCode: 1, Stderr: "swapon: not available"})
 	if _, err := swapActive(context.Background(), f); err == nil {
 		t.Error("expected swapActive to error when swapon --show exits non-zero")
@@ -131,6 +132,7 @@ func stubSwapSatisfied(t *testing.T, f *bssh.FakeRunner, size string) {
 
 func TestSystemCheckSwapSatisfied(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	stubSwapSatisfied(t, f, "2G")
 	cr, err := System().Check(context.Background(), provision.RunCtx{}, swapServer("2G"), f)
 	if err != nil {
@@ -143,6 +145,7 @@ func TestSystemCheckSwapSatisfied(t *testing.T) {
 
 func TestSystemCheckSwapAbsentUnsatisfied(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("stat -c %s '/swapfile' 2>/dev/null", bssh.Result{ExitCode: 1})
 	f.On("swapon --show=NAME --noheadings", bssh.Result{ExitCode: 0, Stdout: ""})
@@ -160,6 +163,7 @@ func TestSystemCheckSwapAbsentUnsatisfied(t *testing.T) {
 
 func TestSystemCheckSwapSizeMismatchUnsatisfied(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	stubSwapSatisfied(t, f, "2G")
 	// Re-stub stat to report a 1G file while config wants 2G.
 	f.On("stat -c %s '/swapfile' 2>/dev/null", bssh.Result{ExitCode: 0, Stdout: strconv.FormatInt(1024*1024*1024, 10) + "\n"})
@@ -174,6 +178,7 @@ func TestSystemCheckSwapSizeMismatchUnsatisfied(t *testing.T) {
 
 func TestSystemCheckForeignSwapAbortsWithoutForce(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	// A foreign /swapfile: fstab line without the berth marker, file present.
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n/swapfile none swap sw 0 0\n"})
 	f.On("stat -c %s '/swapfile' 2>/dev/null", bssh.Result{ExitCode: 0, Stdout: strconv.FormatInt(1024*1024*1024, 10) + "\n"})
@@ -197,6 +202,7 @@ func TestSystemCheckForeignSwapAbortsWithoutForce(t *testing.T) {
 
 func TestSystemCheckSwapDisabledNoArtifactsSatisfied(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
@@ -211,6 +217,7 @@ func TestSystemCheckSwapDisabledNoArtifactsSatisfied(t *testing.T) {
 
 func TestSystemCheckSwapDisabledButPresentUnsatisfied(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n/swapfile none swap sw 0 0 # managed by berth\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
@@ -226,6 +233,7 @@ func TestSystemCheckSwapDisabledButPresentUnsatisfied(t *testing.T) {
 func TestSystemCheckSysctlSatisfied(t *testing.T) {
 	want, _ := renderSysctl()
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
@@ -244,6 +252,7 @@ func TestSystemCheckSysctlSatisfied(t *testing.T) {
 func TestSystemCheckSysctlStaleValueUnsatisfied(t *testing.T) {
 	want, _ := renderSysctl()
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
@@ -258,14 +267,22 @@ func TestSystemCheckSysctlStaleValueUnsatisfied(t *testing.T) {
 	}
 }
 
+// captureSwappinessCmd is the no-clobber pre-berth state write applySwap
+// issues before its first drop-in write.
+func captureSwappinessCmd(val string) string {
+	return "install -d -o root -g root -m 0755 /var/lib/berth && { set -C; printf '%s\n' " + val + " > " + swappinessStatePath + "; } 2>/dev/null || [ -s " + swappinessStatePath + " ]"
+}
+
 func TestSystemApplySwapCreates(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	// checkSwap pre-check sees nothing present (fresh box).
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("stat -c %s '/swapfile' 2>/dev/null", bssh.Result{ExitCode: 1})
 	f.On("swapon --show=NAME --noheadings", bssh.Result{ExitCode: 0, Stdout: ""})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/proc/sys/vm/swappiness'", bssh.Result{ExitCode: 0, Stdout: "60\n"})
+	f.On(captureSwappinessCmd("60"), bssh.Result{})
 	// create path commands.
 	f.On("fallocate -l 2G /swapfile", bssh.Result{})
 	f.On("chmod 600 /swapfile", bssh.Result{})
@@ -298,6 +315,7 @@ func TestSystemApplySwapCreates(t *testing.T) {
 
 func TestSystemApplySwapNoopWhenSatisfied(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	stubSwapSatisfied(t, f, "2G")
 	if err := System().Apply(context.Background(), provision.RunCtx{}, swapServer("2G"), f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -309,6 +327,7 @@ func TestSystemApplySwapNoopWhenSatisfied(t *testing.T) {
 
 func TestSystemApplySwapResizeRecreates(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	// Marked + active + correct fstab + swappiness loaded, but the file is 1G vs 2G.
 	want, _ := renderSwapSysctl()
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "/swapfile none swap sw 0 0 # managed by berth\n"})
@@ -345,6 +364,7 @@ func TestSystemApplySwapResizeRecreates(t *testing.T) {
 
 func TestSystemApplySwapRemovalTargetsMarkedLineOnly(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	// Swap off, but a berth-marked swap lingers.
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "/swapfile none swap sw 0 0 # managed by berth\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 0, Stdout: "# managed by berth\nvm.swappiness = 10\n"})
@@ -369,6 +389,7 @@ func TestSystemApplySwapRemovalTargetsMarkedLineOnly(t *testing.T) {
 
 func TestSystemApplySwapRemovalSkipsForeign(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	// Swap off; a FOREIGN /swapfile line (no marker) and no berth drop-in: leave it.
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "/swapfile none swap sw 0 0\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
@@ -383,6 +404,7 @@ func TestSystemApplySwapRemovalSkipsForeign(t *testing.T) {
 
 func TestSystemApplySwapoffFailureAborts(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	// swap off; a berth-marked ACTIVE swap, but swapoff fails (e.g. ENOMEM). Apply must
 	// abort BEFORE rm -f, never removing a file backing a still-active swap.
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "/swapfile none swap sw 0 0 # managed by berth\n"})
@@ -399,6 +421,7 @@ func TestSystemApplySwapoffFailureAborts(t *testing.T) {
 
 func TestSystemApplySwapForceTakeoverSameSize(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	// A foreign 2G /swapfile (no marker). --force must REBUILD it (mkswap) and normalize
 	// fstab, not merely swapon a possibly-non-swap file.
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n/swapfile none swap sw 0 0\n"})
@@ -416,6 +439,10 @@ func TestSystemApplySwapForceTakeoverSameSize(t *testing.T) {
 	f.On("swapon /swapfile", bssh.Result{})
 	f.On("sed -i '\\|^[[:space:]]*/swapfile[[:space:]]|d' /etc/fstab", bssh.Result{})
 	f.On("printf '\\n%s\\n' '/swapfile none swap sw 0 0 # managed by berth' >> /etc/fstab", bssh.Result{})
+	// pre-berth capture window: drop-in not yet managed, state absent -> record live 60.
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/proc/sys/vm/swappiness'", bssh.Result{ExitCode: 0, Stdout: "60\n"})
+	f.On(captureSwappinessCmd("60"), bssh.Result{})
 	f.On("sysctl -p /etc/sysctl.d/99-berth-swap.conf", bssh.Result{})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1}) // sysctl-removal read (sysctl off)
 	srv := &config.Server{System: config.System{Swap: "2G"}}
@@ -432,6 +459,7 @@ func TestSystemApplySwapForceTakeoverSameSize(t *testing.T) {
 
 func TestSystemApplySysctlEnables(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	// swap is off, so Apply first runs the swap-removal predicate (a no-op here).
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
@@ -450,6 +478,7 @@ func TestSystemApplySysctlEnables(t *testing.T) {
 
 func TestSystemApplySysctlRemoval(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	// sysctl off; the general drop-in is berth-managed -> remove.
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
@@ -466,6 +495,7 @@ func TestSystemApplySysctlRemoval(t *testing.T) {
 
 func TestSystemCheckTimezoneMismatchUnsatisfied(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
@@ -482,6 +512,7 @@ func TestSystemCheckTimezoneMismatchUnsatisfied(t *testing.T) {
 
 func TestSystemCheckTimezoneMatchSatisfied(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
@@ -501,6 +532,7 @@ func TestSystemTimezoneUnsetNeverProbed(t *testing.T) {
 	// path: an unstubbed timedatectl would error the FakeRunner, so Check
 	// succeeding AND Apply succeeding proves neither made the call.
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
@@ -523,6 +555,7 @@ func TestSystemTimezoneUnsetNeverProbed(t *testing.T) {
 
 func TestSystemApplyTimezoneSetsAndRestartsCron(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
@@ -561,6 +594,7 @@ func TestSystemApplyTimezoneInstallsCronWhenAbsent(t *testing.T) {
 	// must install+enable cron itself before restarting it, or the step fails on
 	// every run even when the same config would install cron later.
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
@@ -592,6 +626,7 @@ func TestSystemApplyTimezoneSetFailureAborts(t *testing.T) {
 	// and NO revert (nothing changed): both commands are unstubbed, so any
 	// attempt to run them errors the FakeRunner with a different message.
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
@@ -613,6 +648,7 @@ func TestSystemApplyTimezoneNoopWhenSatisfied(t *testing.T) {
 	// Re-entrant like applySwap/applySysctl: a matching zone must neither
 	// set-timezone nor restart cron (unstubbed commands would error).
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
@@ -634,6 +670,7 @@ func TestSystemApplyTimezoneCronFailureRevertsZone(t *testing.T) {
 	// run's Check falsely Satisfied while cron still fires on the old
 	// zone's schedule (the php step's compensation precedent).
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
@@ -665,6 +702,7 @@ func TestSystemApplyTimezoneCronAndRevertFailureIsHonest(t *testing.T) {
 	// revert that didn't happen (the residual falsely-Satisfied state is
 	// spec-accepted, but only with an honest message pointing at cron).
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
@@ -690,6 +728,7 @@ func TestSystemApplyTimezoneCronAndRevertFailureIsHonest(t *testing.T) {
 
 func TestSystemCheckHostnameMismatchUnsatisfied(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
@@ -707,6 +746,7 @@ func TestSystemCheckHostnameMismatchUnsatisfied(t *testing.T) {
 
 func TestSystemCheckHostnameSatisfied(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
@@ -725,6 +765,7 @@ func TestSystemCheckHostnameSatisfied(t *testing.T) {
 func TestSystemCheckHostnameHostsLineMissingUnsatisfied(t *testing.T) {
 	// Hostname already set but berth's marked alias line absent -> still work to do.
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
@@ -743,6 +784,7 @@ func TestSystemCheckHostnameHostsLineMissingUnsatisfied(t *testing.T) {
 func TestSystemHostnameUnsetNeverProbed(t *testing.T) {
 	// Empty knob = berth never reads or writes the hostname on either path.
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
@@ -761,6 +803,7 @@ func TestSystemHostnameUnsetNeverProbed(t *testing.T) {
 
 func TestSystemApplyHostnameSetsAndRewritesHosts(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
@@ -784,6 +827,7 @@ func TestSystemApplyHostnameSetsAndRewritesHosts(t *testing.T) {
 
 func TestSystemApplyHostnameNoopWhenSatisfied(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
@@ -803,6 +847,7 @@ func TestSystemApplyHostnameNoopWhenSatisfied(t *testing.T) {
 func TestSystemApplyHostnameShortNameNoDot(t *testing.T) {
 	// A single-label hostname gets no short alias (no duplicate token).
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
@@ -825,6 +870,7 @@ func TestSystemCheckHostnameForeignAliasBesideMarkedUnsatisfied(t *testing.T) {
 	// (e.g. re-added by another tool) would keep resolving the image's old
 	// name forever if Check accepted it — the takeover must re-trigger.
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
@@ -842,6 +888,7 @@ func TestSystemCheckHostnameForeignAliasBesideMarkedUnsatisfied(t *testing.T) {
 
 func TestSystemApplyHostnameNormalizesForeignAliasBesideMarked(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
@@ -860,6 +907,7 @@ func TestSystemApplyHostnameNormalizesForeignAliasBesideMarked(t *testing.T) {
 
 func TestSystemCheckHostnameDuplicateMarkedLinesUnsatisfied(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
@@ -872,5 +920,206 @@ func TestSystemCheckHostnameDuplicateMarkedLinesUnsatisfied(t *testing.T) {
 	}
 	if cr.Satisfied {
 		t.Error("expected unsatisfied on duplicated marked lines (Apply promises exactly one)")
+	}
+}
+
+// cmdIdx returns the index of the first Call matching cmd, or -1.
+func cmdIdx(f *bssh.FakeRunner, cmd string) int {
+	for i, c := range f.Calls() {
+		if c.Cmd == cmd {
+			return i
+		}
+	}
+	return -1
+}
+
+func TestSystemApplySwapCaptureSkippedWhenDropInAlreadyManaged(t *testing.T) {
+	// Re-applies must NEVER rewrite the pre-berth state: with the drop-in
+	// already berth-managed the live value is berth's own — recording it
+	// would fabricate a false baseline.
+	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("stat -c %s '/swapfile' 2>/dev/null", bssh.Result{ExitCode: 1})
+	f.On("swapon --show=NAME --noheadings", bssh.Result{ExitCode: 0, Stdout: ""})
+	managed, err := renderSwapSysctl()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 0, Stdout: string(managed)})
+	// checkSwap's swappinessLive legitimately reads the live value; the
+	// capture's distinguishing feature is the no-clobber `set -C` write.
+	f.On("cat '/proc/sys/vm/swappiness'", bssh.Result{ExitCode: 0, Stdout: "10\n"})
+	f.On("fallocate -l 2G /swapfile", bssh.Result{})
+	f.On("chmod 600 /swapfile", bssh.Result{})
+	f.On("mkswap /swapfile", bssh.Result{})
+	f.On("swapon /swapfile", bssh.Result{})
+	f.On("printf '\\n%s\\n' '/swapfile none swap sw 0 0 # managed by berth' >> /etc/fstab", bssh.Result{})
+	f.On("sed -i '\\|^[[:space:]]*/swapfile[[:space:]]|d' /etc/fstab", bssh.Result{})
+	f.On("sysctl -p /etc/sysctl.d/99-berth-swap.conf", bssh.Result{})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+
+	if err := System().Apply(context.Background(), provision.RunCtx{}, swapServer("2G"), f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "set -C") {
+			t.Errorf("no capture may happen when the drop-in is already managed: %q", c.Cmd)
+		}
+	}
+}
+
+// stubSwapRemovalArtifacts stubs a swap-off Apply where the marked fstab line
+// and the managed drop-in exist; state file content is the caller's choice.
+func stubSwapRemovalArtifacts(f *bssh.FakeRunner) {
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "/swapfile none swap sw 0 0 # managed by berth\n"})
+	managed, _ := renderSwapSysctl()
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 0, Stdout: string(managed)})
+	f.On("swapon --show=NAME --noheadings", bssh.Result{ExitCode: 0, Stdout: ""})
+	f.On("sed -i "+shQuote(fstabSedMarked)+" "+fstabPath, bssh.Result{})
+	f.On("rm -f /swapfile", bssh.Result{})
+	f.On("rm -f /etc/sysctl.d/99-berth-swap.conf", bssh.Result{})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1}) // general sysctl off, nothing to remove
+}
+
+func TestSystemApplySwapRemovalRestoresPreBerthSwappinessLast(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 0, Stdout: "35\n"})
+	stubSwapRemovalArtifacts(f)
+	f.On("sysctl --system", bssh.Result{})
+	f.On("sysctl -w vm.swappiness=35", bssh.Result{})
+	f.On("rm -f "+swappinessStatePath, bssh.Result{})
+
+	if err := System().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	system, restore, drop := cmdIdx(f, "sysctl --system"), cmdIdx(f, "sysctl -w vm.swappiness=35"), cmdIdx(f, "rm -f "+swappinessStatePath)
+	if system < 0 || restore < 0 || drop < 0 {
+		t.Fatalf("missing finalization commands: --system=%d -w=%d rm=%d\n%v", system, restore, drop, f.Calls())
+	}
+	// Commit order: reload persistent config FIRST (a later --system would
+	// overwrite the restore), exact restore next, state dropped LAST.
+	if !(system < restore && restore < drop) {
+		t.Errorf("finalization order wrong: --system=%d -w=%d rm=%d", system, restore, drop)
+	}
+}
+
+func TestSystemApplySwapRemovalStateOnlyConverges(t *testing.T) {
+	// Interrupted removal (artifacts gone, state left): the lone state file
+	// must still be restored and dropped.
+	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 0, Stdout: "35\n"})
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("sysctl --system", bssh.Result{})
+	f.On("sysctl -w vm.swappiness=35", bssh.Result{})
+	f.On("rm -f "+swappinessStatePath, bssh.Result{})
+
+	// Check must be unsatisfied on the lone state file.
+	ok, _, err := checkSwapRemoval(context.Background(), f)
+	if err != nil || ok {
+		t.Fatalf("checkSwapRemoval = %v, %v; want unsatisfied on a lone state file", ok, err)
+	}
+	if err := System().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if cmdIdx(f, "rm -f "+swappinessStatePath) < 0 {
+		t.Error("state file must be restored and dropped")
+	}
+}
+
+func TestSystemSwappinessStateInvalidIsHardErrorBeforeMutation(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 0, Stdout: "banana\n"})
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "/swapfile none swap sw 0 0 # managed by berth\n"})
+	if _, _, err := checkSwapRemoval(context.Background(), f); err == nil {
+		t.Fatal("Check must hard-error on an invalid state file")
+	}
+	f2 := bssh.NewFakeRunner()
+	f2.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 0, Stdout: "banana\n"})
+	err := System().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f2)
+	if err == nil || !strings.Contains(err.Error(), "banana") {
+		t.Fatalf("Apply must hard-error naming the bad value; got %v", err)
+	}
+	for _, c := range f2.Calls() {
+		if strings.HasPrefix(c.Cmd, "sysctl -w") || strings.HasPrefix(c.Cmd, "rm -f") || strings.HasPrefix(c.Cmd, "sed -i") {
+			t.Errorf("no mutation may run with an invalid state file: %q", c.Cmd)
+		}
+	}
+}
+
+func TestSystemApplySwapRemovalFailuresKeepState(t *testing.T) {
+	// A failed --system or a failed restore must leave the state file so the
+	// next run retries the finalization.
+	for _, failing := range []string{"sysctl --system", "sysctl -w vm.swappiness=35"} {
+		f := bssh.NewFakeRunner()
+		f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 0, Stdout: "35\n"})
+		stubSwapRemovalArtifacts(f)
+		f.On("sysctl --system", bssh.Result{})
+		f.On("sysctl -w vm.swappiness=35", bssh.Result{})
+		f.On(failing, bssh.Result{ExitCode: 1, Stderr: "boom"})
+		if err := System().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f); err == nil {
+			t.Fatalf("Apply must fail when %q fails", failing)
+		}
+		if cmdIdx(f, "rm -f "+swappinessStatePath) >= 0 {
+			t.Errorf("state file must survive a failed %q", failing)
+		}
+	}
+}
+
+func TestSystemApplySwapRemovalLegacyNoStateWarns(t *testing.T) {
+	// Pre-P15 install: managed drop-in removed but no recorded baseline —
+	// warn (normal output), never fabricate a value.
+	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1})
+	stubSwapRemovalArtifacts(f)
+
+	var warned []string
+	rc := provision.RunCtx{FullRun: true, Warn: func(m string) { warned = append(warned, m) }}
+	if err := System().Apply(context.Background(), rc, &config.Server{}, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if len(warned) != 1 || !strings.Contains(warned[0], "swappiness") {
+		t.Fatalf("want one swappiness warning, got %q", warned)
+	}
+	for _, c := range f.Calls() {
+		if strings.HasPrefix(c.Cmd, "sysctl -w vm.swappiness=") {
+			t.Errorf("no restore may run without recorded state: %q", c.Cmd)
+		}
+	}
+}
+
+func TestSystemApplyRestoreRunsAfterGeneralSysctlBranch(t *testing.T) {
+	// Combined swap-off + general sysctl drift: the pre-berth restore must be
+	// the FINAL sysctl mutation — after the general branch's own reload.
+	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 0, Stdout: "35\n"})
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "/swapfile none swap sw 0 0 # managed by berth\n"})
+	managed, _ := renderSwapSysctl()
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 0, Stdout: string(managed)})
+	f.On("swapon --show=NAME --noheadings", bssh.Result{ExitCode: 0, Stdout: ""})
+	f.On("sed -i "+shQuote(fstabSedMarked)+" "+fstabPath, bssh.Result{})
+	f.On("rm -f /swapfile", bssh.Result{})
+	f.On("rm -f /etc/sysctl.d/99-berth-swap.conf", bssh.Result{})
+	// General sysctl branch ON with a drifted (absent) drop-in -> write + --system.
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("sysctl --system", bssh.Result{})
+	f.On("sysctl -w vm.swappiness=35", bssh.Result{})
+	f.On("rm -f "+swappinessStatePath, bssh.Result{})
+
+	srv := &config.Server{System: config.System{Sysctl: true}}
+	if err := System().Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	restore := cmdIdx(f, "sysctl -w vm.swappiness=35")
+	lastSystem := -1
+	for i, c := range f.Calls() {
+		if c.Cmd == "sysctl --system" {
+			lastSystem = i
+		}
+	}
+	if restore < 0 || lastSystem < 0 || restore < lastSystem {
+		t.Errorf("restore must follow EVERY sysctl --system; restore=%d lastSystem=%d", restore, lastSystem)
 	}
 }

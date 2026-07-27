@@ -72,9 +72,12 @@ func runProvision(cmd *cobra.Command, serverPath string, f *provisionFlags) erro
 	}
 	defer client.Close()
 
+	// The SAME redactor instance feeds the steps (they register secrets on
+	// acquisition) and the engine's output policy (it masks every event and
+	// the pre-flight error).
 	eng := provision.New(steps.Pipeline(srv, red, f.skipSSL)...)
 	events, err := eng.Run(ctx, srv, client, provision.Options{
-		DryRun: f.dryRun, Only: f.only, Force: f.force, SSLStaging: f.sslStaging,
+		DryRun: f.dryRun, Only: f.only, Force: f.force, SSLStaging: f.sslStaging, Redact: red,
 	})
 	if err != nil {
 		return err
@@ -86,7 +89,9 @@ func runProvision(cmd *cobra.Command, serverPath string, f *provisionFlags) erro
 	// renderer has returned, e.g. after a TUI interrupt. The ssh layer TERMs
 	// and abandons an in-flight remote command on cancellation.
 	cancel()
-	return rerr
+	// Defence in depth at the command boundary: cobra prints this error again,
+	// and renderer-internal errors never passed through the engine's masking.
+	return provision.RedactError(red, rerr)
 }
 
 // defaultKnownHosts returns the conventional path to the user's known_hosts file.

@@ -5,22 +5,41 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
 
+// reEnvKey is the dotenv key grammar (shell-identifier shape). Anything else
+// — an empty key, a leading digit, '=', control characters — would change the
+// parsed meaning of the rendered file.
+var reEnvKey = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 // EnvFile renders a .env body from key/value pairs (deterministic order).
-func EnvFile(kv map[string]string) []byte {
+// Defence in depth: every production value is validated or generated
+// alphanumeric today, but the renderer itself must refuse a key outside the
+// env-identifier grammar and any CR/LF/NUL in a value — a newline would
+// inject a second variable line (the same class chpasswd guards against).
+// Error messages name the key, never the (possibly secret) value.
+func EnvFile(kv map[string]string) ([]byte, error) {
 	keys := make([]string, 0, len(kv))
 	for k := range kv {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	sort.Strings(keys) // sorted BEFORE validation: deterministic first error
+	for _, k := range keys {
+		if !reEnvKey.MatchString(k) {
+			return nil, fmt.Errorf("env key %q is not a valid identifier ([A-Za-z_][A-Za-z0-9_]*)", k)
+		}
+		if strings.ContainsAny(kv[k], "\r\n\x00") {
+			return nil, fmt.Errorf("env value for key %q contains a newline or NUL byte; refusing to render it", k)
+		}
+	}
 	var b strings.Builder
 	for _, k := range keys {
 		fmt.Fprintf(&b, "%s=%s\n", k, kv[k])
 	}
-	return []byte(b.String())
+	return []byte(b.String()), nil
 }
 
 // cacheDir is the per-user directory holding berth's local secret caches,

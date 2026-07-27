@@ -10,7 +10,11 @@ import (
 )
 
 func TestEnvFileDeterministicAndComplete(t *testing.T) {
-	got := string(EnvFile(map[string]string{"DB_PASSWORD": "p", "APP_ENV": "production"}))
+	b, err := EnvFile(map[string]string{"DB_PASSWORD": "p", "APP_ENV": "production"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(b)
 	if !strings.HasPrefix(got, "APP_ENV=production\n") { // sorted
 		t.Errorf("env not sorted/deterministic: %q", got)
 	}
@@ -149,5 +153,29 @@ func TestLockCacheSerialises(t *testing.T) {
 		// proceeded after release, correct
 	case <-time.After(2 * time.Second):
 		t.Fatal("second LockCache never proceeded after release")
+	}
+}
+
+func TestEnvFileValidation(t *testing.T) {
+	ok, err := EnvFile(map[string]string{"DB_PASSWORD": "p", "_UNDER": "x"})
+	if err != nil || !strings.Contains(string(ok), "DB_PASSWORD=p\n") {
+		t.Fatalf("valid map must render: %q err=%v", ok, err)
+	}
+	bad := []map[string]string{
+		{"": "v"},             // empty key
+		{"1LEAD": "v"},        // leading digit
+		{"A-B": "v"},          // hyphen
+		{"A=B": "v"},          // equals in key
+		{"A\nB": "v"},         // control char in key
+		{"K": "line1\nline2"}, // LF in value
+		{"K": "line1\rline2"}, // CR in value
+		{"K": "nul\x00byte"},  // NUL in value
+	}
+	for _, m := range bad {
+		if _, err := EnvFile(m); err == nil {
+			t.Errorf("EnvFile(%q) must be rejected", m)
+		} else if strings.Contains(err.Error(), "line1") || strings.Contains(err.Error(), "nul") {
+			t.Errorf("error must not reproduce a secret value: %v", err)
+		}
 	}
 }

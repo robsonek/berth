@@ -3,6 +3,7 @@ package provision
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -422,5 +423,116 @@ func TestRunCtxWarnfNilGuardAndNormalization(t *testing.T) {
 	rc.Warnf("line1\nline2\r\nline3\n")
 	if len(got) != 1 || got[0] != "line1; line2; line3" {
 		t.Errorf("Warnf normalization = %q, want %q", got, "line1; line2; line3")
+	}
+}
+
+// fakeRedactor is a minimal Options.Redact implementation for engine tests.
+type fakeRedactor struct{ secret string }
+
+func (f fakeRedactor) Apply(s string) string {
+	return strings.ReplaceAll(s, f.secret, "***")
+}
+
+var errSentinel = errors.New("sentinel")
+
+func TestEngineRedactsEveryEventField(t *testing.T) {
+	red := fakeRedactor{secret: "hunter2"}
+	failing := &stepStub{name: "b", applyErr: fmt.Errorf("db says hunter2: %w", errSentinel),
+		onApply: func(rc RunCtx) { rc.Warnf("seeded with hunter2") }}
+	eng := New(
+		&stepStub{name: "a", satisfied: true}, // Reason "stub" (no secret) — unchanged
+		failing,
+	)
+	events, err := eng.Run(context.Background(), &config.Server{}, bssh.NewFakeRunner(), Options{Redact: red})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	evs := collect(events)
+	ev := findEvent(evs, "b", EventFailed)
+	if ev == nil {
+		t.Fatal("no EventFailed for b")
+	}
+	if strings.Contains(ev.Err.Error(), "hunter2") || !strings.Contains(ev.Err.Error(), "***") {
+		t.Errorf("event error not redacted: %v", ev.Err)
+	}
+	// errors.Is must keep working THROUGH the redacted wrapper (cmd relies on
+	// error identity, and cobra prints the same object again).
+	if !errors.Is(ev.Err, errSentinel) {
+		t.Error("errors.Is must see the original through the redacted wrapper")
+	}
+	if len(ev.Warnings) != 1 || strings.Contains(ev.Warnings[0], "hunter2") {
+		t.Errorf("warning not redacted: %q", ev.Warnings)
+	}
+}
+
+func TestEngineRedactsChangesAndPlanned(t *testing.T) {
+	// Planned (dry-run) and Satisfied events carry Reason/Changes too — the
+	// masking is an ENGINE output policy, not an Applied-only afterthought.
+	red := fakeRedactor{secret: "hunter2"}
+	eng := New(&checkStub{name: "s", reason: "cached hunter2", changes: []string{"seed hunter2 into .env"}})
+	events, err := eng.Run(context.Background(), &config.Server{}, bssh.NewFakeRunner(), Options{DryRun: true, Redact: red})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	ev := findEvent(collect(events), "s", EventPlanned)
+	if ev == nil {
+		t.Fatal("no EventPlanned")
+	}
+	if strings.Contains(ev.Reason, "hunter2") || strings.Contains(strings.Join(ev.Changes, " "), "hunter2") {
+		t.Errorf("planned Reason/Changes not redacted: %+v", ev)
+	}
+}
+
+// checkStub lets a test control Reason/Changes precisely.
+type checkStub struct {
+	name    string
+	reason  string
+	changes []string
+}
+
+func (s *checkStub) Name() string       { return s.name }
+func (s *checkStub) Requires() []string { return nil }
+func (s *checkStub) Check(context.Context, RunCtx, *config.Server, bssh.Runner) (CheckResult, error) {
+	return CheckResult{Satisfied: false, Reason: s.reason, Changes: s.changes}, nil
+}
+func (s *checkStub) Apply(context.Context, RunCtx, *config.Server, bssh.Runner) error { return nil }
+
+func TestEngineRedactsPreflightError(t *testing.T) {
+	red := fakeRedactor{secret: "hunter2"}
+	eng := New(
+		&checkStub{name: "a", reason: "needs hunter2"},
+		&stepStub{name: "b", requires: []string{"a"}},
+	)
+	_, err := eng.Run(context.Background(), &config.Server{}, bssh.NewFakeRunner(), Options{Only: "b", Redact: red})
+	if err == nil {
+		t.Fatal("expected the unmet-prerequisite refusal")
+	}
+	// The refusal names unsatisfied prerequisites; with a Redactor set, any
+	// secret a Check error/reason could carry must be masked on this SECOND
+	// output channel too. (This refusal text itself has no secret — pin the
+	// mechanism with RedactError directly.)
+	if got := RedactError(red, fmt.Errorf("boom hunter2")).Error(); strings.Contains(got, "hunter2") {
+		t.Errorf("RedactError leak: %q", got)
+	}
+	if RedactError(red, nil) != nil {
+		t.Error("RedactError(nil) must be nil")
+	}
+	if e := RedactError(nil, errSentinel); e != errSentinel {
+		t.Error("nil redactor must return the original error object")
+	}
+	var re *redactedError
+	if !errors.As(RedactError(red, fmt.Errorf("x hunter2")), &re) {
+		t.Error("errors.As must reach the wrapper type")
+	}
+}
+
+func TestEngineNilRedactIsNoop(t *testing.T) {
+	eng := New(&stepStub{name: "a"})
+	events, err := eng.Run(context.Background(), &config.Server{}, bssh.NewFakeRunner(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev := findEvent(collect(events), "a", EventApplied); ev == nil {
+		t.Fatal("pipeline must run unchanged without a redactor")
 	}
 }

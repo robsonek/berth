@@ -19,10 +19,12 @@ const (
 	// mariadbSlowLogDir hosts the slow query log. Debian 13's mariadb logs to
 	// the journal by default and no longer creates /var/log/mysql, yet its
 	// logrotate still covers /var/log/mysql/*.log (missingok) — so berth
-	// creates the directory (Debian's historical mysql:adm 2750) and rotation
+	// creates the directory (Debian's historical mysql:adm setgid 02750) and rotation
 	// comes for free.
-	mariadbSlowLogDir       = "/var/log/mysql"
-	mariadbSlowLogDirEnsure = "install -d -m 2750 -o mysql -g adm " + mariadbSlowLogDir
+	mariadbSlowLogDir = "/var/log/mysql"
+	// 02750 spelled five-digit so the setgid bit is visibly INTENDED (the
+	// group inheritance is what lets logrotate's adm group read new logs).
+	mariadbSlowLogDirEnsure = "install -d -m 02750 -o mysql -g adm " + mariadbSlowLogDir
 	// mariadbSlowLogPath mirrors slow_query_log_file in mariadb_tuning.cnf.tmpl
 	// (kept in sync by TestRenderMariaDBTuningSlowLogPathConst). Its EXISTENCE is
 	// the convergence probe: mariadbd creates the file (with a header) when it

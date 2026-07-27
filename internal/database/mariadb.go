@@ -82,10 +82,14 @@ func (MariaDB) EnsureUser(ctx context.Context, r bssh.Runner, user, password, da
 // DumpCommand writes a logical dump of database to stdout, passwordless via the
 // local socket as root (matching runSQL's auth). --single-transaction gives a
 // consistent InnoDB snapshot; --no-tablespaces avoids needing the PROCESS priv;
-// --routines/--events include stored routines and events. database is a validated
-// SQL identifier (config.Validate), so it carries no shell metacharacters.
+// --routines/--events include stored routines and events. The name is
+// shell-quoted defensively: config.Validate's reSQLIdent already excludes
+// metacharacters, but the command lands in a root cron script, so quoting
+// must not depend on a validator a literal-Server caller could bypass.
+// (Quoting cannot neutralize a LEADING DASH — only reSQLIdent blocks option
+// injection; the quote hardens the primitive, it does not replace validation.)
 func (MariaDB) DumpCommand(database string) string {
-	return "mysqldump --protocol=socket --single-transaction --no-tablespaces --routines --events " + database
+	return "mysqldump --protocol=socket --single-transaction --no-tablespaces --routines --events " + shQuote(database)
 }
 
 // ClientAuthFileName is the MariaDB per-user option file.

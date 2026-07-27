@@ -593,3 +593,36 @@ func TestValidateServerID(t *testing.T) {
 		}
 	}
 }
+
+func TestParseSwapBytesBoundaries(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want int64
+		ok   bool
+	}{
+		{"2G", 2 << 30, true},
+		{"512M", 512 << 20, true},
+		{"1024G", 1 << 40, true},    // exactly 1 TiB
+		{"1048576M", 1 << 40, true}, // exactly 1 TiB in MiB
+		{"1025G", 0, false},         // one unit over the cap
+		{"1048577M", 0, false},
+		{"9999999999G", 0, false}, // would overflow int64 without the cap
+		{"0G", 0, false},
+		{"2T", 0, false},
+		{"", 0, false},
+	} {
+		got, err := ParseSwapBytes(c.in)
+		if c.ok && (err != nil || got != c.want) {
+			t.Errorf("ParseSwapBytes(%q) = %d, %v; want %d", c.in, got, err, c.want)
+		}
+		if !c.ok && err == nil {
+			t.Errorf("ParseSwapBytes(%q) must be rejected", c.in)
+		}
+	}
+	// The authoritative path: a config with an overflowing swap fails Validate.
+	s := base()
+	s.System.Swap = "9999999999G"
+	if err := s.Validate(); err == nil {
+		t.Error("Validate must reject an overflowing system.swap")
+	}
+}

@@ -254,7 +254,7 @@ func TestRenderBackupScriptGolden(t *testing.T) {
 		RetentionDays                                                       int
 	}{
 		Pool:          "app_example_com",
-		DumpCommand:   "mysqldump --protocol=socket --single-transaction --no-tablespaces --routines --events myapp",
+		DumpCommand:   "mysqldump --protocol=socket --single-transaction --no-tablespaces --routines --events 'myapp'",
 		DBName:        "myapp",
 		DeployPath:    "/home/deploy/myapp",
 		BackupDir:     "/var/backups/berth/app_example_com",

@@ -3,6 +3,47 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Fixed
+
+- **Secret redaction is now real, not implied.** Steps have always registered
+  generated credentials with a redactor, but nothing ever applied it to
+  output — the masking a reader would assume from `redactor.Add(pw)` did not
+  exist. The engine now masks every event field (reasons, change lists,
+  warnings, errors — with `errors.Is`/`As` preserved through the wrapper) and
+  its synchronous pre-flight error; the CLI masks returned errors again at
+  the command boundary. Each database secret registers the moment it is
+  acquired, before the next fallible operation, and the redactor itself is
+  now concurrency-safe with longest-first matching (a short secret can no
+  longer shred a longer one it prefixes).
+- **Removing swap restores the pre-berth `vm.swappiness`.** berth records the
+  live value into `/var/lib/berth/swappiness.pre-berth` before its first
+  overwrite (never on re-applies, and never when the drop-in is already
+  berth's — no fabricated baselines) and, on `system.swap` removal, restores
+  exactly that value as the final sysctl operation of the step, dropping the
+  state file only after a successful restore. Hosts provisioned before this
+  version have no recorded baseline: removal warns and the value stays until
+  reboot. Previously berth's `vm.swappiness=10` silently persisted forever.
+- **Swap sizes are capped at 1 TiB at config validation.** An absurd
+  `system.swap` used to overflow the byte conversion or fail remotely in
+  `fallocate`; now `berth` rejects it locally, in the config, the wizard and
+  the step alike.
+- The wizard validates the raw config name (no path separators, `..`, or
+  leading dot/dash — `servers/../x.yml` can no longer escape the directory)
+  and creates the file exclusively (`O_EXCL`), removing a stat-then-write
+  race; partial files are cleaned up on write errors.
+- The secrets cache write is now crash-durable (fsync of file and directory
+  before the promise "cached before the remote effect" is relied upon).
+
+### Changed
+
+- `.env` rendering validates keys (env-identifier grammar) and rejects
+  CR/LF/NUL in values; the database dump command shell-quotes the database
+  name. Both are defence in depth behind existing config validation; the
+  backup script re-renders once on already-provisioned hosts (managed-file
+  drift, quoted dump command).
+
 ## [0.22.0] — 2026-07-27
 
 ### Added

@@ -83,6 +83,7 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	events, err := eng.Run(ctx, srv, client, provision.Options{
 		Force:      os.Getenv("BERTH_TEST_FORCE") == "true",
 		SSLStaging: os.Getenv("BERTH_TEST_SSL_STAGING") == "true",
+		Redact:     red,
 	})
 	if err != nil {
 		t.Fatalf("pipeline pre-flight: %v", err)
@@ -168,7 +169,7 @@ func TestProvisionFreshDebian13(t *testing.T) {
 
 	// berth's defining contract: an immediate second run must change nothing
 	// (every step satisfied), except preflight which re-runs apt by design.
-	assertSecondRunIdempotent(t, eng, srv, client)
+	assertSecondRunIdempotent(t, eng, red, srv, client)
 }
 
 // assertSecondRunIdempotent runs the pipeline a SECOND time over the same
@@ -176,13 +177,13 @@ func TestProvisionFreshDebian13(t *testing.T) {
 // satisfied. The SOLE exception is `preflight`, the only AlwaysRun step (it
 // re-runs `apt-get update` every run by design). Any other EventApplied, or any
 // EventFailed, on the second run is an idempotency regression and fails the test.
-func assertSecondRunIdempotent(t *testing.T, eng *provision.Engine, srv *config.Server, client *bssh.Client) {
+func assertSecondRunIdempotent(t *testing.T, eng *provision.Engine, red *secret.Redactor, srv *config.Server, client *bssh.Client) {
 	t.Helper()
 	// Fresh deadline: the shared test context may be nearly exhausted by a slow
 	// first provision; the second run is read-only Checks + preflight apt and is fast.
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
-	events, err := eng.Run(ctx, srv, client, provision.Options{SSLStaging: os.Getenv("BERTH_TEST_SSL_STAGING") == "true"})
+	events, err := eng.Run(ctx, srv, client, provision.Options{SSLStaging: os.Getenv("BERTH_TEST_SSL_STAGING") == "true", Redact: red})
 	if err != nil {
 		t.Fatalf("second run pre-flight: %v", err)
 	}

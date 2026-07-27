@@ -218,22 +218,25 @@ func optionalPHPSize(s string) error {
 	return nil
 }
 
-// reSwapSize / reCronSchedule / reTimezone mirror config.reSwapSize /
-// config.reCronSchedule / config.reTimezone (unexported there) for inline
-// feedback; config.Server.Validate stays authoritative.
+// reCronSchedule / reTimezone mirror config.reCronSchedule / config.reTimezone
+// (unexported there) for inline feedback; config.Server.Validate stays
+// authoritative.
 // The cron class [0-9*,/-] already excludes newlines (and Go's $ is not multiline),
-// so the regex alone rejects control-char injection — no extra check needed here.
+// so the regex alone rejects control-char injection — no extra check needed
+// here. (Swap sizes have NO mirror regex anymore: optionalSwapSize delegates
+// to the authoritative config.ParseSwapBytes — shape and cap in one place.)
 var (
-	reSwapSize     = regexp.MustCompile(`^[1-9][0-9]*[MmGg]$`)
 	reCronSchedule = regexp.MustCompile(`^[0-9*,/-]+( [0-9*,/-]+){4}$`)
 	reTimezone     = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+){0,2}$`)
 )
 
 func optionalSwapSize(s string) error {
-	if s == "" || reSwapSize.MatchString(s) {
+	if s == "" {
 		return nil
 	}
-	return fmt.Errorf("swap %q must be a positive number suffixed M or G (e.g. 2G)", s)
+	// Delegate to the authoritative parser (shape AND the 1 TiB cap).
+	_, err := config.ParseSwapBytes(s)
+	return err
 }
 
 func optionalTimezone(s string) error {

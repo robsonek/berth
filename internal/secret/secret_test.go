@@ -66,3 +66,35 @@ func TestRedactorIgnoresEmpty(t *testing.T) {
 		t.Errorf("empty secret should be a no-op, got %q", got)
 	}
 }
+
+func TestRedactorPrefixOrderingAndSafety(t *testing.T) {
+	r := NewRedactor()
+	r.Add("abc")    // shorter first — the historical shredding order
+	r.Add("abcdef") // longer must still win
+	r.Add("abcdef") // duplicate dropped
+	if got := r.Apply("x abcdef y abc z"); got != "x *** y *** z" {
+		t.Errorf("Apply = %q, want longest-first masking", got)
+	}
+	var nilR *Redactor
+	nilR.Add("boom") // must not panic
+	if got := nilR.Apply("boom"); got != "boom" {
+		t.Errorf("typed-nil Apply must be a no-op; got %q", got)
+	}
+}
+
+func TestRedactorConcurrentAddApply(t *testing.T) {
+	// Add (steps, engine goroutine) can overlap Apply (command boundary after
+	// a TUI quit) — must be race-free under -race.
+	r := NewRedactor()
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 200; i++ {
+			r.Add(strings.Repeat("s", i%17+1))
+		}
+		close(done)
+	}()
+	for i := 0; i < 200; i++ {
+		_ = r.Apply("sssssss payload")
+	}
+	<-done
+}
