@@ -22,3 +22,6 @@ coverage.*
 /CLAUDE.md
 /servers/
 /docs/
+
+# Local agent-session artifacts (review prompts/outputs) — never tracked
+.superpowers/
