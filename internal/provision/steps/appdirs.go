@@ -3,6 +3,8 @@ package steps
 import (
 	"context"
 	"fmt"
+	"path"
+	"strconv"
 	"strings"
 
 	"github.com/robsonek/berth/internal/config"
@@ -10,9 +12,14 @@ import (
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
 
-// acmeWebroot is the dedicated ACME challenge root for a domain. It is owned by
-// www-data so certbot's --webroot mode can write challenge files, kept separate
-// from the application's deploy_path (design §6.4).
+// acmeWebroot is the dedicated ACME challenge root for a domain, kept separate
+// from the application's deploy_path (design §6.4). It is owned by root:root:
+// certbot runs as root and creates .well-known/acme-challenge/<token> itself,
+// while nginx (www-data) only ever reads and traverses the webroot, which mode
+// 0755 grants. An unprivileged owner here could swap .well-known or
+// acme-challenge for a symlink and redirect certbot's root-run writes to an
+// arbitrary path — the ancestry gate stops AT the webroot and does not protect
+// its descendants, so the webroot itself must be root-controlled too.
 func acmeWebroot(domain string) string {
 	return "/var/www/berth-acme/" + domain
 }
@@ -33,14 +40,17 @@ func (appDirs) Requires() []string { return []string{"accounts"} }
 
 // noSymlinkInPath reports whether every EXISTING component of p — each prefix
 // from the first component under / down to p itself — is a real directory:
-// not a symlink and not any other file type. berth's root-run `install -d`
-// follows a directory symlink to its target and applies ownership there, so a
-// tenant who owns an ancestor of p (e.g. their own prior deploy_path after a
-// migration) could plant a symlink to redirect the chown at /etc. A
-// non-directory ancestor must be refused too: it would make the owner guard's
-// stat fail with ENOTDIR and read as "absent" — fail-open. A non-existent
-// component passes, so a fresh path is created normally. (`test -d` follows
-// symlinks, but `test ! -L` short-circuits first.)
+// not a symlink and not any other file type. This is NOT what makes the step
+// race-free: root-run mutations are confined to paths with a root-controlled
+// ancestry (assertSafeAncestry) and everything inside tenant territory is
+// created and written by the tenant itself, which is what closes the swap
+// window. The probe's job is to turn a planted symlink into an early,
+// actionable refusal instead of a raw EPERM, and to stop the owner guard's stat
+// from reading an inode THROUGH a tenant-planted symlink. A non-directory
+// ancestor must be refused too: it would make that stat fail with ENOTDIR and
+// read as "absent" — fail-open. A non-existent component passes, so a fresh
+// path is created normally. (`test -d` follows symlinks, but `test ! -L`
+// short-circuits first.)
 func noSymlinkInPath(ctx context.Context, r bssh.Runner, p string) (bool, error) {
 	parts := strings.Split(strings.TrimPrefix(p, "/"), "/")
 	cur := ""
@@ -65,7 +75,7 @@ func assertNoSymlinkAt(ctx context.Context, r bssh.Runner, domain, p string) err
 		return err
 	}
 	if !ok {
-		return fmt.Errorf("refusing to create directories for %s: a component of %s is a symlink or not a directory; a tenant may have planted a symlink so root's install -d chowns the target — remove the offending path before re-running", domain, p)
+		return fmt.Errorf("refusing to create directories for %s: a component of %s is a symlink or not a directory — remove the offending path before re-running", domain, p)
 	}
 	return nil
 }
@@ -79,13 +89,123 @@ func assertNoSymlinkDeployTree(ctx context.Context, r bssh.Runner, site config.S
 	return assertNoSymlinkAt(ctx, r, site.Domain, site.DeployPath+"/shared/tmp")
 }
 
-// assertNoSymlinkTargets is the appdirs-wide variant: the deploy tree plus
-// the site's ACME webroot.
+// assertNoSymlinkTargets is the appdirs-wide variant: the root-controlled
+// ancestry requirement for the two directories root itself creates, then the
+// deploy tree and the site's ACME webroot.
+//
+// Ancestry goes FIRST: it is the broadest condition (an unsafe ancestor makes
+// every verdict below it meaningless) and it costs one round-trip.
 func assertNoSymlinkTargets(ctx context.Context, r bssh.Runner, s *config.Server, site config.Site) error {
+	if err := assertSafeAncestry(ctx, r, site.Domain, site.DeployPath, acmeWebroot(site.Domain)); err != nil {
+		return err
+	}
 	if err := assertNoSymlinkDeployTree(ctx, r, site); err != nil {
 		return err
 	}
 	return assertNoSymlinkAt(ctx, r, site.Domain, acmeWebroot(site.Domain))
+}
+
+// ancestorsOf returns every ancestor of p from / down to path.Dir(p)
+// inclusive: /var/www/app -> ["/", "/var", "/var/www"].
+//
+// / is included on purpose: it is a component like any other, and a
+// non-root-owned or writable root directory would let an unprivileged user
+// replace an existing top-level entry (or create a missing one) after the
+// probe — the very class this gate exists to catch.
+func ancestorsOf(p string) []string {
+	out := []string{"/"}
+	dir := path.Dir(p)
+	if dir == "/" || dir == "." {
+		return out
+	}
+	cur := ""
+	for _, part := range strings.Split(strings.TrimPrefix(dir, "/"), "/") {
+		cur += "/" + part
+		out = append(out, cur)
+	}
+	return out
+}
+
+// assertSafeAncestry refuses when any EXISTING ancestor of any given path is
+// not a root-controlled directory: it must be a real directory (not a symlink
+// or other type), owned by uid 0, and neither group- nor other-writable.
+//
+// This is the premise the root-run mutations rest on. berth still creates
+// deploy_path (owned by the site user, which only root can set) and the
+// root-owned ACME webroot as root, and root's `install -d` follows a directory symlink
+// and applies ownership to the target. That is only safe while nobody but root
+// can replace a component of the path: the symlink probe checks a component's
+// TYPE, never its OWNERSHIP, so a tenant-owned ancestor (ValidateDeployPath
+// permits e.g. /srv/apps/site) would let the tenant swap the final component
+// after the probe and redirect the chown. Absent components pass — root
+// creates them, and what root creates is root-owned.
+//
+// Deliberately NOT bypassable with --force: --force is for adopting berth's
+// own unmanaged files, never for lowering a guard that gates a root chown.
+func assertSafeAncestry(ctx context.Context, r bssh.Runner, subject string, paths ...string) error {
+	seen := map[string]bool{}
+	var probe []string
+	for _, p := range paths {
+		for _, a := range ancestorsOf(p) {
+			if !seen[a] {
+				seen[a] = true
+				probe = append(probe, a)
+			}
+		}
+	}
+	if len(probe) == 0 {
+		return nil
+	}
+	var q []string
+	for _, p := range probe {
+		q = append(q, shQuote(p))
+	}
+	// One round-trip regardless of depth. Exit 91 is the probe's own signal
+	// that stat failed on an existing component — a hard error, never "absent"
+	// (fail-open here would defeat the whole guard). %F goes last: file types
+	// contain spaces, and validated paths cannot.
+	cmd := "export LC_ALL=C; for p in " + strings.Join(q, " ") +
+		"; do if [ -e \"$p\" ] || [ -L \"$p\" ]; then stat -c '%n %u %a %F' \"$p\" || exit 91; fi; done"
+	res, err := r.Run(ctx, cmd, nil)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("probing the directory ancestry for %s failed: %s", subject, strings.TrimSpace(res.Stderr))
+	}
+	for _, line := range strings.Split(strings.TrimSpace(res.Stdout), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			return fmt.Errorf("unexpected ancestry probe output for %s: %q", subject, line)
+		}
+		name, uid, modeStr, ftype := fields[0], fields[1], fields[2], strings.Join(fields[3:], " ")
+		if ftype != "directory" {
+			return fmt.Errorf("refusing to provision %s: %s is a %s, not a directory — berth creates directories under it as root, so every component must be a root-owned directory; inspect and fix it before re-running", subject, name, ftype)
+		}
+		if uid != "0" {
+			return fmt.Errorf("refusing to provision %s: %s is owned by uid %s, not root — a non-root owner can replace the directory berth is about to create as root and redirect its ownership; chown it to root or choose a deploy_path under a root-owned tree such as /var/www", subject, name, uid)
+		}
+		mode, err := strconv.ParseUint(modeStr, 8, 32)
+		if err != nil {
+			return fmt.Errorf("unexpected mode %q for %s while probing ancestry for %s", modeStr, name, subject)
+		}
+		if mode&0o022 != 0 {
+			return fmt.Errorf("refusing to provision %s: %s is group- or other-writable (mode %s) — anyone in that group can replace the directory berth is about to create as root; chmod g-w,o-w it before re-running", subject, name, modeStr)
+		}
+		// Searchability is a convergence requirement, not a security one: the
+		// site user creates its own shared/ and shared/tmp, and www-data must
+		// reach the ACME webroot and the site's public/. Neither is in root's
+		// group, so an unsearchable ancestor (e.g. root-owned 0700) makes every
+		// run fail with EACCES and the step never converges. Refuse with the
+		// remedy instead.
+		if mode&0o001 == 0 {
+			return fmt.Errorf("refusing to provision %s: %s (mode %s) cannot be traversed by the site user or by www-data, so berth could create the directories but the site could never use them; run `chmod o+x %s` before re-running", subject, name, modeStr, name)
+		}
+	}
+	return nil
 }
 
 // assertSiteTreeOwners fails loudly when an EXISTING per-site directory
@@ -112,8 +232,11 @@ func assertSiteTreeOwners(ctx context.Context, r bssh.Runner, s *config.Server, 
 		if res.ExitCode != 0 {
 			// Absent. The path-chain assertion already proved every existing
 			// component is a real directory, so a nonzero exit here means
-			// ENOENT — barring a mid-run race or IO failure (consciously
-			// accepted; tracked with the deferred TOCTOU item).
+			// ENOENT — barring IO failure or a tenant swapping a symlink in
+			// between (two separate SSH commands). That residual race can only
+			// skew THIS verdict (adopt vs refuse); it can never hand anything
+			// over, because no root-run mutation targets a tenant-controlled
+			// path any more.
 			continue
 		}
 		fields := strings.Fields(strings.TrimSpace(res.Stdout))
@@ -146,6 +269,13 @@ func (a appDirs) Check(ctx context.Context, _ provision.RunCtx, s *config.Server
 		if err := assertSiteTreeOwners(ctx, r, s, site); err != nil {
 			return provision.CheckResult{}, err
 		}
+		// The site user creates shared/ and shared/tmp itself and can only
+		// chgrp to a group it belongs to; a non-member account would fail with
+		// a raw EPERM mid-Apply. mustExist=false: --only appdirs may run
+		// before accounts creates the user.
+		if err := assertGroupMembership(ctx, r, s.SiteUser(site), false); err != nil {
+			return provision.CheckResult{}, err
+		}
 	}
 	for _, site := range s.Sites {
 		user := s.SiteUser(site)
@@ -158,7 +288,7 @@ func (a appDirs) Check(ctx context.Context, _ provision.RunCtx, s *config.Server
 			{site.DeployPath, user + ":www-data 710"},
 			{site.DeployPath + "/shared", user + ":" + user + " 700"},
 			{site.DeployPath + "/shared/tmp", user + ":" + user + " 700"},
-			{acmeWebroot(site.Domain), "www-data:www-data 755"},
+			{acmeWebroot(site.Domain), "root:root 755"},
 		} {
 			meta, present, err := statOwnerMode(ctx, r, d.path)
 			if err != nil {
@@ -174,8 +304,8 @@ func (a appDirs) Check(ctx context.Context, _ provision.RunCtx, s *config.Server
 
 func (appDirs) changes() []string {
 	return []string{
-		"install -d deploy_path (<user>:www-data 0710) + shared and shared/tmp (<user> 0700)",
-		"install -d ACME webroot (owner www-data)",
+		"install -d deploy_path (<user>:www-data 0710); shared and shared/tmp created as the site user (<user> 0700)",
+		"install -d ACME webroot (owner root)",
 	}
 }
 
@@ -189,25 +319,55 @@ func (appDirs) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 		if err := assertSiteTreeOwners(ctx, r, s, site); err != nil {
 			return err
 		}
+		if err := assertGroupMembership(ctx, r, s.SiteUser(site), false); err != nil {
+			return err
+		}
 	}
 	for _, site := range s.Sites {
 		user := s.SiteUser(site)
-		// deploy_path: site user owns it, group www-data + mode 0710 lets nginx
-		// traverse to public/ while other site users cannot enter.
-		cmds := []string{
-			fmt.Sprintf("install -d -o %s -g www-data -m 0710 %s", user, shQuote(site.DeployPath)),
-			// shared/ holds .env and is private to the site user.
-			fmt.Sprintf("install -d -o %s -g %s -m 0700 %s", user, user, shQuote(site.DeployPath+"/shared")),
-			// shared/tmp backs the pool's sys_temp_dir/upload_tmp_dir (no shared /tmp).
-			fmt.Sprintf("install -d -o %s -g %s -m 0700 %s", user, user, shQuote(site.DeployPath+"/shared/tmp")),
-			// ACME webroot for certbot --webroot.
-			fmt.Sprintf("install -d -o www-data -g www-data -m 0755 %s", shQuote(acmeWebroot(site.Domain))),
+		// Modes are five octal digits on purpose: GNU preserves a directory's
+		// setuid/setgid bits under shorter numeric modes, so `-m 0700` could
+		// leave an existing setgid directory at 2700 while Check demands 700 —
+		// an endlessly re-applying step. Five digits clear the bits explicitly.
+		//
+		// Root creates only the two directories whose whole ancestry is
+		// root-controlled (assertSafeAncestry proves it) and whose owner/group
+		// the running account could not set for itself.
+		rootDirs := []string{
+			// deploy_path: site user owns it, group www-data + mode 0710 lets nginx
+			// traverse to public/ while other site users cannot enter.
+			fmt.Sprintf("install -d -o %s -g www-data -m 00710 %s", user, shQuote(site.DeployPath)),
+			// ACME webroot: root-owned, because root-run certbot writes the
+			// challenge files inside it and nginx only reads (see acmeWebroot).
+			fmt.Sprintf("install -d -o root -g root -m 00755 %s", shQuote(acmeWebroot(site.Domain))),
 		}
-		for _, cmd := range cmds {
+		// shared/ and shared/tmp live INSIDE deploy_path, which the site user
+		// owns — a root-run install -d there is racy by construction: the probe
+		// and the mutation are separate SSH commands, and install -d follows a
+		// directory symlink and applies ownership to the target. Creating them
+		// AS the site user removes root from the window: a swapped symlink can
+		// then only reach what the tenant may already touch (chmod of a foreign
+		// target fails EPERM, a dangling one fails EEXIST/ENOENT). -o is gone
+		// because the creating account IS the owner; -g pins the group to the
+		// account's own group, which is the state Check asserts.
+		tenantDirs := []string{
+			// shared/ holds .env and is private to the site user.
+			fmt.Sprintf("sudo -u %s install -d -g %s -m 00700 %s", user, user, shQuote(site.DeployPath+"/shared")),
+			// shared/tmp backs the pool's sys_temp_dir/upload_tmp_dir (no shared /tmp).
+			fmt.Sprintf("sudo -u %s install -d -g %s -m 00700 %s", user, user, shQuote(site.DeployPath+"/shared/tmp")),
+		}
+		for _, cmd := range rootDirs {
 			if res, err := r.Run(ctx, cmd, nil); err != nil {
 				return err
 			} else if res.ExitCode != 0 {
 				return fmt.Errorf("create directories for %s: %s", site.Domain, res.Stderr)
+			}
+		}
+		for _, cmd := range tenantDirs {
+			if res, err := r.Run(ctx, cmd, nil); err != nil {
+				return err
+			} else if res.ExitCode != 0 {
+				return fmt.Errorf("create directories for %s as %s: %s", site.Domain, user, res.Stderr)
 			}
 		}
 	}

@@ -17,7 +17,7 @@ func backupServer() *config.Server {
 		PHP:      config.PHP{Version: "8.5"},
 		Database: config.Database{Engine: "mariadb", Name: "myapp", User: "myapp"},
 		Backups:  config.Backups{Enabled: true},
-		Sites:    []config.Site{{Domain: "app.example.com", DeployPath: "/home/deploy/app"}},
+		Sites:    []config.Site{{Domain: "app.example.com", DeployPath: "/var/www/app"}},
 	}
 }
 

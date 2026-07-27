@@ -350,8 +350,8 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 		}
 		var pw, appKey string
 		if envExists {
-			// An existing .env is never rewritten: WriteFile is atomic, so a
-			// present file is complete, and rewriting would clobber
+			// An existing .env is never rewritten: the seed write is atomic,
+			// so a present file is complete, and rewriting would clobber
 			// operator-added keys. The role's password must therefore come
 			// from the file the app reads.
 			pw, err = d.passwordFromEnv(ctx, r, site)
@@ -405,12 +405,16 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 			// file is never rewritten. Written AFTER EnsureUser so the
 			// credential it holds is live; a crash in between heals on the
 			// next run via Check's existence probe.
+			//
+			// The client-auth file sits directly in /home/<user>, which the
+			// account owns. A root write there is redirectable by a swapped LEAF
+			// symlink: a destination that resolves to a directory makes mv move
+			// the staged file INSIDE it, planting an account-owned file in a
+			// directory of the tenant's choosing. Writing as the account removes
+			// the privilege from that path.
 			user := s.SiteUser(site)
-			if err := r.WriteFile(ctx, bssh.FileSpec{
-				Path: authPath, Content: eng.ClientAuthFile(dbName, dbUser, pw),
-				Owner: user, Group: user, Mode: 0o600, Sudo: true,
-			}); err != nil {
-				return fmt.Errorf("write %s: %w", authPath, err)
+			if err := writeFileAsUser(ctx, r, user, authPath, 0o600, eng.ClientAuthFile(dbName, dbUser, pw)); err != nil {
+				return err
 			}
 		}
 		cache[dbUser] = pw
@@ -563,11 +567,13 @@ func (d database) seedSharedEnv(ctx context.Context, r bssh.Runner, s *config.Se
 		kv["REDIS_DB"] = "0"
 		kv["REDIS_CACHE_DB"] = "1"
 	}
-	if err := r.WriteFile(ctx, bssh.FileSpec{
-		Path: sharedEnvPath(site), Content: secret.EnvFile(kv),
-		Owner: user, Group: user, Mode: 0o600, Sudo: true,
-	}); err != nil {
-		return fmt.Errorf("write %s: %w", sharedEnvPath(site), err)
+	// shared/.env sits inside shared/, which the site user owns, so the root
+	// write path could be redirected by a swapped symlink into creating a
+	// tenant-owned file in a root-only directory (see writeFileAsUser). The
+	// account writes its own .env; the content still rides on stdin, so the
+	// generated password never reaches a command string.
+	if err := writeFileAsUser(ctx, r, user, sharedEnvPath(site), 0o600, secret.EnvFile(kv)); err != nil {
+		return err
 	}
 	return nil
 }

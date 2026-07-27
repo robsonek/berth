@@ -339,13 +339,23 @@ func (c *Client) sftpPut(ctx context.Context, remotePath string, content []byte)
 
 // installCmd builds the privileged install command; all path/owner values are
 // shell-quoted (defence-in-depth on top of config validation). The staged copy
-// is mktemp'd in the DESTINATION directory — unpredictable name (no
-// symlink-plant window in tenant-writable dirs) on the same filesystem — so
-// the final `mv -f` is an atomic rename(2): a failure anywhere in the chain
-// leaves the old destination intact, never a partial file. Because the chain
-// starts with a variable assignment, the privileged form wraps it whole in
-// `sudo -n sh -c`. It is a pure function so it can be unit-tested without an
-// SSH connection.
+// is mktemp'd in the DESTINATION directory, on the same filesystem, so the
+// closing `mv -fT --` is an atomic rename(2): a failure anywhere in the chain
+// leaves the old destination intact, never a partial file.
+//
+// The unpredictable temp NAME is not a security property: it does not stop an
+// unprivileged owner of the destination directory from replacing that directory
+// (or the leaf) with a symlink. -T is what bounds the damage here — without
+// --no-target-directory a destination that resolves to a DIRECTORY makes mv move
+// the staged file inside it, which turns a root write into "create a file owned
+// by FileSpec.Owner in a directory of the attacker's choosing". For paths inside
+// territory an unprivileged account controls, -T is still not enough: those are
+// written by the account itself (see steps.writeFileAsUser), and this primitive
+// is for root-owned destinations.
+//
+// Because the chain starts with a variable assignment, the privileged form wraps
+// it whole in `sudo -n sh -c`. It is a pure function so it can be unit-tested
+// without an SSH connection.
 func installCmd(f FileSpec, tmp string, useSudo bool) (cmd, tmpOut string) {
 	mode := f.Mode
 	if mode == 0 {
@@ -358,7 +368,14 @@ func installCmd(f FileSpec, tmp string, useSudo bool) (cmd, tmpOut string) {
 	if group == "" {
 		group = owner
 	}
-	cmd = fmt.Sprintf(`t=$(mktemp %s) && install -o %s -g %s -m %o %s "$t" && mv -f "$t" %s && rm -f %s`,
+	// mv -fT (--no-target-directory) is required, not cosmetic: a plain mv whose
+	// destination resolves to a DIRECTORY moves the source inside it. With a
+	// destination inside territory an unprivileged account controls, that turns a
+	// root write into "create a file owned by that account in a directory of its
+	// choosing" — the swapped-leaf-symlink variant of the same escalation the
+	// step layer avoids by writing as the account. -T makes the operation hit the
+	// named path or fail.
+	cmd = fmt.Sprintf(`t=$(mktemp %s) && install -o %s -g %s -m %o %s "$t" && mv -fT -- "$t" %s && rm -f %s`,
 		shQuote(path.Dir(f.Path)+"/.berth.XXXXXX"),
 		shQuote(owner), shQuote(group), mode.Perm(), shQuote(tmp), shQuote(f.Path), shQuote(tmp))
 	if f.Sudo && useSudo {

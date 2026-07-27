@@ -18,7 +18,7 @@ func siteServer() *config.Server {
 		Scheduler: true,
 		Sites: []config.Site{{
 			Domain:     "app.example.com",
-			DeployPath: "/home/deploy/myapp",
+			DeployPath: "/var/www/myapp",
 		}},
 	}
 }
@@ -376,7 +376,7 @@ func TestSiteVhostHonorsUploadMax(t *testing.T) {
 	s := &config.Server{
 		Tuning: config.Tuning{PHPUploadMax: "64M"},
 		Sites: []config.Site{{
-			Domain: "app.example.com", DeployPath: "/home/deploy/myapp", SSL: true,
+			Domain: "app.example.com", DeployPath: "/var/www/myapp", SSL: true,
 		}},
 	}
 	want := "client_max_body_size " + s.Tuning.PHPPostBodyMaxEff() + ";" // 64M + 5% (floored) = 70464307
@@ -1137,7 +1137,7 @@ func TestQueueCommandDefaultByteIdentical(t *testing.T) {
 	s := siteServer()
 	s.Queue = true
 	got := queueCommand(s, s.Sites[0])
-	want := "php /home/deploy/myapp/current/artisan queue:work --sleep=3 --tries=3 --max-time=3600"
+	want := "php /var/www/myapp/current/artisan queue:work --sleep=3 --tries=3 --max-time=3600"
 	if got != want {
 		t.Errorf("default queue command must be byte-identical to today\n got: %s\nwant: %s", got, want)
 	}
@@ -1147,7 +1147,7 @@ func TestQueueCommandTuned(t *testing.T) {
 	s := siteServer()
 	s.Sites[0].Queue = &config.QueueConfig{Processes: 2, Connection: "redis", Queue: "emails", Tries: 5, Timeout: 90, MaxMemory: 128}
 	got := queueCommand(s, s.Sites[0])
-	want := "php /home/deploy/myapp/current/artisan queue:work redis --queue=emails --sleep=3 --tries=5 --max-time=3600 --timeout=90 --memory=128"
+	want := "php /var/www/myapp/current/artisan queue:work redis --queue=emails --sleep=3 --tries=5 --max-time=3600 --timeout=90 --memory=128"
 	if got != want {
 		t.Errorf("tuned queue command wrong\n got: %s\nwant: %s", got, want)
 	}
@@ -1157,7 +1157,7 @@ func TestQueueCommandHorizon(t *testing.T) {
 	s := siteServer()
 	s.Sites[0].Queue = &config.QueueConfig{Driver: "horizon"}
 	got := queueCommand(s, s.Sites[0])
-	want := "php /home/deploy/myapp/current/artisan horizon"
+	want := "php /var/www/myapp/current/artisan horizon"
 	if got != want {
 		t.Errorf("horizon command wrong: %s", got)
 	}

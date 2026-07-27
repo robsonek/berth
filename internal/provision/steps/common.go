@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	gopath "path"
 	"path/filepath"
 	"strings"
 
@@ -165,6 +166,72 @@ func managedFileSatisfied(state managedFileState, path string, force bool) (sati
 	}
 }
 
+// assertManagedWritable enforces the drift policy on the WRITE path: a
+// pre-existing file that lacks the berth marker is refused unless force. Shared
+// by writeManagedFile (root writes) and writeManagedFileAsUser (account
+// writes), so both mechanisms obey exactly one policy.
+func assertManagedWritable(ctx context.Context, r bssh.Runner, force bool, path string) error {
+	res, err := r.Run(ctx, "cat "+shQuote(path), nil)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode == 0 && !hasManagedMarker(res.Stdout) && !force {
+		return fmt.Errorf("%s exists but is not managed by berth; re-run with --force to overwrite", path)
+	}
+	return nil
+}
+
+// writeFileAsUser atomically writes content to path AS user.
+//
+// Use it for every file whose DIRECTORY component the user controls. The root
+// write path (ssh.installCmd) stages its temp file inside the destination
+// directory and gives the result the target owner, so a user who can replace
+// that directory with a symlink gets root to create a user-OWNED file anywhere
+// — e.g. /etc/apt/apt.conf.d/authorized_keys, which APT honors (extensionless
+// fragments are read) and whose content the user may then rewrite into a shell
+// hook that the next root apt-get executes. Running the whole sequence as the
+// user removes that privilege: the worst a swapped symlink achieves is a file
+// the user could have written anyway.
+//
+// Content rides on stdin, never in the command string, so secrets stay out of
+// logs and out of -v output. mktemp stages a sibling of the target, so the
+// closing rename is atomic on the same filesystem — a reader never sees a
+// half-written file (the property ssh.WriteFile gives root writes).
+//
+// Two details are load-bearing. `mv -fT` (--no-target-directory) is required
+// because a plain `mv` whose destination resolves to a DIRECTORY moves the
+// source inside it instead of replacing it, so a symlinked leaf would relocate
+// the file into a directory of the attacker's choosing. The trap removes the
+// staged temp file if any later step fails; without it a failing run leaves a
+// credential-bearing .berth.* behind, and repeated failures accumulate them
+// (after a successful mv the path is gone, so the trap is a no-op).
+func writeFileAsUser(ctx context.Context, r bssh.Runner, user, path string, mode os.FileMode, content []byte) error {
+	if mode.Perm() == 0 {
+		return fmt.Errorf("refusing to write %s with mode 0: pass an explicit mode (a zero mode would leave the file unreadable even by its owner)", path)
+	}
+	dir := gopath.Dir(path)
+	inner := fmt.Sprintf(`umask 077; t=$(mktemp %s) && trap 'rm -f "$t"' EXIT INT TERM && cat > "$t" && chmod %o "$t" && mv -fT -- "$t" %s`,
+		shQuote(dir+"/.berth.XXXXXX"), mode.Perm(), shQuote(path))
+	cmd := fmt.Sprintf("sudo -u %s sh -c %s", user, shQuote(inner))
+	res, err := r.Run(ctx, cmd, content)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("write %s as %s: %s", path, user, res.Stderr)
+	}
+	return nil
+}
+
+// writeManagedFileAsUser is writeManagedFile for a path inside territory the
+// user owns: identical drift policy, but the write runs as the user.
+func writeManagedFileAsUser(ctx context.Context, r bssh.Runner, force bool, user string, spec bssh.FileSpec) error {
+	if err := assertManagedWritable(ctx, r, force, spec.Path); err != nil {
+		return err
+	}
+	return writeFileAsUser(ctx, r, user, spec.Path, spec.Mode, spec.Content)
+}
+
 // writeManagedFile enforces the drift policy (§6.5) on the WRITE path, then
 // writes: a pre-existing file at spec.Path that lacks the berth marker is
 // refused unless force. Check normally reports such conflicts first, but its
@@ -173,12 +240,8 @@ func managedFileSatisfied(state managedFileState, path string, force bool) (sati
 // the abort-unless---force contract itself. Steps write managed configs
 // through this helper, never bare r.WriteFile.
 func writeManagedFile(ctx context.Context, r bssh.Runner, force bool, spec bssh.FileSpec) error {
-	res, err := r.Run(ctx, "cat "+shQuote(spec.Path), nil)
-	if err != nil {
+	if err := assertManagedWritable(ctx, r, force, spec.Path); err != nil {
 		return err
-	}
-	if res.ExitCode == 0 && !hasManagedMarker(res.Stdout) && !force {
-		return fmt.Errorf("%s exists but is not managed by berth; re-run with --force to overwrite", spec.Path)
 	}
 	return r.WriteFile(ctx, spec)
 }

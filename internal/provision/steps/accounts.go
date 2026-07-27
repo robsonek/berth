@@ -125,6 +125,27 @@ func (a accounts) Check(ctx context.Context, rc provision.RunCtx, s *config.Serv
 			return provision.CheckResult{}, err
 		}
 	}
+	// ensureUser creates /home/<user> as root, so /home itself must be
+	// root-controlled — otherwise the account's home could be pre-planted as a
+	// symlink and root's install -d would chown its target. "/home/x" is a
+	// deliberate path PATTERN, not a real account: ancestorsOf derives
+	// ["/", "/home"] from it, which is exactly the chain the probe must cover.
+	if err := assertSafeAncestry(ctx, r, "berth accounts", "/home/x"); err != nil {
+		return provision.CheckResult{}, err
+	}
+	// Both guards belong in Check, not only in Apply: a Satisfied step never
+	// enters Apply, so a host whose ~/.ssh is root-owned would otherwise never
+	// hear about it — and dry-run would print "satisfied" for a state that needs
+	// a manual chown. mustExist=false: on a fresh host the accounts do not exist
+	// yet and Apply creates them.
+	for _, u := range managedAccounts(s) {
+		if err := assertGroupMembership(ctx, r, u, false); err != nil {
+			return provision.CheckResult{}, err
+		}
+		if err := assertOwnSSHDir(ctx, r, u); err != nil {
+			return provision.CheckResult{}, err
+		}
+	}
 	operatorKey, err := operatorPublicKey(s.SSH.Key)
 	if err != nil {
 		return provision.CheckResult{}, err
@@ -301,6 +322,14 @@ func (a accounts) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serv
 			return err
 		}
 	}
+	// ensureUser creates /home/<user> as root, so /home itself must be
+	// root-controlled — otherwise the account's home could be pre-planted as a
+	// symlink and root's install -d would chown its target. "/home/x" is a
+	// deliberate path PATTERN, not a real account: ancestorsOf derives
+	// ["/", "/home"] from it, which is exactly the chain the probe must cover.
+	if err := assertSafeAncestry(ctx, r, "berth accounts", "/home/x"); err != nil {
+		return err
+	}
 	operatorKey, err := operatorPublicKey(s.SSH.Key)
 	if err != nil {
 		return err
@@ -310,6 +339,19 @@ func (a accounts) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serv
 	// 1) Create every managed account with a private (0700) home.
 	for _, u := range managedAccounts(s) {
 		if err := ensureUser(ctx, r, u); err != nil {
+			return err
+		}
+	}
+
+	// 1b) Re-assert with mustExist: the accounts were just created, so an
+	// unresolvable one is a real failure. From here on berth creates ~/.ssh and
+	// writes authorized_keys AS the account, so a state only root could repair
+	// must be reported with its remedy, not hit as a raw EPERM mid-Apply.
+	for _, u := range managedAccounts(s) {
+		if err := assertGroupMembership(ctx, r, u, true); err != nil {
+			return err
+		}
+		if err := assertOwnSSHDir(ctx, r, u); err != nil {
 			return err
 		}
 	}
@@ -462,8 +504,9 @@ func ensureUser(ctx context.Context, r bssh.Runner, user string) error {
 		return fmt.Errorf("user %s already exists with home %q, not %q — it is likely a reserved system account; choose a different sites[].user", user, home, want)
 	}
 	// Private, present home (idempotent: create if missing, own it, lock to
-	// 0700) so one site user cannot traverse into another's home.
-	if res, err := r.Run(ctx, fmt.Sprintf("install -d -o %s -g %s -m 700 %s", user, user, shQuote("/home/"+user)), nil); err != nil {
+	// 0700) so one site user cannot traverse into another's home. Five-digit
+	// mode: shorter numeric modes preserve setuid/setgid on directories.
+	if res, err := r.Run(ctx, fmt.Sprintf("install -d -o %s -g %s -m 00700 %s", user, user, shQuote("/home/"+user)), nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("lock home for %s: %s", user, res.Stderr)
@@ -488,6 +531,82 @@ func userHome(ctx context.Context, r bssh.Runner, user string) (string, error) {
 	return fields[5], nil
 }
 
+// assertGroupMembership refuses when the account is not a member of the group
+// berth pins its directories to (the eponymous <user> group).
+//
+// This exists because the privilege split narrowed one thing: root could chgrp
+// a directory to any EXISTING group, member or not, while the account itself
+// can only chgrp to a group it belongs to. Membership — not primacy — is the
+// real prerequisite: a pinned sites[].user whose primary group is www-data
+// still works if <user> is one of its supplementary groups.
+//
+// mustExist distinguishes two callers. With false (Check, and appdirs, where
+// --only appdirs may legitimately run before the account exists) a genuinely
+// unresolvable account passes: the mutation that follows fails with its own
+// clear error and cannot succeed either way, so this is not fail-open. But
+// `id -nG` also fails on transient NSS or I/O trouble, so a failing probe for
+// an account that still resolves is a hard error — passing on it would skip
+// the guard silently. With true (Apply, right after ensureUser) any failing
+// probe is a hard error — the account was just created, so it must be
+// resolvable.
+func assertGroupMembership(ctx context.Context, r bssh.Runner, user string, mustExist bool) error {
+	res, err := r.Run(ctx, "LC_ALL=C id -nG "+shQuote(user), nil)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		if mustExist {
+			return fmt.Errorf("cannot resolve the groups of account %s right after creating it: %s", user, strings.TrimSpace(res.Stderr))
+		}
+		// Tell "no such account yet" apart from a probe that failed for
+		// another reason: only the former may pass.
+		exists, err := userExists(ctx, r, user)
+		if err != nil {
+			return err
+		}
+		if exists {
+			return fmt.Errorf("account %s exists but probing its groups failed: %s", user, strings.TrimSpace(res.Stderr))
+		}
+		return nil // genuinely no such account yet
+	}
+	for _, g := range strings.Fields(res.Stdout) {
+		if g == user {
+			return nil
+		}
+	}
+	return fmt.Errorf("account %s is not a member of group %q, so it cannot own its directories with that group; run `usermod -aG %s %s` on the host (or pin a different sites[].user) and re-run", user, user, user, user)
+}
+
+// assertOwnSSHDir refuses when an existing ~/.ssh belongs to someone other
+// than the account. berth now creates that directory AS the account (root must
+// not mutate a path inside a tenant-owned home), and the account cannot re-own
+// a directory it does not own — a state root used to repair silently. Only a
+// genuinely absent entry passes (it is about to be created); the probe keeps
+// absence and failure distinguishable — exit 92 is its own "absent" signal
+// (the existence test counts a dangling symlink as present), and a failing
+// stat on an existing entry surfaces as exit 91, a hard error, mirroring
+// assertSafeAncestry. Reading a probe failure as "absent" would skip the
+// guard silently and leave the operator with the raw EPERM it exists to
+// prevent.
+func assertOwnSSHDir(ctx context.Context, r bssh.Runner, user string) error {
+	sshDir := "/home/" + user + "/.ssh"
+	q := shQuote(sshDir)
+	res, err := r.Run(ctx, "export LC_ALL=C; if [ -e "+q+" ] || [ -L "+q+" ]; then stat -c '%U' "+q+" || exit 91; else exit 92; fi", nil)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode == 92 {
+		return nil // genuinely absent — about to be created
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("probing the owner of %s failed: %s", sshDir, strings.TrimSpace(res.Stderr))
+	}
+	if owner := strings.TrimSpace(res.Stdout); owner != user {
+		return fmt.Errorf("%s exists but is owned by %s, not %s; berth creates it as the account itself and cannot re-own it — run `chown -R %s:%s %s` on the host and re-run", sshDir, owner, user, user, user, sshDir)
+	}
+	return nil
+}
+
 // writeValidatedSudoers writes a sudoers drop-in (mode 0440, guarded against
 // clobbering a foreign file) and validates it.
 func writeValidatedSudoers(ctx context.Context, r bssh.Runner, force bool, path string, body []byte) error {
@@ -506,16 +625,26 @@ func writeValidatedSudoers(ctx context.Context, r bssh.Runner, force bool, path 
 
 // installAuthorizedKey creates ~/.ssh and writes the managed authorized_keys
 // (guarded: a pre-existing hand-installed file is never clobbered without force).
+//
+// The directory is created AS THE ACCOUNT, not as root: /home/<user> belongs to
+// the account, so a root-run install -d here could be redirected by a symlink
+// planted between the guard probe and the mutation — install -d follows a
+// directory symlink and would apply ownership to its target. Running as the
+// account removes the privilege from the race window. ensureUser's
+// /home/<user> stays root-run: its parent /home is root-controlled (proved by
+// assertSafeAncestry), so no tenant can plant anything along that path.
 func installAuthorizedKey(ctx context.Context, r bssh.Runner, force bool, user string, want []byte) error {
 	sshDir := fmt.Sprintf("/home/%s/.ssh", user)
-	if res, err := r.Run(ctx, fmt.Sprintf("install -d -o %s -g %s -m 700 %s", user, user, shQuote(sshDir)), nil); err != nil {
+	if res, err := r.Run(ctx, fmt.Sprintf("sudo -u %s install -d -g %s -m 00700 %s", user, user, shQuote(sshDir)), nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
-		return fmt.Errorf("create %s: %s", sshDir, res.Stderr)
+		return fmt.Errorf("create %s as %s: %s", sshDir, user, res.Stderr)
 	}
-	if err := writeManagedFile(ctx, r, force, bssh.FileSpec{
-		Path: authorizedKeysPath(user), Content: want,
-		Owner: user, Group: user, Mode: 0o600, Sudo: true,
+	// authorized_keys lives inside ~/.ssh, which the account owns — see
+	// writeFileAsUser for why a root write through that directory is an
+	// escalation path and not a mere overwrite.
+	if err := writeManagedFileAsUser(ctx, r, force, user, bssh.FileSpec{
+		Path: authorizedKeysPath(user), Content: want, Mode: 0o600,
 	}); err != nil {
 		return fmt.Errorf("write %s authorized_keys: %w", user, err)
 	}

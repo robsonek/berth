@@ -12,7 +12,7 @@ func contains(s, substr string) bool { return strings.Contains(s, substr) }
 
 func TestInstallCmdStagesInDestDirAndRenames(t *testing.T) {
 	cmd, _ := installCmd(FileSpec{Path: "/etc/nginx/app.conf", Owner: "deploy", Group: "www-data", Mode: 0o640}, "/tmp/up.123", false)
-	want := `t=$(mktemp '/etc/nginx/.berth.XXXXXX') && install -o 'deploy' -g 'www-data' -m 640 '/tmp/up.123' "$t" && mv -f "$t" '/etc/nginx/app.conf' && rm -f '/tmp/up.123'`
+	want := `t=$(mktemp '/etc/nginx/.berth.XXXXXX') && install -o 'deploy' -g 'www-data' -m 640 '/tmp/up.123' "$t" && mv -fT -- "$t" '/etc/nginx/app.conf' && rm -f '/tmp/up.123'`
 	if cmd != want {
 		t.Fatalf("cmd = %q\nwant  %q", cmd, want)
 	}
@@ -20,7 +20,7 @@ func TestInstallCmdStagesInDestDirAndRenames(t *testing.T) {
 
 func TestInstallCmdDefaultsRootAndMode(t *testing.T) {
 	cmd, _ := installCmd(FileSpec{Path: "/etc/f"}, "/tmp/t1", false)
-	want := `t=$(mktemp '/etc/.berth.XXXXXX') && install -o 'root' -g 'root' -m 644 '/tmp/t1' "$t" && mv -f "$t" '/etc/f' && rm -f '/tmp/t1'`
+	want := `t=$(mktemp '/etc/.berth.XXXXXX') && install -o 'root' -g 'root' -m 644 '/tmp/t1' "$t" && mv -fT -- "$t" '/etc/f' && rm -f '/tmp/t1'`
 	if cmd != want {
 		t.Fatalf("cmd = %q\nwant  %q", cmd, want)
 	}
@@ -28,9 +28,21 @@ func TestInstallCmdDefaultsRootAndMode(t *testing.T) {
 
 func TestInstallCmdSudoWrapsWholeChain(t *testing.T) {
 	cmd, _ := installCmd(FileSpec{Path: "/etc/f", Sudo: true}, "/tmp/t1", true)
-	inner := `t=$(mktemp '/etc/.berth.XXXXXX') && install -o 'root' -g 'root' -m 644 '/tmp/t1' "$t" && mv -f "$t" '/etc/f' && rm -f '/tmp/t1'`
+	inner := `t=$(mktemp '/etc/.berth.XXXXXX') && install -o 'root' -g 'root' -m 644 '/tmp/t1' "$t" && mv -fT -- "$t" '/etc/f' && rm -f '/tmp/t1'`
 	if want := "sudo -n sh -c " + shQuote(inner); cmd != want {
 		t.Fatalf("cmd = %q\nwant  %q", cmd, want)
+	}
+}
+
+func TestInstallCmdMovesWithNoTargetDirectory(t *testing.T) {
+	// Regression guard, asserted verbatim: a plain `mv -f` whose destination
+	// resolves to a DIRECTORY (e.g. a swapped leaf symlink) moves the staged
+	// file INSIDE it instead of replacing the named path. The -T flag is easy
+	// to lose in a "simplification" and the difference is invisible in a diff
+	// review, so pin it explicitly beyond the full-string tests above.
+	cmd, _ := installCmd(FileSpec{Path: "/etc/f"}, "/tmp/t1", false)
+	if !contains(cmd, `mv -fT -- "$t"`) {
+		t.Fatalf("installCmd must rename with mv -fT -- (--no-target-directory); got %q", cmd)
 	}
 }
 
