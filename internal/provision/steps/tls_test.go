@@ -479,8 +479,15 @@ func TestTLSApplySkipsOnDNSMismatch(t *testing.T) {
 	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: "No certificates found.\n"})
 	f.On("dpkg -s certbot", bssh.Result{ExitCode: 1}) // never installed: issuance was DNS-skipped
 	// install/certonly are NOT stubbed: a DNS mismatch must skip issuance.
-	if err := TLS().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+	var warned []string
+	rc := provision.RunCtx{Warn: func(msg string) { warned = append(warned, msg) }}
+	if err := TLS().Apply(context.Background(), rc, s, f); err != nil {
 		t.Fatalf("Apply() should skip (not error) on DNS mismatch; got %v", err)
+	}
+	// The skip surfaces through the warning channel (renderer-visible), not a
+	// raw fmt.Printf that bypasses both renderers.
+	if len(warned) != 1 || !strings.Contains(warned[0], "does not resolve") || !strings.Contains(warned[0], s.Sites[0].Domain) {
+		t.Errorf("want one warning naming the unresolved domain, got %q", warned)
 	}
 	for _, c := range f.Calls() {
 		if strings.Contains(c.Cmd, "certonly") {

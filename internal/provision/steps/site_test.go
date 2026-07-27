@@ -82,6 +82,15 @@ func TestSiteApplyAbortsOnNginxTestFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected Apply to abort when nginx -t fails")
 	}
+	// site just re-rendered everything it owns, so its -t failure is the
+	// TERMINAL diagnosis (php/nginx defer here since P13) — the message must
+	// say what the validator's path can point at, without overclaiming
+	// (site does not own nginx.conf, the bridge or the PHP drop-ins).
+	for _, want := range []string{"invalid config", "site-owned", "unmanaged file"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to contain %q", err, want)
+		}
+	}
 	var ranNginxT bool
 	for _, c := range f.Calls() {
 		if c.Cmd == "nginx -t" {
@@ -93,6 +102,88 @@ func TestSiteApplyAbortsOnNginxTestFailure(t *testing.T) {
 	}
 	if !ranNginxT {
 		t.Fatal("Apply must reach and fail at nginx -t (not abort earlier)")
+	}
+}
+
+func TestSiteMultiSiteDriftInSecondSiteRewritesEverySite(t *testing.T) {
+	// The deferral design (P13) hangs on this property: whichever single file
+	// drifted, site.Apply re-renders EVERY configured vhost and pool — an
+	// early return after healing the first site would leave the unit broken
+	// and the deferred reload never blessed.
+	s := siteServer()
+	s.Sites = append(s.Sites, config.Site{Domain: "second.example.com", DeployPath: "/var/www/second"})
+
+	// Check: everything up to date EXCEPT the second site's pool → unsatisfied.
+	fc := bssh.NewFakeRunner()
+	stubManagedSiteFiles(t, s, fc)
+	fc.On("cat "+shQuote(fpmPoolPath("8.4", "second.example.com")),
+		bssh.Result{ExitCode: 0, Stdout: managedMarker + "\ncorrupted\n"}) // drifted (marker, wrong bytes)
+	cr, err := Site().Check(context.Background(), provision.RunCtx{}, s, fc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Fatal("a drifted second-site pool must be unsatisfied")
+	}
+
+	// Apply: all four unit files rewritten, both units validated and reloaded.
+	f := bssh.NewFakeRunner()
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("ln -sfn '/etc/nginx/sites-available/second.example.com' '/etc/nginx/sites-enabled/second.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	got := map[string]bool{}
+	for _, w := range f.Writes() {
+		got[w.Path] = true
+	}
+	for _, p := range []string{
+		nginxAvailablePath("app.example.com"),
+		nginxAvailablePath("second.example.com"),
+		fpmPoolPath("8.4", "app.example.com"),
+		fpmPoolPath("8.4", "second.example.com"),
+	} {
+		if !got[p] {
+			t.Errorf("Apply must rewrite %s for every configured site", p)
+		}
+	}
+}
+
+func TestSiteApplyFPMTestFailureIsTerminalDiagnosis(t *testing.T) {
+	// Same terminal-diagnosis contract for the FPM window.
+	s := siteServer()
+	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(legacyCronPath("app.example.com")), bssh.Result{ExitCode: 1})
+	stubEmptyDiscovery(f, s)
+	f.On("rm -f "+shQuote("/var/lib/berth/nginx.reloaded"), bssh.Result{})
+	f.On("cat "+shQuote(nginxAvailablePath("app.example.com")), bssh.Result{ExitCode: 1})
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("cat "+shQuote(cloudflareConfPath), bssh.Result{ExitCode: 1})
+	f.On("nginx -t", bssh.Result{})
+	f.On("systemctl reload nginx", bssh.Result{})
+	f.On(markReloadedCmd("nginx"), bssh.Result{})
+	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{})
+	f.On(fmt.Sprintf("test -f %[1]s && mv -f %[1]s %[1]s.disabled || true", shQuote(defaultFPMPoolPath(s))), bssh.Result{})
+	f.On("cat "+shQuote(fpmPoolPath("8.4", "app.example.com")), bssh.Result{ExitCode: 1}) // pool write-guard: absent
+	f.On("php-fpm8.4 -t", bssh.Result{ExitCode: 1, Stderr: "broken pool"})
+	// systemctl reload php8.4-fpm intentionally NOT stubbed.
+
+	err := Site().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil {
+		t.Fatal("expected Apply to abort when php-fpm -t fails")
+	}
+	for _, want := range []string{"broken pool", "site-owned", "unmanaged file"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to contain %q", err, want)
+		}
+	}
+	for _, c := range f.Calls() {
+		if c.Cmd == "systemctl reload php8.4-fpm" || c.Cmd == markReloadedCmd("php8.4-fpm") {
+			t.Errorf("%q must not run after a failed php-fpm -t", c.Cmd)
+		}
 	}
 }
 

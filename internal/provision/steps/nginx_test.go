@@ -32,6 +32,7 @@ func stubNginxApplyTail(f *bssh.FakeRunner) {
 	f.On("rm -f "+shQuote(debianDefaultSite), bssh.Result{})
 	f.On(fmt.Sprintf("test -f %[1]s && mv -f %[1]s %[1]s.disabled || true", shQuote(nginxOrgDefaultConf)), bssh.Result{})
 	f.On("nginx -t", bssh.Result{})
+	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0}) // running → graceful reload
 	f.On("systemctl reload nginx", bssh.Result{})
 	f.On(markReloadedCmd("nginx"), bssh.Result{})
 }
@@ -121,7 +122,7 @@ func TestNginxCheckUnsatisfiedWhenDefaultSiteEnabled(t *testing.T) {
 func TestNginxApplyDisablesStockDefaults(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx", bssh.Result{})
-	f.On("systemctl enable --now nginx", bssh.Result{})
+	f.On("systemctl enable nginx", bssh.Result{})
 	stubNginxApplyTail(f)
 	if err := Nginx().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -240,7 +241,7 @@ func TestNginxApplySourceNginxAddsRepoAndBridge(t *testing.T) {
 	f.On("install -d /etc/nginx/sites-available /etc/nginx/sites-enabled", bssh.Result{})
 	f.On("cat "+shQuote("/etc/nginx/conf.d/berth-sites.conf"), bssh.Result{ExitCode: 1}) // write-guard: absent
 	f.On("sed -ri 's|^[[:space:]]*user[[:space:]]+[^;]*;|user  www-data;|' "+nginxConfPath, bssh.Result{})
-	f.On("systemctl enable --now nginx", bssh.Result{})
+	f.On("systemctl enable nginx", bssh.Result{})
 	stubNginxApplyTail(f)
 	if err := Nginx().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -277,7 +278,7 @@ func TestNginxApplySourceNginxAddsRepoAndBridge(t *testing.T) {
 func TestNginxApplyInvalidatesBeforeMutationAndStampsAfterReload(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx", bssh.Result{})
-	f.On("systemctl enable --now nginx", bssh.Result{})
+	f.On("systemctl enable nginx", bssh.Result{})
 	stubNginxApplyTail(f)
 	if err := Nginx().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -309,37 +310,113 @@ func TestNginxApplyInvalidatesBeforeMutationAndStampsAfterReload(t *testing.T) {
 	}
 }
 
-func TestNginxApplyTestFailureNamesSitesAvailable(t *testing.T) {
-	// nginx -t validates the WHOLE unit, so the failure may be a vhost owned by
-	// the LATER site step — the error must point the operator there, and no
-	// reload or stamp may follow.
-	f := bssh.NewFakeRunner()
+// stubNginxApplyUpToValidate stubs Apply's prefix through the stock-default
+// removal, leaving nginx -t (and everything after) to the caller.
+func stubNginxApplyUpToValidate(f *bssh.FakeRunner) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx", bssh.Result{})
-	f.On("systemctl enable --now nginx", bssh.Result{})
+	f.On("systemctl enable nginx", bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/nginx.reloaded"), bssh.Result{})
 	f.On("rm -f "+shQuote(debianDefaultSite), bssh.Result{})
 	f.On(fmt.Sprintf("test -f %[1]s && mv -f %[1]s %[1]s.disabled || true", shQuote(nginxOrgDefaultConf)), bssh.Result{})
-	f.On("nginx -t", bssh.Result{ExitCode: 1, Stderr: "unexpected end of file"})
-	// systemctl reload nginx and the stamp mark intentionally NOT stubbed.
+}
 
-	err := Nginx().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f)
+func TestNginxApplyDefersUnitValidationFailureToSite(t *testing.T) {
+	// nginx -t validates the WHOLE unit and this step's own writes are fixed,
+	// known-good content — a failure is a vhost owned by the LATER site step
+	// (or a foreign file). Defer: warn, skip start/reload/stamp, return nil so
+	// the pipeline reaches site, which re-renders its vhosts, validates and
+	// reloads. No differential here: removing the sites bridge would unload
+	// sites-enabled/* and misattribute a vhost fault to berth's own file.
+	// Enablement runs BEFORE -t and without --now: with a dead nginx and a
+	// broken vhost, `enable --now` would fail on the start and never reach
+	// this deferral (the old deadlock).
+	f := bssh.NewFakeRunner()
+	stubNginxApplyUpToValidate(f)
+	f.On("nginx -t", bssh.Result{ExitCode: 1, Stderr: "unexpected end of file"})
+	// is-active/start/reload/stamp intentionally NOT stubbed.
+
+	var warned []string
+	rc := provision.RunCtx{FullRun: true, Warn: func(msg string) { warned = append(warned, msg) }}
+	if err := Nginx().Apply(context.Background(), rc, &config.Server{}, f); err != nil {
+		t.Fatalf("a unit validation failure must defer to site, not fail: %v", err)
+	}
+	if len(warned) != 1 {
+		t.Fatalf("want exactly one warning, got %q", warned)
+	}
+	for _, want := range []string{"unexpected end of file", "/etc/nginx/sites-available/", "site step"} {
+		if !strings.Contains(warned[0], want) {
+			t.Errorf("warning %q must contain %q", warned[0], want)
+		}
+	}
+	for _, c := range f.Calls() {
+		switch c.Cmd {
+		case "systemctl enable --now nginx", "systemctl start nginx",
+			"systemctl is-active nginx", "systemctl reload nginx", markReloadedCmd("nginx"):
+			t.Errorf("%q must not run when validation failed and the reload is deferred", c.Cmd)
+		}
+	}
+}
+
+func TestNginxApplyUnderOnlyFailsHardOnValidationFailure(t *testing.T) {
+	// Under --only (FullRun=false) site never runs, so deferring would report
+	// Applied and exit 0 while nginx keeps serving the old config.
+	f := bssh.NewFakeRunner()
+	stubNginxApplyUpToValidate(f)
+	f.On("nginx -t", bssh.Result{ExitCode: 1, Stderr: "unexpected end of file"})
+
+	var warned []string
+	rc := provision.RunCtx{FullRun: false, Warn: func(msg string) { warned = append(warned, msg) }}
+	err := Nginx().Apply(context.Background(), rc, &config.Server{}, f)
 	if err == nil || !strings.Contains(err.Error(), "nginx -t failed") {
 		t.Fatalf("err = %v, want the nginx -t failure", err)
 	}
-	if !strings.Contains(err.Error(), "/etc/nginx/sites-available/") {
-		t.Errorf("err = %v, want a remediation hint naming the vhost directory", err)
-	}
-	for _, c := range f.Calls() {
-		if c.Cmd == "systemctl reload nginx" || c.Cmd == markReloadedCmd("nginx") {
-			t.Errorf("%q must not run after a failed nginx -t", c.Cmd)
+	for _, want := range []string{"/etc/nginx/sites-available/", "full provision"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to contain %q", err, want)
 		}
+	}
+	if len(warned) != 0 {
+		t.Errorf("no warning under --only, got %q", warned)
+	}
+}
+
+func TestNginxApplyStartsInactiveNginxAfterValidation(t *testing.T) {
+	// A dead nginx with a VALID config must be started (not reloaded), and
+	// only after -t passed — never before validation.
+	f := bssh.NewFakeRunner()
+	stubNginxApplyUpToValidate(f)
+	f.On("nginx -t", bssh.Result{})
+	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 3}) // dead
+	f.On("systemctl start nginx", bssh.Result{})
+	f.On(markReloadedCmd("nginx"), bssh.Result{})
+
+	if err := Nginx().Apply(context.Background(), provision.RunCtx{FullRun: true}, &config.Server{}, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	idx := func(want string) int {
+		for i, c := range f.Calls() {
+			if c.Cmd == want {
+				return i
+			}
+		}
+		return -1
+	}
+	enable, validate, start, mark := idx("systemctl enable nginx"), idx("nginx -t"), idx("systemctl start nginx"), idx(markReloadedCmd("nginx"))
+	if enable < 0 || validate < 0 || start < 0 || mark < 0 {
+		t.Fatalf("missing calls: enable=%d -t=%d start=%d mark=%d\n%+v", enable, validate, start, mark, f.Calls())
+	}
+	if !(enable < validate && validate < start && start < mark) {
+		t.Errorf("order must be enable → -t → start → mark; got enable=%d -t=%d start=%d mark=%d", enable, validate, start, mark)
+	}
+	if idx("systemctl reload nginx") >= 0 {
+		t.Error("a freshly started nginx must not also be reloaded")
 	}
 }
 
 func TestNginxApplyInstallsAndEnables(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx", bssh.Result{})
-	f.On("systemctl enable --now nginx", bssh.Result{})
+	f.On("systemctl enable nginx", bssh.Result{})
 	stubNginxApplyTail(f)
 	if err := Nginx().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -349,7 +426,7 @@ func TestNginxApplyInstallsAndEnables(t *testing.T) {
 		cmds = append(cmds, c.Cmd)
 	}
 	joined := strings.Join(cmds, "\n")
-	for _, want := range []string{"apt-get install -y nginx", "systemctl enable --now nginx"} {
+	for _, want := range []string{"apt-get install -y nginx", "systemctl enable nginx"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("Apply did not run %q; calls:\n%s", want, joined)
 		}

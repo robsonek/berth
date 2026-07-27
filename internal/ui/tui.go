@@ -19,6 +19,7 @@ var ErrInterrupted = errors.New("interrupted")
 type stepModel struct {
 	order    []string
 	statuses map[string]string // started|applied|already|planned|failed
+	warnings []string          // "<step>: <msg>" from terminal-event Warnings
 	err      error
 }
 
@@ -43,6 +44,11 @@ func (m stepModel) apply(e provision.Event) stepModel {
 		m.statuses[e.Step] = "failed"
 		m.err = e.Err
 	}
+	// Warnings never change a step's status or the run's error — they are
+	// operator-facing context on an otherwise terminal event.
+	for _, w := range e.Warnings {
+		m.warnings = append(m.warnings, e.Step+": "+w)
+	}
 	return m
 }
 
@@ -52,6 +58,7 @@ func (m stepModel) failed() bool              { return m.err != nil }
 var (
 	okStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
 	failStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	warnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
 )
 
 func (m stepModel) view() string {
@@ -67,6 +74,9 @@ func (m stepModel) view() string {
 		default:
 			out += "… " + name + "\n"
 		}
+	}
+	for _, w := range m.warnings {
+		out += warnStyle.Render("⚠ "+w) + "\n"
 	}
 	return out
 }

@@ -28,7 +28,7 @@ func New(steps ...Step) *Engine { return &Engine{steps: steps} }
 // dependency); per-step errors travel on the event stream and are surfaced by
 // the renderer (see internal/ui).
 func (e *Engine) Run(ctx context.Context, s *config.Server, r bssh.Runner, opt Options) (<-chan Event, error) {
-	rc := RunCtx{Force: opt.Force, SSLStaging: opt.SSLStaging}
+	rc := RunCtx{Force: opt.Force, SSLStaging: opt.SSLStaging, FullRun: opt.Only == ""}
 	if opt.Only != "" {
 		if err := e.checkDependencies(ctx, rc, s, r, opt.Only); err != nil {
 			return nil, err
@@ -69,11 +69,20 @@ func (e *Engine) Run(ctx context.Context, s *config.Server, r bssh.Runner, opt O
 				ch <- Event{Step: step.Name(), Kind: EventPlanned, Reason: cr.Reason, Changes: cr.Changes, Sensitive: cr.Sensitive}
 				continue
 			}
-			if err := step.Apply(ctx, rc, s, r); err != nil {
-				ch <- Event{Step: step.Name(), Kind: EventFailed, Err: fmt.Errorf("%s: apply: %w", step.Name(), err)}
+			// Warnings ride on the step's terminal event instead of being sent
+			// as extra events: the buffer above is sized for exactly the
+			// events this loop can emit, and that bound is what lets the
+			// goroutine finish even when the consumer stopped reading (TUI
+			// after ctrl+c). Apply runs in this goroutine, so the append is
+			// race-free.
+			var warnings []string
+			applyRC := rc
+			applyRC.Warn = func(msg string) { warnings = append(warnings, msg) }
+			if err := step.Apply(ctx, applyRC, s, r); err != nil {
+				ch <- Event{Step: step.Name(), Kind: EventFailed, Warnings: warnings, Err: fmt.Errorf("%s: apply: %w", step.Name(), err)}
 				return
 			}
-			ch <- Event{Step: step.Name(), Kind: EventApplied, Changes: cr.Changes, Sensitive: cr.Sensitive}
+			ch <- Event{Step: step.Name(), Kind: EventApplied, Changes: cr.Changes, Sensitive: cr.Sensitive, Warnings: warnings}
 		}
 		// A signal that lands during the last step has no next step to observe
 		// it. Emit a trailing failure so an interrupted run never exits 0, even

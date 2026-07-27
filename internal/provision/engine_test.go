@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/robsonek/berth/internal/config"
 	bssh "github.com/robsonek/berth/internal/ssh"
@@ -18,7 +19,8 @@ type stepStub struct {
 	applyErr  error
 	applied   *bool
 	checked   *bool
-	onCheck   func() // invoked at the top of Check when non-nil (e.g. to cancel the run context)
+	onCheck   func()       // invoked at the top of Check when non-nil (e.g. to cancel the run context)
+	onApply   func(RunCtx) // invoked inside Apply when non-nil (e.g. to warn or observe the RunCtx)
 	alwaysRun bool
 }
 
@@ -34,7 +36,10 @@ func (s *stepStub) Check(context.Context, RunCtx, *config.Server, bssh.Runner) (
 	}
 	return CheckResult{Satisfied: s.satisfied, Reason: "stub", Changes: []string{"do x"}}, nil
 }
-func (s *stepStub) Apply(context.Context, RunCtx, *config.Server, bssh.Runner) error {
+func (s *stepStub) Apply(_ context.Context, rc RunCtx, _ *config.Server, _ bssh.Runner) error {
+	if s.onApply != nil {
+		s.onApply(rc)
+	}
 	if s.applied != nil {
 		*s.applied = true
 	}
@@ -285,4 +290,137 @@ func hasKind(evs []Event, step string, k EventKind) bool {
 		}
 	}
 	return false
+}
+
+// findEvent returns the first event for step with kind k, or nil.
+func findEvent(evs []Event, step string, k EventKind) *Event {
+	for i := range evs {
+		if evs[i].Step == step && evs[i].Kind == k {
+			return &evs[i]
+		}
+	}
+	return nil
+}
+
+func TestEngineAttachesWarningsToAppliedEvent(t *testing.T) {
+	warner := &stepStub{name: "a", onApply: func(rc RunCtx) {
+		rc.Warnf("first %d", 1)
+		rc.Warnf("second")
+	}}
+	nextApplied := false
+	eng := New(warner, &stepStub{name: "b", applied: &nextApplied})
+	events, err := eng.Run(context.Background(), &config.Server{}, bssh.NewFakeRunner(), Options{})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	evs := collect(events)
+	ev := findEvent(evs, "a", EventApplied)
+	if ev == nil {
+		t.Fatalf("no EventApplied for a; events: %+v", evs)
+	}
+	if len(ev.Warnings) != 2 || ev.Warnings[0] != "first 1" || ev.Warnings[1] != "second" {
+		t.Errorf("Warnings = %q, want [first 1, second] in emission order", ev.Warnings)
+	}
+	// A warning must never stop the pipeline.
+	if !nextApplied {
+		t.Error("pipeline must continue past a step that warned")
+	}
+	// Warnings belong to their step only: b applied without warning.
+	if b := findEvent(evs, "b", EventApplied); b == nil || len(b.Warnings) != 0 {
+		t.Errorf("step b must carry no warnings; got %+v", b)
+	}
+}
+
+func TestEngineAttachesWarningsToFailedEvent(t *testing.T) {
+	boom := errors.New("boom")
+	eng := New(&stepStub{name: "a", applyErr: boom, onApply: func(rc RunCtx) {
+		rc.Warnf("context before the failure")
+	}})
+	events, err := eng.Run(context.Background(), &config.Server{}, bssh.NewFakeRunner(), Options{})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	ev := findEvent(collect(events), "a", EventFailed)
+	if ev == nil {
+		t.Fatal("no EventFailed for a")
+	}
+	if !errors.Is(ev.Err, boom) {
+		t.Errorf("Err = %v, want boom", ev.Err)
+	}
+	if len(ev.Warnings) != 1 || ev.Warnings[0] != "context before the failure" {
+		t.Errorf("Warnings = %q, want the pre-failure warning", ev.Warnings)
+	}
+}
+
+func TestEngineWarningsDoNotBlockWithoutReader(t *testing.T) {
+	// The channel buffer is sized so the engine NEVER blocks even when nobody
+	// consumes (the TUI stops reading after ctrl+c). Warnings ride on the
+	// terminal events instead of adding sends, so a warn-heavy pipeline must
+	// still finish with no reader attached.
+	done := make(chan struct{})
+	warn := func(rc RunCtx) {
+		for i := 0; i < 5; i++ {
+			rc.Warnf("w%d", i)
+		}
+	}
+	last := &stepStub{name: "c", onApply: func(rc RunCtx) { warn(rc); close(done) }}
+	eng := New(
+		&stepStub{name: "a", onApply: warn},
+		&stepStub{name: "b", onApply: warn},
+		last,
+	)
+	events, err := eng.Run(context.Background(), &config.Server{}, bssh.NewFakeRunner(), Options{})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("engine blocked before finishing the pipeline with no reader draining events")
+	}
+	evs := collect(events)
+	for _, step := range []string{"a", "b", "c"} {
+		if ev := findEvent(evs, step, EventApplied); ev == nil || len(ev.Warnings) != 5 {
+			t.Errorf("step %s: want 5 warnings on the applied event, got %+v", step, ev)
+		}
+	}
+}
+
+func TestEngineFullRunFlag(t *testing.T) {
+	var sawFull, sawOnly *bool
+	full := &stepStub{name: "a", onApply: func(rc RunCtx) { v := rc.FullRun; sawFull = &v }}
+	eng := New(full)
+	events, err := eng.Run(context.Background(), &config.Server{}, bssh.NewFakeRunner(), Options{})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	collect(events)
+	if sawFull == nil || !*sawFull {
+		t.Error("FullRun must be true when no --only target is set")
+	}
+
+	only := &stepStub{name: "a", onApply: func(rc RunCtx) { v := rc.FullRun; sawOnly = &v }}
+	eng = New(only)
+	events, err = eng.Run(context.Background(), &config.Server{}, bssh.NewFakeRunner(), Options{Only: "a"})
+	if err != nil {
+		t.Fatalf("Run(--only) error = %v", err)
+	}
+	collect(events)
+	if sawOnly == nil || *sawOnly {
+		t.Error("FullRun must be false under --only")
+	}
+}
+
+func TestRunCtxWarnfNilGuardAndNormalization(t *testing.T) {
+	// Literal RunCtx{} (step unit tests, checkDependencies) must not panic.
+	RunCtx{}.Warnf("ignored %d", 1)
+
+	var got []string
+	rc := RunCtx{Warn: func(msg string) { got = append(got, msg) }}
+	// Validator stderr is often multi-line (nginx -t emits at least two lines);
+	// the plain renderer's `warn  ` prefix contract needs one line per warning.
+	rc.Warnf("line1\nline2\r\nline3\n")
+	if len(got) != 1 || got[0] != "line1; line2; line3" {
+		t.Errorf("Warnf normalization = %q, want %q", got, "line1; line2; line3")
+	}
 }
