@@ -3,8 +3,7 @@ php:
   version: "8.5"
 database:
   engine: mariadb
-  name: myapp
-  user: myapp
 sites:
   - domain: app.example.com
     deploy_path: /var/www/app
+    database: {name: myapp, user: myapp}

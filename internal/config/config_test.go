@@ -152,9 +152,6 @@ func TestServerYAMLOmitsEmptyOptionalFields(t *testing.T) {
 			t.Errorf("expected %q to be omitted, got:\n%s", absent, out)
 		}
 	}
-	if strings.Contains(out, "name: \"\"") || strings.Contains(out, "user: \"\"") {
-		t.Errorf("empty top-level database name/user should be omitted:\n%s", out)
-	}
 	dir := t.TempDir()
 	p := dir + "/s.yml"
 	if err := os.WriteFile(p, b, 0o644); err != nil {
@@ -268,11 +265,10 @@ php:
   version: "8.5"
 database:
   engine: mariadb
-  name: myapp
-  user: myapp
 sites:
   - domain: app.example.com
     deploy_path: /var/www/app
+    database: {name: myapp, user: myapp}
 `
 	for name, body := range map[string]string{
 		"root key":            base + "clouflare_only: true\n",
@@ -297,6 +293,33 @@ func TestLoadStillAcceptsEveryKnownKey(t *testing.T) {
 	// that only uses documented keys. valid.yml exercises the common ones.
 	if _, err := Load("testdata/valid.yml"); err != nil {
 		t.Fatalf("a fully known config must still load; got %v", err)
+	}
+}
+
+func TestLoadRejectsLegacyTopLevelDatabaseNameUser(t *testing.T) {
+	// The pre-release top-level database.name/user fields are gone; a config
+	// still carrying them must fail loudly at parse time (UnmarshalExact),
+	// never silently ignore the keys.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy.yml")
+	yml := `host: 203.0.113.10
+php:
+  version: "8.5"
+database:
+  engine: mariadb
+  name: myapp
+  user: myapp
+sites:
+  - domain: app.example.com
+    deploy_path: /var/www/app
+    database: {name: myapp, user: myapp}
+`
+	if err := os.WriteFile(path, []byte(yml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "name") {
+		t.Fatalf("legacy top-level database.name must fail to load with an unknown-key error, got %v", err)
 	}
 }
 

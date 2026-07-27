@@ -4,7 +4,7 @@
 # One site on MariaDB from Debian's own repos, no TLS. Everything not set here
 # falls back to berth's defaults (ssh.user=root, ssh.port=22, nginx debian,
 # database.source=debian, scheduler on). A site without user: runs as a
-# domain-derived account; a lone site inherits the top-level database name/user.
+# domain-derived account; every site carries its own database: {name, user}.
 host: 203.0.113.10
 
 ssh:
@@ -15,11 +15,10 @@ php:
 
 database:
   engine: mariadb
-  name: myapp
-  user: myapp
 
 cloudflare_only: false   # opt-in origin lockdown (default off); see README "Cloudflare origin lockdown"
 
 sites:
   - domain: app.example.com
     deploy_path: /var/www/app
+    database: {name: myapp, user: myapp}

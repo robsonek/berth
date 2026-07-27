@@ -330,7 +330,6 @@ func (s *Server) Validate() error {
 		seen[key] = true
 		return nil
 	}
-	inheritLegacyDB := 0
 	for i := range s.Sites {
 		site := s.Sites[i]
 		// Checked before site.validate() so the default-letsencrypt case reports
@@ -342,10 +341,11 @@ func (s *Server) Validate() error {
 		if err := site.validate(); err != nil {
 			return fmt.Errorf("site %d: %w", i, err)
 		}
-		// Per-site database identity (its own block, or the inherited legacy
-		// top-level database.name/user for a lone site).
-		if site.Database.Name == "" && site.Database.User == "" {
-			inheritLegacyDB++
+		// Per-site database identity: every site carries its own block. Checked
+		// before the SQL-identifier tests so the message names the real problem
+		// instead of rejecting "" as an invalid identifier.
+		if site.Database.Name == "" || site.Database.User == "" {
+			return fmt.Errorf("site %d (%s): missing database block; every site needs database: {name, user}", i, site.Domain)
 		}
 		dbName, dbUser := s.SiteDBName(site), s.SiteDBUser(site)
 		if !reSQLIdent.MatchString(dbName) {
@@ -404,11 +404,6 @@ func (s *Server) Validate() error {
 				return err
 			}
 		}
-	}
-	// The legacy top-level database.name/user can back exactly one site; with
-	// several inheriting sites it is ambiguous — each needs its own database block.
-	if inheritLegacyDB > 1 {
-		return fmt.Errorf("%d sites have no database block; give each site its own database: {name, user} (top-level database.name/user is single-site legacy)", inheritLegacyDB)
 	}
 	return nil
 }

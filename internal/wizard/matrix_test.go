@@ -650,19 +650,16 @@ func TestConfigMatrix(t *testing.T) {
 		mustContain(t, err, "shared_app")
 	})
 
-	t.Run("two-sites-one-blank-db-rejected-empty-sqlident", func(t *testing.T) {
+	t.Run("two-sites-one-blank-db-rejected-missing-database-block", func(t *testing.T) {
 		a := base("blankdb", "203.0.113.19")
 		a.Sites = []SiteAnswers{
 			{Domain: "x.example.com", DeployPath: "/srv/x", DBName: "", DBUser: "", SchedulerOverride: "inherit"},
 			{Domain: "y.example.com", DeployPath: "/srv/y", DBName: "y_db", DBUser: "y_usr", SchedulerOverride: "inherit"},
 		}
 		err := writeInvalid(t, a)
-		// Only ONE site has a blank database block (no top-level legacy db is set by
-		// ToServer), so inheritLegacyDB == 1 and the "ambiguous, give each site its
-		// own database block" branch never fires. The actual rejection is earlier:
-		// SiteDBName("") resolves to "" (no legacy top-level name to inherit), and ""
-		// is not a valid SQL identifier.
-		mustContain(t, err, "is not a valid SQL identifier")
+		// A site with a blank database block is refused outright — every site
+		// needs its own database: {name, user}; no top-level fallback exists.
+		mustContain(t, err, "missing database block")
 	})
 
 	// ===================== RUN-path re-prompt =====================

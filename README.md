@@ -97,7 +97,6 @@ nginx:
 database:
   engine: mariadb              # mariadb | postgres   (server-wide)
   source: debian               # debian | mariadb (MariaDB) | pgdg (PostgreSQL)
-  # name / user: legacy single-site only — multi-site sites carry their own block
 
 valkey: false                  # one Valkey instance per site (cache/session/queue)
 queue: false                   # server-wide default: a queue:work worker on every site
@@ -553,9 +552,8 @@ sites:
     ssl_email: admin@example.com
 ```
 
-A single-site config may keep the legacy top-level `database: { name, user }`;
-with multiple sites each site needs its own `database` block, and the OS
-users must be distinct. A site without `user:` always runs as its derived
+Every site carries its own `database: {name, user}` block, and the OS users
+must be distinct. A site without `user:` always runs as its derived
 `b_<slug>_<hash>` account, no matter how many sites the config lists.
 
 Each TLS site uses Let's Encrypt by default; set `ssl_mode: selfsigned` on a site

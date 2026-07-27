@@ -18,12 +18,13 @@ func databaseServer() *config.Server {
 	return &config.Server{
 		Host:     "app.example.com",
 		SSH:      config.SSH{Port: 22},
-		Database: config.Database{Engine: "mariadb", Name: "myapp", User: "myapp", Source: "debian"},
+		Database: config.Database{Engine: "mariadb", Source: "debian"},
 		Sites: []config.Site{{
 			Domain:     "app.example.com",
 			DeployPath: "/var/www/myapp",
 			User:       "deploy",
 			SSL:        true,
+			Database:   config.SiteDatabase{Name: "myapp", User: "myapp"},
 		}},
 	}
 }
@@ -1049,7 +1050,7 @@ func TestDatabaseCheckFailsWhenExistingEnvLacksDBConnection(t *testing.T) {
 
 func TestDatabaseCheckFailsLoudlyOnEngineEnvConflictPostgres(t *testing.T) {
 	s := databaseServer()
-	s.Database = config.Database{Engine: "postgres", Name: "myapp", User: "myapp", Source: "debian"}
+	s.Database = config.Database{Engine: "postgres", Source: "debian"}
 	f := bssh.NewFakeRunner()
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})

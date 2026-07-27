@@ -13,8 +13,8 @@ func base() *Server {
 		SSH:      SSH{User: "root", Port: 22},
 		PHP:      PHP{Version: "8.5", Source: "auto"},
 		Nginx:    Nginx{Source: "debian"},
-		Database: Database{Engine: "mariadb", Name: "myapp", User: "myapp", Source: "debian"},
-		Sites:    []Site{{Domain: "app.example.com", DeployPath: "/var/www/app"}},
+		Database: Database{Engine: "mariadb", Source: "debian"},
+		Sites:    []Site{{Domain: "app.example.com", DeployPath: "/var/www/app", Database: SiteDatabase{Name: "myapp", User: "myapp"}}},
 	}
 }
 
@@ -89,13 +89,13 @@ func TestValidateMultiSite(t *testing.T) {
 		t.Errorf("multi-site users must be distinct & derived; got %q, %q", u0, u1)
 	}
 
-	// Two sites both relying on the legacy top-level database -> ambiguous -> error.
+	// Sites without their own database blocks -> rejected (there is no
+	// top-level fallback to inherit from).
 	bad := multiSite()
 	bad.Sites[0].Database = SiteDatabase{}
 	bad.Sites[1].Database = SiteDatabase{}
-	bad.Database.Name, bad.Database.User = "shared", "shared"
 	if err := bad.Validate(); err == nil {
-		t.Error("expected error when multiple sites have no database block")
+		t.Error("expected error when sites have no database block")
 	}
 
 	// Two sites sharing a database user -> rejected (isolation).
@@ -106,11 +106,35 @@ func TestValidateMultiSite(t *testing.T) {
 	}
 }
 
+func TestValidateSiteMissingDatabaseBlock(t *testing.T) {
+	// Every site must carry its own full database block; there is no top-level
+	// fallback to inherit from. The refusal fires before the SQL-identifier
+	// checks so the message names the real problem.
+	cases := []struct {
+		name string
+		db   SiteDatabase
+	}{
+		{"missing-both", SiteDatabase{}},
+		{"missing-user", SiteDatabase{Name: "myapp"}},
+		{"missing-name", SiteDatabase{User: "myapp"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := base()
+			s.Sites[0].Database = c.db
+			err := s.Validate()
+			if err == nil || !strings.Contains(err.Error(), "missing database block") {
+				t.Fatalf("%s: a site without a full database: {name, user} must be rejected, got %v", c.name, err)
+			}
+		})
+	}
+}
+
 func TestValidateRejects(t *testing.T) {
 	cases := map[string]func(*Server){
 		"bad php version":  func(s *Server) { s.PHP.Version = "9.9" },
 		"bad php source":   func(s *Server) { s.PHP.Source = "ppa" },
-		"bad db name":      func(s *Server) { s.Database.Name = "my-app; DROP" },
+		"bad db name":      func(s *Server) { s.Sites[0].Database.Name = "my-app; DROP" },
 		"bad engine":       func(s *Server) { s.Database.Engine = "oracle" },
 		"bad nginx source": func(s *Server) { s.Nginx.Source = "openresty" },
 		"bad db source":    func(s *Server) { s.Database.Source = "percona" },

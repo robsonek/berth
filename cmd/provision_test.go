@@ -20,10 +20,10 @@ func writeValidConfig(t *testing.T) string {
 	cfg := `host: 203.0.113.10
 ssh: {user: root, port: 22}
 php: {version: "8.5", source: auto}
-database: {engine: mariadb, name: myapp, user: myapp}
+database: {engine: mariadb}
 valkey: true
 sites:
-  - {domain: app.example.com, deploy_path: /var/www/app}
+  - {domain: app.example.com, deploy_path: /var/www/app, database: {name: myapp, user: myapp}}
 `
 	if err := os.WriteFile(p, []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)

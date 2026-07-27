@@ -24,8 +24,6 @@ nginx:
 database:
   engine: mariadb
   source: mariadb       # mariadb.org 12.3 LTS
-  name: myapp
-  user: myapp
 
 valkey: true            # cache / session / queue backend
 queue: true             # a dormant queue:work worker (your deployer starts it)
@@ -65,6 +63,7 @@ system:
 sites:
   - domain: app.example.com
     deploy_path: /var/www/app
+    database: {name: myapp, user: myapp}
     repository: git@github.com:acme/app.git   # optional — SSH git URL only; berth
                                                # generates a deploy key for it
                                                # (print it with `berth site key`)

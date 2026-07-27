@@ -72,14 +72,13 @@ php:
   source: auto
 database:
   engine: mariadb
-  name: app
-  user: app
 valkey: true
 queue: true
 scheduler: true
 sites:
   - domain: smoke.example.test
     deploy_path: /var/www/smoke
+    database: {name: app, user: app}
     repository: https://github.com/example/app.git
     ssl: false
 ```
