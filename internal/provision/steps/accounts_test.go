@@ -42,7 +42,7 @@ func testServerWithKey(t *testing.T) *config.Server {
 func stubAccountExists(f *bssh.FakeRunner, user string, sudoers, want []byte) {
 	f.On("id "+user, bssh.Result{ExitCode: 0})
 	f.On(groupProbeCmd(user), bssh.Result{Stdout: user + "\n"})
-	f.On(sshDirOwnerCmd(user), bssh.Result{Stdout: user + "\n"})
+	f.On(sshDirOwnerCmd(user), bssh.Result{Stdout: user + " directory\n"})
 	f.On("cat "+shQuote(sudoersPath(user)), bssh.Result{Stdout: string(sudoers), ExitCode: 0})
 	f.On("cat "+shQuote(authorizedKeysPath(user)), bssh.Result{Stdout: string(want), ExitCode: 0})
 }
@@ -71,7 +71,7 @@ func stubAccountCreate(f *bssh.FakeRunner, user string) {
 func groupProbeCmd(user string) string { return "LC_ALL=C id -nG " + shQuote(user) }
 func sshDirOwnerCmd(user string) string {
 	q := shQuote("/home/" + user + "/.ssh")
-	return "export LC_ALL=C; if [ -e " + q + " ] || [ -L " + q + " ]; then stat -c '%U' " + q + " || exit 91; else exit 92; fi"
+	return "export LC_ALL=C; if [ -e " + q + " ] || [ -L " + q + " ]; then stat -c '%U %F' " + q + " || exit 91; else exit 92; fi"
 }
 
 func TestGroupMembershipAcceptsEponymousPrimaryGroup(t *testing.T) {
@@ -143,7 +143,7 @@ func TestGroupMembershipHardErrorsWhenAccountRequired(t *testing.T) {
 func TestOwnSSHDirAcceptsAbsentAndOwned(t *testing.T) {
 	for _, out := range []bssh.Result{
 		{ExitCode: 92}, // the probe's own "absent" signal
-		{Stdout: "deploy\n"},
+		{Stdout: "deploy directory\n"},
 	} {
 		f := bssh.NewFakeRunner()
 		f.On(sshDirOwnerCmd("deploy"), out)
@@ -164,7 +164,7 @@ func TestOwnSSHDirHardErrorsWhenStatFailsOnExistingEntry(t *testing.T) {
 		f := bssh.NewFakeRunner()
 		f.On(sshDirOwnerCmd("deploy"), out)
 		err := assertOwnSSHDir(context.Background(), f, "deploy")
-		if err == nil || !strings.Contains(err.Error(), "probing the owner") {
+		if err == nil || !strings.Contains(err.Error(), "probing the owner and type") {
 			t.Fatalf("exit %d: err = %v, want a hard error, not an \"absent\" pass", out.ExitCode, err)
 		}
 	}
@@ -174,10 +174,41 @@ func TestOwnSSHDirRefusesForeignOwner(t *testing.T) {
 	// Previously root re-owned a hand-created root-owned ~/.ssh. The account
 	// cannot, so refuse with the exact chown to run.
 	f := bssh.NewFakeRunner()
-	f.On(sshDirOwnerCmd("deploy"), bssh.Result{Stdout: "root\n"})
+	f.On(sshDirOwnerCmd("deploy"), bssh.Result{Stdout: "root directory\n"})
 	err := assertOwnSSHDir(context.Background(), f, "deploy")
 	if err == nil || !strings.Contains(err.Error(), "chown -R deploy:deploy") {
 		t.Fatalf("err = %v, want a refusal carrying the chown remedy", err)
+	}
+}
+
+func TestOwnSSHDirRefusesSymlinkWithoutSuggestingChown(t *testing.T) {
+	// A SYMLINK at ~/.ssh owned by the account passes an owner-only check: the
+	// probe deliberately does not follow it, so `stat` reports the link's own
+	// owner, which IS the account. The account-run `install -d` then follows it
+	// and fails with a raw EPERM if the target is root-owned.
+	//
+	// The type check must therefore come first, and its remedy must NOT be a
+	// chown: `chown` here would act on the link's TARGET, so telling an operator
+	// to chown `~/.ssh` when it points at, say, /etc/ssh would hand that
+	// directory to the tenant — the escalation delivered inside a help message.
+	for _, ftype := range []string{"symbolic link", "regular file"} {
+		f := bssh.NewFakeRunner()
+		f.On(sshDirOwnerCmd("deploy"), bssh.Result{Stdout: "deploy " + ftype + "\n"})
+		err := assertOwnSSHDir(context.Background(), f, "deploy")
+		if err == nil || !strings.Contains(err.Error(), ftype) {
+			t.Fatalf("%s: err = %v, want a refusal naming the type", ftype, err)
+		}
+		if !strings.Contains(err.Error(), "not a directory") {
+			t.Errorf("%s: refusal must say it is not a directory; got %v", ftype, err)
+		}
+		// The message may WARN about chown; it must never hand over a runnable
+		// one, because `chown -R` on a symlink acts on its target.
+		if strings.Contains(err.Error(), "chown -R") {
+			t.Errorf("%s: refusal must not carry a runnable chown — it would act on the link target; got %v", ftype, err)
+		}
+		if !strings.Contains(err.Error(), "do not chown") {
+			t.Errorf("%s: refusal should warn against chowning it; got %v", ftype, err)
+		}
 	}
 }
 
@@ -1176,7 +1207,7 @@ func TestAccountsCheckRefusesForeignSSHDir(t *testing.T) {
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
 	// …but deploy's ~/.ssh belongs to root (hand-created by an operator).
-	f.On(sshDirOwnerCmd("deploy"), bssh.Result{Stdout: "root\n"})
+	f.On(sshDirOwnerCmd("deploy"), bssh.Result{Stdout: "root directory\n"})
 	_, err = Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err == nil || !strings.Contains(err.Error(), "chown -R deploy:deploy") {
 		t.Fatalf("Check() err = %v, want the foreign-~/.ssh refusal with its remedy", err)

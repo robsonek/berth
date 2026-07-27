@@ -3,6 +3,30 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Fixed
+
+- **A symlink at an account's `~/.ssh` is now refused instead of failing
+  mid-run.** The guard added in 0.19.0 checked only the owner, and it
+  deliberately does not follow symlinks — so a symlink passed, because a
+  symlink's own owner is the account that created it. Provisioning then died
+  with a bare `Permission denied` from `install -d` whenever the link pointed
+  at something the account cannot write. The guard now also requires the entry
+  to be a real directory and names the type it found.
+
+  The refusal deliberately does not offer a `chown`: for a symlink, `chown`
+  acts on whatever the link points at, so that advice would re-own the target
+  to the account. Removing or moving the entry aside is the fix, and the
+  message says so.
+
+  One arrangement that used to work is now refused: a `~/.ssh` symlinked to a
+  directory the account can already write (a home on a separate mount, say)
+  provisioned successfully before, because the account-run `install -d` simply
+  followed the link. berth needs a real directory there, so such a host now
+  gets the refusal too — replace the symlink with a directory, or point
+  `sites[].user` at an account whose home layout berth manages.
+
 ## [0.19.0] — 2026-07-27
 
 ### Fixed
