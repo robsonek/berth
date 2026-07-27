@@ -42,16 +42,10 @@ func supervisorProgramPath(domain string) string {
 // cronPath is the scheduler cron for a site. The "berth-site-" prefix keeps
 // the namespace disjoint from the backups step's "berth-backup-" crons: a
 // domain literally named backup-<x>.tld would otherwise produce
-// /etc/cron.d/berth-backup-<x>_tld — inside the backups sweep's glob (deleted
-// every run) and able to collide with another domain's backup cron. Legacy
-// "berth-<pool>" files of a CONFIGURED site self-migrate via an atomic rename
-// in Apply's pre-write phase (see the migration loop there); a REMOVED site's
-// legacy file is swept like any other orphan.
+// /etc/cron.d/berth-backup-<x>_tld — colliding with the backups step's
+// namespace. Scheduler crons live under berth-site-, backup crons under
+// berth-backup-; any FUTURE berth cron family needs its own prefix.
 func cronPath(domain string) string { return "/etc/cron.d/berth-site-" + poolName(domain) }
-
-// legacyCronPath is the pre-rename scheduler-cron path of a site; current
-// crons live at cronPath. Kept only so Apply can migrate the old files away.
-func legacyCronPath(domain string) string { return "/etc/cron.d/berth-" + poolName(domain) }
 
 // anySchedulerEnabled reports whether at least one site wants the scheduler cron.
 func anySchedulerEnabled(s *config.Server) bool {
@@ -434,19 +428,14 @@ func orphanSiteFiles(ctx context.Context, r bssh.Runner, s *config.Server) ([]si
 	for _, k := range []struct{ dir, pattern string }{
 		{"/etc/nginx/sites-available", ""},
 		{fpmPoolDir(s.PHP.Version), "*.conf"},
-		// berth-* (not berth-site-*): legacy pre-rename scheduler crons must be
-		// swept too; the backups prefix below keeps that step's files out. Any
-		// FUTURE berth cron family must live under berth-site-/berth-backup-
-		// or be excluded here explicitly, or this sweep will delete it — the
-		// exact bug class the berth-site- rename fixed.
-		{"/etc/cron.d", "berth-*"},
+		{"/etc/cron.d", "berth-site-*"},
 	} {
 		paths, err := findRegularFiles(ctx, r, k.dir, k.pattern)
 		if err != nil {
 			return nil, err
 		}
 		for _, p := range paths {
-			if desired[p] || strings.HasPrefix(p, backupCronPrefix) {
+			if desired[p] {
 				continue
 			}
 			managed, err := managedFilePresent(ctx, r, p)
@@ -681,57 +670,6 @@ func (site) changes() []string {
 }
 
 func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
-	// Legacy scheduler-cron migration (pre-rename berth-<pool> ->
-	// berth-site-<pool>) for CONFIGURED sites: writing the NEW file first and
-	// sweeping the legacy one later would leave a window where BOTH schedule
-	// schedule:run every minute (duplicate mail/billing risk if cron ticks in
-	// between). An atomic within-directory rename closes it: legacy
-	// berth-managed && new absent -> mv (the rename does not change the
-	// content, so the normal write below is a plain same-bytes rewrite);
-	// legacy berth-managed && new present as BERTH'S OWN file (a half-migrated
-	// host) -> rm the legacy NOW rather than in the orphan loop. Both happen
-	// before any cron write and before the orphan discovery below, which
-	// therefore never sees the legacy file. /etc/cron.d has no reload window,
-	// so this may precede the stamp invalidations.
-	for _, site := range s.Sites {
-		if !s.SchedulerEnabled(site) {
-			continue // no new file will be written; the orphan sweep removes a legacy one
-		}
-		legacy := legacyCronPath(site.Domain)
-		managed, err := managedFilePresent(ctx, r, legacy)
-		if err != nil {
-			return err
-		}
-		if !managed {
-			continue
-		}
-		// One cat classifies the NEW path: absent -> atomic rename; berth's own
-		// file (or --force, which will overwrite a foreign one right below) ->
-		// the legacy copy is redundant, remove it now; a FOREIGN file without
-		// --force -> leave the legacy alone: deleting it would leave no working
-		// berth scheduler cron at all, because the managed write below refuses
-		// the foreign file — that loud refusal is the operator's signal, and
-		// the scheduler keeps running via the legacy cron meanwhile.
-		probe, err := r.Run(ctx, "cat "+shQuote(cronPath(site.Domain)), nil)
-		if err != nil {
-			return err
-		}
-		var cmd string
-		switch {
-		case probe.ExitCode != 0: // new path absent
-			cmd = "mv " + shQuote(legacy) + " " + shQuote(cronPath(site.Domain))
-		case hasManagedMarker(probe.Stdout) || rc.Force:
-			cmd = "rm -f " + shQuote(legacy)
-		default: // foreign file at the new path
-			continue
-		}
-		if res, err := r.Run(ctx, cmd, nil); err != nil {
-			return err
-		} else if res.ExitCode != 0 {
-			return fmt.Errorf("migrate legacy scheduler cron %s: %s", legacy, res.Stderr)
-		}
-	}
-
 	// Discover the removed-site orphans up front (read-only, so it may precede
 	// the stamp invalidation) and classify them by owning unit: each class is
 	// deleted inside its unit's invalidate→mutate→validate→reload→mark window.
@@ -969,9 +907,7 @@ func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server,
 		}
 	}
 
-	// Orphan scheduler crons (removed sites, including their legacy pre-rename
-	// berth-<pool> names — a CONFIGURED site's legacy cron was already renamed
-	// in the pre-write migration above): no unit window — /etc/cron.d
+	// Orphan scheduler crons (removed sites): no unit window — /etc/cron.d
 	// drop-ins take effect on removal by themselves.
 	for _, p := range orphanCrons {
 		if res, err := r.Run(ctx, "rm -f "+shQuote(p), nil); err != nil {
