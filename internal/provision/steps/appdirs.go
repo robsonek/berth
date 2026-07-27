@@ -12,9 +12,14 @@ import (
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
 
-// acmeWebroot is the dedicated ACME challenge root for a domain. It is owned by
-// www-data so certbot's --webroot mode can write challenge files, kept separate
-// from the application's deploy_path (design §6.4).
+// acmeWebroot is the dedicated ACME challenge root for a domain, kept separate
+// from the application's deploy_path (design §6.4). It is owned by root:root:
+// certbot runs as root and creates .well-known/acme-challenge/<token> itself,
+// while nginx (www-data) only ever reads and traverses the webroot, which mode
+// 0755 grants. An unprivileged owner here could swap .well-known or
+// acme-challenge for a symlink and redirect certbot's root-run writes to an
+// arbitrary path — the ancestry gate stops AT the webroot and does not protect
+// its descendants, so the webroot itself must be root-controlled too.
 func acmeWebroot(domain string) string {
 	return "/var/www/berth-acme/" + domain
 }
@@ -126,8 +131,8 @@ func ancestorsOf(p string) []string {
 // or other type), owned by uid 0, and neither group- nor other-writable.
 //
 // This is the premise the root-run mutations rest on. berth still creates
-// deploy_path and the ACME webroot as root (they need an owner and group the
-// running account is not), and root's `install -d` follows a directory symlink
+// deploy_path (owned by the site user, which only root can set) and the
+// root-owned ACME webroot as root, and root's `install -d` follows a directory symlink
 // and applies ownership to the target. That is only safe while nobody but root
 // can replace a component of the path: the symlink probe checks a component's
 // TYPE, never its OWNERSHIP, so a tenant-owned ancestor (ValidateDeployPath
@@ -283,7 +288,7 @@ func (a appDirs) Check(ctx context.Context, _ provision.RunCtx, s *config.Server
 			{site.DeployPath, user + ":www-data 710"},
 			{site.DeployPath + "/shared", user + ":" + user + " 700"},
 			{site.DeployPath + "/shared/tmp", user + ":" + user + " 700"},
-			{acmeWebroot(site.Domain), "www-data:www-data 755"},
+			{acmeWebroot(site.Domain), "root:root 755"},
 		} {
 			meta, present, err := statOwnerMode(ctx, r, d.path)
 			if err != nil {
@@ -300,7 +305,7 @@ func (a appDirs) Check(ctx context.Context, _ provision.RunCtx, s *config.Server
 func (appDirs) changes() []string {
 	return []string{
 		"install -d deploy_path (<user>:www-data 0710); shared and shared/tmp created as the site user (<user> 0700)",
-		"install -d ACME webroot (owner www-data)",
+		"install -d ACME webroot (owner root)",
 	}
 }
 
@@ -332,8 +337,9 @@ func (appDirs) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, 
 			// deploy_path: site user owns it, group www-data + mode 0710 lets nginx
 			// traverse to public/ while other site users cannot enter.
 			fmt.Sprintf("install -d -o %s -g www-data -m 00710 %s", user, shQuote(site.DeployPath)),
-			// ACME webroot for certbot --webroot.
-			fmt.Sprintf("install -d -o www-data -g www-data -m 00755 %s", shQuote(acmeWebroot(site.Domain))),
+			// ACME webroot: root-owned, because root-run certbot writes the
+			// challenge files inside it and nginx only reads (see acmeWebroot).
+			fmt.Sprintf("install -d -o root -g root -m 00755 %s", shQuote(acmeWebroot(site.Domain))),
 		}
 		// shared/ and shared/tmp live INSIDE deploy_path, which the site user
 		// owns — a root-run install -d there is racy by construction: the probe
