@@ -508,6 +508,16 @@ role and database must already exist before you restore for ownership to be
 reestablished. For disaster recovery, re-run berth (it recreates the role/database)
 before restoring.
 
+**Full-restore order (rehearsed end to end):** after losing the database and the
+whole `shared/` tree, (1) run `berth provision servers/<name>.yml` — it recreates
+the database, its user with the SAME cached password, the directory tree, and
+re-seeds `shared/.env`; (2) `tar -xzf <pool>-files-<ts>.tar.gz -C <deploy_path>`
+as root — restores `shared/` with original owners and modes (including the
+original `.env`, mode 0600); (3) pipe the SQL dump back in as above. Restoring
+files before re-running berth also works, but the provision must come before the
+SQL restore on PostgreSQL (ownership) and is what recreates the database on
+either engine.
+
 **Limitations:** local only (no offsite copy) — backups are root-owned so they survive a
 compromised *site*, but a lost *host* loses them; the DB dump and files tar are independent,
 so a failed run may leave one without the other (match artifacts by UTC timestamp); the first
