@@ -42,7 +42,7 @@ func newProvisionCmd() *cobra.Command {
 	c.Flags().BoolVar(&f.skipSSL, "skip-ssl", false, "skip the TLS phase")
 	c.Flags().BoolVar(&f.sslStaging, "ssl-staging", false, "use Let's Encrypt staging")
 	c.Flags().StringVar(&f.only, "only", "", "run only the named phase or step")
-	c.Flags().BoolVar(&f.force, "force", false, "overwrite resources not managed by berth")
+	c.Flags().BoolVar(&f.force, "force", false, "overwrite resources not managed by berth; also re-bind the local secret cache after a deliberate endpoint (host/port) change")
 	c.Flags().BoolVarP(&f.verbose, "verbose", "v", false, "plain output with reasons for satisfied steps and changes for applied ones")
 	c.Flags().BoolVar(&f.noTTY, "no-tty", false, "force plain output (no live TUI)")
 	return c

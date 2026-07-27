@@ -17,7 +17,11 @@ var (
 	// Site.validate cannot catch them either (ToLower(U+017F) == U+017F).
 	// Uppercase ASCII still matches here so that guard can keep its friendly
 	// "must be lowercase" message.
-	reHostname     = regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`)
+	reHostname = regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`)
+	// reServerID keeps ids filename-safe (the secret cache is keyed by them)
+	// and unambiguous: lowercase, no path separators, no leading/trailing
+	// punctuation, 2-64 chars.
+	reServerID     = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}[a-z0-9]$`)
 	reSQLIdent     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
 	rePHPVer       = regexp.MustCompile(`^\d+\.\d+$`)
 	reEmail        = regexp.MustCompile(`^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$`)
@@ -222,8 +226,21 @@ func ValidFingerprint(fp string) error {
 	return nil
 }
 
+// ValidateServerID guards the optional top-level `id` (the secret-cache key:
+// filename-safe, unambiguous). Exported so the wizard's per-field validation
+// applies exactly the same rule as config loading. Empty = unset (allowed).
+func ValidateServerID(id string) error {
+	if id != "" && !reServerID.MatchString(id) {
+		return fmt.Errorf("id %q is not a valid server id (lowercase [a-z0-9._-], 2-64 chars, must start and end alphanumeric)", id)
+	}
+	return nil
+}
+
 // Validate checks every field that reaches a shell, SQL statement, or path.
 func (s *Server) Validate() error {
+	if err := ValidateServerID(s.ID); err != nil {
+		return err
+	}
 	if !reHostname.MatchString(s.Host) {
 		return fmt.Errorf("host %q is not a valid hostname or IP", s.Host)
 	}

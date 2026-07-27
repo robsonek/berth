@@ -113,6 +113,14 @@ func sudoersValid(ctx context.Context, r bssh.Runner, path string) (bool, error)
 }
 
 func (a accounts) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
+	// PHP version-exclusivity guard first: this step renders the configured
+	// PHP version into every site's sudoers reload grant and runs BEFORE the
+	// php step, so a version change must refuse here or a failed run leaves
+	// deploy users granted a reload on the not-yet-installed version while
+	// the old master keeps serving.
+	if err := assertPHPVersionExclusive(ctx, r, s); err != nil {
+		return provision.CheckResult{}, err
+	}
 	// Tree-safety preflight first: an existing tree under a different
 	// identity (or a symlinked tree) must refuse BEFORE any account, key or
 	// sudoers is created — an orphan-free failure. appdirs re-asserts this
@@ -254,7 +262,7 @@ func (a accounts) Check(ctx context.Context, rc provision.RunCtx, s *config.Serv
 		return provision.CheckResult{Satisfied: false, Reason: "berth console password not set (break_glass on)", Changes: a.changes()}, nil
 	}
 	if !s.System.BreakGlass {
-		owned, err := consolePasswordOwned(s.Host)
+		owned, err := consolePasswordOwned(s)
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
@@ -296,8 +304,8 @@ func consolePasswordUsable(ctx context.Context, r bssh.Runner) (bool, error) {
 // berth-generated console password — the ownership marker for the lock-back
 // direction. A local-file read inside Check is established practice
 // (operatorPublicKey); remote state is untouched.
-func consolePasswordOwned(host string) (bool, error) {
-	cache, err := secret.LoadCache(host)
+func consolePasswordOwned(s *config.Server) (bool, error) {
+	cache, err := loadVerifiedSecrets(s)
 	if err != nil {
 		return false, err
 	}
@@ -314,6 +322,11 @@ func (a accounts) changes() []string {
 }
 
 func (a accounts) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
+	// Same guard as Check — Apply must refuse before ANY account, key or
+	// sudoers mutation (see the Check comment).
+	if err := assertPHPVersionExclusive(ctx, r, s); err != nil {
+		return err
+	}
 	for _, site := range s.Sites {
 		if err := assertNoSymlinkDeployTree(ctx, r, site); err != nil {
 			return err
@@ -414,12 +427,12 @@ func (a accounts) ensureConsolePassword(ctx context.Context, s *config.Server, r
 		return err
 	}
 	if s.System.BreakGlass && !usable {
-		release, err := secret.LockCache(s.Host)
+		release, err := secret.LockCache(s.CacheKey())
 		if err != nil {
 			return fmt.Errorf("lock local secret cache: %w", err)
 		}
 		defer release()
-		cache, err := secret.LoadCache(s.Host)
+		cache, err := loadVerifiedSecrets(s)
 		if err != nil {
 			return fmt.Errorf("load local secret cache: %w", err)
 		}
@@ -431,7 +444,7 @@ func (a accounts) ensureConsolePassword(ctx context.Context, s *config.Server, r
 			cache[consoleCacheKey] = pw
 			// Persist BEFORE chpasswd: a set-but-uncached password would be
 			// unrecoverable by the operator.
-			if err := secret.SaveCache(s.Host, cache); err != nil {
+			if err := saveSecrets(s, cache); err != nil {
 				return fmt.Errorf("cache console password: %w", err)
 			}
 		}
@@ -449,12 +462,12 @@ func (a accounts) ensureConsolePassword(ctx context.Context, s *config.Server, r
 		return nil
 	}
 	if !s.System.BreakGlass {
-		release, err := secret.LockCache(s.Host)
+		release, err := secret.LockCache(s.CacheKey())
 		if err != nil {
 			return fmt.Errorf("lock local secret cache: %w", err)
 		}
 		defer release()
-		cache, err := secret.LoadCache(s.Host)
+		cache, err := loadVerifiedSecrets(s)
 		if err != nil {
 			return fmt.Errorf("load local secret cache: %w", err)
 		}
@@ -469,7 +482,7 @@ func (a accounts) ensureConsolePassword(ctx context.Context, s *config.Server, r
 			}
 		}
 		delete(cache, consoleCacheKey)
-		if err := secret.SaveCache(s.Host, cache); err != nil {
+		if err := saveSecrets(s, cache); err != nil {
 			return fmt.Errorf("drop cached console password: %w", err)
 		}
 	}

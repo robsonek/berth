@@ -21,6 +21,10 @@ import (
 
 // Answers is the data the wizard collects: server-level fields plus one or more sites.
 type Answers struct {
+	// ID is the stable machine identity written as the config's top-level
+	// `id` (secret-cache key). Blank at the prompt = auto-generated after
+	// the core form from the config name + crypto/rand suffix.
+	ID   string
 	Name string // -> servers/<Name>.yml
 
 	// connection

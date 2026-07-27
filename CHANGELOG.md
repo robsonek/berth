@@ -3,6 +3,44 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Added
+
+- **Declared server identity (`id:`) and a versioned secret cache.** The
+  local cache under `~/.berth/` (database passwords, `APP_KEY` backups, the
+  break-glass console password) used to be keyed by hostname alone, so two
+  *different* machines reachable through one hostname (NAT / port forwards)
+  silently shared — and clobbered — each other's credentials, while a lost
+  cache entry could disown a still-usable root-equivalent console password.
+  A new optional top-level `id` declares the machine's stable identity (the
+  wizard generates one); the cache file is now a versioned envelope recording
+  the endpoint it was bound to, and a new `identity` step — always executed,
+  `--only` included, before any remote mutation — binds fresh caches,
+  upgrades legacy files in place, migrates host-keyed files to the id
+  (leaving a tombstone so a stale id-less config fails loudly instead of
+  regenerating secrets), and hard-errors on an endpoint mismatch. A
+  deliberate endpoint change is re-bound with `--force`; accidental id reuse
+  across different servers is refused with both endpoints named. Downgrading
+  below this version after an id/envelope exists is not supported.
+
+### Changed
+
+- **`valkey: false` now reconciles instead of abandoning.** The valkey step
+  used to vanish from the pipeline when disabled, leaving previously
+  provisioned per-site instances running forever. It now always runs: with
+  `valkey: false` it stops, disables and removes every berth-managed
+  instance (marker-guarded — foreign units are untouched; instance data
+  under `/var/lib/berth-valkey/` is kept). Move each application's `.env`
+  off the Valkey socket *before* flipping the knob — see the README.
+- **Changing `php.version` on a provisioned host is refused loudly.** The
+  per-site FPM sockets are version-independent, so the old version's master
+  would fight the new one over them — a silent, non-deterministic
+  half-state. Both the `accounts` and `php` steps now refuse (not
+  bypassable with `--force`) while berth-marked pools of another version —
+  or foreign pools bound to berth sockets — remain, with a manual
+  maintenance-window migration recipe in the error and the README.
+
 ## [0.21.0] — 2026-07-27
 
 ### Fixed

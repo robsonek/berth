@@ -139,7 +139,101 @@ func unitCacheFresh(ctx context.Context, r bssh.Runner, unit string) (bool, erro
 	return res.ExitCode == 0 && strings.TrimSpace(res.Stdout) == "no", nil
 }
 
-func (valkey) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
+// sweepValkeyUnits disables and removes berth-managed instance units not in
+// desired (marker-guarded: a foreign berth-valkey-* file is never touched).
+// Reports whether anything was removed so the caller can daemon-reload once.
+func sweepValkeyUnits(ctx context.Context, r bssh.Runner, desired map[string]bool) (bool, error) {
+	units, err := listValkeyUnits(ctx, r)
+	if err != nil {
+		return false, err
+	}
+	removed := false
+	for _, u := range units {
+		if desired[u] {
+			continue
+		}
+		present, err := managedFilePresent(ctx, r, u)
+		if err != nil {
+			return false, err
+		}
+		if !present {
+			continue
+		}
+		unit := strings.TrimPrefix(u, valkeyUnitDir+"/")
+		if res, err := r.Run(ctx, "systemctl disable --now "+unit, nil); err != nil {
+			return false, err
+		} else if res.ExitCode != 0 {
+			return false, fmt.Errorf("disable orphan %s: %s", unit, res.Stderr)
+		}
+		if res, err := r.Run(ctx, "rm -f "+shQuote(u), nil); err != nil {
+			return false, err
+		} else if res.ExitCode != 0 {
+			return false, fmt.Errorf("remove orphan %s: %s", u, res.Stderr)
+		}
+		removed = true
+	}
+	return removed, nil
+}
+
+// checkDisabled is valkey's Check when the config turns the feature off: the
+// step still runs (P14 — always registered) so berth-valkey instances a
+// previous valkey:true provision left behind are reconciled away instead of
+// running forever. Only marker-owned units count — a foreign berth-valkey-*
+// file must not keep this unsatisfied forever (Apply would never remove it).
+// A clean valkey-less host pays exactly one ls probe. The package and the
+// disabled stock service are deliberately left alone (clearing = stop
+// managing), and instance data under /var/lib/berth-valkey stays, matching
+// the orphan sweep's data-retention behavior for removed sites.
+func (valkey) checkDisabled(ctx context.Context, r bssh.Runner) (provision.CheckResult, error) {
+	units, err := listValkeyUnits(ctx, r)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	owned := 0
+	for _, u := range units {
+		present, err := managedFilePresent(ctx, r, u)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if present {
+			owned++
+		}
+	}
+	if owned == 0 {
+		return provision.CheckResult{Satisfied: true, Reason: "valkey disabled; no berth-valkey instances present"}, nil
+	}
+	return provision.CheckResult{
+		Satisfied: false,
+		Reason:    fmt.Sprintf("valkey disabled but %d berth-valkey instance(s) remain", owned),
+		Changes:   []string{"disable, stop and remove every berth-managed valkey instance (data under /var/lib/berth-valkey is kept)"},
+	}, nil
+}
+
+// applyDisabled sweeps every berth-managed instance (empty desired set) and
+// reloads the manager once if anything was removed. A crash between the unit
+// removal and daemon-reload leaves only stale manager cache (runtime is
+// already stopped by disable --now); that cache is deliberately outside this
+// mode's convergence contract.
+func (valkey) applyDisabled(ctx context.Context, r bssh.Runner) error {
+	removed, err := sweepValkeyUnits(ctx, r, map[string]bool{})
+	if err != nil {
+		return err
+	}
+	if !removed {
+		return nil
+	}
+	if res, err := r.Run(ctx, "systemctl daemon-reload", nil); err != nil {
+		return err
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("daemon-reload after valkey sweep: %s", res.Stderr)
+	}
+	return nil
+}
+
+func (v valkey) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
+	if !s.Valkey {
+		return v.checkDisabled(ctx, r)
+	}
 	ok := true
 	installed, err := pkgInstalled(ctx, r, "valkey-server")
 	if err != nil {
@@ -248,7 +342,10 @@ func (valkey) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 	}, nil
 }
 
-func (valkey) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
+func (v valkey) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
+	if !s.Valkey {
+		return v.applyDisabled(ctx, r)
+	}
 	if err := aptInstall(ctx, r, "valkey-server"); err != nil {
 		return fmt.Errorf("install valkey-server: %w", err)
 	}
@@ -283,35 +380,11 @@ func (valkey) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 
 	// Orphan sweep, modelled on the supervisor one in site.go: disable and
 	// remove berth-managed instances no site desires; never a foreign file.
-	desired := desiredValkeyUnitPaths(s)
-	units, err := listValkeyUnits(ctx, r)
+	swept, err := sweepValkeyUnits(ctx, r, desiredValkeyUnitPaths(s))
 	if err != nil {
 		return err
 	}
-	for _, u := range units {
-		if desired[u] {
-			continue
-		}
-		present, err := managedFilePresent(ctx, r, u)
-		if err != nil {
-			return err
-		}
-		if !present {
-			continue
-		}
-		unit := strings.TrimPrefix(u, valkeyUnitDir+"/")
-		if res, err := r.Run(ctx, "systemctl disable --now "+unit, nil); err != nil {
-			return err
-		} else if res.ExitCode != 0 {
-			return fmt.Errorf("disable orphan %s: %s", unit, res.Stderr)
-		}
-		if res, err := r.Run(ctx, "rm -f "+shQuote(u), nil); err != nil {
-			return err
-		} else if res.ExitCode != 0 {
-			return fmt.Errorf("remove orphan %s: %s", u, res.Stderr)
-		}
-		needReload = true
-	}
+	needReload = needReload || swept
 
 	// Per-site units: write when absent or drifted (writeManagedFile enforces
 	// the foreign-file abort), remember which changed for a targeted restart.

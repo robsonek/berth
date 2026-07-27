@@ -9,6 +9,7 @@ import "github.com/robsonek/berth/internal/config"
 // marshaled YAML always carries an explicit user:.
 func (a Answers) ToServer() *config.Server {
 	srv := &config.Server{
+		ID:       a.ID,
 		Host:     a.Host,
 		SSH:      config.SSH{User: a.SSHUser, Port: a.Port, Key: a.Key, Fingerprint: a.Fingerprint},
 		PHP:      config.PHP{Version: a.PHPVersion, Source: a.PHPSource},

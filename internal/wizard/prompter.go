@@ -48,6 +48,8 @@ func (h *huhPrompter) ServerCore(a *Answers) error {
 	form := huh.NewForm(
 		huh.NewGroup(
 			huh.NewInput().Title("Config name").Value(&a.Name).Validate(required("config name")),
+			huh.NewInput().Title("Server id (stable machine identity; blank = auto-generate)").
+				Value(&a.ID).Validate(config.ValidateServerID),
 			huh.NewInput().Title("Host (IP or DNS)").Value(&a.Host).Validate(validHostname("host")),
 			huh.NewInput().Title("SSH user").Value(&a.SSHUser).Validate(required("ssh user")),
 			huh.NewInput().Title("SSH port").Value(&portStr).Validate(validIntField("ssh.port", 1, 65535)),

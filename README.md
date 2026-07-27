@@ -71,6 +71,7 @@ starting points live in [`examples/`](examples/) — e.g.
 and accepted values:
 
 ```yaml
+id: myserver-1a2b3c4d          # optional — stable machine identity (see below)
 host: 203.0.113.10             # required — server IP or DNS name
 
 ssh:
@@ -184,6 +185,30 @@ berth-seeded keys (`base64:` + 32 bytes); a key in any other format is not
 backed up, and a present-but-corrupt key makes berth refuse loudly rather than
 cache it. The thematic sections below explain each area in depth.
 
+### Server identity (`id:`)
+
+The local secret cache is keyed by `id` when set, else by `host`. Declare an
+`id` (the wizard generates one) whenever hostnames are ambiguous: two
+*different* machines reachable through one hostname on different ports must
+have *different* ids (or they would share database passwords, `APP_KEY`
+backups and the break-glass console password), while one machine addressed by
+several configs must use the *same* id in all of them — and, in this version,
+the same current `host:port`. Rules:
+
+- `id` is a stable, immutable machine identity, not a display name. Changing
+  it orphans the cache.
+- Adding an `id` to an already-provisioned config migrates the cache file
+  automatically and leaves a tombstone at the old host-keyed path, so any
+  stale config still lacking the `id` fails loudly instead of silently
+  regenerating (or disowning) secrets — add the same `id` there too.
+- The cache records the endpoint it was bound to. A mismatch is a hard error:
+  if it is a *different* server, give it its own `id`; if the endpoint really
+  changed, update every config sharing the id first, then re-run once with
+  `--force` to re-bind. Endpoint metadata is an operator-error tripwire, not
+  authentication — SSH host-key verification is unaffected and never bypassed.
+- Downgrading berth below this version after an `id`/envelope exists is not
+  supported (older binaries reject both the config key and the cache format).
+
 ## Package sources
 
 By default every component is installed from Debian 13's own repositories. Where
@@ -202,6 +227,19 @@ database:
   source: mariadb     # mariadb engine: debian | mariadb (mariadb.org 12.3 LTS)
                       # postgres engine: debian | pgdg   (apt.postgresql.org / PGDG)
 ```
+
+### Changing `php.version` on a provisioned host
+
+`php.version` is effectively immutable once sites are provisioned: the
+per-site FPM sockets (`/run/php/berth-<pool>.sock`) are shared between PHP
+versions, so an old master left running would fight the new one over them.
+berth refuses loudly (in both the `accounts` and `php` steps, `--force`
+included) while pools of another version remain. To migrate, in a maintenance
+window: (1) inventory `/etc/php/<old>/fpm/pool.d/*.conf` — berth's pools carry
+the exact first line `; managed by berth`; move anything else off that master
+first; (2) `systemctl disable --now php<old>-fpm`; (3) remove only the
+confirmed berth pool files; (4) re-run a full `berth provision`; (5) verify
+only the new `php<ver>-fpm` holds the `/run/php/berth-*.sock` sockets.
 
 Each defaults to `debian`. `database.source` accepts `debian` or the chosen
 engine's producer repo (`mariadb` for MariaDB, `pgdg` for PostgreSQL). An
@@ -225,7 +263,13 @@ berth tunes the host for production Laravel out of the box:
   backend when berth first seeds a site's `shared/.env` (without Valkey the
   app keeps the database driver), so enable `valkey` before the initial
   provision — flipping it on later does not rewrite an existing `.env`;
-  remove it or re-seed by hand.
+  update it by hand. Flipping `valkey: false` on a provisioned host makes the
+  next full run (or `--only valkey`) stop and remove every berth-managed
+  instance — **first** move each application's `.env` cache/session/queue off
+  the Valkey socket, or the app breaks the moment the instance goes away.
+  Instance data under `/var/lib/berth-valkey/` is kept; the package and the
+  disabled stock service are left alone. Note `--only <other-step>` runs do
+  not perform this cleanup.
 - **HTTP/3 (QUIC)** is available per site with `http3: true` (requires `ssl` and
   `nginx.source: nginx`); berth also opens UDP/443.
 - nginx serves fingerprinted Vite assets under `/build/assets/` with a one-year

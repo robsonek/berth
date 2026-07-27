@@ -299,3 +299,14 @@ func TestLoadStillAcceptsEveryKnownKey(t *testing.T) {
 		t.Fatalf("a fully known config must still load; got %v", err)
 	}
 }
+
+func TestCacheKey(t *testing.T) {
+	s := &Server{Host: "h.example.com"}
+	if got := s.CacheKey(); got != "h.example.com" {
+		t.Errorf("CacheKey without id = %q, want the host", got)
+	}
+	s.ID = "prod-web-1a2b3c"
+	if got := s.CacheKey(); got != "prod-web-1a2b3c" {
+		t.Errorf("CacheKey with id = %q, want the id", got)
+	}
+}

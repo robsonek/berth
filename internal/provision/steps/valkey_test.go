@@ -11,7 +11,7 @@ import (
 )
 
 func valkeyServer() *config.Server {
-	return &config.Server{Sites: []config.Site{{Domain: "app.example.com", User: "tenant1"}}}
+	return &config.Server{Valkey: true, Sites: []config.Site{{Domain: "app.example.com", User: "tenant1"}}}
 }
 
 // valkeyLoadedCmd mirrors serviceConfigLoaded's exact command construction
@@ -221,7 +221,7 @@ func TestValkeyExecCmdFollowsSymlinkBothSides(t *testing.T) {
 }
 
 func TestRenderValkeyUnit(t *testing.T) {
-	s := &config.Server{Sites: []config.Site{{Domain: "app.example.com", User: "tenant1"}}}
+	s := &config.Server{Valkey: true, Sites: []config.Site{{Domain: "app.example.com", User: "tenant1"}}}
 	got, err := renderValkeyUnit(s, s.Sites[0])
 	if err != nil {
 		t.Fatal(err)
@@ -584,5 +584,107 @@ func TestValkeyApplyRestartsStaleBinary(t *testing.T) {
 	}
 	if reloads != 0 {
 		t.Errorf("a stale binary needs no daemon-reload (unit file unchanged), got %d", reloads)
+	}
+}
+
+func TestValkeyDisabledCheckSatisfiedWhenNoInstances(t *testing.T) {
+	s := &config.Server{Valkey: false, Sites: []config.Site{{Domain: "app.example.com"}}}
+	f := bssh.NewFakeRunner()
+	f.On(valkeyListUnitsCmd, bssh.Result{}) // empty listing
+	cr, err := Valkey().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("no instances with valkey disabled must be satisfied; got %+v", cr)
+	}
+	// A clean valkey-less host pays exactly ONE probe.
+	if len(f.Calls()) != 1 {
+		t.Errorf("disabled Check must cost one ls; ran %v", f.Calls())
+	}
+}
+
+func TestValkeyDisabledCheckIgnoresForeignUnits(t *testing.T) {
+	s := &config.Server{Valkey: false, Sites: []config.Site{{Domain: "app.example.com"}}}
+	foreign := "/etc/systemd/system/berth-valkey-foreign.service"
+	f := bssh.NewFakeRunner()
+	f.On(valkeyListUnitsCmd, bssh.Result{Stdout: foreign + "\n"})
+	f.On("cat "+shQuote(foreign), bssh.Result{Stdout: "[Unit]\nDescription=mine\n"}) // no marker
+	cr, err := Valkey().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("a foreign berth-valkey-* unit must not keep disabled mode unsatisfied forever; got %+v", cr)
+	}
+}
+
+func TestValkeyDisabledSweepsManagedInstances(t *testing.T) {
+	s := &config.Server{Valkey: false, Sites: []config.Site{{Domain: "app.example.com"}}}
+	owned := "/etc/systemd/system/berth-valkey-app_example_com.service"
+	foreign := "/etc/systemd/system/berth-valkey-foreign.service"
+	f := bssh.NewFakeRunner()
+	f.On(valkeyListUnitsCmd, bssh.Result{Stdout: owned + "\n" + foreign + "\n"})
+	f.On("cat "+shQuote(owned), bssh.Result{Stdout: string(managedMarker) + "\n[Unit]\n"})
+	f.On("cat "+shQuote(foreign), bssh.Result{Stdout: "[Unit]\n"})
+
+	cr, err := Valkey().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil || cr.Satisfied {
+		t.Fatalf("Check = %+v err=%v, want unsatisfied with a managed instance present", cr, err)
+	}
+
+	f2 := bssh.NewFakeRunner()
+	f2.On(valkeyListUnitsCmd, bssh.Result{Stdout: owned + "\n" + foreign + "\n"})
+	f2.On("cat "+shQuote(owned), bssh.Result{Stdout: string(managedMarker) + "\n[Unit]\n"})
+	f2.On("cat "+shQuote(foreign), bssh.Result{Stdout: "[Unit]\n"})
+	f2.On("systemctl disable --now berth-valkey-app_example_com.service", bssh.Result{})
+	f2.On("rm -f "+shQuote(owned), bssh.Result{})
+	f2.On("systemctl daemon-reload", bssh.Result{})
+	if err := Valkey().Apply(context.Background(), provision.RunCtx{}, s, f2); err != nil {
+		t.Fatal(err)
+	}
+	var removedForeign, reloaded bool
+	for _, c := range f2.Calls() {
+		if c.Cmd == "rm -f "+shQuote(foreign) || c.Cmd == "systemctl disable --now berth-valkey-foreign.service" {
+			removedForeign = true
+		}
+		if c.Cmd == "systemctl daemon-reload" {
+			reloaded = true
+		}
+		if strings.Contains(c.Cmd, "apt-get") || strings.Contains(c.Cmd, "valkey-server.service") {
+			t.Errorf("disabled mode must not touch the package or the stock unit: %q", c.Cmd)
+		}
+	}
+	if removedForeign {
+		t.Error("a foreign unit must never be disabled or removed")
+	}
+	if !reloaded {
+		t.Error("daemon-reload must follow a removal")
+	}
+}
+
+func TestValkeyDisabledApplyNoReloadWhenNothingRemoved(t *testing.T) {
+	s := &config.Server{Valkey: false, Sites: []config.Site{{Domain: "app.example.com"}}}
+	f := bssh.NewFakeRunner()
+	f.On(valkeyListUnitsCmd, bssh.Result{})
+	if err := Valkey().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range f.Calls() {
+		if c.Cmd == "systemctl daemon-reload" {
+			t.Error("no daemon-reload when nothing was removed")
+		}
+	}
+}
+
+func TestValkeyDisabledSweepFailureIsHardError(t *testing.T) {
+	s := &config.Server{Valkey: false, Sites: []config.Site{{Domain: "app.example.com"}}}
+	owned := "/etc/systemd/system/berth-valkey-app_example_com.service"
+	f := bssh.NewFakeRunner()
+	f.On(valkeyListUnitsCmd, bssh.Result{Stdout: owned + "\n"})
+	f.On("cat "+shQuote(owned), bssh.Result{Stdout: string(managedMarker) + "\n[Unit]\n"})
+	f.On("systemctl disable --now berth-valkey-app_example_com.service", bssh.Result{ExitCode: 1, Stderr: "boom"})
+	if err := Valkey().Apply(context.Background(), provision.RunCtx{}, s, f); err == nil {
+		t.Fatal("a failed disable must be a hard error")
 	}
 }

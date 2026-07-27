@@ -9,12 +9,17 @@ import (
 // Pipeline returns the ordered steps for a server, honoring toggles and flags.
 func Pipeline(s *config.Server, red *secret.Redactor, skipSSL bool) []provision.Step {
 	steps := []provision.Step{
+		// identity FIRST: it reconciles the local secret-cache identity
+		// (bind/upgrade/migrate/endpoint check) and must settle before
+		// preflight performs the run's first remote mutation.
+		Identity(),
 		Preflight(), SystemBase(), System(), Accounts(red), Hardening(),
 		PHP(), Nginx(), Composer(),
 	}
-	if s.Valkey {
-		steps = append(steps, Valkey())
-	}
+	// valkey is ALWAYS registered: its disabled mode sweeps instances a
+	// previous valkey:true provision left behind (P14) — omitting the step
+	// made the true->false flip an undeclared state transition.
+	steps = append(steps, Valkey())
 	if s.NeedsSupervisor() {
 		steps = append(steps, Supervisor())
 	}
