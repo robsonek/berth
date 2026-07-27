@@ -427,9 +427,9 @@ func TestAncestorsOf(t *testing.T) {
 		{"/srv/apps/site", []string{"/", "/srv", "/srv/apps"}},
 		{"/home/x", []string{"/", "/home"}},
 	} {
-		got := ancestorsOf(tc.in)
+		got := bssh.AncestorsOf(tc.in)
 		if strings.Join(got, ",") != strings.Join(tc.want, ",") {
-			t.Errorf("ancestorsOf(%q) = %v, want %v", tc.in, got, tc.want)
+			t.Errorf("AncestorsOf(%q) = %v, want %v", tc.in, got, tc.want)
 		}
 	}
 }

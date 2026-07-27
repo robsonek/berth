@@ -265,7 +265,7 @@ func TestWriteFilePreCancelledContext(t *testing.T) {
 	cancel()
 	// nil c.sftp is safe here: the pre-cancelled ctx must short-circuit in
 	// exec("mktemp") before anything touches the SFTP subsystem.
-	err := c.WriteFile(ctx, FileSpec{Path: "/tmp/x", Content: []byte("y")})
+	err := c.WriteFile(ctx, FileSpec{Path: "/tmp/x", Content: []byte("y"), Sudo: true})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}

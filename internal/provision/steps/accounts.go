@@ -128,7 +128,7 @@ func (a accounts) Check(ctx context.Context, rc provision.RunCtx, s *config.Serv
 	// ensureUser creates /home/<user> as root, so /home itself must be
 	// root-controlled — otherwise the account's home could be pre-planted as a
 	// symlink and root's install -d would chown its target. "/home/x" is a
-	// deliberate path PATTERN, not a real account: ancestorsOf derives
+	// deliberate path PATTERN, not a real account: bssh.AncestorsOf derives
 	// ["/", "/home"] from it, which is exactly the chain the probe must cover.
 	if err := assertSafeAncestry(ctx, r, "berth accounts", "/home/x"); err != nil {
 		return provision.CheckResult{}, err
@@ -325,7 +325,7 @@ func (a accounts) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serv
 	// ensureUser creates /home/<user> as root, so /home itself must be
 	// root-controlled — otherwise the account's home could be pre-planted as a
 	// symlink and root's install -d would chown its target. "/home/x" is a
-	// deliberate path PATTERN, not a real account: ancestorsOf derives
+	// deliberate path PATTERN, not a real account: bssh.AncestorsOf derives
 	// ["/", "/home"] from it, which is exactly the chain the probe must cover.
 	if err := assertSafeAncestry(ctx, r, "berth accounts", "/home/x"); err != nil {
 		return err

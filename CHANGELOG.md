@@ -3,6 +3,35 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Changed
+
+- **BREAKING: a config file with an unknown or misspelled key no longer
+  loads.** `berth` used to ignore keys it did not recognise and quietly apply
+  the default, so a typo in something safety-relevant — `cloudflare_only`, a
+  backup setting, a per-site policy — left you convinced you had configured
+  something berth never read. Unknown keys are now a parse error naming the
+  offending key. If a config fails to load after upgrading, the message tells
+  you which key to fix or remove.
+
+### Fixed
+
+- **The privileged write path now states and enforces its contract.** Writing
+  a file as root is only sound when root controls the whole destination path:
+  the temp file is staged next to the destination, so an account that can write
+  any component of that path can substitute the staged file (via a hard link it
+  keeps) or replace the final name afterwards. Ownership of the content does not
+  help — a root-owned file is itself a capability, and an `authorized_keys`
+  landing in `/root/.ssh` through a swapped symlink would grant root.
+
+  Every privileged write therefore requires a `root:root` destination whose mode
+  is not group- or other-writable, an absolute clean path, and an ancestry in
+  which every existing component is a root-owned, non-writable real directory.
+  Violations are refused before anything is staged, naming the component, its
+  owner and the remedy. Files inside territory an account owns are not written
+  this way at all; they are written by that account, as of the previous release.
+
 ## [0.19.1] — 2026-07-27
 
 ### Fixed
