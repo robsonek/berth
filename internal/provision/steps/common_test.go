@@ -91,20 +91,40 @@ func writtenContent(f *bssh.FakeRunner, path string) []byte {
 // occurrence of any of them against tenant territory is the bug this package
 // closed, so the guard matches the verb anywhere in the command (catching
 // `/usr/bin/install -d`, `sudo install -d`, `chown`, a bare `mkdir`, …) rather
-// than a single literal prefix.
+// than a single literal prefix. "mv " and "rm " also match writeFileAsUser's
+// own tenant command (`… mv -fT -- …`, `trap 'rm -f …'`) — harmless there, the
+// sudo -u prefix clears it, and load-bearing: a regression moving that write
+// into a root `sh -c '… mv …'` fires the command half, not only the WriteFile
+// half. Do not trim them as dead weight.
 var mutatingVerbs = []string{"install ", "mkdir ", "chown ", "chmod ", "rm ", "ln ", "mv "}
 
 // assertOnlyTenantMutates fails when any recorded command mutates one of the
-// given paths without running as user, or when any privileged WriteFile targets
-// one. Read-only probes (stat, test, cat, id) are ignored — they cannot hand
-// anything over. Paths must be absolute and are matched shell-quoted, the form
-// every step emits.
+// given paths — or anything beneath them — without running as user, or when
+// any privileged WriteFile targets one. Read-only probes (stat, test, cat, id)
+// are ignored — they cannot hand anything over. Paths must be absolute and are
+// matched shell-quoted, the form every step emits.
 func assertOnlyTenantMutates(t *testing.T, f *bssh.FakeRunner, user string, paths ...string) {
 	t.Helper()
+	for _, v := range tenantMutationViolations(f, user, paths...) {
+		t.Error(v)
+	}
+}
+
+// tenantMutationViolations is assertOnlyTenantMutates' engine, split out so
+// the guard itself can be tested (a helper that only t.Errorfs cannot be
+// exercised without failing the calling test). Both halves cover the whole
+// SUBTREE of each guarded path: the most likely future regression is a NEW
+// file under shared/ or ~/.ssh written as root, and an exact-path match would
+// stay silent for exactly that case.
+func tenantMutationViolations(f *bssh.FakeRunner, user string, paths ...string) []string {
+	var out []string
 	prefix := "sudo -u " + user + " "
 	for _, c := range f.Calls() {
 		for _, p := range paths {
-			if !strings.Contains(c.Cmd, shQuote(p)) {
+			// shQuote(p) is 'p' (guarded paths carry no quotes), so a quoted
+			// child appears as 'p/…: match the exact path or the subtree prefix.
+			q := shQuote(p)
+			if !strings.Contains(c.Cmd, q) && !strings.Contains(c.Cmd, strings.TrimSuffix(q, "'")+"/") {
 				continue
 			}
 			mutating := false
@@ -115,16 +135,55 @@ func assertOnlyTenantMutates(t *testing.T, f *bssh.FakeRunner, user string, path
 				}
 			}
 			if mutating && !strings.HasPrefix(c.Cmd, prefix) {
-				t.Errorf("mutation of tenant-owned %s must run as %s; got %q", p, user, c.Cmd)
+				out = append(out, fmt.Sprintf("mutation of tenant-owned %s must run as %s; got %q", p, user, c.Cmd))
 			}
 		}
 	}
 	for _, w := range f.Writes() {
 		for _, p := range paths {
-			if w.Path == p {
-				t.Errorf("%s must not be written through the privileged WriteFile path; got %+v", p, w)
+			if w.Path == p || strings.HasPrefix(w.Path, p+"/") {
+				out = append(out, fmt.Sprintf("%s must not be written through the privileged WriteFile path; got %+v", p, w))
 			}
 		}
+	}
+	return out
+}
+
+func TestAssertOnlyTenantMutatesCoversSubtree(t *testing.T) {
+	// The most likely future edit is a NEW file under a guarded directory
+	// written as root; exact-path matching would stay silent for exactly that
+	// case, so both halves must fire on children too.
+	guarded := "/var/www/myapp/shared"
+	f := bssh.NewFakeRunner()
+	if err := f.WriteFile(context.Background(), bssh.FileSpec{Path: guarded + "/newfile", Content: []byte("x"), Mode: 0o600, Sudo: true}); err != nil {
+		t.Fatal(err)
+	}
+	got := tenantMutationViolations(f, "deploy", guarded)
+	if len(got) != 1 || !strings.Contains(got[0], guarded+"/newfile") {
+		t.Fatalf("a privileged WriteFile to a child of a guarded directory must fire; got %v", got)
+	}
+
+	rootCmd := "install -d -o deploy -g deploy -m 00700 " + shQuote(guarded+"/cache")
+	f2 := bssh.NewFakeRunner()
+	f2.On(rootCmd, bssh.Result{})
+	if _, err := f2.Run(context.Background(), rootCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	got = tenantMutationViolations(f2, "deploy", guarded)
+	if len(got) != 1 || !strings.Contains(got[0], "must run as deploy") {
+		t.Fatalf("a root-run mutation of a child path must fire; got %v", got)
+	}
+
+	// The tenant-run form of the same child mutation must stay clean — the
+	// subtree widening must not turn legitimate tenant work into noise.
+	tenantCmd := "sudo -u deploy install -d -g deploy -m 00700 " + shQuote(guarded+"/cache")
+	f3 := bssh.NewFakeRunner()
+	f3.On(tenantCmd, bssh.Result{})
+	if _, err := f3.Run(context.Background(), tenantCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := tenantMutationViolations(f3, "deploy", guarded); len(got) != 0 {
+		t.Fatalf("a tenant-run child mutation must not fire; got %v", got)
 	}
 }
 
