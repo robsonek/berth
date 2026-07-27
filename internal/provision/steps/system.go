@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -20,6 +21,11 @@ const (
 	sysctlPath         = "/etc/sysctl.d/99-berth.conf"
 	swappinessProcPath = "/proc/sys/vm/swappiness"
 	swappinessValue    = "10"
+	// swappinessStatePath records the LIVE vm.swappiness observed before
+	// berth's first overwrite — the only value an honest swap removal can
+	// restore (sysctl --system cannot: no file re-establishes a default, and
+	// hardcoding the kernel's 60 would destroy an operator's own setting).
+	swappinessStatePath = berthStateDir + "/swappiness.pre-berth"
 )
 
 // fstabSwapLine is the exact /etc/fstab entry berth appends for its swap file. The
@@ -42,26 +48,12 @@ const (
 // leaving it would keep resolving the image's old name next to the new one.
 const hostsSedLocalAlias = `\|^[[:space:]]*127\.0\.1\.1[[:space:]]|d`
 
-// parseSwapBytes converts a validated swap size ("2G", "512M", case-insensitive)
-// to bytes. Units are binary (M = MiB, G = GiB) to match `fallocate -l` and
-// `stat -c %s`. It re-rejects bad input defensively (config.Validate already guards).
+// parseSwapBytes is a thin defensive wrapper over the authoritative
+// config.ParseSwapBytes (shape + 1 TiB overflow cap live there; the wizard
+// delegates to the same function). Kept so literal-Server callers that
+// bypass config.Load still fail here instead of reaching fallocate.
 func parseSwapBytes(size string) (int64, error) {
-	s := strings.ToUpper(strings.TrimSpace(size))
-	if len(s) < 2 {
-		return 0, fmt.Errorf("invalid swap size %q", size)
-	}
-	num, err := strconv.ParseInt(s[:len(s)-1], 10, 64)
-	if err != nil || num <= 0 {
-		return 0, fmt.Errorf("invalid swap size %q", size)
-	}
-	switch s[len(s)-1] {
-	case 'M':
-		return num * 1024 * 1024, nil
-	case 'G':
-		return num * 1024 * 1024 * 1024, nil
-	default:
-		return 0, fmt.Errorf("invalid swap size unit in %q (use M or G)", size)
-	}
+	return config.ParseSwapBytes(strings.TrimSpace(size))
 }
 
 // fstabSwapState scans /etc/fstab content for /swapfile entries. marked is true if a
@@ -166,6 +158,28 @@ func (system) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 	return provision.CheckResult{Satisfied: false, Reason: "system (swap/sysctl/timezone/hostname) not in desired state", Changes: changes}, nil
 }
 
+// reSwappinessVal is the kernel's accepted vm.swappiness range (0-200 since
+// 5.8). The state file's contents are interpolated into `sysctl -w`, so an
+// invalid or tampered file must hard-fail, never reach the command line.
+var reSwappinessVal = regexp.MustCompile(`^([0-9]{1,2}|1[0-9]{2}|200)$`)
+
+// readSwappinessState reads and validates the pre-berth swappiness state
+// file: (value, exists, error). A present-but-invalid file is a hard error
+// BEFORE any mutation.
+func readSwappinessState(ctx context.Context, r bssh.Runner) (string, bool, error) {
+	val, ok, err := catTrim(ctx, r, swappinessStatePath)
+	if err != nil {
+		return "", false, err
+	}
+	if !ok {
+		return "", false, nil
+	}
+	if !reSwappinessVal.MatchString(val) {
+		return "", true, fmt.Errorf("%s holds %q, not a valid vm.swappiness (0-200); refusing to restore it — inspect or remove the file", swappinessStatePath, val)
+	}
+	return val, true, nil
+}
+
 // catTrim returns the trimmed stdout of `cat <path>` and whether the file was
 // readable (exit 0). Read-only; mirrors checkManagedFile's read style.
 func catTrim(ctx context.Context, r bssh.Runner, path string) (string, bool, error) {
@@ -258,6 +272,12 @@ func checkSwap(ctx context.Context, rc provision.RunCtx, r bssh.Runner, size str
 	if !swapDropOK {
 		changes = append(changes, "write "+swapSysctlPath+" (vm.swappiness="+swappinessValue+") + sysctl -p")
 	}
+	// A present pre-berth state file must be VALID (hard error otherwise);
+	// a missing one is fine — legacy pre-P15 hosts stay converged without a
+	// fabricated baseline, re-applies never rewrite it.
+	if _, _, err := readSwappinessState(ctx, r); err != nil {
+		return false, nil, err
+	}
 	if len(changes) == 0 {
 		return true, nil, nil
 	}
@@ -287,8 +307,11 @@ func swappinessLive(ctx context.Context, rc provision.RunCtx, r bssh.Runner) (bo
 }
 
 // checkSwapRemoval reports satisfied unless a berth-owned swap lingers while swap is
-// off: a marked fstab line or a berth-managed swappiness drop-in. A foreign swap is
-// never flagged (berth removes only what it created).
+// off: a marked fstab line, a berth-managed swappiness drop-in, or the
+// pre-berth swappiness state file (its presence means the restore has not
+// happened yet — the file is deleted only AFTER a successful restore, so an
+// interrupted removal converges on the next run). A foreign swap is never
+// flagged (berth removes only what it created).
 func checkSwapRemoval(ctx context.Context, r bssh.Runner) (bool, []string, error) {
 	fstab, _, err := catTrim(ctx, r, fstabPath)
 	if err != nil {
@@ -299,8 +322,19 @@ func checkSwapRemoval(ctx context.Context, r bssh.Runner) (bool, []string, error
 	if err != nil {
 		return false, nil, err
 	}
+	_, stateExists, err := readSwappinessState(ctx, r)
+	if err != nil {
+		return false, nil, err
+	}
+	var changes []string
 	if marked || dropPresent {
-		return false, []string{"remove berth swap (" + swapfilePath + " + fstab entry + " + swapSysctlPath + ")"}, nil
+		changes = append(changes, "remove berth swap ("+swapfilePath+" + fstab entry + "+swapSysctlPath+")")
+	}
+	if stateExists {
+		changes = append(changes, "sysctl --system, restore pre-berth vm.swappiness, drop "+swappinessStatePath)
+	}
+	if len(changes) > 0 {
+		return false, changes, nil
 	}
 	return true, nil, nil
 }
@@ -521,12 +555,17 @@ func applyHostname(ctx context.Context, r bssh.Runner, hostname string) error {
 }
 
 func (system) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
+	var swapOff, restorePending, removedNoState bool
+	var savedSwappiness string
 	if s.System.Swap != "" {
 		if err := applySwap(ctx, rc, r, s.System.Swap); err != nil {
 			return err
 		}
 	} else {
-		if err := applySwapRemoval(ctx, r); err != nil {
+		swapOff = true
+		var err error
+		savedSwappiness, restorePending, removedNoState, err = applySwapRemoval(ctx, r)
+		if err != nil {
 			return err
 		}
 	}
@@ -548,6 +587,24 @@ func (system) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 		if err := applyHostname(ctx, r, s.System.Hostname); err != nil {
 			return err
 		}
+	}
+	// Deferred swap-removal finalization — the LAST sysctl mutations of the
+	// step, in commit order: reload the remaining persistent config first (an
+	// operator drop-in reloaded later would overwrite the restore), then the
+	// exact pre-berth value, and only after a successful restore drop the
+	// state file (any earlier failure leaves it, so the next Check retries).
+	if swapOff && restorePending {
+		if err := runOK(ctx, r, "sysctl --system"); err != nil {
+			return err
+		}
+		if err := runOK(ctx, r, "sysctl -w vm.swappiness="+savedSwappiness); err != nil {
+			return err
+		}
+		if err := runOK(ctx, r, "rm -f "+swappinessStatePath); err != nil {
+			return err
+		}
+	} else if swapOff && removedNoState {
+		rc.Warnf("removed %s but no pre-berth swappiness state was recorded (pre-P15 provision); the live vm.swappiness keeps berth's value until reboot or a manual sysctl", swapSysctlPath)
 	}
 	return nil
 }
@@ -652,6 +709,40 @@ func applySwap(ctx context.Context, rc provision.RunCtx, r bssh.Runner, size str
 			return err
 		}
 	}
+	// Capture the pre-berth vm.swappiness BEFORE the first drop-in write (not
+	// merely before sysctl -p): a crash after writing the persistent drop-in
+	// but before recording state would let a reboot apply berth's value with
+	// no recovery information. Captured only when the drop-in is not already
+	// berth-managed (an already-managed drop-in means the live value is
+	// berth's own — recording it would fabricate a false baseline) and the
+	// state file does not exist (re-applies must never rewrite the original).
+	dropManaged, err := managedFilePresent(ctx, r, swapSysctlPath)
+	if err != nil {
+		return err
+	}
+	if !dropManaged {
+		if _, exists, err := readSwappinessState(ctx, r); err != nil {
+			return err
+		} else if !exists {
+			live, ok, err := catTrim(ctx, r, swappinessProcPath)
+			if err != nil {
+				return err
+			}
+			if !ok || !reSwappinessVal.MatchString(live) {
+				return fmt.Errorf("read live vm.swappiness before overwriting it: got %q", live)
+			}
+			// No-clobber create (set -C): a concurrent run must not replace
+			// the original with a value berth already set. The value is
+			// regexp-validated above, so the interpolation is shell-safe.
+			// The fallback tests -s (non-empty), NOT -e: a failed printf that
+			// already created the file (ENOSPC) must surface here, not
+			// proceed and strand an empty baseline for the removal to choke
+			// on later.
+			if err := runOK(ctx, r, "install -d -o root -g root -m 0755 "+berthStateDir+" && { set -C; printf '%s\n' "+live+" > "+swappinessStatePath+"; } 2>/dev/null || [ -s "+swappinessStatePath+" ]"); err != nil {
+				return fmt.Errorf("record pre-berth vm.swappiness: %w", err)
+			}
+		}
+	}
 	want, err := renderSwapSysctl()
 	if err != nil {
 		return err
@@ -662,39 +753,46 @@ func applySwap(ctx context.Context, rc provision.RunCtx, r bssh.Runner, size str
 	return runOK(ctx, r, "sysctl -p "+swapSysctlPath)
 }
 
-// applySwapRemoval removes berth's swap artifacts when swap is off. It removes the
-// swap file + fstab line only if berth marked it (never a foreign swap), and the
-// swappiness drop-in if berth-managed.
-func applySwapRemoval(ctx context.Context, r bssh.Runner) error {
+// applySwapRemoval removes berth's swap artifacts when swap is off: the swap
+// file + fstab line only if berth marked it (never a foreign swap), and the
+// swappiness drop-in if berth-managed. It performs NO sysctl work itself —
+// the pre-berth swappiness restore must be the FINAL sysctl mutation of the
+// whole system step (a later `sysctl --system` from the general branch would
+// overwrite it), so it returns what the caller needs for that deferred
+// finalization: the validated saved value (state read hard-fails on an
+// invalid file BEFORE any mutation) and whether a drop-in was removed with
+// no recovery state (pre-P15 install — worth a warning).
+func applySwapRemoval(ctx context.Context, r bssh.Runner) (saved string, hasState bool, removedNoState bool, err error) {
+	saved, hasState, err = readSwappinessState(ctx, r)
+	if err != nil {
+		return "", false, false, err
+	}
 	fstab, _, err := catTrim(ctx, r, fstabPath)
 	if err != nil {
-		return err
+		return "", false, false, err
 	}
 	marked, _ := fstabSwapState(fstab)
 	dropPresent, err := managedFilePresent(ctx, r, swapSysctlPath)
 	if err != nil {
-		return err
-	}
-	if !marked && !dropPresent {
-		return nil
+		return "", false, false, err
 	}
 	if marked {
 		if err := swapoffIfActive(ctx, r); err != nil {
-			return err
+			return "", false, false, err
 		}
 		if err := runOK(ctx, r, "sed -i "+shQuote(fstabSedMarked)+" "+fstabPath); err != nil {
-			return err
+			return "", false, false, err
 		}
 		if err := runOK(ctx, r, "rm -f "+swapfilePath); err != nil {
-			return err
+			return "", false, false, err
 		}
 	}
 	if dropPresent {
 		if err := runOK(ctx, r, "rm -f "+swapSysctlPath); err != nil {
-			return err
+			return "", false, false, err
 		}
 	}
-	return nil
+	return saved, hasState, dropPresent && !hasState, nil
 }
 
 // applySysctl writes the general drop-in and reloads, unless already satisfied.

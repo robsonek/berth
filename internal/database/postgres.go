@@ -101,8 +101,9 @@ func (Postgres) EnsureUser(ctx context.Context, r bssh.Runner, user, password, d
 // app role the database owner. The app role/database must already exist; berth
 // provisions them, so for disaster recovery re-run berth before restoring.
 // database is a validated SQL identifier, so it carries no shell metacharacters.
+// The name is shell-quoted for the same defensive reason as MariaDB's.
 func (Postgres) DumpCommand(database string) string {
-	return "sudo -u postgres pg_dump " + database
+	return "sudo -u postgres pg_dump " + shQuote(database)
 }
 
 // ClientAuthFileName is libpq's per-user password file.

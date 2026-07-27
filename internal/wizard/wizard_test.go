@@ -2,6 +2,7 @@ package wizard
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/robsonek/berth/internal/config"
@@ -168,5 +169,45 @@ func TestWriteRefusesOverwrite(t *testing.T) {
 	}
 	if _, err := validSingle().Write(); err == nil {
 		t.Error("expected refusal to overwrite existing config")
+	}
+}
+
+func TestWriteRejectsPathEscapingNames(t *testing.T) {
+	// The RAW name is validated (filepath.Join would clean "../x" first and
+	// hide the escape); today's barriers against writing outside servers/ are
+	// accidental (refuse-existing + ENOENT on nested paths), not a validator.
+	dir := t.TempDir()
+	old, _ := os.Getwd()
+	t.Cleanup(func() { os.Chdir(old) })
+	os.Chdir(dir)
+	for _, name := range []string{"../evil", "a/b", `a\b`, "..", ".hidden", "-lead", ""} {
+		a := validSingle()
+		a.Name = name
+		if _, err := a.Write(); err == nil {
+			t.Errorf("Name %q must be rejected", name)
+		}
+	}
+	// The shared validator is also what the prompt uses.
+	if err := validConfigName("../evil"); err == nil {
+		t.Error("prompt validator must reject the raw escape too")
+	}
+	if err := validConfigName("good-name.v2"); err != nil {
+		t.Errorf("dots/dashes are legal: %v", err)
+	}
+}
+
+func TestWriteUsesExclusiveCreate(t *testing.T) {
+	dir := t.TempDir()
+	old, _ := os.Getwd()
+	t.Cleanup(func() { os.Chdir(old) })
+	os.Chdir(dir)
+	a := validSingle()
+	a.Name = "dup"
+	if _, err := a.Write(); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	_, err := a.Write()
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("second write must refuse with the friendly message; got %v", err)
 	}
 }

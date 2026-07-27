@@ -65,7 +65,7 @@ func TestBackupsApplyWritesScriptCronDirAndPrereqs(t *testing.T) {
 			t.Errorf("%s: mode=%o owner=%s:%s, want %o root:root", p, w.Mode, w.Owner, w.Group, mode)
 		}
 	}
-	if !strings.Contains(string(got[backupScriptPath(site.Domain)].Content), "mysqldump --protocol=socket --single-transaction --no-tablespaces --routines --events myapp") {
+	if !strings.Contains(string(got[backupScriptPath(site.Domain)].Content), "mysqldump --protocol=socket --single-transaction --no-tablespaces --routines --events 'myapp'") {
 		t.Errorf("script missing dump command:\n%s", got[backupScriptPath(site.Domain)].Content)
 	}
 	if !strings.HasPrefix(string(got[backupScriptPath(site.Domain)].Content), "# managed by berth\nset -euo pipefail") {

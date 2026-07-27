@@ -11,7 +11,7 @@ trap 'rm -f -- "$db_tmp" "$files_tmp"' EXIT
 find "/var/backups/berth/app_example_com" -maxdepth 1 -type f -name '.tmp-*' -mmin +1440 -delete
 echo "[$(date -u +%FT%TZ)] berth backup app_example_com: start"
 db_tmp="$(mktemp "/var/backups/berth/app_example_com/.tmp-XXXXXXXX")"
-mysqldump --protocol=socket --single-transaction --no-tablespaces --routines --events myapp | gzip -c > "$db_tmp"
+mysqldump --protocol=socket --single-transaction --no-tablespaces --routines --events 'myapp' | gzip -c > "$db_tmp"
 chmod 0600 "$db_tmp"
 mv "$db_tmp" "/var/backups/berth/app_example_com/myapp-$ts.sql.gz"
 files_tmp="$(mktemp "/var/backups/berth/app_example_com/.tmp-XXXXXXXX")"

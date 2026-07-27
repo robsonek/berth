@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -1287,5 +1288,57 @@ func TestDatabaseApplyPostgresSeedsPgpass(t *testing.T) {
 	}
 	if !strings.HasPrefix(string(auth), "*:*:myapp:myapp:") {
 		t.Errorf("~/.pgpass = %q, want the wildcard db/user line", auth)
+	}
+}
+
+func TestDatabaseApplyRegistersPasswordBeforeAppKeyAcquisitionFails(t *testing.T) {
+	// The redaction property is TEMPORAL: each secret registers the moment it
+	// is acquired, BEFORE the next fallible operation. With the pre-P15
+	// ordering (Add after the whole branch) this test fails: the password
+	// read from the live .env would stay unregistered when appKeyFromEnv
+	// dies, and the run's error output could carry it unmasked.
+	chdirTemp(t)
+	s := databaseServer()
+	red := secret.NewRedactor()
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Hunter22pw\n"})
+	f.OnError("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), errors.New("connection lost"))
+
+	err := Database(red).Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil {
+		t.Fatal("Apply must fail when the APP_KEY read dies")
+	}
+	if got := red.Apply("leak Hunter22pw leak"); strings.Contains(got, "Hunter22pw") {
+		t.Fatalf("the password must already be registered when a LATER acquisition fails; Apply => %q", got)
+	}
+}
+
+func TestDatabaseApplyRegistersFreshPasswordBeforeAppKeyRecoveryFails(t *testing.T) {
+	// Fresh-seed branch: the (cache-reused) password registers before
+	// recoverOrNewAppKey — a malformed cached APP_KEY aborts the branch, and
+	// the password must already redact.
+	chdirTemp(t)
+	s := databaseServer()
+	dbUser := s.SiteDBUser(s.Sites[0])
+	if err := secret.SaveCache(s.Host, map[string]string{
+		dbUser:             "Hunter22pw",
+		"appkey:" + dbUser: "garbage-not-an-app-key",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	red := secret.NewRedactor()
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh: no .env
+
+	err := Database(red).Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "APP_KEY") {
+		t.Fatalf("Apply must fail on the malformed cached APP_KEY; got %v", err)
+	}
+	if got := red.Apply("leak Hunter22pw leak"); strings.Contains(got, "Hunter22pw") {
+		t.Fatalf("the password must already be registered when APP_KEY recovery fails; Apply => %q", got)
 	}
 }

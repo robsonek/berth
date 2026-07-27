@@ -348,6 +348,10 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 		if err != nil {
 			return err
 		}
+		// Each secret is registered with the redactor the MOMENT it is
+		// acquired — before the NEXT fallible operation, whose error text
+		// could otherwise carry an unmasked value (e.g. the password must
+		// already redact when appKeyFromEnv or the remote seed fails).
 		var pw, appKey string
 		if envExists {
 			// An existing .env is never rewritten: the seed write is atomic,
@@ -358,19 +362,23 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 			if err != nil {
 				return err
 			}
+			d.redactor.Add(pw)
 			appKey, err = d.appKeyFromEnv(ctx, r, site)
 			if err != nil {
 				return err
 			}
+			d.redactor.Add(appKey) // no-op when empty
 		} else {
 			pw, err = newPassword(dbUser, cache)
 			if err != nil {
 				return err
 			}
+			d.redactor.Add(pw)
 			appKey, err = recoverOrNewAppKey(dbUser, cache)
 			if err != nil {
 				return err
 			}
+			d.redactor.Add(appKey)
 			cache[dbUser] = pw
 			cache[appKeyCacheKey(dbUser)] = appKey
 			// Persist the recovery copy BEFORE the secret goes live remotely
@@ -386,8 +394,6 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 				return err
 			}
 		}
-		d.redactor.Add(pw)
-		d.redactor.Add(appKey) // no-op when empty
 		if err := eng.EnsureDatabase(ctx, r, dbName); err != nil {
 			return err
 		}
@@ -572,7 +578,11 @@ func (d database) seedSharedEnv(ctx context.Context, r bssh.Runner, s *config.Se
 	// tenant-owned file in a root-only directory (see writeFileAsUser). The
 	// account writes its own .env; the content still rides on stdin, so the
 	// generated password never reaches a command string.
-	if err := writeFileAsUser(ctx, r, user, sharedEnvPath(site), 0o600, secret.EnvFile(kv)); err != nil {
+	body, err := secret.EnvFile(kv)
+	if err != nil {
+		return fmt.Errorf("render shared/.env for %s: %w", site.Domain, err)
+	}
+	if err := writeFileAsUser(ctx, r, user, sharedEnvPath(site), 0o600, body); err != nil {
 		return err
 	}
 	return nil
