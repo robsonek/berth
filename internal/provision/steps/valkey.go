@@ -14,13 +14,6 @@ import (
 // valkeyUnit is the systemd unit shipped by the Debian valkey-server package.
 const valkeyUnit = "valkey-server.service"
 
-// Legacy paths of the pre-per-site tuning drop-in that targeted the stock
-// valkey-server.service; kept only so Apply can migrate them away.
-const (
-	valkeyDropInDir  = "/etc/systemd/system/valkey-server.service.d"
-	valkeyDropInPath = valkeyDropInDir + "/berth.conf"
-)
-
 const (
 	valkeyUnitDir   = "/etc/systemd/system"
 	valkeyRunBase   = "/run/berth-valkey"
@@ -254,14 +247,6 @@ func (v valkey) Check(ctx context.Context, rc provision.RunCtx, s *config.Server
 	}
 	ok = ok && stockEnabled.ExitCode != 0 && stockActive.ExitCode != 0
 
-	// The legacy tuning drop-in targeted the stock unit; a berth-managed copy
-	// left behind must be migrated away (foreign files are left alone).
-	legacyDropIn, err := managedFilePresent(ctx, r, valkeyDropInPath)
-	if err != nil {
-		return provision.CheckResult{}, err
-	}
-	ok = ok && !legacyDropIn
-
 	for _, site := range s.Sites {
 		want, err := renderValkeyUnit(s, site)
 		if err != nil {
@@ -335,7 +320,6 @@ func (v valkey) Check(ctx context.Context, rc provision.RunCtx, s *config.Server
 		Changes: []string{
 			"install valkey-server (valkey-cli comes via its valkey-tools dependency)",
 			"disable the stock shared valkey-server.service",
-			"remove the legacy valkey tuning drop-in (when berth-managed)",
 			"per site: write berth-valkey-<pool>.service, enable --now, verify PONG over the socket",
 			"remove orphan berth-valkey instances",
 		},
@@ -358,33 +342,12 @@ func (v valkey) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server
 		return fmt.Errorf("disable stock %s: %s", valkeyUnit, res.Stderr)
 	}
 
-	needReload := false
-
-	// Migrate the legacy tuning drop-in (targeted the stock unit) — guarded:
-	// only a berth-managed file is removed.
-	if present, err := managedFilePresent(ctx, r, valkeyDropInPath); err != nil {
-		return err
-	} else if present {
-		if res, err := r.Run(ctx, "rm -f "+shQuote(valkeyDropInPath), nil); err != nil {
-			return err
-		} else if res.ExitCode != 0 {
-			return fmt.Errorf("remove legacy %s: %s", valkeyDropInPath, res.Stderr)
-		}
-		if res, err := r.Run(ctx, "rmdir --ignore-fail-on-non-empty "+shQuote(valkeyDropInDir), nil); err != nil {
-			return err
-		} else if res.ExitCode != 0 {
-			return fmt.Errorf("rmdir %s: %s", valkeyDropInDir, res.Stderr)
-		}
-		needReload = true
-	}
-
 	// Orphan sweep, modelled on the supervisor one in site.go: disable and
 	// remove berth-managed instances no site desires; never a foreign file.
-	swept, err := sweepValkeyUnits(ctx, r, desiredValkeyUnitPaths(s))
+	needReload, err := sweepValkeyUnits(ctx, r, desiredValkeyUnitPaths(s))
 	if err != nil {
 		return err
 	}
-	needReload = needReload || swept
 
 	// Per-site units: write when absent or drifted (writeManagedFile enforces
 	// the foreign-file abort), remember which changed for a targeted restart.

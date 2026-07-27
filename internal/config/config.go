@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 
-	mapstructure "github.com/go-viper/mapstructure/v2"
 	"github.com/spf13/viper"
 )
 
@@ -330,10 +329,6 @@ func (b Backups) ScheduleEff() string {
 type Database struct {
 	Engine string `mapstructure:"engine" yaml:"engine"` // mariadb | postgres (server-wide)
 	Source string `mapstructure:"source" yaml:"source"` // debian | mariadb | pgdg
-	// Name/User are legacy single-site fields; multi-site sites carry their own
-	// database block. A lone site without a site.database inherits these.
-	Name string `mapstructure:"name" yaml:"name,omitempty"`
-	User string `mapstructure:"user" yaml:"user,omitempty"`
 }
 
 // SiteDatabase is a per-site database name + user (each domain its own DB).
@@ -501,21 +496,12 @@ func (s *Server) SiteProgramNames(site Site) []string {
 	return names
 }
 
-// SiteDBName / SiteDBUser return the per-site database name and user, inheriting
-// the legacy top-level database.name/user when a lone site omits its own block.
-func (s *Server) SiteDBName(site Site) string {
-	if site.Database.Name != "" {
-		return site.Database.Name
-	}
-	return s.Database.Name
-}
+// SiteDBName / SiteDBUser return the per-site database name and user. Every
+// site carries its own database block; the pre-release top-level
+// database.name/user fallback was removed before the first real deployment.
+func (s *Server) SiteDBName(site Site) string { return site.Database.Name }
 
-func (s *Server) SiteDBUser(site Site) string {
-	if site.Database.User != "" {
-		return site.Database.User
-	}
-	return s.Database.User
-}
+func (s *Server) SiteDBUser(site Site) string { return site.Database.User }
 
 // DerivedSiteUser builds a Linux-valid, collision-resistant username from a
 // domain: "b_" + a sanitized domain prefix + "_" + an 8-hex fnv hash, lowercased
@@ -584,11 +570,11 @@ func Load(path string) (*Server, error) {
 	// convinced they configured something berth never read. The strictness is
 	// cheap while only test configs exist and becomes a breaking change once
 	// real ones do, which is why it lands before the first deployment.
-	if err := v.UnmarshalExact(&s, viper.DecodeHook(mapstructure.ComposeDecodeHookFunc(
-		mapstructure.StringToTimeDurationHookFunc(),
-		mapstructure.StringToSliceHookFunc(","),
-		stringToQueueConfigHook,
-	))); err != nil {
+	// Exactly one custom hook: the queue string shorthand. No schema field is
+	// a time.Duration or []string, and keeping the stock hooks for those
+	// types would silently grant any FUTURE such field an alias spelling
+	// (comma-split strings) from day one.
+	if err := v.UnmarshalExact(&s, viper.DecodeHook(stringToQueueConfigHook)); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	if err := s.Validate(); err != nil {

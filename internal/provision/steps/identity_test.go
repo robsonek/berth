@@ -65,11 +65,11 @@ func TestIdentityFreshWithIDBindsAndTombstones(t *testing.T) {
 	if err := Identity().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatal(err)
 	}
-	env, legacy, err := secret.LoadEnvelope("prod-1a2b")
-	if err != nil || legacy || env == nil || env.Endpoint.Host != "h.example.com" || env.Endpoint.Port != 22 {
-		t.Fatalf("bound envelope wrong: %+v legacy=%v err=%v", env, legacy, err)
+	env, err := secret.LoadEnvelope("prod-1a2b")
+	if err != nil || env == nil || env.Endpoint.Host != "h.example.com" || env.Endpoint.Port != 22 {
+		t.Fatalf("bound envelope wrong: %+v err=%v", env, err)
 	}
-	tomb, _, err := secret.LoadEnvelope("h.example.com")
+	tomb, err := secret.LoadEnvelope("h.example.com")
 	if err != nil || tomb == nil || tomb.MigratedTo != "prod-1a2b" {
 		t.Fatalf("advisory tombstone missing: %+v err=%v", tomb, err)
 	}
@@ -89,9 +89,9 @@ func TestIdentityFreshWithoutIDBindsHostKey(t *testing.T) {
 	if err := Identity().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatal(err)
 	}
-	env, legacy, err := secret.LoadEnvelope("h.example.com")
-	if err != nil || legacy || env == nil || env.MigratedTo != "" {
-		t.Fatalf("host-keyed envelope wrong: %+v legacy=%v err=%v", env, legacy, err)
+	env, err := secret.LoadEnvelope("h.example.com")
+	if err != nil || env == nil || env.MigratedTo != "" {
+		t.Fatalf("host-keyed envelope wrong: %+v err=%v", env, err)
 	}
 	cr, err := Identity().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil || !cr.Satisfied {
@@ -99,9 +99,14 @@ func TestIdentityFreshWithoutIDBindsHostKey(t *testing.T) {
 	}
 }
 
-func TestIdentityMigratesLegacyHostCacheWithoutRotation(t *testing.T) {
-	berth := identityHome(t)
-	writeCacheFile(t, berth, "h.example.com", `{"console:berth":"unchanged-pw","appdb":"dbpw"}`)
+func TestIdentityMigratesHostKeyedCacheWithoutRotation(t *testing.T) {
+	identityHome(t)
+	if err := secret.SaveEnvelope("h.example.com", secret.Envelope{
+		Endpoint: &secret.Endpoint{Host: "h.example.com", Port: 22},
+		Secrets:  map[string]string{"console:berth": "unchanged-pw", "appdb": "dbpw"},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	s := identityServer("prod-1a2b")
 	f := bssh.NewFakeRunner()
 
@@ -112,31 +117,13 @@ func TestIdentityMigratesLegacyHostCacheWithoutRotation(t *testing.T) {
 	if err := Identity().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatal(err)
 	}
-	env, legacy, err := secret.LoadEnvelope("prod-1a2b")
-	if err != nil || legacy || env.Secrets["console:berth"] != "unchanged-pw" || env.Secrets["appdb"] != "dbpw" {
-		t.Fatalf("migration must preserve every secret verbatim: %+v legacy=%v err=%v", env, legacy, err)
+	env, err := secret.LoadEnvelope("prod-1a2b")
+	if err != nil || env.Secrets["console:berth"] != "unchanged-pw" || env.Secrets["appdb"] != "dbpw" {
+		t.Fatalf("migration must preserve every secret verbatim: %+v err=%v", env, err)
 	}
-	tomb, _, _ := secret.LoadEnvelope("h.example.com")
+	tomb, _ := secret.LoadEnvelope("h.example.com")
 	if tomb == nil || tomb.MigratedTo != "prod-1a2b" || len(tomb.Secrets) != 0 {
 		t.Fatalf("tombstone wrong: %+v", tomb)
-	}
-}
-
-func TestIdentityUpgradesLegacyInPlaceWithoutID(t *testing.T) {
-	berth := identityHome(t)
-	writeCacheFile(t, berth, "h.example.com", `{"a":"1"}`)
-	s := identityServer("")
-	f := bssh.NewFakeRunner()
-	cr, err := Identity().Check(context.Background(), provision.RunCtx{}, s, f)
-	if err != nil || cr.Satisfied || !strings.Contains(cr.Reason, "upgrade") {
-		t.Fatalf("Check = %+v err=%v, want unsatisfied upgrade", cr, err)
-	}
-	if err := Identity().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
-		t.Fatal(err)
-	}
-	env, legacy, err := secret.LoadEnvelope("h.example.com")
-	if err != nil || legacy || env.Secrets["a"] != "1" || env.Endpoint.Port != 22 {
-		t.Fatalf("upgrade wrong: %+v legacy=%v err=%v", env, legacy, err)
 	}
 }
 
@@ -161,7 +148,7 @@ func TestIdentityEndpointMismatch(t *testing.T) {
 	if err := Identity().Apply(context.Background(), provision.RunCtx{Force: true}, s, f); err != nil {
 		t.Fatal(err)
 	}
-	env, _, err := secret.LoadEnvelope("prod-1a2b")
+	env, err := secret.LoadEnvelope("prod-1a2b")
 	if err != nil || env.Endpoint.Port != 22 || env.Secrets["a"] != "1" {
 		t.Fatalf("re-bind must rewrite the endpoint and keep secrets: %+v err=%v", env, err)
 	}
@@ -188,7 +175,8 @@ func TestIdentityTombstoneWithoutIDIsHardError(t *testing.T) {
 
 func TestIdentityBothRealCachesIsHardError(t *testing.T) {
 	berth := identityHome(t)
-	writeCacheFile(t, berth, "h.example.com", `{"a":"1"}`)
+	writeCacheFile(t, berth, "h.example.com",
+		`{"version":1,"endpoint":{"host":"h.example.com","port":22},"secrets":{"a":"1"}}`)
 	writeCacheFile(t, berth, "prod-1a2b",
 		`{"version":1,"endpoint":{"host":"h.example.com","port":22},"secrets":{"a":"2"}}`)
 	s := identityServer("prod-1a2b")
@@ -227,7 +215,7 @@ func TestIdentityRefusesMigrationOfForeignEndpointHostCache(t *testing.T) {
 	if err := Identity().Apply(context.Background(), provision.RunCtx{}, s, f); err == nil {
 		t.Fatal("Apply (MigrateCache) must refuse too")
 	}
-	if env, _, err := secret.LoadEnvelope("h.example.com"); err != nil || env == nil || env.Secrets["b"] != "1" {
+	if env, err := secret.LoadEnvelope("h.example.com"); err != nil || env == nil || env.Secrets["b"] != "1" {
 		t.Fatalf("the foreign cache must stay untouched: %+v err=%v", env, err)
 	}
 }

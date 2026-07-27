@@ -32,8 +32,9 @@ func assertHardeningEndState(ctx context.Context, t *testing.T, c *bssh.Client, 
 	}
 
 	// The managed drop-in must sit at the 00- path (first-match-wins). The
-	// legacy path may hold a FOREIGN file (preserved by design) but never a
-	// berth-managed one (Apply migrates it away).
+	// legacy path may hold a FOREIGN file (left alone by design) but never a
+	// berth-managed one: no current berth writes that path, so a berth-marked
+	// file there means a pre-cleanup binary ran on this host.
 	assertExitZero(ctx, t, c, "sshd drop-in at 00- path", "sudo test -f /etc/ssh/sshd_config.d/00-berth.conf")
 	legacy, err := c.Run(ctx, "sudo cat /etc/ssh/sshd_config.d/berth.conf", nil)
 	if err != nil {

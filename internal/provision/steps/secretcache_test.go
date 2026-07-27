@@ -7,10 +7,23 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
 	"github.com/robsonek/berth/internal/secret"
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
+
+// seedCache seeds a v1 envelope bound to the server's endpoint — the only
+// on-disk format production code reads.
+func seedCache(t *testing.T, s *config.Server, secrets map[string]string) {
+	t.Helper()
+	if err := secret.SaveEnvelope(s.CacheKey(), secret.Envelope{
+		Endpoint: &secret.Endpoint{Host: s.Host, Port: s.SSH.Port},
+		Secrets:  secrets,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // These pin the verified-cache wiring in the SECRET CONSUMERS (spec §6:
 // "accounts/database: wywołania po CacheKey; VerifyEnvelope przed użyciem
@@ -78,8 +91,8 @@ func TestSaveSecretsWritesEnvelopeUnderID(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(home, ".berth", "prod-db-1a2b.secrets.json")); err != nil {
 		t.Fatalf("secrets must land under the ID key: %v", err)
 	}
-	env, legacy, err := secret.LoadEnvelope("prod-db-1a2b")
-	if err != nil || legacy || env.Version != 1 || env.Endpoint.Host != s.Host || env.Endpoint.Port != 22 || env.Secrets["k"] != "v" {
-		t.Fatalf("saved envelope wrong: %+v legacy=%v err=%v", env, legacy, err)
+	env, err := secret.LoadEnvelope("prod-db-1a2b")
+	if err != nil || env.Version != 1 || env.Endpoint.Host != s.Host || env.Endpoint.Port != 22 || env.Secrets["k"] != "v" {
+		t.Fatalf("saved envelope wrong: %+v err=%v", env, err)
 	}
 }

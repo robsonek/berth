@@ -37,11 +37,9 @@ func hardeningServer() *config.Server {
 const sshdTGood = "port 2222\npermitrootlogin no\npasswordauthentication no\nkbdinteractiveauthentication no\n"
 
 // stubSshdEffectiveGood stubs the probes a fully converged host answers:
-// no legacy drop-in, no SSHD_OPTS override (/etc/default/ssh missing:
-// exit 0, empty output), and an effective config with all required
-// directives.
+// no SSHD_OPTS override (/etc/default/ssh missing: exit 0, empty output)
+// and an effective config with all required directives.
 func stubSshdEffectiveGood(f *bssh.FakeRunner) {
-	f.On("cat "+shQuote(sshdDropInLegacyPath), bssh.Result{ExitCode: 1})
 	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
 	f.On("sshd -T", bssh.Result{ExitCode: 0, Stdout: sshdTGood})
 }
@@ -192,8 +190,8 @@ func TestHardeningApplyAbortsReloadWhenSshdConfigInvalid(t *testing.T) {
 	f.On("ufw allow 80,443/tcp", bssh.Result{})
 	f.On("ufw --force enable", bssh.Result{})
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 1}) // write-guard: absent
-	// Covers the legacy-path probe Apply issues before sshd -t; the helper's
-	// SSHD_OPTS and sshd -T stubs stay inert (the failing sshd -t aborts first).
+	// Covers Apply's up-front SSHD_OPTS guard; the helper's sshd -T stub
+	// stays inert (the failing sshd -t aborts first).
 	stubSshdEffectiveGood(f)
 	stubApplyStampsGreen(f) // ssh up: the heal skips its own sshd -t
 	f.On("sshd -t", bssh.Result{ExitCode: 1, Stderr: "/etc/ssh/sshd_config.d/00-berth.conf: Bad configuration option"})
@@ -495,9 +493,6 @@ func TestHardeningDropInTargetsSortFirstPath(t *testing.T) {
 	if sshdDropInPath != "/etc/ssh/sshd_config.d/00-berth.conf" {
 		t.Errorf("sshdDropInPath = %q, want the 00-prefixed path", sshdDropInPath)
 	}
-	if sshdDropInLegacyPath != "/etc/ssh/sshd_config.d/berth.conf" {
-		t.Errorf("sshdDropInLegacyPath = %q, want the pre-rename path", sshdDropInLegacyPath)
-	}
 	for _, want := range []string{
 		"PermitRootLogin no\n",
 		"PasswordAuthentication no\n",
@@ -510,7 +505,7 @@ func TestHardeningDropInTargetsSortFirstPath(t *testing.T) {
 }
 
 // stubCheckGreenBase stubs everything Check needs for a converged host EXCEPT
-// the legacy/SSHD_OPTS/sshd -T probes, which each test controls itself.
+// the SSHD_OPTS/sshd -T probes, which each test controls itself.
 func stubCheckGreenBase(f *bssh.FakeRunner) {
 	f.On("ufw status", bssh.Result{Stdout: "Status: active\n", ExitCode: 0})
 	f.On("systemctl is-active fail2ban", bssh.Result{ExitCode: 0})
@@ -528,7 +523,6 @@ func TestHardeningCheckErrorsWhenEffectiveOverridden(t *testing.T) {
 	// reconcilable drift (which would also make dry-run promise a fix).
 	f := bssh.NewFakeRunner()
 	stubCheckGreenBase(f)
-	f.On("cat "+shQuote(sshdDropInLegacyPath), bssh.Result{ExitCode: 1})
 	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
 	f.On("sshd -T", bssh.Result{ExitCode: 0,
 		Stdout: "port 2222\npermitrootlogin no\npasswordauthentication yes\nkbdinteractiveauthentication no\n"})
@@ -621,39 +615,12 @@ func TestHardeningCheckErrorsWhenSshdDumpFails(t *testing.T) {
 	// A broken foreign config berth cannot converge: fail loud, not unsatisfied.
 	f := bssh.NewFakeRunner()
 	stubCheckGreenBase(f)
-	f.On("cat "+shQuote(sshdDropInLegacyPath), bssh.Result{ExitCode: 1})
 	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
 	f.On("sshd -T", bssh.Result{ExitCode: 1, Stderr: "/etc/ssh/sshd_config.d/60-broken.conf: Bad configuration option"})
 
 	_, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
 	if err == nil || !strings.Contains(err.Error(), "sshd -T") {
 		t.Fatalf("err = %v, want an sshd -T failure", err)
-	}
-}
-
-func TestHardeningCheckUnsatisfiedWhenLegacyDropInPresent(t *testing.T) {
-	// A berth-managed legacy file gates sshd -T OFF: Apply must migrate it
-	// first (a malformed managed legacy file would otherwise error sshd -T
-	// before Apply could remove the very file berth owns). The SSHD_OPTS
-	// guard is NOT gated — it runs on every Check.
-	f := bssh.NewFakeRunner()
-	stubCheckGreenBase(f)
-	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
-	f.On("cat "+shQuote(sshdDropInLegacyPath),
-		bssh.Result{ExitCode: 0, Stdout: managedMarker + "\nPermitRootLogin no\nPasswordAuthentication no\n"})
-	stubStampsGreen(f)
-
-	cr, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cr.Satisfied {
-		t.Error("expected unsatisfied while the berth-managed legacy drop-in remains")
-	}
-	for _, c := range f.Calls() {
-		if c.Cmd == "sshd -T" {
-			t.Error("sshd -T must be gated off while a managed legacy file remains")
-		}
 	}
 }
 
@@ -665,8 +632,7 @@ func TestHardeningCheckFreshHostGatesEffectiveProbeOff(t *testing.T) {
 	// The SSHD_OPTS guard still runs — it is unconditional by design.
 	f := bssh.NewFakeRunner()
 	stubCheckGreenBase(f)
-	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 1})       // fresh: drop-in absent
-	f.On("cat "+shQuote(sshdDropInLegacyPath), bssh.Result{ExitCode: 1}) // no legacy file either
+	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 1}) // fresh: drop-in absent
 	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
 	stubStampsGreen(f)
 
@@ -684,35 +650,6 @@ func TestHardeningCheckFreshHostGatesEffectiveProbeOff(t *testing.T) {
 	}
 }
 
-func TestHardeningCheckIgnoresForeignLegacyDropIn(t *testing.T) {
-	// A foreign file at the legacy path is NOT berth's to delete, and any of
-	// the protected directives it sets is caught by the effective probe
-	// (Match-scoped content is out of contract). It must not block Satisfied.
-	f := bssh.NewFakeRunner()
-	stubCheckGreenBase(f)
-	f.On("cat "+shQuote(sshdDropInLegacyPath), bssh.Result{ExitCode: 0, Stdout: "# operator notes\n"})
-	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
-	f.On("sshd -T", bssh.Result{ExitCode: 0, Stdout: sshdTGood})
-	stubStampsGreen(f)
-
-	cr, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !cr.Satisfied {
-		t.Errorf("expected satisfied despite a foreign file at the legacy path; got %+v", cr)
-	}
-	var probed bool
-	for _, c := range f.Calls() {
-		if c.Cmd == "cat "+shQuote(sshdDropInLegacyPath) {
-			probed = true
-		}
-	}
-	if !probed {
-		t.Error("Check must actually probe the legacy path (guards against passing for the wrong reason)")
-	}
-}
-
 // stubApplyGreenBase stubs the fixed early part of Apply (packages, ufw) and
 // the fail2ban tail, leaving the sshd-related probes to each test.
 func stubApplyGreenBase(f *bssh.FakeRunner) {
@@ -726,78 +663,11 @@ func stubApplyGreenBase(f *bssh.FakeRunner) {
 	f.On("systemctl reload fail2ban", bssh.Result{})
 }
 
-func TestHardeningApplyMigratesLegacyDropIn(t *testing.T) {
-	stubGate(t, nil, nil)
-	f := bssh.NewFakeRunner()
-	stubApplyGreenBase(f)
-	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 1}) // write-guard: absent
-	// Berth-managed file at the legacy path -> must be removed.
-	f.On("cat "+shQuote(sshdDropInLegacyPath),
-		bssh.Result{ExitCode: 0, Stdout: managedMarker + "\nPermitRootLogin no\nPasswordAuthentication no\n"})
-	f.On("rm -f "+shQuote(sshdDropInLegacyPath), bssh.Result{})
-	f.On("sshd -t", bssh.Result{})
-	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
-	f.On("sshd -T", bssh.Result{ExitCode: 0, Stdout: sshdTGood})
-	f.On("systemctl reload ssh", bssh.Result{})
-	stubApplyStampsGreen(f)
-
-	if err := Hardening().Apply(context.Background(), provision.RunCtx{}, hardeningServer(), f); err != nil {
-		t.Fatalf("Apply() error = %v", err)
-	}
-	idx := func(want string) int {
-		for i, c := range f.Calls() {
-			if c.Cmd == want {
-				return i
-			}
-		}
-		return -1
-	}
-	// The write-guard cat is issued by writeManagedFile immediately before
-	// the WriteFile — the closest observable proxy for the write itself
-	// (FakeRunner records Run and WriteFile separately, so their relative
-	// order cannot be asserted directly).
-	guard := idx("cat " + shQuote(sshdDropInPath))
-	rm := idx("rm -f " + shQuote(sshdDropInLegacyPath))
-	syntax := idx("sshd -t")
-	dump := idx("sshd -T")
-	reload := idx("systemctl reload ssh")
-	if guard < 0 || rm < 0 || syntax < 0 || dump < 0 || reload < 0 {
-		t.Fatalf("missing expected commands; guard=%d rm=%d t=%d T=%d reload=%d", guard, rm, syntax, dump, reload)
-	}
-	if !(guard < rm && rm < syntax && syntax < dump && dump < reload) {
-		t.Errorf("want write-guard < rm < sshd -t < sshd -T < reload; got guard=%d rm=%d t=%d T=%d reload=%d",
-			guard, rm, syntax, dump, reload)
-	}
-}
-
-func TestHardeningApplyLeavesForeignLegacyDropIn(t *testing.T) {
-	stubGate(t, nil, nil)
-	f := bssh.NewFakeRunner()
-	stubApplyGreenBase(f)
-	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 1}) // write-guard: absent
-	f.On("cat "+shQuote(sshdDropInLegacyPath), bssh.Result{ExitCode: 0, Stdout: "# operator notes\n"})
-	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
-	f.On("sshd -t", bssh.Result{})
-	f.On("sshd -T", bssh.Result{ExitCode: 0, Stdout: sshdTGood})
-	f.On("systemctl reload ssh", bssh.Result{})
-	stubApplyStampsGreen(f)
-
-	if err := Hardening().Apply(context.Background(), provision.RunCtx{}, hardeningServer(), f); err != nil {
-		t.Fatalf("Apply() error = %v", err)
-	}
-	for _, c := range f.Calls() {
-		if c.Cmd == "rm -f "+shQuote(sshdDropInLegacyPath) {
-			t.Error("a foreign file at the legacy path must never be removed")
-		}
-	}
-}
-
 func TestHardeningApplyFailsLoudWhenEffectiveConfigLoses(t *testing.T) {
 	stubGate(t, nil, nil)
 	f := bssh.NewFakeRunner()
 	stubApplyGreenBase(f)
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 1}) // write-guard: absent
-	f.On("cat "+shQuote(sshdDropInLegacyPath), bssh.Result{ExitCode: 1})
 	f.On("sshd -t", bssh.Result{})
 	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
 	// A file sorting before 00-berth.conf keeps password auth enabled.

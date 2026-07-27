@@ -1,7 +1,6 @@
 package secret
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -58,25 +57,12 @@ func cacheDir() (string, error) {
 	return filepath.Join(home, ".berth"), nil
 }
 
-// SaveCache writes a LEGACY (pre-envelope) flat secrets file. Production code
-// must use SaveEnvelope — this survives only so tests can seed the pre-P14
-// on-disk format that LoadEnvelope's legacy branch and the identity step's
-// upgrade/migration paths exist for. Atomicity and mode-tightening match
-// SaveEnvelope.
-func SaveCache(server string, secrets map[string]string) error {
-	b, err := json.MarshalIndent(secrets, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal secrets cache: %w", err)
-	}
-	return writeCacheBytes(server, b)
-}
-
-// LoadCache reads just the secrets map of a cache in EITHER format (envelope
-// or legacy flat). A never-written cache is an empty map, a tombstone is an
-// error. It performs NO endpoint verification — production steps go through
-// their verified helper; this is for read-only consumers (assertions, tests).
+// LoadCache reads just the secrets map of a v1 envelope cache. A
+// never-written cache is an empty map, a tombstone is an error. It performs
+// NO endpoint verification — production steps go through their verified
+// helper; this is for read-only consumers (assertions, tests).
 func LoadCache(server string) (map[string]string, error) {
-	env, _, err := LoadEnvelope(server)
+	env, err := LoadEnvelope(server)
 	if err != nil {
 		return nil, err
 	}
@@ -93,9 +79,9 @@ func LoadCache(server string) (map[string]string, error) {
 // closure. Hold it across a whole load→modify→save window so two concurrent
 // berth runs against the same host cannot lost-update the cache. It also
 // tightens the cache dir to 0700 up front, because a cache-hit path may never
-// reach SaveCache (which does the same) yet the dir guards a root-equivalent
+// reach SaveEnvelope (which does the same) yet the dir guards a root-equivalent
 // password. It is a low-level primitive: the caller still calls
-// LoadCache/SaveCache itself (some call sites must persist before a side
+// LoadEnvelope/SaveEnvelope itself (some call sites must persist before a side
 // effect, an ordering a save-last wrapper could not express).
 func LockCache(host string) (func(), error) {
 	dir, err := cacheDir()

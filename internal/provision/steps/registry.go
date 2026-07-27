@@ -10,7 +10,7 @@ import (
 func Pipeline(s *config.Server, red *secret.Redactor, skipSSL bool) []provision.Step {
 	steps := []provision.Step{
 		// identity FIRST: it reconciles the local secret-cache identity
-		// (bind/upgrade/migrate/endpoint check) and must settle before
+		// (bind/migrate/endpoint check) and must settle before
 		// preflight performs the run's first remote mutation.
 		Identity(),
 		Preflight(), SystemBase(), System(), Accounts(red), Hardening(),

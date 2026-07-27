@@ -8,14 +8,13 @@ php:
   source: auto
 database:
   engine: mariadb
-  name: myapp
-  user: myapp
 valkey: true
 queue: true
 scheduler: true
 sites:
   - domain: app.example.com
     deploy_path: /var/www/app
+    database: {name: myapp, user: myapp}
     repository: git@github.com:owner/repo.git
     ssl: true
     ssl_email: admin@example.com

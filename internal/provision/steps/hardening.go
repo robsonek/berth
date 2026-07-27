@@ -16,12 +16,10 @@ const (
 	// sshdDropInPath is 00-prefixed on purpose: sshd's Include expands
 	// lexicographically and each directive keeps its FIRST value, so berth
 	// must sort before image drop-ins (e.g. cloud-init's 50-cloud-init.conf
-	// re-enabling PasswordAuthentication). sshdDropInLegacyPath is the
-	// pre-rename location, kept only so Apply can migrate it away.
-	sshdDropInPath       = "/etc/ssh/sshd_config.d/00-berth.conf"
-	sshdDropInLegacyPath = "/etc/ssh/sshd_config.d/berth.conf"
-	sshdDropInBody       = managedMarker + "\nPermitRootLogin no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n"
-	fail2banJailPath     = "/etc/fail2ban/jail.local"
+	// re-enabling PasswordAuthentication).
+	sshdDropInPath   = "/etc/ssh/sshd_config.d/00-berth.conf"
+	sshdDropInBody   = managedMarker + "\nPermitRootLogin no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n"
+	fail2banJailPath = "/etc/fail2ban/jail.local"
 )
 
 // sshdEffectiveWant lists the directives (exactly as sshd -T prints them:
@@ -218,22 +216,12 @@ func (hardening) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 		return provision.CheckResult{}, err
 	}
 
-	// A berth-managed drop-in at the legacy (pre-00 rename) path must be
-	// migrated away. A foreign file there is left alone: it is not ours to
-	// delete, and any of the protected directives it sets is caught by the
-	// effective probe below.
-	legacyPresent, err := managedFilePresent(ctx, r, sshdDropInLegacyPath)
-	if err != nil {
-		return provision.CheckResult{}, err
-	}
-
 	// Effective-config probe (sshd -T only — the SSHD_OPTS guard above is
 	// unconditional), gated on everything berth owns being converged
 	// (otherwise the step is unsatisfied anyway and Apply reconciles berth's
-	// files first — the gate also keeps a malformed managed legacy file from
-	// erroring sshd -T before Apply gets the chance to remove it).
+	// files first).
 	effectiveOK := false
-	if sshdOK && !legacyPresent {
+	if sshdOK {
 		missing, err := sshdEffective(ctx, r)
 		if err != nil {
 			return provision.CheckResult{}, err
@@ -290,7 +278,7 @@ func (hardening) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 		return provision.CheckResult{}, err
 	}
 
-	if ufwActive && f2bUp && sshdOK && !legacyPresent && effectiveOK && udpOK && jailOK && f2bLoaded && sshUp && sshdLoaded {
+	if ufwActive && f2bUp && sshdOK && effectiveOK && udpOK && jailOK && f2bLoaded && sshUp && sshdLoaded {
 		return provision.CheckResult{Satisfied: true, Reason: "firewall, fail2ban and sshd hardening in place"}, nil
 	}
 	return provision.CheckResult{
@@ -301,7 +289,6 @@ func (hardening) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 			"install fail2ban",
 			"write managed fail2ban jail (sshd port-bound, recidive)",
 			"disable root login, password and kbd-interactive auth (after anti-lockout gate)",
-			"remove legacy sshd drop-in (when present)",
 			"verify the directives win in the effective sshd config (sshd -T)",
 			"reload fail2ban to load the managed jail",
 			"start/enable sshd when stopped",
@@ -429,18 +416,6 @@ func (h hardening) Apply(ctx context.Context, rc provision.RunCtx, s *config.Ser
 	}); err != nil {
 		return fmt.Errorf("write %s: %w", sshdDropInPath, err)
 	}
-	// Migrate the pre-rename drop-in away. Guarded: only a berth-managed file
-	// is removed; a foreign file at that path is left in place (any of the
-	// protected directives it sets is caught by the effective gate below).
-	if present, err := managedFilePresent(ctx, r, sshdDropInLegacyPath); err != nil {
-		return err
-	} else if present {
-		if res, err := r.Run(ctx, "rm -f "+shQuote(sshdDropInLegacyPath), nil); err != nil {
-			return err
-		} else if res.ExitCode != 0 {
-			return fmt.Errorf("remove legacy %s: %s", sshdDropInLegacyPath, res.Stderr)
-		}
-	}
 	// Validate before reloading (same contract as nginx -t / visudo -cf): the
 	// anti-lockout gate above proves access, not config syntax — a bad drop-in
 	// left on disk would break sshd on its next restart/reboot.
@@ -465,8 +440,8 @@ func (h hardening) Apply(ctx context.Context, rc provision.RunCtx, s *config.Ser
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("reload ssh: %s", res.Stderr)
 	}
-	// The legacy drop-in removal above precedes this reload, so no ssh config
-	// mutation follows the stamp — the transactional contract holds.
+	// No ssh config mutation follows this stamp — the transactional contract
+	// (invalidate before mutating, mark after the reload) holds.
 	if err := markReloaded(ctx, r, "ssh"); err != nil {
 		return err
 	}

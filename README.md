@@ -97,7 +97,6 @@ nginx:
 database:
   engine: mariadb              # mariadb | postgres   (server-wide)
   source: debian               # debian | mariadb (MariaDB) | pgdg (PostgreSQL)
-  # name / user: legacy single-site only — multi-site sites carry their own block
 
 valkey: false                  # one Valkey instance per site (cache/session/queue)
 queue: false                   # server-wide default: a queue:work worker on every site
@@ -156,7 +155,7 @@ sites:                         # one or more
     repository: git@github.com:acme/app.git   # optional — SSH git URL only; berth
                                        # generates a per-site deploy key for it
                                        # (print it with `berth site key`)
-    database: { name: app, user: app }        # per-site DB (required with 2+ sites)
+    database: { name: app, user: app }        # per-site DB (required for every site)
     ssl: true
     ssl_mode: selfsigned               # letsencrypt (default) | selfsigned —
                                        # cloudflare_only requires selfsigned (or ssl: false)
@@ -553,9 +552,8 @@ sites:
     ssl_email: admin@example.com
 ```
 
-A single-site config may keep the legacy top-level `database: { name, user }`;
-with multiple sites each site needs its own `database` block, and the OS
-users must be distinct. A site without `user:` always runs as its derived
+Every site carries its own `database: {name, user}` block, and the OS users
+must be distinct. A site without `user:` always runs as its derived
 `b_<slug>_<hash>` account, no matter how many sites the config lists.
 
 Each TLS site uses Let's Encrypt by default; set `ssl_mode: selfsigned` on a site
