@@ -74,7 +74,8 @@ func writeTmpConfig(t *testing.T, body string) string {
 	return p
 }
 
-const baseCfg = `host: app.example.com
+const baseCfg = `id: test-machine-0001
+host: app.example.com
 ssh: {user: deploy, key: ~/.ssh/id_rsa}
 php: {version: "8.4"}
 database: {engine: mariadb, source: mariadb}
@@ -92,6 +93,33 @@ func TestQueueHorizonBareStringDecodes(t *testing.T) {
 	q := s.Sites[0].Queue
 	if q == nil || q.Driver != "horizon" {
 		t.Fatalf("queue: horizon must decode to {Driver: horizon}; got %+v", q)
+	}
+}
+
+func TestQueueEnabledDriverNoneOverridesServerDefault(t *testing.T) {
+	s := &Server{Queue: true, Sites: []Site{
+		{Domain: "a.example.com", Queue: &QueueConfig{Driver: "none"}},
+		{Domain: "b.example.com"},
+	}}
+	if s.QueueEnabled(s.Sites[0]) {
+		t.Fatal("queue: none must opt the site out of the server-wide worker")
+	}
+	if !s.QueueEnabled(s.Sites[1]) {
+		t.Fatal("sites without a queue block keep inheriting the server default")
+	}
+}
+
+func TestQueueNoneBareStringDecodes(t *testing.T) {
+	s, err := Load(writeTmpConfig(t, baseCfg+"    queue: none\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := s.Sites[0].Queue
+	if q == nil || q.Driver != "none" {
+		t.Fatalf("queue: none must decode to {Driver: none}; got %+v", q)
+	}
+	if s.QueueEnabled(s.Sites[0]) {
+		t.Error("a decoded queue: none site must not get a worker")
 	}
 }
 
@@ -137,6 +165,7 @@ func TestSiteProgramNamesAndEnablement(t *testing.T) {
 
 func TestServerYAMLOmitsEmptyOptionalFields(t *testing.T) {
 	s := &Server{
+		ID:   "test-machine-0001",
 		Host: "h.example", SSH: SSH{User: "root", Port: 22, Key: "~/.ssh/id_ed25519"},
 		PHP: PHP{Version: "8.5", Source: "auto"}, Nginx: Nginx{Source: "debian"},
 		Database: Database{Engine: "mariadb", Source: "debian"},
@@ -257,7 +286,8 @@ func TestLoadRejectsUnknownKeys(t *testing.T) {
 	// convinced they configured something berth never read. All four nesting
 	// levels are covered because viper flattens the tree and it is not obvious
 	// from the call site that every level is checked.
-	base := `host: 203.0.113.10
+	base := `id: test-machine-0001
+host: 203.0.113.10
 ssh:
   user: root
   key: ~/.ssh/id_ed25519
@@ -314,7 +344,8 @@ func TestLoadRejectsLegacyTopLevelDatabaseNameUser(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "legacy.yml")
-			yml := `host: 203.0.113.10
+			yml := `id: test-machine-0001
+host: 203.0.113.10
 php:
   version: "8.5"
 database:
@@ -343,5 +374,37 @@ func TestCacheKey(t *testing.T) {
 	s.ID = "prod-web-1a2b3c"
 	if got := s.CacheKey(); got != "prod-web-1a2b3c" {
 		t.Errorf("CacheKey with id = %q, want the id", got)
+	}
+}
+
+// These derivations name OS users, FPM sockets, systemd units, supervisor
+// programs and the role names inside PostgreSQL dumps on every live host.
+// FROZEN FOREVER as of the first real deployment: changing either function
+// re-identifies every implicitly-named tenant — the owner guard would
+// refuse loudly rather than corrupt, but the config would stop converging.
+func TestDerivationsAreFrozen(t *testing.T) {
+	if got := DerivedSiteUser("app.example.com"); got != "b_appexamplecom_dd46c94b" {
+		t.Fatalf("DerivedSiteUser derivation changed: %s", got)
+	}
+	if got := PoolName("app.example.com"); got != "app_example_com" {
+		t.Fatalf("PoolName derivation changed: %s", got)
+	}
+	if got := FPMSocketPath("app_example_com"); got != "/run/php/berth-app_example_com.sock" {
+		t.Fatalf("FPMSocketPath derivation changed: %s", got)
+	}
+	if got := ValkeySocketPath("app_example_com"); got != "/run/berth-valkey/app_example_com/valkey.sock" {
+		t.Fatalf("ValkeySocketPath derivation changed: %s", got)
+	}
+	if ValkeyStateBase != "/var/lib/berth-valkey" {
+		t.Fatalf("ValkeyStateBase changed: %s", ValkeyStateBase)
+	}
+	if got := SiteWorkerProgram("app.example.com"); got != "berth-app_example_com" {
+		t.Fatalf("SiteWorkerProgram derivation changed: %s", got)
+	}
+	if got := SiteDaemonProgram("app.example.com", "pulse"); got != "berth-app_example_com-pulse" {
+		t.Fatalf("SiteDaemonProgram derivation changed: %s", got)
+	}
+	if got := DeployKeyPath("b_appexamplecom_dd46c94b"); got != "/home/b_appexamplecom_dd46c94b/.ssh/id_ed25519" {
+		t.Fatalf("DeployKeyPath derivation changed: %s", got)
 	}
 }

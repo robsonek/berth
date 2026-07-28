@@ -5,6 +5,11 @@
 # falls back to berth's defaults (ssh.user=root, ssh.port=22, nginx debian,
 # database.source=debian, scheduler on). A site without user: runs as a
 # domain-derived account; every site carries its own database: {name, user}.
+
+# Stable machine identity keying the local secret cache (~/.berth/<id>.secrets.json).
+# Required; `berth init` generates one. A rename is refused; migrate deliberately per the error's recipe.
+id: prod-minimal-4f2a
+
 host: 203.0.113.10
 
 ssh:

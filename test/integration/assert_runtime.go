@@ -21,17 +21,16 @@ import (
 
 // assertRuntime verifies the deployer-handoff runtime, each invariant on its OWN gate:
 // every site has an FPM socket; queue-enabled sites have a DORMANT worker (supervisor
-// active + all processes STOPPED, never FATAL/BACKOFF); scheduler-enabled sites have a
-// valid managed scheduler cron.
+// active + all processes STOPPED, never FATAL/BACKOFF); sites without a worker (queue
+// off or the queue: none opt-out) have NO program file; daemons are independent of the
+// queue knob (rendered, loaded and sudoers-granted even for queue: none sites, whose
+// worker target must stay denied); scheduler-enabled sites have a valid managed
+// scheduler cron.
 func assertRuntime(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server) {
 	t.Helper()
-	anyQueue := false
-	for _, site := range srv.Sites {
-		if srv.QueueEnabled(site) {
-			anyQueue = true
-		}
-	}
-	if anyQueue {
+	// Daemons alone (a queue-less config) already require supervisord — the
+	// same gate the supervisor pipeline step keys on.
+	if srv.NeedsSupervisor() {
 		assertExitZero(ctx, t, c, "supervisor active", "systemctl is-active supervisor")
 	}
 	for _, site := range srv.Sites {
@@ -39,8 +38,8 @@ func assertRuntime(ctx context.Context, t *testing.T, c *bssh.Client, srv *confi
 		// Every site has its own FPM pool socket.
 		assertExitZero(ctx, t, c, "fpm socket "+site.Domain, "test -S /run/php/berth-"+pool+".sock")
 
+		prog := "berth-" + pool
 		if srv.QueueEnabled(site) {
-			prog := "berth-" + pool
 			st, err := c.Run(ctx, "sudo supervisorctl status '"+prog+":*'", nil)
 			if err != nil {
 				t.Fatalf("%s: supervisorctl status: %v", site.Domain, err)
@@ -48,6 +47,43 @@ func assertRuntime(ctx context.Context, t *testing.T, c *bssh.Client, srv *confi
 			if !supervisorAllStopped(st.Stdout) {
 				t.Errorf("%s: worker %s not fully dormant (want every process STOPPED):\n%s", site.Domain, prog, st.Stdout)
 			}
+		} else {
+			// No worker desired (queue: none opt-out, or no queue at all): the
+			// program file must be ABSENT — the site step never writes it and its
+			// global sweep removes a stale copy left by an earlier config.
+			assertExitZero(ctx, t, c, "no worker program "+site.Domain,
+				"test ! -e /etc/supervisor/conf.d/"+prog+".conf")
+		}
+
+		// Daemons ride beside the worker on the same knobs but are independent
+		// of queue: each must be rendered, loaded in supervisord, and granted
+		// to the site user — including the queue: none cross-product, where the
+		// worker is absent but the daemons stay.
+		user := srv.SiteUser(site)
+		for _, d := range site.Daemons {
+			dprog := config.SiteDaemonProgram(site.Domain, d.Name)
+			assertExitZero(ctx, t, c, "daemon program conf "+dprog,
+				"test -e /etc/supervisor/conf.d/"+dprog+".conf")
+			// Loaded (known to supervisord), whatever its process state: a
+			// dormant autostart=false daemon reports STOPPED with a non-zero
+			// supervisorctl exit, so only "no such process" / empty output is
+			// a failure here.
+			st, err := c.Run(ctx, "sudo supervisorctl status '"+dprog+":*'", nil)
+			if err != nil {
+				t.Fatalf("%s: supervisorctl status %s: %v", site.Domain, dprog, err)
+			}
+			if strings.TrimSpace(st.Stdout) == "" || strings.Contains(st.Stdout, "no such process") {
+				t.Errorf("%s: daemon %s not loaded in supervisord:\n%s", site.Domain, dprog, st.Stdout)
+			}
+			assertExitZero(ctx, t, c, user+" authorized for daemon "+dprog,
+				fmt.Sprintf("sudo -u %s sudo -n -l /usr/bin/supervisorctl restart '%s:*'", user, dprog))
+		}
+		if len(site.Daemons) > 0 && !srv.QueueEnabled(site) {
+			// The site's own (absent) worker program is the natural NON-granted
+			// target: sudoers must grant exactly the daemon programs, so the
+			// worker spelling has to be denied.
+			assertDenied(ctx, t, c, user+" authorized for the opted-out worker program",
+				fmt.Sprintf("sudo -u %s sudo -n -l /usr/bin/supervisorctl restart '%s:*'", user, prog))
 		}
 
 		if srv.SchedulerEnabled(site) {
@@ -96,11 +132,15 @@ func assertOpcacheEffective(ctx context.Context, t *testing.T, c *bssh.Client, s
 	}
 }
 
-// assertDeployReload validates the deploy-reload contract: each site user is authorized to
-// reload php<ver>-fpm via its narrow sudoers grant; running that graceful reload keeps
-// EVERY site's FPM socket up and a .php request answering per site (404 fine, never a
-// persistent 5xx gateway error). Each site is probed with its own Host header (and SNI
-// over TLS) on the scheme its TLS state provably serves (siteHTTPSProbe).
+// assertDeployReload validates the deploy-reload contract: each site user is authorized
+// to reload FPM via the version-stable wrapper (`sudo /bin/sh
+// /usr/local/sbin/berth-reload-fpm` — the exact line deployers hard-code; the PHP
+// version never appears in it), the same command with an extra argument is DENIED
+// (sudoers exact-args matching — the property that makes a /bin/sh grant safe), and
+// running the graceful reload keeps EVERY site's FPM socket up and a .php request
+// answering per site (404 fine, never a persistent 5xx gateway error). Each site is
+// probed with its own Host header (and SNI over TLS) on the scheme its TLS state
+// provably serves (siteHTTPSProbe).
 func assertDeployReload(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server, sslExplicit bool) {
 	t.Helper()
 	ver := srv.PHP.Version
@@ -121,8 +161,16 @@ func assertDeployReload(ctx context.Context, t *testing.T, c *bssh.Client, srv *
 		}
 		seen[user] = true
 		assertExitZero(ctx, t, c, user+" authorized to reload fpm",
-			fmt.Sprintf("sudo -u %s sudo -n -l /usr/bin/systemctl reload php%s-fpm", user, ver))
-		if res, err := c.Run(ctx, fmt.Sprintf("sudo -u %s sudo -n /usr/bin/systemctl reload php%s-fpm", user, ver), nil); err != nil {
+			fmt.Sprintf("sudo -u %s sudo -n -l /bin/sh /usr/local/sbin/berth-reload-fpm", user))
+		// Exact-args property, pinned live: the grant authorizes ONLY the bare
+		// wrapper invocation, so the same command with an appended argument must
+		// be denied by sudoers (exit non-zero, nothing executed).
+		if res, err := c.Run(ctx, fmt.Sprintf("sudo -u %s sudo -n /bin/sh /usr/local/sbin/berth-reload-fpm extra-arg", user), nil); err != nil {
+			t.Fatalf("%s: extra-arg denial probe: %v", user, err)
+		} else if res.ExitCode == 0 {
+			t.Errorf("%s: sudoers accepted the reload wrapper WITH an extra argument — the exact-args boundary is broken", user)
+		}
+		if res, err := c.Run(ctx, fmt.Sprintf("sudo -u %s sudo -n /bin/sh /usr/local/sbin/berth-reload-fpm", user), nil); err != nil {
 			t.Fatalf("%s: deploy reload: %v", user, err)
 		} else if res.ExitCode != 0 {
 			t.Errorf("%s: deploy reload exit %d: %s", user, res.ExitCode, strings.TrimSpace(res.Stderr))

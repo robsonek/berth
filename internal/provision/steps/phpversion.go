@@ -22,16 +22,17 @@ func phpPoolConflictProbeCmd(version string) string {
 	// The listen match tolerates FPM's INI whitespace freedom (`listen=`,
 	// indentation, an optional quote) — a rigid `listen = ` would
 	// false-negative exactly the foreign files this branch exists for.
-	return `for f in /etc/php/*/fpm/pool.d/*.conf; do [ -e "$f" ] || continue; case "$f" in /etc/php/` + version + `/fpm/pool.d/*) continue;; esac; if [ "$(head -n 1 "$f" 2>/dev/null)" = '` + managedMarkerINI + `' ]; then printf 'M %s\n' "$f"; elif grep -Eq '^[[:space:]]*listen[[:space:]]*=[[:space:]]*"?/run/php/berth-' "$f" 2>/dev/null; then printf 'S %s\n' "$f"; fi; done`
+	return `for f in /etc/php/*/fpm/pool.d/*.conf; do [ -e "$f" ] || continue; case "$f" in /etc/php/` + version + `/fpm/pool.d/*) continue;; esac; if [ "$(head -n 1 "$f" 2>/dev/null)" = '` + managedMarkerINI + `' ]; then printf 'M %s\n' "$f"; elif grep -Eq '^[[:space:]]*listen[[:space:]]*=[[:space:]]*"?` + config.FPMSocketPrefix + `' "$f" 2>/dev/null; then printf 'S %s\n' "$f"; fi; done`
 }
 
 // assertPHPVersionExclusive refuses to proceed while FPM pools of another PHP
 // version could fight over berth's version-independent per-site sockets
 // (/run/php/berth-<pool>.sock): whichever master (re)binds last would serve —
 // a silent, non-deterministic half-state. It runs FIRST in the Check AND
-// Apply of BOTH accounts (which renders the configured version into site
-// sudoers and precedes php in the pipeline) and php (before repo setup, the
-// reload-stamp invalidation and apt — a refusal must change nothing).
+// Apply of BOTH accounts (which renders the configured version into the
+// shared FPM reload wrapper its site sudoers grants name, and precedes php in
+// the pipeline) and php (before repo setup, the reload-stamp invalidation and
+// apt — a refusal must change nothing).
 // Deliberately NOT bypassable with --force, mirroring the owner-guard
 // precedent: the remedy is reverting php.version or the manual migration in
 // the error text. berth does not migrate PHP versions automatically — the old

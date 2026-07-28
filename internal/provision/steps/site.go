@@ -15,11 +15,11 @@ import (
 func poolName(domain string) string { return config.PoolName(domain) }
 
 // programName is the Supervisor program name for a site's queue worker.
-func programName(domain string) string { return "berth-" + poolName(domain) }
+func programName(domain string) string { return config.SiteWorkerProgram(domain) }
 
 // fpmSocket is the per-site PHP-FPM unix socket (one per site so sites do not
 // share a socket and each runs under its own user).
-func fpmSocket(domain string) string { return "/run/php/berth-" + poolName(domain) + ".sock" }
+func fpmSocket(domain string) string { return config.FPMSocketPath(poolName(domain)) }
 
 // nginxEnabledDir / fpmPoolDir are the directories governing which vhosts and
 // pools the units load. They join the reload-stamp probes as a whole: a
@@ -35,8 +35,16 @@ func nginxEnabledPath(domain string) string   { return nginxEnabledDir + "/" + d
 func fpmPoolPath(phpVersion, domain string) string {
 	return fpmPoolDir(phpVersion) + "/" + poolName(domain) + ".conf"
 }
+
+// supervisorProgramConfPath is THE conf.d path for one Supervisor program
+// name; every surface that paths a program (write, sweep, orphan removal)
+// goes through it so path and name derivation can never disagree.
+func supervisorProgramConfPath(prog string) string {
+	return "/etc/supervisor/conf.d/" + prog + ".conf"
+}
+
 func supervisorProgramPath(domain string) string {
-	return "/etc/supervisor/conf.d/" + programName(domain) + ".conf"
+	return supervisorProgramConfPath(programName(domain))
 }
 
 // cronPath is the scheduler cron for a site. The "berth-site-" prefix keeps
@@ -341,9 +349,9 @@ func renderSupervisorProgram(programName, command string, numprocs int, user, de
 }
 
 // daemonProgramName / daemonProgramPath name a site's daemon program file.
-func daemonProgramName(domain, name string) string { return programName(domain) + "-" + name }
+func daemonProgramName(domain, name string) string { return config.SiteDaemonProgram(domain, name) }
 func daemonProgramPath(domain, name string) string {
-	return "/etc/supervisor/conf.d/" + daemonProgramName(domain, name) + ".conf"
+	return supervisorProgramConfPath(daemonProgramName(domain, name))
 }
 
 // desiredProgramPaths is the set of supervisor program file paths every site
@@ -352,7 +360,7 @@ func desiredProgramPaths(s *config.Server) map[string]bool {
 	desired := map[string]bool{}
 	for _, site := range s.Sites {
 		for _, name := range s.SiteProgramNames(site) {
-			desired["/etc/supervisor/conf.d/"+name+".conf"] = true
+			desired[supervisorProgramConfPath(name)] = true
 		}
 	}
 	return desired

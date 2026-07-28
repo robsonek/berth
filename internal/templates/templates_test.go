@@ -44,6 +44,21 @@ func checkGoldenRender(t *testing.T, render func(string, any) ([]byte, error), n
 	}
 }
 
+// The marker text is FROZEN FOREVER as of the first real deployment: it is
+// the first line of every managed file on every host, and the drift
+// machinery classifies files by comparing it exactly. Changing either
+// constant would make every already-provisioned host read as foreign
+// (abort-unless--force on every write) and blind every marker-guarded sweep.
+// If this test fails, you are about to break every live host — stop.
+func TestManagedMarkerIsFrozen(t *testing.T) {
+	if ManagedMarker != "# managed by berth" {
+		t.Fatalf("ManagedMarker changed: %q", ManagedMarker)
+	}
+	if ManagedMarkerINI != "; managed by berth" {
+		t.Fatalf("ManagedMarkerINI changed: %q", ManagedMarkerINI)
+	}
+}
+
 type nginxData struct {
 	Domain, DeployPath, ACMEWebroot, Socket, CertPath, KeyPath, BodyMax string
 	HTTP3, QUICReuseport, HSTS, CloudflareOnly                          bool
@@ -163,16 +178,25 @@ func TestRenderSupervisorDaemonGolden(t *testing.T) {
 
 func TestRenderSudoersDeployGolden(t *testing.T) {
 	checkGolden(t, "sudoers_deploy.tmpl", "sudoers_deploy.golden", struct {
-		User, PHPVersion string
-		Programs         []string
-	}{User: "webuser", PHPVersion: "8.5", Programs: []string{"berth-app_example_com"}})
+		User     string
+		Programs []string
+	}{User: "webuser", Programs: []string{"berth-app_example_com"}})
 }
 
 func TestRenderSudoersDeployDaemonsGolden(t *testing.T) {
 	checkGolden(t, "sudoers_deploy.tmpl", "sudoers_deploy_daemons.golden", struct {
-		User, PHPVersion string
-		Programs         []string
-	}{User: "webuser", PHPVersion: "8.5", Programs: []string{"berth-app_example_com", "berth-app_example_com-reverb"}})
+		User     string
+		Programs []string
+	}{User: "webuser", Programs: []string{"berth-app_example_com", "berth-app_example_com-reverb"}})
+}
+
+func TestRenderReloadFPMGolden(t *testing.T) {
+	// The deployer-facing sudoers grant is version-stable (/bin/sh + this
+	// wrapper's path); the PHP version lives only INSIDE the wrapper body, so a
+	// php.version migration rewrites one root-owned file instead of every
+	// deploy pipeline. systemctl is invoked by ABSOLUTE path — the wrapper must
+	// never depend on PATH.
+	checkGolden(t, "reload_fpm.sh.tmpl", "reload_fpm.golden", struct{ PHPVersion string }{"8.5"})
 }
 
 func TestRenderSchedulerCronGolden(t *testing.T) {
@@ -251,6 +275,7 @@ func TestRenderSysctlBerthGolden(t *testing.T) {
 func TestRenderBackupScriptGolden(t *testing.T) {
 	checkGolden(t, "backup.sh.tmpl", "backup_sh.golden", struct {
 		Pool, DumpCommand, DBName, DeployPath, BackupDir, LogFile, LockFile string
+		BerthVersion, Domain, Engine, DBUser, SiteUser                      string
 		RetentionDays                                                       int
 	}{
 		Pool:          "app_example_com",
@@ -260,6 +285,11 @@ func TestRenderBackupScriptGolden(t *testing.T) {
 		BackupDir:     "/var/backups/berth/app_example_com",
 		LogFile:       "/var/log/berth/backup-app_example_com.log",
 		LockFile:      "/var/backups/berth/app_example_com/.lock",
+		BerthVersion:  "v9.9.9",
+		Domain:        "app.example.com",
+		Engine:        "mariadb",
+		DBUser:        "myapp",
+		SiteUser:      "b_appexamplecom_dd46c94b",
 		RetentionDays: 7,
 	})
 }

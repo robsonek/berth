@@ -82,7 +82,7 @@ func printDeployKeys(ctx context.Context, out io.Writer, srv *config.Server, r b
 			fmt.Fprintln(out, "no deploy key is managed for this site (set sites[].repository to have berth generate one)")
 			continue
 		}
-		res, err := r.Run(ctx, "cat /home/"+user+"/.ssh/id_ed25519.pub", nil)
+		res, err := r.Run(ctx, "cat "+config.DeployKeyPath(user)+".pub", nil)
 		if err != nil {
 			return err
 		}

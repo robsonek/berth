@@ -61,6 +61,10 @@ var (
 	reCronSchedule = regexp.MustCompile(`^[0-9*,/-]+( [0-9*,/-]+){4}$`)
 )
 
+// GROW-ONLY after the first real deployment: removing a value from any of
+// these allow-lists hard-fails Load() for an existing pinned config of a
+// live host that cannot migrate (php.version is immutable on a provisioned
+// host). Add new values freely; deletions need a deprecation path.
 var allowedPHPVersions = map[string]bool{"8.2": true, "8.3": true, "8.4": true, "8.5": true}
 var allowedPHPSources = map[string]bool{"auto": true, "sury": true, "debian": true}
 var allowedNginxSources = map[string]bool{"debian": true, "nginx": true}
@@ -258,9 +262,12 @@ func ParseSwapBytes(size string) (int64, error) {
 	return bytes, nil
 }
 
-// ValidateServerID guards the optional top-level `id` (the secret-cache key:
-// filename-safe, unambiguous). Exported so the wizard's per-field validation
-// applies exactly the same rule as config loading. Empty = unset (allowed).
+// ValidateServerID guards the FORMAT of the top-level `id` (the secret-cache
+// key: filename-safe, unambiguous). Exported so the wizard's per-field
+// validation applies exactly the same rule as config loading. Empty passes
+// HERE by design — the wizard validates the prompt before auto-generating an
+// id, so blank means "generate one" at that layer; only Server.Validate
+// requires a non-empty id.
 func ValidateServerID(id string) error {
 	if id != "" && !reServerID.MatchString(id) {
 		return fmt.Errorf("id %q is not a valid server id (lowercase [a-z0-9._-], 2-64 chars, must start and end alphanumeric)", id)
@@ -270,6 +277,9 @@ func ValidateServerID(id string) error {
 
 // Validate checks every field that reaches a shell, SQL statement, or path.
 func (s *Server) Validate() error {
+	if s.ID == "" {
+		return fmt.Errorf("id is required: it is the stable identity of the machine's local secret cache (a host rename must never silently re-key it) — run `berth init` to generate one, or add e.g. `id: prod-<name>-<4 random hex>`")
+	}
 	if err := ValidateServerID(s.ID); err != nil {
 		return err
 	}
@@ -501,11 +511,11 @@ func (t Tuning) validate() error {
 			return err
 		}
 	}
-	if t.PHPMaxExecutionTime > phpMaxExecutionCeiling {
-		return fmt.Errorf("tuning.php_max_execution_time %d exceeds the %d s cap (long-running work belongs in queue workers)", t.PHPMaxExecutionTime, phpMaxExecutionCeiling)
+	if t.PHPMaxExecutionTime < 0 || t.PHPMaxExecutionTime > phpMaxExecutionCeiling {
+		return fmt.Errorf("tuning.php_max_execution_time %d out of range (0-%d s; 0 = default, long-running work belongs in queue workers)", t.PHPMaxExecutionTime, phpMaxExecutionCeiling)
 	}
-	if t.PHPMaxInputVars > phpMaxInputVarsCeiling {
-		return fmt.Errorf("tuning.php_max_input_vars %d exceeds %d", t.PHPMaxInputVars, phpMaxInputVarsCeiling)
+	if t.PHPMaxInputVars < 0 || t.PHPMaxInputVars > phpMaxInputVarsCeiling {
+		return fmt.Errorf("tuning.php_max_input_vars %d out of range (0-%d; 0 = default)", t.PHPMaxInputVars, phpMaxInputVarsCeiling)
 	}
 	if t.PHPFPMMaxChildren != 0 && (t.PHPFPMMaxChildren < 4 || t.PHPFPMMaxChildren > 10000) {
 		return fmt.Errorf("tuning.php_fpm_max_children %d out of range (4-10000; the static pm.max_spare_servers = 4 must not exceed it)", t.PHPFPMMaxChildren)
@@ -575,8 +585,10 @@ func (b Backups) validate() error {
 // with every feature, and every longer one breaks something. The Valkey
 // budget applies unconditionally (never gate this on valkey being enabled: a
 // domain valid only while valkey is off would blow up the day the knob is
-// switched on). Recompute this bound if any prefix above ever grows — there
-// is deliberately no headroom, because headroom rejects working domains.
+// switched on). TestDomainCapMatchesPrefixArithmetic recomputes this bound
+// from the live prefix constants (ValkeyRunBase, FPMSocketPrefix), so growing
+// a prefix fails the build's tests instead of silently shrinking the budget.
+// There is deliberately no headroom, because headroom rejects working domains.
 // Without the guard a longer (still RFC-valid, up to 253 chars) domain passed
 // validation and then EVERY Apply failed creating the derived artifact,
 // permanently, after services were already reloaded.
@@ -679,9 +691,14 @@ func hasControlChars(s string) bool {
 func (st *Site) validateQueueDaemons() error {
 	if q := st.Queue; q != nil {
 		switch q.Driver {
-		case "", "work", "horizon":
+		case "", "work", "horizon", "none":
 		default:
-			return fmt.Errorf("queue.driver %q must be work or horizon", q.Driver)
+			return fmt.Errorf("queue.driver %q must be work, horizon or none", q.Driver)
+		}
+		if q.Driver == "none" {
+			if q.Connection != "" || q.Queue != "" || q.Processes != 0 || q.Sleep != 0 || q.Tries != 0 || q.Timeout != 0 || q.MaxMemory != 0 {
+				return fmt.Errorf("queue: none disables the worker; remove the other queue settings")
+			}
 		}
 		for _, kv := range []struct {
 			name string

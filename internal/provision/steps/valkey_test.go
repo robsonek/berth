@@ -240,6 +240,41 @@ func TestRenderValkeyUnit(t *testing.T) {
 	}
 }
 
+// TestRenderValkeyUnitPathsMatchConsts pins the unit template's path literals
+// (templates cannot import Go) to the live config constants: the socket must
+// be exactly config.ValkeySocketPath, the --dir exactly under ValkeyStateBase,
+// and Runtime/StateDirectory= the /run- and /var/lib-relative halves of the
+// same bases — a base change that misses the template would otherwise strand
+// every instance's socket and data dir.
+func TestRenderValkeyUnitPathsMatchConsts(t *testing.T) {
+	s := &config.Server{Valkey: true, Sites: []config.Site{{Domain: "app.example.com", User: "tenant1"}}}
+	pool := poolName(s.Sites[0].Domain)
+	got, err := renderValkeyUnit(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(got)
+	// systemd roots RuntimeDirectory= at /run/ and StateDirectory= at
+	// /var/lib/; the relative trims below are honest only while the constants
+	// live there.
+	if !strings.HasPrefix(config.ValkeyRunBase, "/run/") {
+		t.Fatalf("ValkeyRunBase %q must live under /run/ (RuntimeDirectory= is /run-relative)", config.ValkeyRunBase)
+	}
+	if !strings.HasPrefix(config.ValkeyStateBase, "/var/lib/") {
+		t.Fatalf("ValkeyStateBase %q must live under /var/lib/ (StateDirectory= is /var/lib-relative)", config.ValkeyStateBase)
+	}
+	for _, want := range []string{
+		"RuntimeDirectory=" + strings.TrimPrefix(config.ValkeyRunBase, "/run/") + "/" + pool + "\n",
+		"StateDirectory=" + strings.TrimPrefix(config.ValkeyStateBase, "/var/lib/") + "/" + pool + "\n",
+		"--unixsocket " + config.ValkeySocketPath(pool) + " ",
+		"--dir " + config.ValkeyStateBase + "/" + pool + " ",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("unit diverged from the config constants, missing %q:\n%s", want, body)
+		}
+	}
+}
+
 func TestValkeyApplyConvergesFreshFleet(t *testing.T) {
 	s := valkeyServer()
 	f := bssh.NewFakeRunner()

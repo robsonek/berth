@@ -8,10 +8,13 @@ import (
 	"github.com/robsonek/berth/internal/config"
 )
 
-// validSingle returns answers for one MariaDB-on-Debian site.
+// validSingle returns answers for one MariaDB-on-Debian site. The id is set
+// explicitly: production answers get it from run()'s auto-generation, which
+// these Answers-literal tests bypass.
 func validSingle() Answers {
 	a := defaults()
 	a.Name = "example"
+	a.ID = "test-machine-0001"
 	a.Host = "203.0.113.10"
 	a.Sites = []SiteAnswers{{
 		Domain: "app.example.com", DeployPath: "/var/www/app",

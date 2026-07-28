@@ -110,7 +110,6 @@ func TestTuningValidateAcceptsEmptyAndValid(t *testing.T) {
 		{PHPMemoryLimit: "134217728"}, // bare bytes
 		{PHPUploadMax: "512k"},        // suffixes are case-insensitive
 		{PHPUploadMax: "64G"},         // exactly the 64 GiB bound is accepted (reject is >)
-		{PHPMaxExecutionTime: -1},     // non-positive = unset, lenient
 		{MariaDBLogFileSize: "1G", MariaDBTmpTableSize: "128M", MariaDBMaxConnections: 256, MariaDBMaxAllowedPacket: "64M"},
 		{MariaDBMaxConnections: 10},          // range floor
 		{MariaDBMaxConnections: 100000},      // range ceiling
@@ -148,7 +147,9 @@ func TestTuningValidateRejectsBad(t *testing.T) {
 		{PHPUploadMax: "65G"},                    // > 64 GiB bound
 		{PHPMemoryLimit: "18446744073709551615"}, // would wrap PHP's int64 parse to -1
 		{PHPMaxExecutionTime: 301},               // opinionated 300 s cap
+		{PHPMaxExecutionTime: -5},                // negative: 0 is the only "unset" spelling
 		{PHPMaxInputVars: 1000001},               // matches the wizard's domain
+		{PHPMaxInputVars: -1},                    // negative: 0 is the only "unset" spelling
 		{MariaDBLogFileSize: "1GB"},              // MariaDB uses K/M/G, not GB
 		{MariaDBLogFileSize: "huge"},
 		{MariaDBLogFileSize: "0"},                    // below the 4M minimum (the regex alone allows 0)

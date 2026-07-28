@@ -16,10 +16,12 @@ import (
 // assertBackups verifies the live end state of the backups step. For each site
 // with backups enabled it checks the managed root cron + script (owner/mode +
 // content + `bash -n`) and the root:root 0700 per-site dir, then RUNS the script
-// once and asserts it produced a gzip'd DB dump and a shared/ tarball — both
-// root:root 0600 — and that an aged *.gz is pruned by the same run. When any
-// site is enabled it also checks the global logrotate fragment. A no-op (beyond
-// a no-leftover check) when no site is enabled.
+// once and asserts it produced a gzip'd DB dump, a shared/ tarball and a
+// pair-matched `<pool>-meta-<ts>.manifest` sidecar — all root:root 0600 — and
+// that the same run pruned an aged berth-family artifact while leaving an aged
+// foreign .gz alone (retention only ever touches berth's own artifact names).
+// When any site is enabled it also checks the global logrotate fragment. A
+// no-op (beyond a no-leftover check) when no site is enabled.
 //
 // Commands run unprivileged here are auto-elevated by ssh.Client.Run (it wraps
 // `sudo -n -- /bin/sh -c …` when connected non-root), so reads of the 0700 dir
@@ -68,11 +70,17 @@ func assertBackups(ctx context.Context, t *testing.T, c *bssh.Client, srv *confi
 		// cron never creates predictably-named files in a tenant-writable dir).
 		assertStatMode(ctx, t, c, dir, "root:root 700")
 
-		// Seed an aged *.gz so the age-based prune has something old to delete.
+		// Seed two aged files: one matching a berth artifact family (the prune
+		// must delete it) and one foreign .gz (the prune must NOT touch it — an
+		// operator-parked archive is not berth's to delete; its survival is the
+		// live pin of the name-scoped retention).
 		staleDays := strconv.Itoa(srv.Backups.RetentionDaysEff() + 3)
-		aged := dir + "/berth-aged-prune-test.gz"
-		assertExitZero(ctx, t, c, "seed aged archive "+pool,
-			fmt.Sprintf("touch -d '%s days ago' %s", staleDays, aged))
+		agedBerth := dir + "/" + db + "-19700101T000000Z.sql.gz"
+		agedForeign := dir + "/operator-parked.gz"
+		for _, aged := range []string{agedBerth, agedForeign} {
+			assertExitZero(ctx, t, c, "seed aged file "+aged,
+				fmt.Sprintf("touch -d '%s days ago' %s", staleDays, aged))
+		}
 
 		// Run the backup once (it redirects its own output to /var/log/berth, so a
 		// clean exit is the signal; a non-zero exit means the dump or tar failed).
@@ -88,14 +96,52 @@ func assertBackups(ctx context.Context, t *testing.T, c *bssh.Client, srv *confi
 		assertExitZero(ctx, t, c, "db dump valid gzip "+pool,
 			"gunzip -t "+dbGlob)
 
-		// The same run must have pruned the aged archive.
-		res, err := c.Run(ctx, "test -e "+aged+" && echo present || echo gone", nil)
+		// The run's own pair must carry a sidecar manifest with the SAME <ts>:
+		// take the newest dump (the <ts> format sorts lexicographically) and
+		// require the pair-matched tarball + sidecar, sidecar fields matching
+		// the config the archives were produced under. Older pre-sidecar pairs
+		// from earlier runs on a non-fresh box deliberately stay unasserted.
+		res, err := c.Run(ctx, "ls -1 "+dbGlob+" | sort | tail -1", nil)
+		if err != nil {
+			t.Fatalf("list newest dump %s: %v", pool, err)
+		}
+		newest := strings.TrimSpace(res.Stdout)
+		prefix := dir + "/" + db + "-"
+		if !strings.HasPrefix(newest, prefix) || !strings.HasSuffix(newest, ".sql.gz") {
+			t.Fatalf("unexpected newest dump path %q", newest)
+		}
+		ts := strings.TrimSuffix(strings.TrimPrefix(newest, prefix), ".sql.gz")
+		meta := dir + "/" + pool + "-meta-" + ts + ".manifest"
+		assertExitZero(ctx, t, c, "pair files tarball "+pool,
+			"test -f "+dir+"/"+pool+"-files-"+ts+".tar.gz")
+		assertStatMode(ctx, t, c, meta, "root:root 600")
+		for _, line := range []string{
+			"TIMESTAMP=" + ts,
+			"DB_NAME=" + db,
+			"DEPLOY_PATH=" + site.DeployPath,
+		} {
+			assertExitZero(ctx, t, c, "sidecar field "+line,
+				"grep -Fxq '"+line+"' "+meta)
+		}
+
+		// The same run must have pruned the aged berth-family artifact...
+		res, err = c.Run(ctx, "test -e "+agedBerth+" && echo present || echo gone", nil)
 		if err != nil {
 			t.Fatalf("check aged pruned %s: %v", pool, err)
 		}
 		if strings.TrimSpace(res.Stdout) != "gone" {
-			t.Errorf("aged archive %s not pruned (retention %d days)", aged, srv.Backups.RetentionDaysEff())
+			t.Errorf("aged berth artifact %s not pruned (retention %d days)", agedBerth, srv.Backups.RetentionDaysEff())
 		}
+		// ...and must have left the foreign archive alone.
+		res, err = c.Run(ctx, "test -e "+agedForeign+" && echo present || echo gone", nil)
+		if err != nil {
+			t.Fatalf("check foreign survived %s: %v", pool, err)
+		}
+		if strings.TrimSpace(res.Stdout) != "present" {
+			t.Errorf("foreign archive %s was pruned; retention must only touch berth's own artifact names", agedForeign)
+		}
+		// Clean the seed up so re-runs on the same box start from a known state.
+		assertExitZero(ctx, t, c, "remove foreign seed "+pool, "rm -f "+agedForeign)
 	}
 }
 

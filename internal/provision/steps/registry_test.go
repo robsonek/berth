@@ -105,6 +105,22 @@ func TestPipelineManifestLastAndSkipSSLGate(t *testing.T) {
 	}
 }
 
+func TestPipelineOmitsSupervisorWhenOnlySiteQueueNone(t *testing.T) {
+	s := &config.Server{
+		PHP: config.PHP{Version: "8.4"}, Nginx: config.Nginx{Source: "debian"},
+		Database: config.Database{Engine: "mariadb", Source: "mariadb"},
+		// Server-wide queue: true, but the ONLY site opts out with queue: none
+		// and has no daemons -> nothing needs supervisor.
+		Queue: true,
+		Sites: []config.Site{{Domain: "a.example.com", DeployPath: "/var/www/a",
+			Queue: &config.QueueConfig{Driver: "none"}}},
+	}
+	names := stepNames(steps.Pipeline(s, secret.NewRedactor(), true))
+	if contains(names, "supervisor") {
+		t.Errorf("queue: none on the only site must drop the supervisor step: %v", names)
+	}
+}
+
 func TestPipelineIncludesSupervisorForDaemonOnlySite(t *testing.T) {
 	s := &config.Server{
 		PHP: config.PHP{Version: "8.4"}, Nginx: config.Nginx{Source: "debian"},

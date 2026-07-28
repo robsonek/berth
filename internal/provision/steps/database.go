@@ -14,12 +14,6 @@ import (
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
 
-// upstreamSourceList is the apt source file an engine's producer repo is written
-// to; its presence is how Check knows the configured upstream source is in effect.
-func upstreamSourceList(repo apt.Repo) string {
-	return "/etc/apt/sources.list.d/" + repo.Name + ".list"
-}
-
 // dbPasswordKey is the .env key under which the database password lives.
 const dbPasswordKey = "DB_PASSWORD"
 
@@ -75,7 +69,7 @@ func validateCachedDBPassword(dbUser, pw string) error {
 // (reAppKey); an empty entry stays legal.
 func validateCachedAppKey(dbUser, key string) error {
 	if key != "" && !reAppKey.MatchString(key) {
-		return fmt.Errorf("cached APP_KEY for %s is malformed; refusing to use it", dbUser)
+		return fmt.Errorf("cached APP_KEY (cache entry %q) is malformed; refusing to use it", appKeyCacheKey(dbUser))
 	}
 	return nil
 }
@@ -336,7 +330,7 @@ func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	sourceOK := true
 	if s.Database.Source != "debian" {
 		if repo, ok := eng.UpstreamRepo(); ok {
-			sourceOK, err = fileExists(ctx, r, upstreamSourceList(repo))
+			sourceOK, err = fileExists(ctx, r, repo.SourceListPath())
 			if err != nil {
 				return provision.CheckResult{}, err
 			}

@@ -28,12 +28,12 @@ type Nginx struct {
 	Source string `mapstructure:"source" yaml:"source"` // debian | nginx (nginx.org mainline)
 }
 
-// Fail2ban holds the tunable knobs for berth's managed jail.local. bantime and
-// findtime are a number optionally suffixed s/m/h/d/w (e.g. "1h", "10m");
-// compound forms like "1h30m" are not supported. Zero/empty values mean "use
-// the default"; defaults live in the *Eff accessors (NOT in Load() via
-// SetDefault) so wizard ToServer() and literal Server callers that bypass
-// Load() still render valid, non-empty values into jail.local.
+// Fail2ban holds the tunable knobs for berth's managed jail.d drop-in.
+// bantime and findtime are a number optionally suffixed s/m/h/d/w (e.g. "1h",
+// "10m"); compound forms like "1h30m" are not supported. Zero/empty values
+// mean "use the default"; defaults live in the *Eff accessors (NOT in Load()
+// via SetDefault) so wizard ToServer() and literal Server callers that bypass
+// Load() still render valid, non-empty values into the jail drop-in.
 type Fail2ban struct {
 	Bantime  string `mapstructure:"bantime" yaml:"bantime,omitempty"`
 	Findtime string `mapstructure:"findtime" yaml:"findtime,omitempty"`
@@ -340,7 +340,8 @@ type SiteDatabase struct {
 // QueueConfig tunes a site's queue worker. nil => the server-default worker
 // (when Server.Queue) or none. Driver "" / "work" => queue:work; "horizon" =>
 // `artisan horizon` (Horizon manages its own workers; queue:work-only knobs are
-// rejected by validation and numprocs is forced to 1).
+// rejected by validation and numprocs is forced to 1); "none" => no worker for
+// this site even under a server-wide queue: true (every other knob rejected).
 type QueueConfig struct {
 	Driver     string `mapstructure:"driver" yaml:"driver,omitempty"`
 	Processes  int    `mapstructure:"processes" yaml:"processes,omitempty"`
@@ -391,8 +392,10 @@ func (st Site) CertMode() string {
 // config lists. (Before v0.18 a lone site implicitly kept a shared "deploy"
 // account; pin sites[].user: deploy to keep that identity.)
 // CacheKey is the local secret-cache key: the declared server ID when set,
-// else the host (pre-P14 compatibility). Every LockCache/LoadEnvelope/
-// SaveEnvelope call must go through this — never s.Host directly.
+// else the host. The host branch is unreachable for Load-validated configs
+// (Validate requires id) and survives for step-level tests and as defense in
+// depth against a literal Server that bypassed validation. Every LockCache/
+// LoadEnvelope/SaveEnvelope call must go through this — never s.Host directly.
 func (s *Server) CacheKey() string {
 	if s.ID != "" {
 		return s.ID
@@ -460,15 +463,55 @@ func (s *Server) AnyBackupsEnabled() bool {
 	return false
 }
 
+// FROZEN FOREVER (see TestDerivationsAreFrozen): this slug names FPM pools,
+// sockets, supervisor programs and systemd units on every live host.
 // PoolName derives the FPM pool / supervisor program slug from a domain
 // (filesystem-safe: dots -> underscores). Single source of truth shared by the
 // steps package and validation so program names never diverge.
 func PoolName(domain string) string { return strings.ReplaceAll(domain, ".", "_") }
 
-// QueueEnabled reports whether a site gets a queue worker: an explicit per-site
-// queue block, OR the server-wide Server.Queue default. site.Queue works
-// independently of Server.Queue.
-func (s *Server) QueueEnabled(site Site) bool { return site.Queue != nil || s.Queue }
+// FROZEN FOREVER: the on-host name prefixes below root every per-site socket
+// and directory berth derives. They live here — not in the steps that write
+// them — because validation's domain-length cap is computed from their byte
+// lengths (TestDomainCapMatchesPrefixArithmetic) and steps->config is the only
+// legal import direction.
+
+// FPMSocketPrefix roots the per-site PHP-FPM unix sockets. Deliberately PHP
+// version-independent: the sockets survive a php.version migration, which is
+// also why assertPHPVersionExclusive must keep two masters from fighting over
+// them.
+const FPMSocketPrefix = "/run/php/berth-"
+
+// FPMSocketPath is the per-site PHP-FPM unix socket for a pool slug (one per
+// site, each pool running as its own user).
+func FPMSocketPath(pool string) string { return FPMSocketPrefix + pool + ".sock" }
+
+// ValkeyRunBase / ValkeyStateBase root every per-site Valkey instance's
+// runtime (socket) and state (data) directories. The systemd unit template
+// embeds both as literals (RuntimeDirectory=/StateDirectory= plus the
+// --unixsocket/--dir arguments) — render-pin tests hold it to these constants.
+const (
+	ValkeyRunBase   = "/run/berth-valkey"
+	ValkeyStateBase = "/var/lib/berth-valkey"
+)
+
+// ValkeySocketPath is the per-site Valkey unix socket for a pool slug. Its
+// byte length under sun_path is the TIGHTEST budget behind maxSiteDomainLen.
+func ValkeySocketPath(pool string) string { return ValkeyRunBase + "/" + pool + "/valkey.sock" }
+
+// DeployKeyPath is the site user's git deploy private key, generated by the
+// accounts step; `berth site key` prints the .pub beside it.
+func DeployKeyPath(user string) string { return "/home/" + user + "/.ssh/id_ed25519" }
+
+// QueueEnabled reports whether a site gets a queue worker: an explicit
+// per-site queue block (driver "none" opts OUT — the only per-site off
+// switch against a server-wide queue: true), else the server-wide default.
+func (s *Server) QueueEnabled(site Site) bool {
+	if site.Queue != nil {
+		return site.Queue.Driver != "none"
+	}
+	return s.Queue
+}
 
 // NeedsSupervisor reports whether the supervisor step must run: any site has a
 // queue worker or any daemons.
@@ -481,17 +524,27 @@ func (s *Server) NeedsSupervisor() bool {
 	return false
 }
 
+// SiteWorkerProgram / SiteDaemonProgram derive one program's Supervisor name:
+// "berth-<pool>" for the queue worker, "berth-<pool>-<daemon>" per daemon.
+// The per-name halves of SiteProgramNames, exported so the steps that render
+// and path a SINGLE program (site.go) share the exact derivation the
+// list-consuming surfaces (sweep, Check, sudoers) get from the list.
+func SiteWorkerProgram(domain string) string { return "berth-" + PoolName(domain) }
+
+func SiteDaemonProgram(domain, daemon string) string {
+	return SiteWorkerProgram(domain) + "-" + daemon
+}
+
 // SiteProgramNames returns the Supervisor program names a site owns, worker
-// first: "berth-<pool>" iff QueueEnabled, then "berth-<pool>-<name>" per daemon.
+// first: SiteWorkerProgram iff QueueEnabled, then SiteDaemonProgram per daemon.
 // THE single source of truth for program naming.
 func (s *Server) SiteProgramNames(site Site) []string {
-	pool := PoolName(site.Domain)
 	var names []string
 	if s.QueueEnabled(site) {
-		names = append(names, "berth-"+pool)
+		names = append(names, SiteWorkerProgram(site.Domain))
 	}
 	for _, d := range site.Daemons {
-		names = append(names, "berth-"+pool+"-"+d.Name)
+		names = append(names, SiteDaemonProgram(site.Domain, d.Name))
 	}
 	return names
 }
@@ -503,6 +556,8 @@ func (s *Server) SiteDBName(site Site) string { return site.Database.Name }
 
 func (s *Server) SiteDBUser(site Site) string { return site.Database.User }
 
+// FROZEN FOREVER (see TestDerivationsAreFrozen): this name is the OS user
+// owning every implicitly-named tenant's files, DB role and dump contents.
 // DerivedSiteUser builds a Linux-valid, collision-resistant username from a
 // domain: "b_" + a sanitized domain prefix + "_" + an 8-hex fnv hash, lowercased
 // and capped at 32 characters. Stable across runs (deterministic hash).
@@ -529,8 +584,10 @@ type Server struct {
 	// machines behind one hostname get separate credential caches and one
 	// machine addressed by several configs shares a single cache (give every
 	// config of that machine the same id — and, in v1, the same current
-	// host:port). Optional; when empty the cache falls back to the host key
-	// (pre-P14 behavior). Immutable once set — changing it orphans the cache.
+	// host:port). Required by Server.Validate (`berth init` generates one);
+	// CacheKey's host fallback survives only for pre-id tombstone handling.
+	// Immutable once set — the identity step refuses a renamed id (the host
+	// tombstone records the owning id) instead of orphaning the cache.
 	ID             string   `mapstructure:"id" yaml:"id,omitempty"`
 	Host           string   `mapstructure:"host" yaml:"host"`
 	SSH            SSH      `mapstructure:"ssh" yaml:"ssh"`

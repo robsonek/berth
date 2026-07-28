@@ -19,11 +19,18 @@ Notable changes to berth. Older releases are documented on the
   pipeline truncated by `--skip-ssl` does not attest at all.
 - **Per-site backup manifest** — `/var/backups/berth/<pool>/manifest` records
   the berth version, engine, database/user names, site user and deploy path
-  of the site's current configuration (archives created before a config
-  change may predate it — match dump/tar pairs by their UTC timestamp); the
-  offsite copy of a backup directory is now self-describing. The recorded
-  version makes the backups step re-apply once after every berth upgrade
-  (byte-identical rewrites of its other files, no reload).
+  of the site's current configuration; the offsite copy of a backup directory
+  is now self-describing. Each backup run additionally writes a per-pair
+  `<pool>-meta-<timestamp>.manifest` sidecar recording the same facts as of
+  that very run — for archives predating a config change, trust the pair's
+  own sidecar over the directory manifest. The recorded version makes the
+  backups step re-apply once after every berth upgrade (byte-identical
+  rewrites of its other files, no reload).
+- **`queue: none`** — a per-site opt-out from the server-wide `queue: true`
+  worker (symmetric with the `queue: horizon` shorthand).
+- Contract tests freezing the managed-marker text, the on-host default
+  values, and the name-derivation functions; changing any of them now
+  requires a conscious BREAKING changelog entry.
 
 ### Changed
 
@@ -41,6 +48,27 @@ Notable changes to berth. Older releases are documented on the
   `break_glass: false` will leave it untouched — lock it manually with
   `passwd -l berth` or copy the `console:berth` entry into the new cache
   first.
+- **BREAKING: `id` is now required in every config.** It is the stable key
+  of the local secret cache; a host rename must never silently re-key it.
+  `berth init` has always generated one — add `id: <name>` to hand-written
+  configs. A tombstone pointing at a DIFFERENT id than the config declares
+  is now a hard error (a renamed `id` used to silently orphan the cache,
+  including the break-glass console-password ownership marker).
+- **BREAKING: hosts provisioned by earlier releases must be re-provisioned
+  fresh.** The managed fail2ban jail moved to
+  `/etc/fail2ban/jail.d/99-berth.conf` — berth no longer claims the
+  operator's `jail.local`, and a leftover berth-written `jail.local` loads
+  AFTER `jail.d/` and silently overrides the new drop-in. The per-site
+  sudoers moved to `/etc/sudoers.d/berth-<user>` — a leftover
+  `/etc/sudoers.d/<user>` from an earlier release stays an ACTIVE duplicate
+  grant beside it (sudo reads both files). The deploy sudoers grant itself
+  changed as well. There are deliberately no migration shims before the
+  first real deployment.
+- **The deployer's FPM reload is now version-stable**: the per-site sudoers
+  grants `/bin/sh /usr/local/sbin/berth-reload-fpm` (a berth-managed
+  wrapper) instead of `systemctl reload php<ver>-fpm`, so a future PHP
+  version migration never breaks deploy pipelines. Update your deploy.php
+  accordingly (README shows the new line).
 - Removed the three on-host migration shims for artifacts renamed during
   pre-release development: the scheduler cron (`berth-<pool>` →
   `berth-site-<pool>`), the sshd drop-in (`berth.conf` → `00-berth.conf`)
@@ -50,9 +78,39 @@ Notable changes to berth. Older releases are documented on the
   host carries any of these paths.
 - Dropped two dead config decode hooks (`time.Duration`, comma-`[]string`) so
   no future field silently gains an alias spelling.
+- The endpoint re-bind advice now prescribes the narrow
+  `--only identity --force` form (a bare `--force` would also authorize
+  unmanaged-file overwrites in every other step of that run) — and the
+  engine now enforces that scoping: under `--only`, `--force` reaches the
+  target step alone, while the always-run steps executing ahead of it run
+  unforced. Previously `--only site --force` also handed `--force` to the
+  identity step, which reads it as re-bind authorization — an unrelated
+  forced run could silently re-bind the secret cache's endpoint.
+- The backup retention prune now matches only berth's own artifact names —
+  an operator-parked `.gz` in the backup directory is no longer deleted.
 
 ### Fixed
 
+- **A lost id-keyed secret cache no longer reads as fresh state.** A host
+  tombstone pointing at the config's OWN id while
+  `~/.berth/<id>.secrets.json` is missing (deleted, incomplete restore) used
+  to bind a fresh EMPTY envelope, silently disowning every secret the lost
+  cache held — including the console-password ownership marker, without
+  which `break_glass: false` leaves a still-usable berth-set password
+  behind forever. All three reconciliation sites (identity check, identity
+  apply, the cache migration itself) now refuse with advice: restore the
+  file from backup, or settle the console password manually
+  (`passwd -l berth`) and remove the tombstone to rebuild.
+- The apt lock-timeout drop-in
+  (`/etc/apt/apt.conf.d/99-berth-lock-timeout`) now obeys the managed-file
+  drift policy it carries the marker for: a foreign file at that path
+  aborts the run unless `--force`, instead of being clobbered by the
+  always-run preflight on every run (even under `--only`).
+- The accounts step now probes every sudoers drop-in's owner and mode
+  (root:root 0440), not just its content. sudo refuses a drop-in that is
+  not root-owned 0440 wide, so a correct-content grant broken by metadata
+  drift stayed both broken and permanently green; it now heals on the next
+  run.
 - **Restores are order-insensitive.** The `database` step now detects when
   the live `shared/.env` and the local secret cache hold DIFFERENT values for
   the DB password or `APP_KEY` (e.g. an older `.env` restored over a freshly
@@ -74,6 +132,8 @@ Notable changes to berth. Older releases are documented on the
   `APP_KEY` behind an operator-shaped live key stayed green forever, and a
   corrupt value handed to apply surfaced only after packages and SQL had
   already run.
+- Negative `tuning.php_max_execution_time` / `tuning.php_max_input_vars`
+  are rejected at validation instead of silently mapping to the defaults.
 - The `database` step's three whitespace-sensitive `.env` probe scripts now
   pin `LC_ALL=C`. Under `LANG=C.UTF-8` (the target hosts' default),
   `[[:space:]]` in grep/sed also matches Unicode whitespace that the Go side

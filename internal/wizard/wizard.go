@@ -116,7 +116,7 @@ type SiteAnswers struct {
 }
 
 type QueueAnswers struct {
-	Driver     string // "" | "work" | "horizon"
+	Driver     string // "" | "work" | "horizon" | "none"
 	Processes  int
 	Connection string
 	Queue      string

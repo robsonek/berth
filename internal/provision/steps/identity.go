@@ -12,8 +12,10 @@ import (
 )
 
 // Identity reconciles the LOCAL secret-cache identity before any remote
-// mutation: it binds the cache to the config's declared server id (or the
-// host when no id is declared), migrates host-keyed files to id-keyed ones
+// mutation: it binds the cache to the config's declared server id (the
+// host-keyed fallback is unreachable for Load-validated configs — id is
+// required — and survives for step-level tests and as defense in depth
+// against a literal Server), migrates host-keyed files to id-keyed ones
 // (leaving a tombstone so a stale host-keyed config fails loudly instead of
 // regenerating or disowning secrets — a lost console:berth marker can leave
 // a usable root-equivalent password behind), and verifies the recorded
@@ -44,6 +46,14 @@ func tombstoneAdvice(key, migratedTo string) error {
 	return fmt.Errorf("the secret cache for %s was migrated to server id %q; if this config targets the same machine add `id: %s` to it, if it targets a different machine give that machine its own `id`", key, migratedTo, migratedTo)
 }
 
+// foreignHostTombstone renders the refusal for a host tombstone that points at
+// a different server id than the config declares — the signature of a renamed
+// `id`, which would otherwise silently bind a fresh empty cache and orphan the
+// old id's secrets.
+func foreignHostTombstone(migratedTo, id string) error {
+	return fmt.Errorf("this host's cache was migrated to server id %q but the config declares id %q — a renamed id would orphan the existing cache (including the console-password ownership marker); restore `id: %s`, or migrate deliberately by renaming ~/.berth/%s.secrets.json to %s.secrets.json and updating the tombstone", migratedTo, id, migratedTo, migratedTo, id)
+}
+
 func (identity) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
 	key := s.CacheKey()
 	env, err := secret.LoadEnvelope(key)
@@ -61,6 +71,16 @@ func (identity) Check(ctx context.Context, rc provision.RunCtx, s *config.Server
 		hostEnv, err = secret.LoadEnvelope(s.Host)
 		if err != nil {
 			return provision.CheckResult{}, err
+		}
+		if hostEnv != nil && hostEnv.MigratedTo != "" && hostEnv.MigratedTo != s.ID {
+			// The host tombstone records which id owns this machine's cache;
+			// a mismatch is a renamed `id`, never a fresh bind.
+			return provision.CheckResult{}, foreignHostTombstone(hostEnv.MigratedTo, s.ID)
+		}
+		if hostEnv != nil && hostEnv.MigratedTo == s.ID && env == nil {
+			// The tombstone points at OUR id but the id-keyed envelope is gone
+			// (lost cache) — binding fresh here would disown its secrets.
+			return provision.CheckResult{}, secret.TombstoneWithoutEnvelope(s.ID, s.Host)
 		}
 		hostReal := hostEnv != nil && hostEnv.MigratedTo == ""
 		if hostReal && env != nil {
@@ -141,6 +161,32 @@ func (identity) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server
 	if env != nil && env.MigratedTo != "" {
 		return tombstoneAdvice(key, env.MigratedTo)
 	}
+	// The host tombstone is validated BEFORE any active-envelope write: a
+	// tombstone pointing at a foreign id (a renamed `id`) must leave the cache
+	// dir untouched. MigrateCache above refuses it too, but under its own
+	// locks — re-read under ours (Check ran unlocked, and a concurrent run
+	// may have written the tombstone in between).
+	var hostEnv *secret.Envelope
+	if migrated {
+		hostEnv, err = secret.LoadEnvelope(s.Host)
+		if err != nil {
+			return err
+		}
+		if hostEnv != nil && hostEnv.MigratedTo != "" && hostEnv.MigratedTo != s.ID {
+			return foreignHostTombstone(hostEnv.MigratedTo, s.ID)
+		}
+		if hostEnv != nil && hostEnv.MigratedTo == "" {
+			return fmt.Errorf("a host-keyed cache %s.secrets.json reappeared during identity reconciliation (a concurrent run without `id`?); re-run after making every config of this machine use `id: %s`", s.Host, s.ID)
+		}
+		// After the two refusals above, a present hostEnv can only be OUR OWN
+		// tombstone; with the id-keyed envelope missing that is a lost cache —
+		// the env==nil branch below must never bind a fresh empty envelope over
+		// it. MigrateCache refuses this state too, but under its own locks;
+		// re-assert under ours (a concurrent run may have changed the files).
+		if hostEnv != nil && env == nil {
+			return secret.TombstoneWithoutEnvelope(s.ID, s.Host)
+		}
+	}
 	ep := endpointOf(s)
 	switch {
 	case env == nil:
@@ -156,18 +202,9 @@ func (identity) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server
 			return err
 		}
 	}
-	if migrated {
-		hostEnv, err := secret.LoadEnvelope(s.Host)
-		if err != nil {
+	if migrated && hostEnv == nil {
+		if err := secret.SaveEnvelope(s.Host, secret.Envelope{Endpoint: ep, MigratedTo: key, Secrets: map[string]string{}}); err != nil {
 			return err
-		}
-		if hostEnv != nil && hostEnv.MigratedTo == "" {
-			return fmt.Errorf("a host-keyed cache %s.secrets.json reappeared during identity reconciliation (a concurrent run without `id`?); re-run after making every config of this machine use `id: %s`", s.Host, s.ID)
-		}
-		if hostEnv == nil {
-			if err := secret.SaveEnvelope(s.Host, secret.Envelope{Endpoint: ep, MigratedTo: key, Secrets: map[string]string{}}); err != nil {
-				return err
-			}
 		}
 	}
 	return nil

@@ -1,0 +1,2 @@
+# managed by berth
+exec /usr/bin/systemctl reload php8.5-fpm

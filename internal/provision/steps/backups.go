@@ -56,9 +56,17 @@ func dumpClientBinary(engine string) string {
 	return "mysqldump"
 }
 
+// renderBackupScript bakes the per-pair sidecar fields (the directory
+// manifest's eight derivation facts) into the script at render time, so each
+// run writes a `<pool>-meta-<ts>.manifest` describing the exact pair it
+// produced — the directory manifest only describes the CURRENT config, the
+// sidecar survives config changes alongside its archives. BerthVersion makes
+// the script change bytes on every berth upgrade, same accepted re-apply as
+// the directory manifest (see renderBackupManifest).
 func renderBackupScript(s *config.Server, site config.Site, eng dbpkg.Engine) ([]byte, error) {
 	return templates.Render("backup.sh.tmpl", struct {
 		Pool, DumpCommand, DBName, DeployPath, BackupDir, LogFile, LockFile string
+		BerthVersion, Domain, Engine, DBUser, SiteUser                      string
 		RetentionDays                                                       int
 	}{
 		Pool:          poolName(site.Domain),
@@ -68,6 +76,11 @@ func renderBackupScript(s *config.Server, site config.Site, eng dbpkg.Engine) ([
 		BackupDir:     backupDir(site.Domain),
 		LogFile:       backupLogPath(site.Domain),
 		LockFile:      backupLockPath(site.Domain),
+		BerthVersion:  version.Version,
+		Domain:        site.Domain,
+		Engine:        s.Database.Engine,
+		DBUser:        s.SiteDBUser(site),
+		SiteUser:      s.SiteUser(site),
 		RetentionDays: s.Backups.RetentionDaysEff(),
 	})
 }

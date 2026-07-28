@@ -6,7 +6,8 @@ flock -n 9 || { echo "[$(date -u +%FT%TZ)] berth backup {{ .Pool }}: skipped (an
 ts="$(date -u +%Y%m%dT%H%M%SZ)"
 db_tmp=""
 files_tmp=""
-trap 'rm -f -- "$db_tmp" "$files_tmp"' EXIT
+meta_tmp=""
+trap 'rm -f -- "$db_tmp" "$files_tmp" "$meta_tmp"' EXIT
 find "{{ .BackupDir }}" -maxdepth 1 -type f -name '.tmp-*' -mmin +1440 -delete
 echo "[$(date -u +%FT%TZ)] berth backup {{ .Pool }}: start"
 db_tmp="$(mktemp "{{ .BackupDir }}/.tmp-XXXXXXXX")"
@@ -17,5 +18,14 @@ files_tmp="$(mktemp "{{ .BackupDir }}/.tmp-XXXXXXXX")"
 tar --exclude='shared/tmp' -czf "$files_tmp" -C "{{ .DeployPath }}" shared || [ $? -eq 1 ]
 chmod 0600 "$files_tmp"
 mv "$files_tmp" "{{ .BackupDir }}/{{ .Pool }}-files-$ts.tar.gz"
-find "{{ .BackupDir }}" -maxdepth 1 -type f -name '*.gz' -mtime +{{ .RetentionDays }} -delete
+meta_tmp="$(mktemp "{{ .BackupDir }}/.tmp-XXXXXXXX")"
+{
+  printf 'BERTH_VERSION=%s\n' '{{ .BerthVersion }}'
+  printf 'DOMAIN=%s\nPOOL=%s\nENGINE=%s\n' '{{ .Domain }}' '{{ .Pool }}' '{{ .Engine }}'
+  printf 'DB_NAME=%s\nDB_USER=%s\nSITE_USER=%s\nDEPLOY_PATH=%s\n' '{{ .DBName }}' '{{ .DBUser }}' '{{ .SiteUser }}' '{{ .DeployPath }}'
+  printf 'TIMESTAMP=%s\n' "$ts"
+} > "$meta_tmp"
+chmod 0600 "$meta_tmp"
+mv "$meta_tmp" "{{ .BackupDir }}/{{ .Pool }}-meta-$ts.manifest"
+find "{{ .BackupDir }}" -maxdepth 1 -type f \( -name '{{ .DBName }}-*.sql.gz' -o -name '{{ .Pool }}-files-*.tar.gz' -o -name '{{ .Pool }}-meta-*.manifest' \) -mtime +{{ .RetentionDays }} -delete
 echo "[$(date -u +%FT%TZ)] berth backup {{ .Pool }}: done"

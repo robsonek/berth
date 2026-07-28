@@ -9,6 +9,7 @@ import (
 
 func base() *Server {
 	return &Server{
+		ID:       "test-machine-0001",
 		Host:     "203.0.113.10",
 		SSH:      SSH{User: "root", Port: 22},
 		PHP:      PHP{Version: "8.5", Source: "auto"},
@@ -68,6 +69,7 @@ func TestValidateHTTP3OK(t *testing.T) {
 
 func multiSite() *Server {
 	return &Server{
+		ID:   "test-machine-0001",
 		Host: "203.0.113.10", SSH: SSH{User: "root", Port: 22},
 		PHP: PHP{Version: "8.5", Source: "auto"}, Nginx: Nginx{Source: "debian"},
 		Database: Database{Engine: "mariadb", Source: "debian"},
@@ -258,6 +260,29 @@ func TestValidateDomainLengthBoundary(t *testing.T) {
 	}
 }
 
+// TestDomainCapMatchesPrefixArithmetic derives the domain cap from the LIVE
+// name-prefix constants instead of restating 77: growing a prefix must break
+// this test at build time, not re-open the every-Apply-fails bug the cap fixed
+// (an accepted domain whose derived socket path exceeds sun_path).
+func TestDomainCapMatchesPrefixArithmetic(t *testing.T) {
+	// poolName only swaps dots for underscores, so len(pool) == len(domain).
+	// The tightest budget is the per-site Valkey socket against the 107 usable
+	// sun_path bytes; it applies unconditionally (a domain must never turn
+	// invalid the day valkey: true is switched on).
+	valkeyBudget := 107 - len(ValkeyRunBase+"/") - len("/valkey.sock")
+	if maxSiteDomainLen != valkeyBudget {
+		t.Errorf("maxSiteDomainLen = %d, want %d = 107 - len(%q+\"/\") - len(\"/valkey.sock\")",
+			maxSiteDomainLen, valkeyBudget, ValkeyRunBase)
+	}
+	// The FPM socket budget must stay at least as loose, or the Valkey budget
+	// is no longer the tightest bound and the cap needs recomputing.
+	fpmBudget := 107 - len(FPMSocketPrefix) - len(".sock")
+	if fpmBudget < maxSiteDomainLen {
+		t.Errorf("FPM socket budget %d (from FPMSocketPrefix %q) is tighter than maxSiteDomainLen %d — recompute the cap",
+			fpmBudget, FPMSocketPrefix, maxSiteDomainLen)
+	}
+}
+
 func TestValidateDeployPathDeniesEverySystemRoot(t *testing.T) {
 	// Every entry of the deny-list must be refused both as an exact path (the
 	// depth>=2 rule catches single-component roots) and as a parent of the
@@ -333,6 +358,7 @@ func TestSchedulerEnabled(t *testing.T) {
 
 func validQueueServer() *Server {
 	return &Server{
+		ID:   "test-machine-0001",
 		Host: "app.example.com",
 		SSH:  SSH{Port: 22, User: "deploy", Key: "~/.ssh/id_rsa"},
 		PHP:  PHP{Version: "8.4", Source: "auto"}, Nginx: Nginx{Source: "debian"},
@@ -358,6 +384,26 @@ func TestValidateRejectsControlCharInCommand(t *testing.T) {
 	}
 }
 
+func TestValidateQueueDriverNone(t *testing.T) {
+	s := validQueueServer()
+	s.Sites[0].Queue = &QueueConfig{Driver: "none"}
+	if err := s.Validate(); err != nil {
+		t.Errorf("driver none alone must be valid: %v", err)
+	}
+
+	s = validQueueServer()
+	s.Sites[0].Queue = &QueueConfig{Driver: "none", Processes: 2}
+	if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "queue: none disables the worker") {
+		t.Errorf("none + processes must be rejected with the none-excludes-knobs message; got %v", err)
+	}
+
+	s = validQueueServer()
+	s.Sites[0].Queue = &QueueConfig{Driver: "none", Connection: "redis"}
+	if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "queue: none disables the worker") {
+		t.Errorf("none + connection must be rejected with the none-excludes-knobs message; got %v", err)
+	}
+}
+
 func TestValidateRejectsHorizonWithKnobs(t *testing.T) {
 	s := validQueueServer()
 	s.Sites[0].Queue = &QueueConfig{Driver: "horizon", Tries: 5}
@@ -379,6 +425,20 @@ func TestValidateRejectsNegativeKnob(t *testing.T) {
 	s.Sites[0].Queue = &QueueConfig{Tries: -1}
 	if s.Validate() == nil {
 		t.Error("expected error for negative tries")
+	}
+}
+
+func TestValidateRejectsNegativePHPTuning(t *testing.T) {
+	s := validQueueServer()
+	s.Tuning = Tuning{PHPMaxExecutionTime: -5}
+	if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "php_max_execution_time") {
+		t.Errorf("negative php_max_execution_time must be rejected; got %v", err)
+	}
+
+	s = validQueueServer()
+	s.Tuning = Tuning{PHPMaxInputVars: -1}
+	if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "php_max_input_vars") {
+		t.Errorf("negative php_max_input_vars must be rejected; got %v", err)
 	}
 }
 
@@ -485,6 +545,7 @@ func TestDatabaseChoices(t *testing.T) {
 	}
 	for _, c := range got {
 		s := &Server{
+			ID:   "test-machine-0001",
 			Host: "h.example", SSH: SSH{Port: 22}, PHP: PHP{Version: "8.5", Source: "auto"},
 			Nginx: Nginx{Source: "debian"}, Database: Database{Engine: c.Engine, Source: c.Source},
 			Sites: []Site{{Domain: "a.example", DeployPath: "/srv/a", Database: SiteDatabase{Name: "a", User: "a"}}},
@@ -600,8 +661,17 @@ func TestIsValidSiteOSUser(t *testing.T) {
 }
 
 func TestValidateServerID(t *testing.T) {
-	ok := []string{"", "ab", "prod-web-1a2b3c", "a.b_c-9", "x0"}
+	// Field-level: "" is deliberately legal HERE — the wizard validates the
+	// prompt BEFORE auto-generating an id, so blank means "generate one".
+	// Only Server.Validate (TestValidateRequiresID) rejects an empty id.
+	if err := ValidateServerID(""); err != nil {
+		t.Errorf(`ValidateServerID("") must stay nil (wizard pre-generation layer): %v`, err)
+	}
+	ok := []string{"ab", "prod-web-1a2b3c", "a.b_c-9", "x0"}
 	for _, id := range ok {
+		if err := ValidateServerID(id); err != nil {
+			t.Errorf("ValidateServerID(%q) = %v, want nil", id, err)
+		}
 		s := base()
 		s.ID = id
 		if err := s.Validate(); err != nil {
@@ -610,11 +680,23 @@ func TestValidateServerID(t *testing.T) {
 	}
 	bad := []string{"a", "A-upper", "-lead", "trail-", "spa ce", "zażółć", strings.Repeat("x", 65)}
 	for _, id := range bad {
+		if err := ValidateServerID(id); err == nil {
+			t.Errorf("ValidateServerID(%q) = nil, want error", id)
+		}
 		s := base()
 		s.ID = id
 		if err := s.Validate(); err == nil {
 			t.Errorf("id %q must be rejected", id)
 		}
+	}
+}
+
+func TestValidateRequiresID(t *testing.T) {
+	s := base()
+	s.ID = ""
+	err := s.Validate()
+	if err == nil || !strings.Contains(err.Error(), "id") || !strings.Contains(err.Error(), "berth init") {
+		t.Fatalf("an empty id must be rejected with `berth init` advice; got %v", err)
 	}
 }
 

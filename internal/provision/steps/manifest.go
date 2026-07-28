@@ -32,6 +32,13 @@ const manifestPath = berthStateDir + "/manifest"
 // being overwritten with a false attestation — and Check reports unsatisfied
 // on such a run even over a same-version manifest, so that withhold path is
 // actually reachable.
+//
+// Stale-Satisfied edge, by design: because Check compares only VERSION, a
+// converged same-version re-run stays Satisfied even when it just re-applied
+// other steps (config change, drift heal) — the manifest is a version-level
+// attestation ("this version once fully converged this host"), not a record
+// of the latest run, and PROVISIONED_AT keeps that version's FIRST full
+// convergence.
 type manifest struct{}
 
 func Manifest() provision.Step { return manifest{} }

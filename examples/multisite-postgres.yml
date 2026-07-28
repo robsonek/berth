@@ -4,6 +4,11 @@
 # Each site runs under its OWN OS user and gets its OWN database + user, so a
 # compromise of one cannot read another's files. With 2+ sites every site needs
 # its own `database:` block and a distinct user/domain/deploy_path.
+
+# Stable machine identity keying the local secret cache (~/.berth/<id>.secrets.json).
+# Required; `berth init` generates one. A rename is refused; migrate deliberately per the error's recipe.
+id: prod-multisite-3e7b
+
 host: 203.0.113.20
 
 ssh:

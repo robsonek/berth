@@ -5,6 +5,7 @@ import "testing"
 func TestToServerOpsBlocks(t *testing.T) {
 	a := defaults()
 	a.Name, a.Host = "t", "203.0.113.10"
+	a.ID = "test-machine-0001"
 	a.System = SystemAnswers{Swap: "2G", Sysctl: true}
 	a.CloudflareOnly = true
 	a.Backups = BackupsAnswers{Enabled: true, RetentionDays: 14, Schedule: "0 2 * * 0"}

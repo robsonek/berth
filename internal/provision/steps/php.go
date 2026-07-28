@@ -295,8 +295,9 @@ func (php) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 	}
 	// Production OPcache tuning (FPM SAPI only). validate_timestamps=0 means new
 	// code is picked up only after an FPM reload — the deployer does that
-	// post-deploy via its `sudo systemctl reload php<ver>-fpm` grant (the shared
-	// per-version master: a reload gracefully recycles every site's pool).
+	// post-deploy via its `sudo /bin/sh /usr/local/sbin/berth-reload-fpm` grant
+	// (the version-stable wrapper accounts writes; it reloads the shared
+	// per-version master, gracefully recycling every site's pool).
 	ini, err := renderOpcache()
 	if err != nil {
 		return err

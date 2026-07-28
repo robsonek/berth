@@ -34,6 +34,12 @@ func (e *Endpoint) valid() bool {
 // an envelope into a tombstone: a non-secret marker left at the old host-keyed
 // path after a migration to an id-keyed file, so a stale config still keyed by
 // host fails loudly instead of regenerating (or silently disowning) secrets.
+//
+// The secrets-map key grammar is FROZEN as of the first real deployment:
+// bare "<dbUser>" (DB password), "appkey:<dbUser>" (APP_KEY backup),
+// "console:berth" (break-glass ownership marker). New secret kinds get NEW
+// "<kind>:" prefixes; the three existing spellings never change (renaming
+// them would orphan every live cache).
 type Envelope struct {
 	Version    int               `json:"version"`
 	Endpoint   *Endpoint         `json:"endpoint"`
@@ -185,9 +191,21 @@ func VerifyEnvelope(env *Envelope, host string, port int) error {
 		return fmt.Errorf("this host's secret cache was migrated to server id %q; add `id: %s` to this config", env.MigratedTo, env.MigratedTo)
 	}
 	if env.Endpoint.Host != host || env.Endpoint.Port != port {
-		return fmt.Errorf("secret cache is bound to endpoint %s but the config targets %s:%d — if this is a DIFFERENT server, give it its own `id`; if the endpoint really changed, re-run with --force to re-bind", env.Endpoint, host, port)
+		return fmt.Errorf("secret cache is bound to endpoint %s but the config targets %s:%d — if this is a DIFFERENT server, give it its own `id`; if the endpoint really changed, re-bind with the narrow form: berth provision <config> --only identity --force (a bare --force would ALSO authorize overwriting unmanaged files in every other step of the run)", env.Endpoint, host, port)
 	}
 	return nil
+}
+
+// TombstoneWithoutEnvelope renders the refusal for a host tombstone that
+// points at the caller's OWN id while the id-keyed envelope is missing (lost,
+// deleted, restored incompletely). The tombstone proves an id-keyed cache
+// existed, so silently binding a fresh EMPTY one would disown every secret it
+// held — including the console-password ownership marker, without which
+// `break_glass: false` leaves a still-usable berth-set root-equivalent
+// password behind forever. Shared by MigrateCache and the identity step so
+// all three guard sites speak with one voice.
+func TombstoneWithoutEnvelope(id, host string) error {
+	return fmt.Errorf("the tombstone at ~/.berth/%s.secrets.json records a migration to server id %q, but ~/.berth/%s.secrets.json is missing — rebinding fresh would disown every secret that cache held (including the console-password ownership marker); restore ~/.berth/%s.secrets.json from backup, or settle the console password manually (`passwd -l berth` on the host) and remove the tombstone to let berth rebuild the cache", host, id, id, id)
 }
 
 // MigrateCache moves a host-keyed cache to an id-keyed file (atomic rename)
@@ -217,6 +235,18 @@ func MigrateCache(id, host string, port int) error {
 	source, err := LoadEnvelope(host)
 	if err != nil {
 		return err
+	}
+	// A tombstone pointing at a DIFFERENT id means the caller's id was
+	// renamed; both shortcuts below would swallow it (and the fresh-target
+	// path would then bind an empty cache, orphaning the old id's secrets).
+	if source != nil && source.MigratedTo != "" && source.MigratedTo != id {
+		return fmt.Errorf("the cache for host %s was already migrated to server id %q but this run declares id %q — a renamed id would orphan the existing cache (including the console-password ownership marker); restore `id: %s`, or migrate deliberately by renaming ~/.berth/%s.secrets.json to %s.secrets.json and updating the tombstone", host, source.MigratedTo, id, source.MigratedTo, source.MigratedTo, id)
+	}
+	// A tombstone pointing at OUR id with the id-keyed envelope gone is a lost
+	// cache, not a fresh machine: the `!sourceIsReal` shortcut below would
+	// return nil and let the caller bind an empty envelope over it.
+	if source != nil && source.MigratedTo == id && target == nil {
+		return TombstoneWithoutEnvelope(id, host)
 	}
 	sourceIsReal := source != nil && source.MigratedTo == ""
 	if target != nil && sourceIsReal {

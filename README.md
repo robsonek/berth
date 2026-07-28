@@ -71,7 +71,7 @@ starting points live in [`examples/`](examples/) — e.g.
 and accepted values:
 
 ```yaml
-id: myserver-1a2b3c4d          # optional — stable machine identity (see below)
+id: myserver-1a2b3c4d          # required — stable machine identity (see below)
 host: 203.0.113.10             # required — server IP or DNS name
 
 ssh:
@@ -166,7 +166,7 @@ sites:                         # one or more
     backups: false                     # per-site override of the server default
                                        # (nil/absent = inherit backups.enabled)
     queue:                             # tune this site's worker (omit = server default)
-      driver: work                     # work (default) | horizon
+      driver: work                     # work (default) | horizon | none (opt out)
       processes: 4                     # numprocs
       connection: redis
       queue: default,emails
@@ -187,25 +187,37 @@ than propagate it. The thematic sections below explain each area in depth.
 
 ### Server identity (`id:`)
 
-The local secret cache is keyed by `id` when set, else by `host`. Declare an
-`id` (the wizard generates one) whenever hostnames are ambiguous: two
+The local secret cache is keyed by `id` — a **required** field (`berth init`
+has always generated one; a config predating this requirement keeps working
+after you add the id it was implicitly using, i.e. one already recorded in a
+tombstone, or a fresh one if the machine was only ever host-keyed). Two
 *different* machines reachable through one hostname on different ports must
 have *different* ids (or they would share database passwords, `APP_KEY`
 backups and the break-glass console password), while one machine addressed by
 several configs must use the *same* id in all of them — and, in this version,
 the same current `host:port`. Rules:
 
-- `id` is a stable, immutable machine identity, not a display name. Changing
-  it orphans the cache.
+- `id` is a stable, immutable machine identity, not a display name. Renaming
+  it is refused: the host's tombstone records which id owns the cache, and a
+  mismatch would orphan the old id's secrets (including the console-password
+  ownership marker). Either restore the recorded id, or migrate deliberately
+  by renaming `~/.berth/<old-id>.secrets.json` to `<new-id>.secrets.json` and
+  updating the tombstone.
 - Adding an `id` to an already-provisioned config migrates the cache file
   automatically and leaves a tombstone at the old host-keyed path, so any
   stale config still lacking the `id` fails loudly instead of silently
   regenerating (or disowning) secrets — add the same `id` there too.
 - The cache records the endpoint it was bound to. A mismatch is a hard error:
   if it is a *different* server, give it its own `id`; if the endpoint really
-  changed, update every config sharing the id first, then re-run once with
-  `--force` to re-bind. Endpoint metadata is an operator-error tripwire, not
-  authentication — SSH host-key verification is unaffected and never bypassed.
+  changed, update every config sharing the id first, then re-bind once with
+  the narrow form `berth provision <config> --only identity --force`. Under
+  `--only`, `--force` applies to the target step alone (the always-run steps
+  ahead of it run unforced), so the narrow form authorizes exactly the
+  re-bind and a forced run of any *other* step can never re-bind the cache as
+  a side effect — while a bare `--force` (full run) would ALSO authorize
+  overwriting unmanaged files in every other step. Endpoint metadata is an
+  operator-error tripwire, not authentication — SSH host-key verification is
+  unaffected and never bypassed.
 - Downgrading berth below this version after an `id`/envelope exists is not
   supported (older binaries reject both the config key and the cache format).
 
@@ -262,8 +274,10 @@ berth tunes the host for production Laravel out of the box:
   knobs apply per instance. Valkey is wired as the cache, session and queue
   backend when berth first seeds a site's `shared/.env` (without Valkey the
   app keeps the database driver), so enable `valkey` before the initial
-  provision — flipping it on later does not rewrite an existing `.env`;
-  update it by hand. Flipping `valkey: false` on a provisioned host makes the
+  provision — the `REDIS_*` lines are seed-time-only: flipping `valkey:` on
+  an already-seeded host never rewrites the existing `.env`; update the
+  site's `.env` by hand, or remove it so the next run re-seeds it (cached
+  secrets are reused). Flipping `valkey: false` on a provisioned host makes the
   next full run (or `--only valkey`) stop and remove every berth-managed
   instance — **first** move each application's `.env` cache/session/queue off
   the Valkey socket, or the app breaks the moment the instance goes away.
@@ -342,10 +356,12 @@ symlink it must reload FPM (and restart any running queue worker):
 
 ```php
 // deploy.php (Deployer) — berth grants the site user exactly this reload, nothing more.
+// The command is version-stable: the PHP version lives inside the berth-managed
+// wrapper, so a future php version migration never touches your deploy pipeline.
 // Note: it reloads the shared per-version FPM master, gracefully recycling every
 // site's pool on the host (FPM has no per-pool reload).
 after('deploy:publish', function () {
-    run('sudo systemctl reload php{{php_version}}-fpm'); // clear OPcache -> serve new bytecode
+    run('sudo /bin/sh /usr/local/sbin/berth-reload-fpm'); // clear OPcache -> serve new bytecode
 });
 // plus: php artisan queue:restart  (or horizon:terminate) so a running worker picks up the new code
 ```
@@ -364,7 +380,10 @@ scope):
   `unattended-upgrades` actually applies updates (the package alone is inert
   without it).
 - **fail2ban** — a managed jail bans SSH brute-forcers (bound to your configured
-  SSH port) and repeat offenders (`recidive`). Tunable, with safe defaults:
+  SSH port) and repeat offenders (`recidive`). berth writes it as
+  `/etc/fail2ban/jail.d/99-berth.conf`, leaving `jail.local` — which loads
+  after `jail.d/` and keeps final say — free for your own overrides. Tunable,
+  with safe defaults:
 
   ```yaml
   fail2ban:
@@ -453,6 +472,7 @@ sites:
       timeout: 90
       max_memory: 256        # MB
     # queue: horizon         # …or run Laravel Horizon instead of queue:work
+    # queue: none            # …or opt just this site out of the server-wide worker
     daemons:                 # arbitrary long-running programs (full command)
       - { name: reverb, command: php artisan reverb:start }
 ```
@@ -461,7 +481,10 @@ Every program is installed **dormant** (`autostart=false`) — your deployer sta
 and restarts them; berth never runs them. `queue: horizon` emits an `artisan
 horizon` program instead of `queue:work` (Horizon runs single-process and manages
 its own workers, so the `queue:work` knobs don't apply; configure it in your app's
-`config/horizon.php`, and note it needs the Redis/Valkey queue driver). Each site
+`config/horizon.php`, and note it needs the Redis/Valkey queue driver).
+`queue: none` opts a single site out of the server-wide worker — the only
+per-site off switch under `queue: true` (a shorthand like `horizon`; combining
+it with the other worker knobs is rejected). Each site
 user gets **narrow sudoers** to control only its own programs, and Supervisor is
 installed whenever any site declares a worker or a daemon.
 
@@ -482,13 +505,18 @@ that writes, into `/var/backups/berth/<pool>/` (**`root:root`, mode 0700**):
 
 - `<db>-<UTC-timestamp>.sql.gz` — passwordless engine dump (MariaDB socket-root / Postgres peer)
 - `<pool>-files-<UTC-timestamp>.tar.gz` — a tar of the site's `shared/` (`.env` + `storage/`)
-- `manifest` — written by `berth provision` itself (not the cron): the berth
-  version, engine, database/user names, site user and `deploy_path` of the
-  site's **current** configuration, so a copy of the directory stays
-  self-describing. Archives created before a config change may predate what
-  the manifest records — match dump/tar pairs by their UTC timestamp
+- `<pool>-meta-<UTC-timestamp>.manifest` — a per-pair sidecar written by the
+  same run as its two archives, recording the berth version, engine,
+  database/user names, site user and `deploy_path` **as of that run**.
+- `manifest` — written by `berth provision` itself (not the cron): the same
+  facts for the site's **current** configuration, so a copy of the directory
+  stays self-describing. Archives created before a config change may predate
+  what it records — match dump/tar pairs by their UTC timestamp and trust
+  the pair's own sidecar over the directory manifest.
 
-Old archives are pruned by age. Disabling backups (per site, or removing the site)
+Old archives (and their sidecars) are pruned by age; the prune matches only
+berth's own artifact names, so an operator-parked file in the directory is
+never deleted. Disabling backups (per site, or removing the site)
 deletes the cron + script + manifest but **never** the existing archive files.
 
 Backups are deliberately **root-owned** (directory and files): the dump cron runs as root,
@@ -528,7 +556,9 @@ step (4) report everything satisfied. Each backup directory carries a
 `manifest` file recording the engine, database/user names, site user and
 `deploy_path` as of the last provision run — a useful starting point, but it
 describes the current configuration, not necessarily the one an older archive
-was made under; verify against the dump/tar UTC timestamps before restoring.
+was made under; match the pair by its UTC timestamp and, for archives
+predating a config change, trust the pair's own `<pool>-meta-<ts>.manifest`
+sidecar over the directory manifest.
 
 **Limitations:** local only (no offsite copy) — backups are root-owned so they survive a
 compromised *site*, but a lost *host* loses them; the DB dump and files tar are independent,
@@ -621,15 +651,16 @@ implicitly. Remove manually if you want them gone:
 - database + DB user: `DROP DATABASE`/`DROP USER` (MariaDB) or
   `dropdb`/`dropuser` (PostgreSQL)
 - the OS account (its home also holds the git deploy key) and its sudoers
-  entry: `deluser --remove-home <user>`, `rm /etc/sudoers.d/<user>`
+  entry: `deluser --remove-home <user>`, `rm /etc/sudoers.d/berth-<user>`
 - the application tree: `rm -rf <deploy_path>`
 - Valkey state (`/var/lib/berth-valkey/<pool>`) and backup archives
   (`/var/backups/berth/<pool>/`) are likewise retained
 
-Two related notes: setting `valkey: false` skips the whole Valkey step, so
-orphan instances are cleaned only while it stays `true`; and after changing
-`php.version`, the previous version's FPM unit and pool files are no longer
-managed — clean them up manually.
+Two related notes: the Valkey step always runs — while `valkey: true` a
+removed site's instance is swept as an orphan, and `valkey: false` stops and
+removes every berth-managed instance (data under `/var/lib/berth-valkey/` is
+kept either way); and after changing `php.version`, the previous version's
+FPM unit and pool files are no longer managed — clean them up manually.
 
 ## Beyond v1
 

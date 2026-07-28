@@ -984,6 +984,24 @@ func TestManagedSiteFilesNoWorkerWhenQueueDisabled(t *testing.T) {
 	}
 }
 
+func TestManagedSiteFilesNoWorkerWhenSiteQueueNone(t *testing.T) {
+	s := siteServer()
+	s.Queue = true // server-wide default ON; the site opts out below
+	s.Sites[0].Queue = &config.QueueConfig{Driver: "none"}
+	f := bssh.NewFakeRunner()
+	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{ExitCode: 0, Stdout: ""})
+	stubEmptyDiscovery(f, s)
+	mfs, err := managedSiteFiles(context.Background(), f, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range mfs {
+		if mf.path == "/etc/supervisor/conf.d/berth-app_example_com.conf" && !mf.remove {
+			t.Error("queue: none must opt the site out of the server-wide worker program")
+		}
+	}
+}
+
 func TestManagedSiteFilesFlagsOrphanProgram(t *testing.T) {
 	s := siteServer()
 	s.Queue = true // worker berth-app_example_com is desired; berth-app_example_com-old is NOT
@@ -1319,6 +1337,56 @@ func TestSiteApplyReloadsSupervisorAfterOrphanRemovalWithoutQueue(t *testing.T) 
 	}
 }
 
+// TestSiteApplyQueueNoneSweepsExistingWorker covers the opt-out transition on
+// an already-provisioned host: the server-wide queue stays true, but the site
+// flips to queue: none. Its worker program is no longer desired, so the global
+// sweep must drift-remove the conf and reread/update supervisord to unload it
+// (NeedsSupervisor is false — the reload rides the removed-orphan gate).
+func TestSiteApplyQueueNoneSweepsExistingWorker(t *testing.T) {
+	s := siteServer()
+	s.Queue = true
+	s.Sites[0].Queue = &config.QueueConfig{Driver: "none"}
+	f := bssh.NewFakeRunner()
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+	// The worker a previous (pre-opt-out) run installed still exists on the host.
+	worker := "/etc/supervisor/conf.d/berth-app_example_com.conf"
+	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{Stdout: worker + "\n"})
+	f.On("cat "+shQuote(worker), bssh.Result{ExitCode: 0, Stdout: managedMarker + "\n[program:berth-app_example_com]\n"})
+	f.On("rm -f "+shQuote(worker), bssh.Result{})
+	// supervisord is present, so the removal must be followed by reread/update.
+	f.On("systemctl is-active supervisor", bssh.Result{ExitCode: 0, Stdout: "active\n"})
+	f.On("systemctl is-enabled supervisor", bssh.Result{ExitCode: 0, Stdout: "enabled\n"})
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var removed, sawReread, sawUpdate bool
+	for _, c := range f.Calls() {
+		switch c.Cmd {
+		case "rm -f " + shQuote(worker):
+			removed = true
+		case "supervisorctl reread":
+			sawReread = true
+		case "supervisorctl update":
+			sawUpdate = true
+		}
+	}
+	if !removed {
+		t.Error("flipping to queue: none must remove the site's existing worker program")
+	}
+	if !sawReread || !sawUpdate {
+		t.Errorf("removing the opted-out worker must refresh supervisord; reread=%v update=%v", sawReread, sawUpdate)
+	}
+	for _, w := range f.Writes() {
+		if w.Path == worker {
+			t.Errorf("queue: none site must not have its worker program re-written")
+		}
+	}
+}
+
 // TestSiteApplyNoSupervisorReloadWhenNotNeeded pins the negative gate: a site
 // with no queue/daemons and no orphan to remove must NOT touch supervisord, so a
 // regression that always reloaded would be caught (the stubs make reread/update
@@ -1448,6 +1516,119 @@ func TestSiteCheckSatisfiedWhenSupervisorProgramLoaded(t *testing.T) {
 	}
 	if !cr.Satisfied {
 		t.Errorf("expected satisfied when the supervisor program is loaded; got %+v", cr)
+	}
+}
+
+// TestSupervisorProgramSurfacesAgree pins every surface that names a site's
+// supervisor programs to config.SiteProgramNames for a queue+daemons fixture:
+// the managed write paths (with the [program:] header inside each rendered
+// body), the sweep's desired set, Check's supervisorctl probes and the sudoers
+// grants. A rename reaching one surface but not another would strand programs
+// (sweep misses them) or break the deployer's sudo lines.
+func TestSupervisorProgramSurfacesAgree(t *testing.T) {
+	s := siteServer()
+	s.Queue = true
+	s.Sites[0].Daemons = []config.Daemon{
+		{Name: "sockets", Command: "php artisan sockets:serve"},
+		{Name: "pulse", Command: "php artisan pulse:work"},
+	}
+	site := s.Sites[0]
+	names := s.SiteProgramNames(site)
+	if len(names) != 3 {
+		t.Fatalf("fixture must yield worker + 2 daemons, got %v", names)
+	}
+	wantPaths := map[string]bool{}
+	for _, n := range names {
+		wantPaths["/etc/supervisor/conf.d/"+n+".conf"] = true
+	}
+
+	// Surface 1: the write paths managedSiteFiles produces, and the program
+	// header rendered into each body (what supervisord registers).
+	f := bssh.NewFakeRunner()
+	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{})
+	stubEmptyDiscovery(f, s)
+	mfs, err := managedSiteFiles(context.Background(), f, s)
+	if err != nil {
+		t.Fatalf("managedSiteFiles: %v", err)
+	}
+	gotPaths := map[string]bool{}
+	for _, mf := range mfs {
+		if !strings.HasPrefix(mf.path, "/etc/supervisor/conf.d/") || mf.remove {
+			continue
+		}
+		gotPaths[mf.path] = true
+		prog := strings.TrimSuffix(strings.TrimPrefix(mf.path, "/etc/supervisor/conf.d/"), ".conf")
+		if !strings.Contains(string(mf.content), "[program:"+prog+"]") {
+			t.Errorf("%s does not declare [program:%s]:\n%s", mf.path, prog, mf.content)
+		}
+	}
+	for p := range wantPaths {
+		if !gotPaths[p] {
+			t.Errorf("managedSiteFiles is missing the write for %s", p)
+		}
+	}
+	for p := range gotPaths {
+		if !wantPaths[p] {
+			t.Errorf("managedSiteFiles writes %s, which SiteProgramNames does not own", p)
+		}
+	}
+
+	// Surface 2: the sweep's desired set (what protects a program file from
+	// orphan removal).
+	desired := desiredProgramPaths(s)
+	for p := range wantPaths {
+		if !desired[p] {
+			t.Errorf("desiredProgramPaths is missing %s — the sweep would remove a desired program", p)
+		}
+	}
+	for p := range desired {
+		if !wantPaths[p] {
+			t.Errorf("desiredProgramPaths protects %s, which SiteProgramNames does not own", p)
+		}
+	}
+
+	// Surface 3: the sudoers grants the deployer drives the programs with.
+	sudoers, err := renderSiteSudoers(s, site)
+	if err != nil {
+		t.Fatalf("renderSiteSudoers: %v", err)
+	}
+	for _, n := range names {
+		if !strings.Contains(string(sudoers), `supervisorctl restart `+n+`\:\*`) {
+			t.Errorf("sudoers is missing the restart grant for %s:\n%s", n, sudoers)
+		}
+	}
+
+	// Surface 4: Check's loaded-in-supervisord probes ask for exactly these
+	// program groups (stub them loaded; a diverged name would surface as an
+	// unstubbed-command error or a missing probe below).
+	f2 := bssh.NewFakeRunner()
+	stubManagedSiteFiles(t, s, f2)
+	f2.On("nginx -t", bssh.Result{ExitCode: 0})
+	f2.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
+	stubSiteConvergedProbes(s, f2)
+	for _, n := range names {
+		f2.On("supervisorctl status "+shQuote(n+":*"), bssh.Result{ExitCode: 3, Stdout: n + ": STOPPED\n"})
+	}
+	cr, err := Site().Check(context.Background(), provision.RunCtx{}, s, f2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("expected satisfied with all programs loaded; got %+v", cr)
+	}
+	probed := map[string]bool{}
+	for _, c := range f2.Calls() {
+		if strings.HasPrefix(c.Cmd, "supervisorctl status ") {
+			probed[c.Cmd] = true
+		}
+	}
+	for _, n := range names {
+		if !probed["supervisorctl status "+shQuote(n+":*")] {
+			t.Errorf("Check never probed supervisord for %s", n)
+		}
+	}
+	if len(probed) != len(names) {
+		t.Errorf("Check probed %d supervisor programs, want %d: %v", len(probed), len(names), probed)
 	}
 }
 
@@ -1980,5 +2161,31 @@ func TestRenderFPMPoolMaxChildren(t *testing.T) {
 	}
 	if !strings.Contains(string(got), "pm.max_children = 16\n") {
 		t.Errorf("tuned pool must render pm.max_children = 16:\n%s", got)
+	}
+}
+
+// TestRenderFPMPoolLogPathMatchesLogrotateGlob pins the three surfaces that
+// share the per-site FPM error-log location to phpLogDir (php.go): php.Apply
+// creates the directory, the pool template points error_log into it, and the
+// logrotate template rotates it by glob. The templates embed the path as a
+// literal (templates cannot import Go), so a phpLogDir change that misses one
+// template would silently log to — or rotate — a directory nothing else uses.
+func TestRenderFPMPoolLogPathMatchesLogrotateGlob(t *testing.T) {
+	s := siteServer()
+	pool, err := renderFPMPool(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	logLine := "php_admin_value[error_log] = " + phpLogDir + "/" + poolName(s.Sites[0].Domain) + "-fpm.error.log\n"
+	if !strings.Contains(string(pool), logLine) {
+		t.Errorf("pool template's error_log diverged from phpLogDir (%s), missing %q:\n%s", phpLogDir, logLine, pool)
+	}
+	lr, err := renderLogrotate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	glob := phpLogDir + "/*-fpm.error.log\n"
+	if !strings.Contains(string(lr), glob) {
+		t.Errorf("logrotate template's glob diverged from phpLogDir (%s), missing %q:\n%s", phpLogDir, glob, lr)
 	}
 }

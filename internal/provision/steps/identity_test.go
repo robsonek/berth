@@ -173,6 +173,93 @@ func TestIdentityTombstoneWithoutIDIsHardError(t *testing.T) {
 	}
 }
 
+// Renaming `id` in the config used to be completely silent: a fresh empty
+// envelope bound at the new id, the old id's cache (incl. the root-equivalent
+// console:berth marker) orphaned, the host tombstone still pointing at the
+// dead old id. The tombstone already stores the truth — validate it.
+func TestIdentityRefusesTombstonePointingAtDifferentID(t *testing.T) {
+	cases := []struct {
+		name       string
+		newIDCache bool // a real cache already exists at the renamed id
+	}{
+		{"fresh renamed id", false},
+		{"renamed id cache already bound", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			berth := identityHome(t)
+			if err := secret.SaveEnvelope("h.example.com", secret.Envelope{
+				Endpoint:   &secret.Endpoint{Host: "h.example.com", Port: 22},
+				MigratedTo: "old-id",
+				Secrets:    map[string]string{},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if tc.newIDCache {
+				if err := secret.SaveEnvelope("new-id", secret.Envelope{
+					Endpoint: &secret.Endpoint{Host: "h.example.com", Port: 22},
+					Secrets:  map[string]string{"a": "1"},
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s := identityServer("new-id")
+			f := bssh.NewFakeRunner()
+			_, err := Identity().Check(context.Background(), provision.RunCtx{}, s, f)
+			if err == nil || !strings.Contains(err.Error(), "old-id") || !strings.Contains(err.Error(), "new-id") {
+				t.Fatalf("Check must refuse a tombstone pointing at a different id, naming both ids; got %v", err)
+			}
+			err = Identity().Apply(context.Background(), provision.RunCtx{}, s, f)
+			if err == nil || !strings.Contains(err.Error(), "old-id") || !strings.Contains(err.Error(), "new-id") {
+				t.Fatalf("Apply must refuse too, naming both ids; got %v", err)
+			}
+			if !tc.newIDCache {
+				if _, statErr := os.Stat(filepath.Join(berth, "new-id.secrets.json")); !os.IsNotExist(statErr) {
+					t.Fatal("the refused Apply must not bind a cache at the renamed id")
+				}
+			}
+			tomb, terr := secret.LoadEnvelope("h.example.com")
+			if terr != nil || tomb == nil || tomb.MigratedTo != "old-id" {
+				t.Fatalf("the tombstone must stay untouched: %+v err=%v", tomb, terr)
+			}
+		})
+	}
+}
+
+// A host tombstone pointing at the config's OWN id with the id-keyed envelope
+// missing used to read as fresh state: Check reported "not yet bound" and
+// Apply bound an EMPTY envelope — disowning every secret the lost cache held,
+// including the console-password ownership marker (a still-usable berth-set
+// password would never be locked back). The tombstone proves the cache
+// existed; refuse until the operator restores it or settles the password.
+func TestIdentityRefusesTombstonePointingAtOwnIDWithoutEnvelope(t *testing.T) {
+	berth := identityHome(t)
+	if err := secret.SaveEnvelope("h.example.com", secret.Envelope{
+		Endpoint:   &secret.Endpoint{Host: "h.example.com", Port: 22},
+		MigratedTo: "prod-1a2b",
+		Secrets:    map[string]string{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s := identityServer("prod-1a2b")
+	f := bssh.NewFakeRunner()
+	_, err := Identity().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "restore") || !strings.Contains(err.Error(), "passwd -l berth") {
+		t.Fatalf("Check must refuse the lost id-keyed cache with restore/settle advice; got %v", err)
+	}
+	err = Identity().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "prod-1a2b") {
+		t.Fatalf("Apply must refuse too, naming the id; got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(berth, "prod-1a2b.secrets.json")); !os.IsNotExist(statErr) {
+		t.Fatal("the refused Apply must not bind a fresh empty envelope at the id")
+	}
+	tomb, terr := secret.LoadEnvelope("h.example.com")
+	if terr != nil || tomb == nil || tomb.MigratedTo != "prod-1a2b" {
+		t.Fatalf("the tombstone must stay untouched: %+v err=%v", tomb, terr)
+	}
+}
+
 func TestIdentityBothRealCachesIsHardError(t *testing.T) {
 	berth := identityHome(t)
 	writeCacheFile(t, berth, "h.example.com",
