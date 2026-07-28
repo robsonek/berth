@@ -12,10 +12,13 @@ Notable changes to berth. Older releases are documented on the
 - **Lint gate** — golangci-lint v2 (pinned v2.12.2) now runs as a hard gate
   in CI and before every release: the default bug-finder set plus revive,
   misspell and gocritic, with the gofmt formatter enforced (previously
-  `gofmt -l` was a by-convention gate CI never checked). Three conscious
-  config exceptions are commented in `.golangci.yml`; the whole tree was
-  brought to zero findings with no `//nolint` directives, and `make lint`
-  runs the same check locally.
+  `gofmt -l` was a by-convention gate CI never checked). Two conscious
+  config exceptions are commented in `.golangci.yml` (revive
+  exported/package-comments, staticcheck QF1001); the gate runs as two
+  passes — the default tree plus `-tags integration` for
+  `test/integration/` — mirroring the repo's two `go vet` invocations;
+  the whole tree was brought to zero findings with no `//nolint`
+  directives, and `make lint` runs the same check locally.
 
 ### Changed
 

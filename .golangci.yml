@@ -1,14 +1,5 @@
 version: "2"
 
-run:
-  # One pass also analyzes test/integration/ (its files sit behind this
-  # build tag and are invisible to the linter without it). Trade-off:
-  # the two !integration unit-test files (internal/ssh/client_test.go,
-  # connect_test.go) are excluded from this pass — verified clean by hand
-  # (2026-07-28); revisit if that constraint ever spreads.
-  build-tags:
-    - integration
-
 linters:
   default: standard
   enable:
