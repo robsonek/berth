@@ -85,7 +85,8 @@ func (s *testServer) handle(c net.Conn, cfg *xssh.ServerConfig, behavior execBeh
 		// Simulate a dead peer for keepalive probes: drain global requests
 		// WITHOUT replying, so a wantReply SendRequest blocks forever.
 		go func() {
-			for range globals {
+			for req := range globals {
+				_ = req // received but never answered
 			}
 		}()
 	} else {

@@ -16,9 +16,9 @@ const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789
 // Generate returns a cryptographically random password of length n.
 func Generate(n int) (string, error) {
 	b := make([]byte, n)
-	max := big.NewInt(int64(len(alphabet)))
+	bound := big.NewInt(int64(len(alphabet)))
 	for i := range b {
-		idx, err := rand.Int(rand.Reader, max)
+		idx, err := rand.Int(rand.Reader, bound)
 		if err != nil {
 			return "", err
 		}

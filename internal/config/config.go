@@ -572,8 +572,8 @@ func DerivedSiteUser(domain string) string {
 		}
 	}
 	slug := b.String()
-	if max := 32 - len("b_") - len("_") - len(suffix); len(slug) > max {
-		slug = slug[:max]
+	if maxSlugLen := 32 - len("b_") - len("_") - len(suffix); len(slug) > maxSlugLen {
+		slug = slug[:maxSlugLen]
 	}
 	return "b_" + slug + "_" + suffix
 }

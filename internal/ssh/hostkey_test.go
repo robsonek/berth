@@ -97,7 +97,7 @@ func TestUnknownHostTOFUConfirmsAndPins(t *testing.T) {
 	cb := HostKeyChecker(HostKeyPolicy{
 		KnownHosts: kh,
 		AllowTOFU:  true,
-		ConfirmTOFU: func(host, fingerprint, keyType string) bool {
+		ConfirmTOFU: func(_, fingerprint, keyType string) bool {
 			confirmed, confirmedType = fingerprint, keyType
 			return true
 		},

@@ -20,7 +20,7 @@ func newSiteCmd() *cobra.Command {
 		Use:   "add <server>",
 		Short: "Add another site to an existing server",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			return errNotImplemented("site:add") // post-v1
 		},
 	})

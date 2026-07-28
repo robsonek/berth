@@ -63,7 +63,7 @@ func baseServer(a *Answers) {
 	a.Host = "203.0.113.10"
 }
 
-func TestFakeCompiles(t *testing.T) {
+func TestFakeCompiles(_ *testing.T) {
 	var _ prompter = &fakePrompter{}
 }
 

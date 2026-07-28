@@ -54,7 +54,7 @@ func foreignHostTombstone(migratedTo, id string) error {
 	return fmt.Errorf("this host's cache was migrated to server id %q but the config declares id %q — a renamed id would orphan the existing cache (including the console-password ownership marker); restore `id: %s`, or migrate deliberately by renaming ~/.berth/%s.secrets.json to %s.secrets.json and updating the tombstone", migratedTo, id, migratedTo, migratedTo, id)
 }
 
-func (identity) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
+func (identity) Check(_ context.Context, rc provision.RunCtx, s *config.Server, _ bssh.Runner) (provision.CheckResult, error) {
 	key := s.CacheKey()
 	env, err := secret.LoadEnvelope(key)
 	if err != nil {
@@ -121,7 +121,7 @@ func identityChanges(s *config.Server) []string {
 	}
 }
 
-func (identity) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
+func (identity) Apply(_ context.Context, rc provision.RunCtx, s *config.Server, _ bssh.Runner) error {
 	key := s.CacheKey()
 	migrated := s.ID != "" && s.ID != s.Host
 	if migrated {

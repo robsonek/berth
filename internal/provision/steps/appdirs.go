@@ -93,7 +93,7 @@ func assertNoSymlinkDeployTree(ctx context.Context, r bssh.Runner, site config.S
 //
 // Ancestry goes FIRST: it is the broadest condition (an unsafe ancestor makes
 // every verdict below it meaningless) and it costs one round-trip.
-func assertNoSymlinkTargets(ctx context.Context, r bssh.Runner, s *config.Server, site config.Site) error {
+func assertNoSymlinkTargets(ctx context.Context, r bssh.Runner, _ *config.Server, site config.Site) error {
 	if err := assertSafeAncestry(ctx, r, site.Domain, site.DeployPath, acmeWebroot(site.Domain)); err != nil {
 		return err
 	}

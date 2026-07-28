@@ -150,7 +150,7 @@ func (o *orderedRunner) WriteFile(ctx context.Context, spec bssh.FileSpec) error
 
 func TestTLSApplyUsesWebrootAndIssuesCert(t *testing.T) {
 	s := tlsServer()
-	withResolver(t, func(host string) ([]string, error) { return []string{s.Host}, nil })
+	withResolver(t, func(_ string) ([]string, error) { return []string{s.Host}, nil })
 	f := bssh.NewFakeRunner()
 	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: "No certificates found.\n"})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y certbot", bssh.Result{})
@@ -216,7 +216,7 @@ func TestTLSApplyUsesWebrootAndIssuesCert(t *testing.T) {
 
 func TestTLSApplyHonorsStagingFlag(t *testing.T) {
 	s := tlsServer()
-	withResolver(t, func(host string) ([]string, error) { return []string{s.Host}, nil })
+	withResolver(t, func(_ string) ([]string, error) { return []string{s.Host}, nil })
 	f := bssh.NewFakeRunner()
 	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: "No certificates found.\n"})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y certbot", bssh.Result{})
@@ -333,7 +333,7 @@ func TestTLSCheckAcceptsStagingCertUnderStagingRun(t *testing.T) {
 
 func TestTLSApplyForceRenewsStagingCertOnProductionRun(t *testing.T) {
 	s := tlsServer()
-	withResolver(t, func(host string) ([]string, error) { return []string{s.Host}, nil })
+	withResolver(t, func(_ string) ([]string, error) { return []string{s.Host}, nil })
 	f := bssh.NewFakeRunner()
 	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: certbotStagingCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour))})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y certbot", bssh.Result{})

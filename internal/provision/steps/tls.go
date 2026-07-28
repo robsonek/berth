@@ -40,9 +40,7 @@ func anyLetsEncrypt(s *config.Server) bool {
 
 // resolveA resolves the A/AAAA records for a host. It is a package-level var so
 // tests can stub DNS without a real lookup; production uses the system resolver.
-var resolveA = func(host string) ([]string, error) {
-	return net.LookupHost(host)
-}
+var resolveA = net.LookupHost
 
 type tls struct{}
 
