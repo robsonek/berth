@@ -1,0 +1,9 @@
+# managed by berth
+BERTH_VERSION=v9.9.9
+DOMAIN=app.example.com
+POOL=app_example_com
+ENGINE=mariadb
+DB_NAME=myapp
+DB_USER=myapp
+SITE_USER=b_appexamplecom_dd46c94b
+DEPLOY_PATH=/home/deploy/myapp

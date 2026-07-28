@@ -77,6 +77,34 @@ func TestTLSPresenceTracksAnySiteSSL(t *testing.T) {
 	}
 }
 
+// TestPipelineManifestLastAndSkipSSLGate asserts the manifest step closes
+// every pipeline that is not artificially truncated, and is absent when
+// --skip-ssl removed a TLS step the config asked for — a "fully provisioned"
+// attestation for that run would be a lie.
+func TestPipelineManifestLastAndSkipSSLGate(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		ssl     bool
+		skipSSL bool
+		want    bool // manifest registered
+	}{
+		{"ssl-on", true, false, true},
+		{"ssl-off", false, false, true},
+		{"ssl-off-skip-flag", false, true, true},
+		{"ssl-on-skipped", true, true, false},
+	} {
+		s := &config.Server{Sites: []config.Site{{Domain: "app.example.com", SSL: tc.ssl}}}
+		names := stepNames(steps.Pipeline(s, secret.NewRedactor(), tc.skipSSL))
+		if got := contains(names, "manifest"); got != tc.want {
+			t.Errorf("%s: manifest presence = %v, want %v (names=%v)", tc.name, got, tc.want, names)
+			continue
+		}
+		if tc.want && names[len(names)-1] != "manifest" {
+			t.Errorf("%s: manifest must be the LAST step; got %v", tc.name, names)
+		}
+	}
+}
+
 func TestPipelineIncludesSupervisorForDaemonOnlySite(t *testing.T) {
 	s := &config.Server{
 		PHP: config.PHP{Version: "8.4"}, Nginx: config.Nginx{Source: "debian"},

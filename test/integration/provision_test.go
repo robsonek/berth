@@ -151,6 +151,11 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	assertValkeyIsolation(invCtx, t, client, srv)
 	assertSwapSysctl(invCtx, t, client, srv)
 	assertBackups(invCtx, t, client, srv)
+	// Upgrade machinery: the host + per-site backup manifests. The host
+	// manifest step is unregistered when skip-ssl truncated a pipeline that
+	// would otherwise carry TLS (steps.Pipeline's exact condition, mirrored
+	// here), so only then is it exempt from the assert.
+	assertManifests(invCtx, t, client, srv, !(skipSSL && anySiteSSL(srv)))
 
 	// iter-5: runtime + deploy-reload (#36) and apt provenance (#35).
 	assertRuntime(invCtx, t, client, srv)
@@ -170,6 +175,12 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	// berth's defining contract: an immediate second run must change nothing
 	// (every step satisfied), except preflight which re-runs apt by design.
 	assertSecondRunIdempotent(t, eng, red, srv, client)
+
+	// LAST on purpose: the restore drill deliberately diverges live state
+	// (fresh shared/.env secrets) and re-runs the pipeline to prove the
+	// database step heals the role, the local cache and the client-auth file
+	// back to convergence.
+	assertRestoreDrill(t, eng, red, srv, client)
 }
 
 // assertSecondRunIdempotent runs the pipeline a SECOND time over the same

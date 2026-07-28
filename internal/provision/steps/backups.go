@@ -10,6 +10,7 @@ import (
 	"github.com/robsonek/berth/internal/provision"
 	bssh "github.com/robsonek/berth/internal/ssh"
 	"github.com/robsonek/berth/internal/templates"
+	"github.com/robsonek/berth/internal/version"
 )
 
 const (
@@ -18,6 +19,7 @@ const (
 	backupLogrotatePath = "/etc/logrotate.d/berth-backup"
 	backupScriptGlob    = "/usr/local/sbin/berth-backup-*"
 	backupCronGlob      = "/etc/cron.d/berth-backup-*"
+	backupManifestGlob  = backupBaseDir + "/*/manifest"
 )
 
 func backupScriptPath(domain string) string {
@@ -35,6 +37,8 @@ func backupLogPath(domain string) string {
 	return backupLogDir + "/backup-" + poolName(domain) + ".log"
 }
 func backupLockPath(domain string) string { return backupDir(domain) + "/.lock" }
+
+func backupManifestPath(domain string) string { return backupDir(domain) + "/manifest" }
 
 // dumpClientPackage / dumpClientBinary name the apt package shipping the engine's
 // logical-dump tool and the binary the backup script invokes.
@@ -77,6 +81,29 @@ func renderBackupCron(s *config.Server, site config.Site) ([]byte, error) {
 
 func renderBackupLogrotate() ([]byte, error) {
 	return templates.Render("backup_logrotate.conf.tmpl", nil)
+}
+
+// renderBackupManifest freezes the derivation facts a future restore needs
+// next to the archives themselves: the offsite copy of this directory stays
+// self-describing even when the host (and its /var/lib/berth manifest) is
+// gone. BERTH_VERSION deliberately makes the backups step re-apply on the
+// first run after every berth upgrade — that run rewrites the step's other
+// managed files with identical bytes too (Apply is not content-aware), which
+// is idempotent and attaches no reload; accepted in the spec (Codex review
+// corrected the earlier "just this one file" claim).
+func renderBackupManifest(s *config.Server, site config.Site) ([]byte, error) {
+	return templates.Render("backup_manifest.tmpl", struct {
+		BerthVersion, Domain, Pool, Engine, DBName, DBUser, SiteUser, DeployPath string
+	}{
+		BerthVersion: version.Version,
+		Domain:       site.Domain,
+		Pool:         poolName(site.Domain),
+		Engine:       s.Database.Engine,
+		DBName:       s.SiteDBName(site),
+		DBUser:       s.SiteDBUser(site),
+		SiteUser:     s.SiteUser(site),
+		DeployPath:   site.DeployPath,
+	})
 }
 
 // managedFileOK reports whether path holds berth's exact desired content. An
@@ -150,8 +177,8 @@ func (b backups) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 		if !s.BackupsEnabled(site) {
 			continue
 		}
-		sp, cp := backupScriptPath(site.Domain), backupCronPath(site.Domain)
-		desired[sp], desired[cp] = true, true
+		sp, cp, mp := backupScriptPath(site.Domain), backupCronPath(site.Domain), backupManifestPath(site.Domain)
+		desired[sp], desired[cp], desired[mp] = true, true, true
 
 		script, err := renderBackupScript(s, site, eng)
 		if err != nil {
@@ -187,6 +214,23 @@ func (b backups) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 			changes = append(changes, "fix owner/mode of "+cp)
 		}
 
+		manifest, err := renderBackupManifest(s, site)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		ok, err = managedFileOK(ctx, r, mp, manifest, rc.Force)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if !ok {
+			changes = append(changes, "write "+mp)
+		}
+		if meta, present, err := statOwnerMode(ctx, r, mp); err != nil {
+			return provision.CheckResult{}, err
+		} else if present && meta != "root:root 600" {
+			changes = append(changes, "fix owner/mode of "+mp)
+		}
+
 		// Backup dir is root-owned (Decision 1): a root cron must NOT write into a
 		// tenant-owned dir (symlink-TOCTOU privesc). root:root 0700.
 		if meta, present, err := statOwnerMode(ctx, r, backupDir(site.Domain)); err != nil {
@@ -196,9 +240,9 @@ func (b backups) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 		}
 	}
 
-	// Orphan drift-removal: a berth-managed backup script/cron on disk whose path is
-	// not desired (site disabled or removed) must be deleted.
-	for _, glob := range []string{backupScriptGlob, backupCronGlob} {
+	// Orphan drift-removal: a berth-managed backup script/cron/manifest on disk
+	// whose path is not desired (site disabled or removed) must be deleted.
+	for _, glob := range []string{backupScriptGlob, backupCronGlob, backupManifestGlob} {
 		paths, err := lsGlob(ctx, r, glob)
 		if err != nil {
 			return provision.CheckResult{}, err
@@ -319,8 +363,8 @@ func (b backups) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serve
 		if !s.BackupsEnabled(site) {
 			continue
 		}
-		sp, cp := backupScriptPath(site.Domain), backupCronPath(site.Domain)
-		desired[sp], desired[cp] = true, true
+		sp, cp, mp := backupScriptPath(site.Domain), backupCronPath(site.Domain), backupManifestPath(site.Domain)
+		desired[sp], desired[cp], desired[mp] = true, true, true
 
 		// Root-owned backup dir (Decision 1) — never the site user, so a root cron
 		// never writes predictably-named files into a tenant-controlled directory.
@@ -345,10 +389,18 @@ func (b backups) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serve
 		if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{Path: cp, Content: cron, Owner: "root", Group: "root", Mode: 0o644, Sudo: true}); err != nil {
 			return fmt.Errorf("write %s: %w", cp, err)
 		}
+		manifest, err := renderBackupManifest(s, site)
+		if err != nil {
+			return err
+		}
+		if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{Path: mp, Content: manifest, Owner: "root", Group: "root", Mode: 0o600, Sudo: true}); err != nil {
+			return fmt.Errorf("write %s: %w", mp, err)
+		}
 	}
 
-	// Orphan removal: a berth-managed backup script/cron not desired by the current config.
-	for _, glob := range []string{backupScriptGlob, backupCronGlob} {
+	// Orphan removal: a berth-managed backup script/cron/manifest not desired by
+	// the current config.
+	for _, glob := range []string{backupScriptGlob, backupCronGlob, backupManifestGlob} {
 		paths, err := lsGlob(ctx, r, glob)
 		if err != nil {
 			return err

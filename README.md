@@ -481,9 +481,12 @@ that writes, into `/var/backups/berth/<pool>/` (**`root:root`, mode 0700**):
 
 - `<db>-<UTC-timestamp>.sql.gz` — passwordless engine dump (MariaDB socket-root / Postgres peer)
 - `<pool>-files-<UTC-timestamp>.tar.gz` — a tar of the site's `shared/` (`.env` + `storage/`)
+- `manifest` — written by `berth provision` itself (not the cron): the berth
+  version, engine, database/user names, site user and `deploy_path` the
+  archives were made under, so a copy of the directory stays self-describing
 
 Old archives are pruned by age. Disabling backups (per site, or removing the site)
-deletes the cron + script but **never** the existing archive files.
+deletes the cron + script + manifest but **never** the existing archive files.
 
 Backups are deliberately **root-owned** (directory and files): the dump cron runs as root,
 and a root process must not create files in a directory a tenant can write to (a symlink
@@ -507,15 +510,20 @@ role and database must already exist before you restore for ownership to be
 reestablished. For disaster recovery, re-run berth (it recreates the role/database)
 before restoring.
 
-**Full-restore order (rehearsed end to end):** after losing the database and the
-whole `shared/` tree, (1) run `berth provision servers/<name>.yml` — it recreates
-the database, its user with the SAME cached password, the directory tree, and
-re-seeds `shared/.env`; (2) `tar -xzf <pool>-files-<ts>.tar.gz -C <deploy_path>`
-as root — restores `shared/` with original owners and modes (including the
-original `.env`, mode 0600); (3) pipe the SQL dump back in as above. Restoring
-files before re-running berth also works, but the provision must come before the
-SQL restore on PostgreSQL (ownership) and is what recreates the database on
-either engine.
+**Full-restore order (disaster recovery — host AND workstation lost):**
+(1) run `berth provision servers/<name>.yml` — it rebuilds the stack and, with
+no local cache, seeds `shared/.env` with FRESH secrets; (2) restore the files
+tar (`tar -xzf <pool>-files-<ts>.tar.gz -C <deploy_path>` as root) — this
+brings back the ORIGINAL `.env`; (3) pipe the SQL dump back in as above;
+(4) run `berth provision` again — it detects that the restored `.env` disagrees
+with the fresh cache and reconciles: the database role's password is reset to
+the `.env` value and the local cache (including the `APP_KEY` backup) is
+re-synced from the file the app actually reads. Without step (4) the app
+cannot reach its database and the cache would poison any future re-seed with
+a wrong `APP_KEY`. When `~/.berth/` survived, the same sequence simply makes
+step (4) report everything satisfied. Each backup directory carries a
+`manifest` file recording the engine, database/user names, site user and
+`deploy_path` the archives were made under — trust it over re-deriving.
 
 **Limitations:** local only (no offsite copy) — backups are root-owned so they survive a
 compromised *site*, but a lost *host* loses them; the DB dump and files tar are independent,
