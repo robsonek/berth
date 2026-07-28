@@ -15,8 +15,8 @@ func TestReducerTracksStatusesAndFailure(t *testing.T) {
 	m = m.apply(provision.Event{Step: "php", Kind: provision.EventApplied})
 	m = m.apply(provision.Event{Step: "tls", Kind: provision.EventFailed, Err: errTest})
 
-	if m.status("php") != "applied" {
-		t.Errorf("php status = %q, want applied", m.status("php"))
+	if m.statuses["php"] != "applied" {
+		t.Errorf("php status = %q, want applied", m.statuses["php"])
 	}
 	if !m.failed() {
 		t.Error("model should record failure")
@@ -60,8 +60,8 @@ func TestReducerCollectsWarningsWithoutChangingStatus(t *testing.T) {
 	m = m.apply(provision.Event{Step: "php", Kind: provision.EventApplied,
 		Warnings: []string{"reload deferred to site"}})
 
-	if m.status("php") != "applied" {
-		t.Errorf("php status = %q, want applied (a warning must not change it)", m.status("php"))
+	if m.statuses["php"] != "applied" {
+		t.Errorf("php status = %q, want applied (a warning must not change it)", m.statuses["php"])
 	}
 	if m.failed() {
 		t.Error("a warning must not mark the run failed")

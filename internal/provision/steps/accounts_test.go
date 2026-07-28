@@ -69,7 +69,7 @@ func stubAccountCreate(f *bssh.FakeRunner, user string) {
 	f.On(fmt.Sprintf("sudo -u %s install -d -g %s -m 00700 ", user, user)+shQuote(fmt.Sprintf("/home/%s/.ssh", user)), bssh.Result{})
 	f.On("cat "+shQuote(accountSudoersPath(user)), bssh.Result{ExitCode: 1})
 	f.On("cat "+shQuote(authorizedKeysPath(user)), bssh.Result{ExitCode: 1})
-	f.On(writeAsUserCmd(user, authorizedKeysPath(user), 0o600), bssh.Result{})
+	f.On(writeAsUserCmd(user, authorizedKeysPath(user)), bssh.Result{})
 }
 
 // groupProbeCmd / sshDirOwnerCmd mirror the production probes so FakeRunner

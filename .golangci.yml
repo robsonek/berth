@@ -13,6 +13,30 @@ linters:
     - nilerr
     - revive
     - unparam
+  exclusions:
+    rules:
+      # database_test.go deliberately runs production-built shell scripts
+      # through the local /bin/sh (a FakeRunner stub can only echo back what
+      # we assume — these tests pin real shell semantics). The "tainted"
+      # argument is the test-authored script itself, never user input. G204
+      # stays live for production code.
+      - path: internal/provision/steps/database_test\.go
+        linters: [gosec]
+        text: "G204"
+      # Same deliberate local-/bin/sh fixture (untagged by design so
+      # `go test ./...` always pins envOverwriteScript's hardened semantics).
+      - path: test/integration/envoverwrite_test\.go
+        linters: [gosec]
+        text: "G204"
+      # The integration harness probes a disposable test box over HTTPS whose
+      # certs are self-signed or LE-staging by design: skipping chain
+      # verification is the run's explicit shared trust decision
+      # (insecureHTTPSProbes), and the SNI probe still verifies the peer
+      # certificate's hostname manually. The "SSRF" URLs are the operator's
+      # own BERTH_TEST_SERVER config — probing that host IS the suite's job.
+      - path: ^test/integration/
+        linters: [gosec]
+        text: "G(402|704)"
   settings:
     gosec:
       # Writing files and directories with specific modes, and taking file
@@ -21,6 +45,10 @@ linters:
       # permissions. G301/G302/G306 (dir/file mode "too permissive") and
       # G304 (file path from variable) would be ~20 permanent false
       # positives here. Every other gosec rule stays live.
+      # Note: G704 (SSRF) is quiet on the ssh-agent dial in
+      # internal/ssh/connect.go only because (*net.Dialer).Dial is not in
+      # gosec's sink list — incidental, not a suppression; the finding
+      # returns if gosec ever adds it (a local unix-socket dial, judged safe).
       excludes:
         - G301
         - G302

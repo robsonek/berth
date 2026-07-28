@@ -22,9 +22,10 @@ type execBehavior func(srv *testServer, ch xssh.Channel, reqs <-chan *xssh.Reque
 // SFTP subsystem (spec decision: not worth building for one phase).
 type testServer struct {
 	addr            string
-	signals         chan string   // signal names observed by hanging execs
-	execStarted     chan struct{} // one send per ACKed exec request
-	swallowSessions bool          // neither Accept nor Reject channel opens: NewSession blocks forever
+	hostKey         xssh.PublicKey // the server's real host key, for strict pinning in dials
+	signals         chan string    // signal names observed by hanging execs
+	execStarted     chan struct{}  // one send per ACKed exec request
+	swallowSessions bool           // neither Accept nor Reject channel opens: NewSession blocks forever
 }
 
 func startTestServer(t *testing.T, behavior execBehavior, deaf bool) *testServer {
@@ -59,6 +60,7 @@ func startTestServerOpts(t *testing.T, behavior execBehavior, deaf, swallowSessi
 
 	srv := &testServer{
 		addr:            ln.Addr().String(),
+		hostKey:         signer.PublicKey(),
 		signals:         make(chan string, 4),
 		execStarted:     make(chan struct{}, 4),
 		swallowSessions: swallowSessions,
@@ -165,7 +167,7 @@ func dialTest(t *testing.T, srv *testServer) *Client {
 	t.Helper()
 	conn, err := xssh.Dial("tcp", srv.addr, &xssh.ClientConfig{
 		User:            "test",
-		HostKeyCallback: xssh.InsecureIgnoreHostKey(), // in-process test server
+		HostKeyCallback: xssh.FixedHostKey(srv.hostKey), // pin the harness's real host key
 		Timeout:         5 * time.Second,
 	})
 	if err != nil {
@@ -325,9 +327,13 @@ func TestDialCancelDuringHandshake(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		_, err := Dial(ctx, ln.Addr().String(), &xssh.ClientConfig{
-			User:            "t",
-			HostKeyCallback: xssh.InsecureIgnoreHostKey(),
-			Timeout:         5 * time.Second,
+			User: "t",
+			// The fixture never speaks SSH, so no host key can ever be
+			// presented; reject any that somehow is, keeping the config strict.
+			HostKeyCallback: func(string, net.Addr, xssh.PublicKey) error {
+				return errors.New("unexpected host key from a fixture that never speaks SSH")
+			},
+			Timeout: 5 * time.Second,
 		}, false)
 		done <- err
 	}()
@@ -347,7 +353,7 @@ func TestKeepaliveClosesDeadConnection(t *testing.T) {
 	srv := startTestServer(t, completeExec("", 0), true) // deaf: probes never get a reply
 	conn, err := xssh.Dial("tcp", srv.addr, &xssh.ClientConfig{
 		User:            "test",
-		HostKeyCallback: xssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: xssh.FixedHostKey(srv.hostKey),
 		Timeout:         5 * time.Second,
 	})
 	if err != nil {

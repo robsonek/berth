@@ -11,11 +11,12 @@ import (
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
 
-// stubComposerSig replaces the run-time signature fetch for the test's duration.
-func stubComposerSig(t *testing.T, sig string, err error) {
+// stubComposerSig replaces the run-time signature fetch for the test's
+// duration; the stubbed fetch always succeeds (no test exercises its failure).
+func stubComposerSig(t *testing.T, sig string) {
 	t.Helper()
 	prev := fetchComposerSig
-	fetchComposerSig = func(_ context.Context) (string, error) { return sig, err }
+	fetchComposerSig = func(_ context.Context) (string, error) { return sig, nil }
 	t.Cleanup(func() { fetchComposerSig = prev })
 }
 
@@ -54,7 +55,7 @@ const fakeComposerDir = "/tmp/berth-composer.abcd123456"
 
 func TestComposerApplyInstallsOnMatchingHash(t *testing.T) {
 	const sig = "abc123def456" // stand-in for the run-time SHA-384
-	stubComposerSig(t, sig, nil)
+	stubComposerSig(t, sig)
 
 	setup := fakeComposerDir + "/composer-setup.php"
 	hashCmd := fmt.Sprintf("php -r \"echo hash_file('sha384', '%s');\"", setup)
@@ -85,7 +86,7 @@ func TestComposerApplyInstallsOnMatchingHash(t *testing.T) {
 }
 
 func TestComposerApplyAbortsOnHashMismatch(t *testing.T) {
-	stubComposerSig(t, "the-expected-hash", nil)
+	stubComposerSig(t, "the-expected-hash")
 
 	setup := fakeComposerDir + "/composer-setup.php"
 	hashCmd := fmt.Sprintf("php -r \"echo hash_file('sha384', '%s');\"", setup)
@@ -138,7 +139,7 @@ func (s *ctxSpyRunner) Run(ctx context.Context, cmd string, stdin []byte) (bssh.
 
 func TestComposerApplyCleanupSurvivesCancelAndIsBounded(t *testing.T) {
 	const sig = "abc123def456"
-	stubComposerSig(t, sig, nil)
+	stubComposerSig(t, sig)
 
 	setup := fakeComposerDir + "/composer-setup.php"
 	dlCmd := fmt.Sprintf("php -r \"copy('%s', '%s');\"", composerInstallerURL, setup)
@@ -179,7 +180,7 @@ func TestComposerApplyCleanupSurvivesCancelAndIsBounded(t *testing.T) {
 }
 
 func TestComposerApplyRejectsUnexpectedMktempOutput(t *testing.T) {
-	stubComposerSig(t, "irrelevant", nil)
+	stubComposerSig(t, "irrelevant")
 
 	cases := []struct {
 		name   string

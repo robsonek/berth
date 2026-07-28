@@ -3,7 +3,6 @@ package steps
 import (
 	"context"
 	"fmt"
-	"os"
 	gopath "path"
 	"strings"
 	"testing"
@@ -62,11 +61,13 @@ func TestPkgInstalledRequiresInstalledStatus(t *testing.T) {
 }
 
 // writeAsUserCmd mirrors writeFileAsUser's command so FakeRunner stubs match.
-// Keep in lockstep with writeFileAsUser.
-func writeAsUserCmd(user, p string, mode os.FileMode) string {
+// Keep in lockstep with writeFileAsUser. Every as-user write berth performs
+// today is 0600 (.env, client-auth files, authorized_keys), so the mode is
+// fixed here; re-parametrize if production ever writes another mode.
+func writeAsUserCmd(user, p string) string {
 	dir := gopath.Dir(p)
-	inner := fmt.Sprintf(`umask 077; t=$(mktemp %s) && trap 'rm -f "$t"' EXIT INT TERM && cat > "$t" && chmod %o "$t" && mv -fT -- "$t" %s`,
-		shQuote(dir+"/.berth.XXXXXX"), mode.Perm(), shQuote(p))
+	inner := fmt.Sprintf(`umask 077; t=$(mktemp %s) && trap 'rm -f "$t"' EXIT INT TERM && cat > "$t" && chmod 600 "$t" && mv -fT -- "$t" %s`,
+		shQuote(dir+"/.berth.XXXXXX"), shQuote(p))
 	return "sudo -u " + user + " sh -c " + shQuote(inner)
 }
 
@@ -222,7 +223,7 @@ func TestWriteFileAsUserRunsEntirelyAsTheAccount(t *testing.T) {
 	// contains "key"), or the leak assertion below would always fire.
 	const secret = "s3cr3t-material\n"
 	f := bssh.NewFakeRunner()
-	f.On(writeAsUserCmd("deploy", "/home/deploy/.ssh/authorized_keys", 0o600), bssh.Result{})
+	f.On(writeAsUserCmd("deploy", "/home/deploy/.ssh/authorized_keys"), bssh.Result{})
 	if err := writeFileAsUser(context.Background(), f, "deploy", "/home/deploy/.ssh/authorized_keys", 0o600, []byte(secret)); err != nil {
 		t.Fatalf("writeFileAsUser() error = %v", err)
 	}
@@ -248,7 +249,7 @@ func TestWriteFileAsUserStagesInsideTheTargetDirectory(t *testing.T) {
 	// The temp file must be a sibling of the target so the closing rename is
 	// atomic (same filesystem), and it must be created by the account.
 	f := bssh.NewFakeRunner()
-	f.On(writeAsUserCmd("deploy", "/var/www/app/shared/.env", 0o600), bssh.Result{})
+	f.On(writeAsUserCmd("deploy", "/var/www/app/shared/.env"), bssh.Result{})
 	if err := writeFileAsUser(context.Background(), f, "deploy", "/var/www/app/shared/.env", 0o600, []byte("K=V\n")); err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +287,7 @@ func TestWriteFileAsUserRefusesZeroMode(t *testing.T) {
 
 func TestWriteFileAsUserSurfacesFailure(t *testing.T) {
 	f := bssh.NewFakeRunner()
-	f.On(writeAsUserCmd("deploy", "/var/www/app/shared/.env", 0o600),
+	f.On(writeAsUserCmd("deploy", "/var/www/app/shared/.env"),
 		bssh.Result{ExitCode: 1, Stderr: "mv: cannot move: Permission denied"})
 	err := writeFileAsUser(context.Background(), f, "deploy", "/var/www/app/shared/.env", 0o600, []byte("x"))
 	if err == nil || !strings.Contains(err.Error(), "Permission denied") {
@@ -312,7 +313,7 @@ func TestWriteManagedFileAsUserKeepsTheDriftGuard(t *testing.T) {
 	}
 	f2 := bssh.NewFakeRunner()
 	f2.On("cat "+shQuote(path), bssh.Result{Stdout: "ssh-rsa AAAAMANUAL manual@ops\n"})
-	f2.On(writeAsUserCmd("deploy", path, 0o600), bssh.Result{})
+	f2.On(writeAsUserCmd("deploy", path), bssh.Result{})
 	if err := writeManagedFileAsUser(context.Background(), f2, true, "deploy", spec); err != nil {
 		t.Fatalf("with force the write must proceed; got %v", err)
 	}
