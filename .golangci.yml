@@ -1,0 +1,40 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - gocritic
+    - misspell
+    - revive
+  settings:
+    revive:
+      # A bare `rules` list REPLACES revive's default rule set (verified on
+      # v2.12.2: only-disabled entries left zero active rules). This flag
+      # re-adds the defaults around the explicit entries, so the two
+      # disabled rules below genuinely subtract from the default set.
+      enable-default-rules: true
+      rules:
+        # The whole codebase lives under internal/ and cmd/ — there is no
+        # public Go API, so doc-comment demands on exported symbols are
+        # churn without a consumer. Revisit if a public package appears.
+        - name: exported
+          disabled: true
+        - name: package-comments
+          disabled: true
+    staticcheck:
+      # Upstream default ST exclusions, plus -QF1001: the `if !(a && b)`
+      # idiom in step Check aggregations reads as "not all conditions
+      # hold" and is clearer than a chain of negations.
+      checks:
+        - "all"
+        - "-ST1000"
+        - "-ST1003"
+        - "-ST1016"
+        - "-ST1020"
+        - "-ST1021"
+        - "-ST1022"
+        - "-QF1001"
+
+formatters:
+  enable:
+    - gofmt

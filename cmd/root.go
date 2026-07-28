@@ -36,14 +36,20 @@ func errNotImplemented(what string) error {
 // After the first signal default handling is restored, so a second ctrl+c
 // force-kills the CLI if anything still refuses to die.
 func Execute() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+}
+
+// run is split from Execute so its deferred signal cleanup runs before
+// Execute's os.Exit.
+func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {
 		<-ctx.Done()
 		stop()
 	}()
-	if err := newRootCmd().ExecuteContext(ctx); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
-	}
+	return newRootCmd().ExecuteContext(ctx)
 }

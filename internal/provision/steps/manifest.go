@@ -46,7 +46,7 @@ func Manifest() provision.Step { return manifest{} }
 func (manifest) Name() string       { return "manifest" }
 func (manifest) Requires() []string { return nil }
 
-func (manifest) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
+func (manifest) Check(ctx context.Context, rc provision.RunCtx, _ *config.Server, r bssh.Runner) (provision.CheckResult, error) {
 	if !rc.FullRun {
 		return provision.CheckResult{Satisfied: true, Reason: "manifest is written only by full runs"}, nil
 	}
@@ -84,7 +84,7 @@ func manifestChanges() []string {
 	return []string{"record VERSION=" + version.Version + " in " + manifestPath}
 }
 
-func (manifest) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
+func (manifest) Apply(ctx context.Context, rc provision.RunCtx, _ *config.Server, r bssh.Runner) error {
 	// A run that knowingly left work undone must not attest full convergence:
 	// warn and skip the write, leaving any manifest from a PRIOR converged
 	// run untouched.

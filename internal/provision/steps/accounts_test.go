@@ -233,7 +233,7 @@ func TestOwnSSHDirRefusesSymlinkWithoutSuggestingChown(t *testing.T) {
 // stubFullApply stubs a complete Apply pass for the single-site test server
 // (berth + deploy created fresh), so break-glass tests can focus on the
 // password commands appended at the end of Apply.
-func stubFullApply(t *testing.T, s *config.Server) *bssh.FakeRunner {
+func stubFullApply(t *testing.T, _ *config.Server) *bssh.FakeRunner {
 	t.Helper()
 	f := bssh.NewFakeRunner()
 	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})

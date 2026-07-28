@@ -82,7 +82,7 @@ func TestRedactorPrefixOrderingAndSafety(t *testing.T) {
 	}
 }
 
-func TestRedactorConcurrentAddApply(t *testing.T) {
+func TestRedactorConcurrentAddApply(_ *testing.T) {
 	// Add (steps, engine goroutine) can overlap Apply (command boundary after
 	// a TUI quit) — must be race-free under -race.
 	r := NewRedactor()

@@ -93,7 +93,7 @@ func assertBerthAdminUsable(ctx context.Context, t *testing.T, srv *config.Serve
 	if err != nil {
 		t.Fatalf("fresh berth dial: %v", err)
 	}
-	defer bc.Close()
+	defer func() { _ = bc.Close() }()
 	res, err := bc.Run(ctx, "sudo -n true", nil)
 	if err != nil {
 		t.Fatalf("berth sudo -n: %v", err)

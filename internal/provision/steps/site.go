@@ -291,7 +291,7 @@ func renderFPMPool(s *config.Server, site config.Site) ([]byte, error) {
 // queueCommand builds the worker command line. The default (no queue block) is
 // byte-identical to berth's historical worker; tuning appends flags in a stable
 // order. Horizon replaces queue:work entirely.
-func queueCommand(s *config.Server, site config.Site) string {
+func queueCommand(_ *config.Server, site config.Site) string {
 	base := "php " + site.DeployPath + "/current/artisan "
 	q := site.Queue
 	if q != nil && q.Driver == "horizon" {

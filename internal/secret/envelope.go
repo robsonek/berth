@@ -141,13 +141,13 @@ func writeCacheBytes(key string, b []byte) error {
 		return fmt.Errorf("temp cache file: %w", err)
 	}
 	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath) // no-op after a successful rename
+	defer func() { _ = os.Remove(tmpPath) }() // no-op after a successful rename
 	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("chmod %s: %w", tmpPath, err)
 	}
 	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("write %s: %w", tmpPath, err)
 	}
 	// fsync file THEN directory: the cache is persisted BEFORE the remote
@@ -156,7 +156,7 @@ func writeCacheBytes(key string, b []byte) error {
 	// error after the rename is safe — a retry rewrites the cache
 	// idempotently.
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("fsync %s: %w", tmpPath, err)
 	}
 	if err := tmp.Close(); err != nil {
@@ -170,7 +170,7 @@ func writeCacheBytes(key string, b []byte) error {
 		return fmt.Errorf("open %s for fsync: %w", dir, err)
 	}
 	if err := d.Sync(); err != nil {
-		d.Close()
+		_ = d.Close()
 		return fmt.Errorf("fsync %s: %w", dir, err)
 	}
 	if err := d.Close(); err != nil {

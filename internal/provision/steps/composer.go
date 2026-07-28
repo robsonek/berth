@@ -33,7 +33,7 @@ var fetchComposerSig = func(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("fetch composer installer signature: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("fetch composer installer signature: unexpected status %s", resp.Status)
 	}

@@ -264,16 +264,17 @@ func TestTuningMariaDBBufferPoolGuardBoundaries(t *testing.T) {
 			f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 1})
 		}
 		cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
-		if tc.ok {
+		switch {
+		case tc.ok:
 			if err != nil {
 				t.Fatalf("pool %s: unexpected error: %v", tc.pool, err)
 			}
 			if cr.Satisfied {
 				t.Errorf("pool %s: expected unsatisfied (file absent)", tc.pool)
 			}
-		} else if err == nil {
+		case err == nil:
 			t.Errorf("pool %s: expected guard error", tc.pool)
-		} else if !strings.Contains(err.Error(), "exceeds") {
+		case !strings.Contains(err.Error(), "exceeds"):
 			t.Errorf("pool %s: expected the buffer-pool guard error, got: %v", tc.pool, err)
 		}
 	}

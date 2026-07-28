@@ -30,7 +30,9 @@ type huhPrompter struct{ out io.Writer }
 
 func newHuhPrompter() prompter { return &huhPrompter{out: os.Stderr} }
 
-func (h *huhPrompter) ShowError(err error) { fmt.Fprintf(h.out, "  ✗ %v — please fix it\n", err) }
+func (h *huhPrompter) ShowError(err error) {
+	_, _ = fmt.Fprintf(h.out, "  ✗ %v — please fix it\n", err)
+}
 
 func (h *huhPrompter) Confirm(prompt string) (bool, error) {
 	v := false
@@ -55,7 +57,7 @@ func (h *huhPrompter) ServerCore(a *Answers) error {
 			huh.NewInput().Title("SSH port").Value(&portStr).Validate(validIntField("ssh.port", 1, 65535)),
 			huh.NewInput().Title("SSH key path").Value(&a.Key).Validate(required("ssh key")),
 			huh.NewInput().Title("Host key fingerprint (optional, SHA256:… ; blank = trust on first use)").
-				Value(&a.Fingerprint).Validate(func(s string) error { return config.ValidFingerprint(s) }),
+				Value(&a.Fingerprint).Validate(config.ValidFingerprint),
 		),
 		huh.NewGroup(
 			huh.NewSelect[string]().Title("PHP version").Options(huh.NewOptions("8.5", "8.4", "8.3", "8.2")...).Value(&a.PHPVersion),

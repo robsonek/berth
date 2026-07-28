@@ -51,7 +51,7 @@ func assertPHPTuning(ctx context.Context, t *testing.T, c *bssh.Client, srv *con
 		"max_input_vars => " + strconv.Itoa(tn.PHPMaxInputVarsEff()) + " => ",
 		"expose_php => Off => ",
 	} {
-		key := want[:strings.Index(want, " =>")]
+		key, _, _ := strings.Cut(want, " =>")
 		if !strings.Contains(info.Stdout, want) {
 			t.Errorf("FPM %s not effective (want %q):\n%s", key, want, grepLines(info.Stdout, key))
 		}

@@ -67,7 +67,7 @@ func keepalive(conn *xssh.Client, stop <-chan struct{}) {
 			case <-time.After(keepaliveReplyBudget):
 				missed++
 				if missed >= keepaliveMaxMissed {
-					conn.Close()
+					_ = conn.Close()
 					return
 				}
 			case <-stop:
@@ -114,10 +114,10 @@ func Dial(ctx context.Context, addr string, cfg *xssh.ClientConfig, useSudo bool
 		}
 		conn = r.conn
 	case <-ctx.Done():
-		netConn.Close() // unblocks the handshake goroutine; its result is reaped below
+		_ = netConn.Close() // unblocks the handshake goroutine; its result is reaped below
 		go func() {
 			if r := <-cr; r.err == nil {
-				r.conn.Close()
+				_ = r.conn.Close()
 			}
 		}()
 		return nil, ctx.Err()
@@ -138,13 +138,13 @@ func Dial(ctx context.Context, addr string, cfg *xssh.ClientConfig, useSudo bool
 	case r := <-res:
 		if r.err != nil {
 			close(stop)
-			conn.Close()
+			_ = conn.Close()
 			return nil, fmt.Errorf("sftp: %w", r.err)
 		}
 		return &Client{conn: conn, sftp: r.sc, useSudo: useSudo, stopKeepalive: stop}, nil
 	case <-ctx.Done():
 		close(stop)
-		conn.Close() // unblocks the NewClient goroutine; its result is discarded
+		_ = conn.Close() // unblocks the NewClient goroutine; its result is discarded
 		return nil, ctx.Err()
 	}
 }
@@ -161,7 +161,7 @@ func (c *Client) Close() error {
 	}
 	err := c.conn.Close()
 	if c.sftp != nil {
-		c.sftp.Close()
+		_ = c.sftp.Close()
 	}
 	return err
 }
@@ -226,10 +226,10 @@ func (c *Client) exec(ctx context.Context, cmd string, stdin []byte) (Result, er
 		// and reap the session if the open wins the race after all.
 		go func() {
 			if r := <-sr; r.err == nil {
-				r.sess.Close()
+				_ = r.sess.Close()
 			}
 		}()
-		c.conn.Close()
+		_ = c.conn.Close()
 		return Result{}, ctx.Err()
 	}
 	var out, errb bytes.Buffer
@@ -242,7 +242,7 @@ func (c *Client) exec(ctx context.Context, cmd string, stdin []byte) (Result, er
 	go func() { done <- sess.Run(cmd) }()
 	select {
 	case runErr := <-done:
-		sess.Close()
+		_ = sess.Close()
 		res := Result{Stdout: out.String(), Stderr: errb.String()}
 		if ee, ok := runErr.(*xssh.ExitError); ok {
 			res.ExitCode = ee.ExitStatus()
@@ -256,12 +256,12 @@ func (c *Client) exec(ctx context.Context, cmd string, stdin []byte) (Result, er
 			// own goroutine and the budget below covers them as well.
 			go func() {
 				_ = sess.Signal(xssh.SIGTERM)
-				sess.Close()
+				_ = sess.Close()
 			}()
 			select {
 			case <-done: // session unwound: connection stays usable
 			case <-time.After(execTeardownBudget):
-				c.conn.Close() // wedged transport: force-unblock everything, incl. the writes above
+				_ = c.conn.Close() // wedged transport: force-unblock everything, incl. the writes above
 			}
 		}()
 		return Result{}, ctx.Err()
@@ -333,7 +333,7 @@ func (c *Client) sftpPut(ctx context.Context, remotePath string, content []byte)
 			return
 		}
 		if _, err := w.Write(content); err != nil {
-			w.Close()
+			_ = w.Close()
 			done <- err
 			return
 		}
@@ -347,7 +347,7 @@ func (c *Client) sftpPut(ctx context.Context, remotePath string, content []byte)
 	case err := <-done:
 		return err
 	case <-ctx.Done():
-		c.conn.Close()
+		_ = c.conn.Close()
 		return ctx.Err()
 	}
 }

@@ -77,9 +77,13 @@ func appendKnownHost(path, hostname string, key xssh.PublicKey) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	_, err = fmt.Fprintln(f, knownhosts.Line([]string{hostname}, key))
-	return err
+	if _, err := fmt.Fprintln(f, knownhosts.Line([]string{hostname}, key)); err != nil {
+		_ = f.Close()
+		return err
+	}
+	// A swallowed close error could report the key as pinned while the write
+	// never became durable — the next connect would then fail as unknown host.
+	return f.Close()
 }
 
 // expandHome replaces a leading "~" with the user's home directory. It is the

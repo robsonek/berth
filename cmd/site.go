@@ -20,7 +20,7 @@ func newSiteCmd() *cobra.Command {
 		Use:   "add <server>",
 		Short: "Add another site to an existing server",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			return errNotImplemented("site:add") // post-v1
 		},
 	})
@@ -49,7 +49,7 @@ func newSiteKeyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 			return printDeployKeys(cmd.Context(), cmd.OutOrStdout(), srv, client, domain)
 		},
 	}
@@ -77,9 +77,9 @@ func printDeployKeys(ctx context.Context, out io.Writer, srv *config.Server, r b
 	}
 	for _, site := range sites {
 		user := srv.SiteUser(site)
-		fmt.Fprintf(out, "# %s (user %s)\n", site.Domain, user)
+		_, _ = fmt.Fprintf(out, "# %s (user %s)\n", site.Domain, user)
 		if site.Repository == "" {
-			fmt.Fprintln(out, "no deploy key is managed for this site (set sites[].repository to have berth generate one)")
+			_, _ = fmt.Fprintln(out, "no deploy key is managed for this site (set sites[].repository to have berth generate one)")
 			continue
 		}
 		res, err := r.Run(ctx, "cat "+config.DeployKeyPath(user)+".pub", nil)
@@ -87,10 +87,10 @@ func printDeployKeys(ctx context.Context, out io.Writer, srv *config.Server, r b
 			return err
 		}
 		if res.ExitCode != 0 {
-			fmt.Fprintln(out, "deploy key not generated yet — run `berth provision` first")
+			_, _ = fmt.Fprintln(out, "deploy key not generated yet — run `berth provision` first")
 			continue
 		}
-		fmt.Fprintln(out, strings.TrimSpace(res.Stdout))
+		_, _ = fmt.Fprintln(out, strings.TrimSpace(res.Stdout))
 	}
 	return nil
 }

@@ -26,7 +26,7 @@ func Connect(ctx context.Context, s *config.Server, policy HostKeyPolicy) (*Clie
 		if r, e := c.Run(ctx, "sudo -n true", nil); e == nil && r.ExitCode == 0 {
 			return c, nil
 		}
-		c.Close()
+		_ = c.Close()
 		// A probe that failed because ctx was cancelled must not fall through
 		// to a second dial on a dead context (Ctrl-C during the probe).
 		if err := ctx.Err(); err != nil {
