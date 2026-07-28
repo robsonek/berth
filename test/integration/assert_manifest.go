@@ -155,36 +155,12 @@ func assertRestoreDrill(t *testing.T, eng *provision.Engine, red *secret.Redacto
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
-	// Fidelity guard, BEFORE the drill mutates or probes anything: shared/.env
-	// is seed-if-absent and never rewritten, so a pre-existing file's
-	// non-secret connection fields can legitimately differ from what the
-	// current config would seed. The role-login probe below is built
-	// EXCLUSIVELY from the trusted identities above, so every live non-secret
-	// DB field must first be proven equal to those expectations (exit-code-only
-	// through the production match script). A mismatch means the app connects
-	// elsewhere than berth believes — the drill fails loudly instead of
-	// probing an endpoint the app does not use.
-	for _, f := range [][2]string{
-		{"DB_CONNECTION", driver},
-		{"DB_HOST", host},
-		{"DB_PORT", port},
-		{"DB_USERNAME", dbUser},
-		{"DB_DATABASE", dbName},
-	} {
-		if exit := envFieldExit(ctx, t, client, envPath, f[0], f[1]); exit != 0 {
-			t.Fatalf("restore drill: live %s in %s disagrees with the trusted value %q (probe exit %d) — the app connects elsewhere than berth believes",
-				f[0], envPath, f[1], exit)
-		}
-	}
-	if socket != "" {
-		if exit := envFieldExit(ctx, t, client, envPath, "DB_SOCKET", socket); exit != 0 {
-			t.Fatalf("restore drill: live DB_SOCKET in %s disagrees with the trusted value %q (probe exit %d) — the app connects elsewhere than berth believes",
-				envPath, socket, exit)
-		}
-	} else if exit := envFieldExit(ctx, t, client, envPath, "DB_SOCKET", ""); exit != 3 {
-		t.Fatalf("restore drill: %s carries a DB_SOCKET line but engine %s connects over TCP (probe exit %d, want 3 = key absent) — the app connects elsewhere than berth believes",
-			envPath, srv.Database.Engine, exit)
-	}
+	// Fidelity guard, BEFORE the drill mutates or probes anything: the
+	// role-login probe below is built EXCLUSIVELY from the trusted identities
+	// above, so the live .env must first be proven to agree with them — see
+	// assertEnvIdentityFidelity.
+	assertEnvIdentityFidelity(ctx, t, client, "restore drill", envPath,
+		trustedDBConn{driver: driver, host: host, port: port, socket: socket}, dbUser, dbName)
 
 	// Precondition: the local cache holds the site's CURRENT secrets — the
 	// suite's provision converged them. Without that, the drill would not be
@@ -251,7 +227,7 @@ func assertRestoreDrill(t *testing.T, eng *provision.Engine, red *secret.Redacto
 	// path the app uses — rebuilt here from the TRUSTED identities the
 	// fidelity guard proved the live .env agrees with, never from the
 	// tenant-writable file itself; the password rides stdin into an env
-	// assignment (never argv — unlike dbProbeCmd's inline form).
+	// assignment, never argv.
 	res, err = client.Run(ctx, dbProbeStdinCmd(driver, host, port, socket, dbUser, dbName, "SELECT 1"), []byte(newPW+"\n"))
 	if err != nil {
 		t.Fatalf("restore drill: role login probe: %v", err)
@@ -340,14 +316,15 @@ func drillRun(ctx context.Context, t *testing.T, eng *provision.Engine, red *sec
 	return terminal
 }
 
-// dbProbeStdinCmd is dbProbeCmd with the password moved OFF the command string:
+// dbProbeStdinCmd runs sql against dbName as the app's DB role, the way
+// Laravel connects (socket or TCP), with the password OFF the command string:
 // `IFS= read -r` takes it from SSH stdin into a shell variable, and it reaches
 // the client only as an environment assignment (MYSQL_PWD / PGPASSWORD) — never
 // argv. This command runs as ROOT, so every connection parameter comes from
 // TRUSTED identities — the loaded config (dbUser, dbName) and the engine's
 // EnvConnection() (driver, host, port, socket) — never from the tenant-writable
-// .env; the fidelity guard in assertRestoreDrill has already proven the live
-// .env agrees with these values. Every interpolated token is sqQuoted anyway
+// .env; every caller first proves the live .env agrees with these values via
+// assertEnvIdentityFidelity. Every interpolated token is sqQuoted anyway
 // (defence in depth).
 func dbProbeStdinCmd(driver, host, port, socket, dbUser, dbName, sql string) string {
 	switch driver {

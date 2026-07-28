@@ -80,27 +80,6 @@ func validateCachedAppKey(dbUser, key string) error {
 	return nil
 }
 
-// validateCachedSecrets shape-validates every configured site's cached secrets
-// (DB password and APP_KEY backup). It is this step's preflight invariant:
-// Check and Apply both run it BEFORE any unsatisfied early-return and BEFORE
-// any remote mutation, so a hand-corrupted cache value can never stay green
-// behind an operator-shaped live key, ride into Apply behind an unrelated
-// unsatisfied reason, or surface only after SQL already ran. The strict
-// charsets also exclude CR/LF, so nothing validated here can smuggle a second
-// line past the agreement probes' `read`.
-func validateCachedSecrets(s *config.Server, cache map[string]string) error {
-	for _, site := range s.Sites {
-		dbUser := s.SiteDBUser(site)
-		if err := validateCachedDBPassword(dbUser, cache[dbUser]); err != nil {
-			return err
-		}
-		if err := validateCachedAppKey(dbUser, cache[appKeyCacheKey(dbUser)]); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 type database struct {
 	redactor *secret.Redactor
 }
@@ -115,23 +94,39 @@ func (database) Name() string       { return "database" }
 func (database) Requires() []string { return []string{"base", "appdirs"} }
 
 // loadValidatedSecrets is the preflight cache read Check and Apply share:
-// load the verified cache, register every per-site secret with the redactor
-// the moment it is in memory (BEFORE the next fallible operation, whose error
-// text could otherwise carry an unmasked value — including the validation
-// refusal itself, which names only the cache key), then shape-validate via
-// validateCachedSecrets. It never locks — Check must stay side-effect-free;
-// Apply takes the lock itself before calling.
+// load the verified cache, then shape-validate every configured site's cached
+// secrets (DB password and APP_KEY backup). It is this step's preflight
+// invariant: Check and Apply both run it BEFORE any unsatisfied early-return
+// and BEFORE any remote mutation, so a hand-corrupted cache value can never
+// stay green behind an operator-shaped live key, ride into Apply behind an
+// unrelated unsatisfied reason, or surface only after SQL already ran. The
+// strict charsets also exclude CR/LF, so nothing validated here can smuggle a
+// second line past the agreement probes' `read`.
+//
+// Each value is validated and, having passed, IMMEDIATELY registered with the
+// redactor — before the next fallible operation (including the next value's
+// validation), whose error text could otherwise carry an unmasked valid
+// value. A value that FAILS validation is never registered: the refusal
+// names only the cache key, never the value, so nothing can leak — while
+// registering a corrupt value that happens to collide with innocent text
+// (a username, a wording fragment) would redact pieces of the very
+// diagnostic explaining the refusal. It never locks — Check must stay
+// side-effect-free; Apply takes the lock itself before calling.
 func (d database) loadValidatedSecrets(s *config.Server) (map[string]string, error) {
 	cache, err := loadVerifiedSecrets(s)
 	if err != nil {
 		return nil, fmt.Errorf("load local secret cache: %w", err)
 	}
 	for _, site := range s.Sites {
-		d.redactor.Add(cache[s.SiteDBUser(site)])
-		d.redactor.Add(cache[appKeyCacheKey(s.SiteDBUser(site))])
-	}
-	if err := validateCachedSecrets(s, cache); err != nil {
-		return nil, err
+		dbUser := s.SiteDBUser(site)
+		if err := validateCachedDBPassword(dbUser, cache[dbUser]); err != nil {
+			return nil, err
+		}
+		d.redactor.Add(cache[dbUser])
+		if err := validateCachedAppKey(dbUser, cache[appKeyCacheKey(dbUser)]); err != nil {
+			return nil, err
+		}
+		d.redactor.Add(cache[appKeyCacheKey(dbUser)])
 	}
 	return cache, nil
 }
@@ -227,7 +222,7 @@ func envValueMatchScript(path, key string) string {
 // via STDIN (read into a shell variable — never argv, never stdout); the
 // comparison is shell string equality, so no grep pattern semantics apply.
 // The caller MUST have shape-validated expected — the preflight
-// validateCachedSecrets does, for every cached value, before any probe runs:
+// loadValidatedSecrets does, for every cached value, before any probe runs:
 // a value with CR/LF could otherwise smuggle a second line past `read`, and
 // a corrupt cache must fail loudly, not compare.
 // Exit map: 0 = match; 1 = present but different; 3 = no <key>= line
@@ -415,7 +410,7 @@ func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Serve
 		// the cache holding a WRONG APP_KEY forever, with every run green —
 		// Apply's passwordFromEnv branch reconciles the role and the cache toward
 		// .env once triggered. Cached values rode through the preflight validator
-		// (validateCachedSecrets) before any probe: the strict charsets exclude
+		// (loadValidatedSecrets) before any probe: the strict charsets exclude
 		// CR/LF, so nothing can smuggle a second line past the script's `read`,
 		// and a corrupt cache already failed loudly up front.
 		match, err := envValueMatches(ctx, r, site, dbPasswordKey, cache[s.SiteDBUser(site)])

@@ -180,9 +180,10 @@ sites:                         # one or more
 
 Generated passwords are cached in `~/.berth/` (the secrets file is mode 0600)
 and reused across runs — never rotated. The `APP_KEY` backup covers
-berth-seeded keys (`base64:` + 32 bytes); a key in any other format is not
-backed up, and a present-but-corrupt key makes berth refuse loudly rather than
-cache it. The thematic sections below explain each area in depth.
+berth-seeded keys (`base64:` + 32 bytes); a live key in any other shape is
+treated as operator-managed — left alone and simply not backed up — while a
+malformed key already in the local cache makes berth refuse loudly rather
+than propagate it. The thematic sections below explain each area in depth.
 
 ### Server identity (`id:`)
 

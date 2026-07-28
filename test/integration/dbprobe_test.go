@@ -11,33 +11,6 @@ func TestParseEnv(t *testing.T) {
 	}
 }
 
-func TestDBProbeCmdMariaDBSocket(t *testing.T) {
-	env := map[string]string{"DB_CONNECTION": "mysql", "DB_SOCKET": "/run/mysqld/mysqld.sock", "DB_USERNAME": "sync", "DB_PASSWORD": "pw"}
-	got := dbProbeCmd(env, "sync", "SELECT 1")
-	want := "MYSQL_PWD=pw mysql --socket=/run/mysqld/mysqld.sock -usync sync -e 'SELECT 1'"
-	if got != want {
-		t.Errorf("got  %q\nwant %q", got, want)
-	}
-}
-
-func TestDBProbeCmdMariaDBTCPFallback(t *testing.T) {
-	env := map[string]string{"DB_CONNECTION": "mysql", "DB_HOST": "127.0.0.1", "DB_USERNAME": "sync", "DB_PASSWORD": "pw"}
-	got := dbProbeCmd(env, "sync", "SELECT 1")
-	want := "MYSQL_PWD=pw mysql -h127.0.0.1 -usync sync -e 'SELECT 1'"
-	if got != want {
-		t.Errorf("got  %q\nwant %q", got, want)
-	}
-}
-
-func TestDBProbeCmdPostgresTCP(t *testing.T) {
-	env := map[string]string{"DB_CONNECTION": "pgsql", "DB_HOST": "127.0.0.1", "DB_USERNAME": "sync", "DB_PASSWORD": "pw"}
-	got := dbProbeCmd(env, "sync", "SELECT 1")
-	want := "PGPASSWORD=pw psql -h127.0.0.1 -Usync -dsync -tAc 'SELECT 1'"
-	if got != want {
-		t.Errorf("got  %q\nwant %q", got, want)
-	}
-}
-
 // dbProbeStdinCmd builds from TRUSTED identities (config + EnvConnection) and
 // sqQuotes every token; these pins mirror the two engines' EnvConnection
 // shapes the drill actually feeds it.

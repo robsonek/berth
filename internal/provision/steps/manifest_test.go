@@ -75,6 +75,31 @@ func TestManifestCheckVersionMismatchUnsatisfied(t *testing.T) {
 	}
 }
 
+// A SAME-VERSION manifest must not satisfy Check when the run marked itself
+// unconverged: Satisfied would skip Apply and make the withhold warning
+// unreachable on exactly the run that matters — a same-version re-run that
+// newly skipped TLS issuance. Check must report unsatisfied (routing into
+// Apply's warn-and-skip) even though the recorded VERSION matches.
+func TestManifestCheckUnsatisfiedWhenRunUnconverged(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("cat /var/lib/berth/manifest", bssh.Result{ExitCode: 0,
+		Stdout: "# managed by berth\nVERSION=dev\nPROVISIONED_AT=2026-01-02T03:04:05Z\n"})
+	rc := provision.RunCtx{
+		FullRun:            true,
+		UnconvergedReasons: func() []string { return []string{"tls skipped issuance for app.example.com"} },
+	}
+	res, err := Manifest().Check(context.Background(), rc, manifestServer(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Satisfied {
+		t.Fatal("a same-version manifest must not satisfy Check on an unconverged run — Apply's withhold guard would be unreachable")
+	}
+	if !strings.Contains(res.Reason, "withheld") {
+		t.Fatalf("Reason = %q, want it to say the manifest write is withheld", res.Reason)
+	}
+}
+
 // A run that knowingly left work undone (tls skipped issuance on a DNS
 // mismatch) must not attest full convergence: Apply withholds the write with
 // a warning and touches NOTHING on the host — a previous manifest, which

@@ -630,6 +630,27 @@ func TestDatabaseCheckRefusesCorruptCachedPasswordBeforeUnsatisfiedReturn(t *tes
 	}
 }
 
+func TestDatabasePreflightRefusalDiagnosticNotRedactedByCorruptValue(t *testing.T) {
+	// A corrupt cached value must NOT reach the redactor: the refusal
+	// diagnostic names only the cache key, so there is nothing to leak — but
+	// a corrupt value colliding with innocent wording (here: the refusal text
+	// itself) would mask pieces of the very message explaining the refusal.
+	// Only validated values may register.
+	chdirTemp(t)
+	s := databaseServer()
+	dbUser := s.SiteDBUser(s.Sites[0])
+	seedCache(t, s, map[string]string{dbUser: "outside the allowed charset"}) // invalid (spaces) AND a diagnostic substring
+	f := bssh.NewFakeRunner()
+	red := secret.NewRedactor()
+	_, err := Database(red).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "outside the allowed charset") {
+		t.Fatalf("Check() = %v, want the charset refusal", err)
+	}
+	if got := red.Apply(err.Error()); got != err.Error() {
+		t.Errorf("refusal diagnostic garbled by a corrupt-value redaction:\n%q", got)
+	}
+}
+
 func TestDatabaseCheckRefusesCorruptCacheWhenPackageMissing(t *testing.T) {
 	// The missing-package/source early return used to happen BEFORE the cache
 	// was even loaded, so validation placed after the load was not preflight:
