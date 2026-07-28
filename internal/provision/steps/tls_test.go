@@ -113,6 +113,7 @@ func TestTLSCheckUnsatisfiedWhenNearExpiry(t *testing.T) {
 func TestTLSApplyShortCircuitsOnValidCert(t *testing.T) {
 	s := tlsServer()
 	f := bssh.NewFakeRunner()
+	stubNoTLSOrphans(f)
 	f.On("certbot certificates", bssh.Result{
 		ExitCode: 0,
 		Stdout:   certbotCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour)),
@@ -156,6 +157,7 @@ func TestTLSApplyUsesWebrootAndIssuesCert(t *testing.T) {
 	s := tlsServer()
 	withResolver(t, func(_ string) ([]string, error) { return []string{s.Host}, nil })
 	f := bssh.NewFakeRunner()
+	stubNoTLSOrphans(f)
 	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: "No certificates found.\n"})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y certbot", bssh.Result{})
 	certonly := "certbot certonly --webroot -w /var/www/berth-acme/app.example.com -d app.example.com --cert-name app.example.com --agree-tos -m 'ops@example.com' --non-interactive --server https://acme-v02.api.letsencrypt.org/directory"
@@ -222,6 +224,7 @@ func TestTLSApplyHonorsStagingFlag(t *testing.T) {
 	s := tlsServer()
 	withResolver(t, func(_ string) ([]string, error) { return []string{s.Host}, nil })
 	f := bssh.NewFakeRunner()
+	stubNoTLSOrphans(f)
 	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: "No certificates found.\n"})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y certbot", bssh.Result{})
 	certonly := "certbot certonly --webroot -w /var/www/berth-acme/app.example.com -d app.example.com --cert-name app.example.com --agree-tos -m 'ops@example.com' --non-interactive --staging"
@@ -341,6 +344,7 @@ func TestTLSApplyForceRenewsStagingCertOnProductionRun(t *testing.T) {
 	s := tlsServer()
 	withResolver(t, func(_ string) ([]string, error) { return []string{s.Host}, nil })
 	f := bssh.NewFakeRunner()
+	stubNoTLSOrphans(f)
 	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: certbotStagingCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour))})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y certbot", bssh.Result{})
 	certonly := "certbot certonly --webroot -w /var/www/berth-acme/app.example.com -d app.example.com --cert-name app.example.com --agree-tos -m 'ops@example.com' --non-interactive --server https://acme-v02.api.letsencrypt.org/directory --force-renewal"
@@ -385,6 +389,7 @@ func TestTLSApplyLeavesProductionCertUnderStagingRun(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			s := tlsServer()
 			f := bssh.NewFakeRunner()
+			stubNoTLSOrphans(f)
 			f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: certbotCertsOutput(s.Sites[0].Domain, expiry)})
 			f.On("dpkg -s certbot", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 			f.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 1})
@@ -482,6 +487,7 @@ func TestTLSApplySkipsOnDNSMismatch(t *testing.T) {
 		return []string{s.Host}, nil
 	})
 	f := bssh.NewFakeRunner()
+	stubNoTLSOrphans(f)
 	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: "No certificates found.\n"})
 	f.On("dpkg -s certbot", bssh.Result{ExitCode: 1}) // never installed: issuance was DNS-skipped
 	// install/certonly are NOT stubbed: a DNS mismatch must skip issuance.
@@ -520,6 +526,7 @@ func TestTLSSelfSignedIssuesWithoutCertbotOrDNS(t *testing.T) {
 	s.Sites[0].SSLMode = "selfsigned"
 	site := s.Sites[0]
 	f := bssh.NewFakeRunner()
+	stubNoTLSOrphans(f)
 	// No cert yet.
 	f.On("test -e "+shQuote(certFullchainPath(site)), bssh.Result{ExitCode: 1})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y openssl", bssh.Result{})
@@ -629,6 +636,7 @@ func TestTLSCheckAbortsOnForeignDeployHook(t *testing.T) {
 func TestTLSApplyWritesDeployHook(t *testing.T) {
 	s := tlsServer()
 	f := bssh.NewFakeRunner()
+	stubNoTLSOrphans(f)
 	// Valid cert: the per-site loop short-circuits; the hook must be written anyway.
 	f.On("certbot certificates", bssh.Result{
 		ExitCode: 0,
@@ -689,6 +697,7 @@ func TestTLSCheckUnsatisfiedWhenCertbotTimerInactive(t *testing.T) {
 func TestTLSApplyEnablesCertbotTimerWithoutIssuing(t *testing.T) {
 	s := tlsServer()
 	f := bssh.NewFakeRunner()
+	stubNoTLSOrphans(f)
 	// Valid cert -> per-site loop short-circuits, no certonly this run.
 	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: certbotCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour))})
 	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
@@ -721,6 +730,7 @@ func TestTLSApplyRefusesForeignDeployHookWithoutForce(t *testing.T) {
 	s := tlsServer()
 	stubs := func() *bssh.FakeRunner {
 		f := bssh.NewFakeRunner()
+		stubNoTLSOrphans(f)
 		// Valid cert: the per-site loop short-circuits; hook convergence follows.
 		f.On("certbot certificates", bssh.Result{
 			ExitCode: 0,
@@ -784,6 +794,7 @@ func TestTLSRemovesLingeringHookWhenNoLetsEncryptSites(t *testing.T) {
 
 	// Apply removes it (guarded by the marker).
 	f2 := bssh.NewFakeRunner()
+	stubNoTLSOrphans(f2)
 	certStubs(f2)
 	f2.On("cat "+shQuote(certbotDeployHookPath), lingering)
 	f2.On("rm -f "+shQuote(certbotDeployHookPath), bssh.Result{})
@@ -802,6 +813,7 @@ func TestTLSRemovesLingeringHookWhenNoLetsEncryptSites(t *testing.T) {
 
 	// A FOREIGN hook (no marker) is never touched — rm is deliberately unstubbed.
 	f3 := bssh.NewFakeRunner()
+	stubNoTLSOrphans(f3)
 	certStubs(f3)
 	f3.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 0, Stdout: "service apache2 reload\n"})
 	if err := TLS().Apply(context.Background(), provision.RunCtx{}, s, f3); err != nil {
@@ -1069,5 +1081,108 @@ func TestTLSCheckNoSSLCleanHostConvergedReason(t *testing.T) {
 	}
 	if got := len(f.Calls()); got != 4 {
 		t.Errorf("clean no-SSL Check cost %d probes, want 4 (three discovery + hook)", got)
+	}
+}
+
+// stubOrphanTLSHost stubs a host holding all three orphan classes for
+// old.example.com plus the no-LE deploy-hook fallthrough of Apply.
+func stubOrphanTLSHost(f *bssh.FakeRunner) {
+	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find '/etc/letsencrypt/renewal' -maxdepth 1 -type f -name '*.conf'; fi",
+		bssh.Result{Stdout: "/etc/letsencrypt/renewal/old.example.com.conf\n"})
+	f.On("cat '/etc/letsencrypt/renewal/old.example.com.conf'",
+		bssh.Result{Stdout: berthRenewalConf("old.example.com")})
+	f.On("if [ -d '/var/www/berth-acme' ]; then find '/var/www/berth-acme' -mindepth 1 -maxdepth 1 -type d; fi",
+		bssh.Result{Stdout: "/var/www/berth-acme/old.example.com\n"})
+	f.On("if [ -d '/etc/ssl/berth' ]; then find '/etc/ssl/berth' -mindepth 1 -maxdepth 1 -type d; fi",
+		bssh.Result{Stdout: "/etc/ssl/berth/old.example.com\n"})
+	f.On("cat '/etc/letsencrypt/renewal-hooks/deploy/berth-nginx-reload'", bssh.Result{ExitCode: 1})
+}
+
+func TestTLSApplySweepsOrphanArtifactsInOrder(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	stubOrphanTLSHost(f)
+	f.On("dpkg -s certbot", bssh.Result{Stdout: "Status: install ok installed\n"})
+	f.On("certbot delete --cert-name 'old.example.com' -n", bssh.Result{})
+	f.On("rm -rf '/var/www/berth-acme/old.example.com'", bssh.Result{})
+	f.On("rm -rf '/etc/ssl/berth/old.example.com'", bssh.Result{})
+
+	if err := TLS().Apply(context.Background(), provision.RunCtx{}, tlsNoSSLServer(), f); err != nil {
+		t.Fatal(err)
+	}
+	var order []string
+	for _, c := range f.Calls() {
+		switch c.Cmd {
+		case "certbot delete --cert-name 'old.example.com' -n",
+			"rm -rf '/var/www/berth-acme/old.example.com'",
+			"rm -rf '/etc/ssl/berth/old.example.com'":
+			order = append(order, c.Cmd)
+		}
+	}
+	want := []string{
+		"certbot delete --cert-name 'old.example.com' -n",
+		"rm -rf '/var/www/berth-acme/old.example.com'",
+		"rm -rf '/etc/ssl/berth/old.example.com'",
+	}
+	if !reflect.DeepEqual(order, want) {
+		t.Errorf("sweep order = %v, want %v (lineage first: it references the webroot)", order, want)
+	}
+}
+
+func TestTLSApplyCertbotDeleteFailureIsFatal(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	stubOrphanTLSHost(f)
+	f.On("dpkg -s certbot", bssh.Result{Stdout: "Status: install ok installed\n"})
+	f.On("certbot delete --cert-name 'old.example.com' -n",
+		bssh.Result{ExitCode: 1, Stderr: "No certificate found with name old.example.com"})
+
+	err := TLS().Apply(context.Background(), provision.RunCtx{}, tlsNoSSLServer(), f)
+	if err == nil || !strings.Contains(err.Error(), "certbot delete") {
+		t.Fatalf("a failing certbot delete must abort the step; got %v", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.HasPrefix(c.Cmd, "rm -rf") {
+			t.Fatalf("nothing may be removed after the delete failed; got %q", c.Cmd)
+		}
+	}
+}
+
+func TestTLSApplyKeepsLineageWebrootPairWhenCertbotMissing(t *testing.T) {
+	// The suffixed-lineage variant on purpose: the kept lineage is named
+	// old.example.com-0001 but references old.example.com's webroot — the
+	// pairing must follow the REFERENCES, not the cert name.
+	f := bssh.NewFakeRunner()
+	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find '/etc/letsencrypt/renewal' -maxdepth 1 -type f -name '*.conf'; fi",
+		bssh.Result{Stdout: "/etc/letsencrypt/renewal/old.example.com-0001.conf\n"})
+	f.On("cat '/etc/letsencrypt/renewal/old.example.com-0001.conf'",
+		bssh.Result{Stdout: berthRenewalConf("old.example.com")})
+	f.On("if [ -d '/var/www/berth-acme' ]; then find '/var/www/berth-acme' -mindepth 1 -maxdepth 1 -type d; fi",
+		bssh.Result{Stdout: "/var/www/berth-acme/old.example.com\n"})
+	f.On("if [ -d '/etc/ssl/berth' ]; then find '/etc/ssl/berth' -mindepth 1 -maxdepth 1 -type d; fi",
+		bssh.Result{Stdout: "/etc/ssl/berth/old.example.com\n"})
+	f.On("cat '/etc/letsencrypt/renewal-hooks/deploy/berth-nginx-reload'", bssh.Result{ExitCode: 1})
+	f.On("dpkg -s certbot", bssh.Result{ExitCode: 1})
+	f.On("rm -rf '/etc/ssl/berth/old.example.com'", bssh.Result{})
+
+	var warned, unconverged []string
+	rc := provision.RunCtx{
+		Warn:            func(msg string) { warned = append(warned, msg) },
+		NoteUnconverged: func(reason string) { unconverged = append(unconverged, reason) },
+	}
+	if err := TLS().Apply(context.Background(), rc, tlsNoSSLServer(), f); err != nil {
+		t.Fatal(err)
+	}
+	if len(warned) != 1 || !strings.Contains(warned[0], "certbot is not installed") {
+		t.Errorf("expected one certbot-missing warning; got %v", warned)
+	}
+	if len(unconverged) != 1 {
+		t.Errorf("a knowingly kept orphan lineage must mark the run unconverged; got %v", unconverged)
+	}
+	for _, c := range f.Calls() {
+		if c.Cmd == "rm -rf '/var/www/berth-acme/old.example.com'" {
+			t.Fatal("the kept lineage's REFERENCED webroot must be kept as a pair")
+		}
+		if strings.HasPrefix(c.Cmd, "certbot delete") {
+			t.Fatal("no certbot delete may run without certbot")
+		}
 	}
 }

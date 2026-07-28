@@ -366,6 +366,9 @@ func (st tls) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 			return err
 		}
 	}
+	if err := st.sweepOrphans(ctx, rc, s, r); err != nil {
+		return err
+	}
 	// Converge the renewal deploy hook regardless of whether any cert was
 	// (re)issued this run — an already-provisioned LE host must pick it up.
 	if anyLetsEncrypt(s) {
@@ -405,6 +408,63 @@ func (st tls) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 			} else if res.ExitCode != 0 {
 				return fmt.Errorf("remove certbot deploy hook: %s", res.Stderr)
 			}
+		}
+	}
+	return nil
+}
+
+// sweepOrphans removes the TLS artifacts of sites no longer in the config.
+// Order: certbot deletes first (the lineage is the part that actively
+// misbehaves, and it references the webroot), then the ACME webroots, then
+// the self-signed dirs. Lineages go through certbot's own CLI only — never
+// rm inside /etc/letsencrypt. If certbot itself was uninstalled, each orphan
+// lineage is kept together with every webroot it references (warning +
+// unconverged mark) and the rest is still swept; --force is deliberately not
+// consulted — this is plain drift convergence like the site step's P6 sweep.
+func (tls) sweepOrphans(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
+	orphans, err := discoverTLSOrphans(ctx, r, s)
+	if err != nil {
+		return err
+	}
+	keptRefs := map[string]bool{}
+	if len(orphans.lineages) > 0 {
+		installed, err := pkgInstalled(ctx, r, "certbot")
+		if err != nil {
+			return err
+		}
+		for _, l := range orphans.lineages {
+			if !installed {
+				for _, d := range l.webroots {
+					keptRefs[d] = true
+				}
+				rc.Warnf("cannot sweep the orphan Let's Encrypt lineage %s: certbot is not installed; reinstall certbot and re-run, or remove it manually (certbot delete --cert-name %s)", l.name, l.name)
+				rc.MarkUnconverged("tls kept the orphan lineage " + l.name + ": certbot is not installed")
+				continue
+			}
+			res, err := r.Run(ctx, "certbot delete --cert-name "+shQuote(l.name)+" -n", nil)
+			if err != nil {
+				return err
+			}
+			if res.ExitCode != 0 {
+				return fmt.Errorf("certbot delete --cert-name %s: %s", l.name, strings.TrimSpace(res.Stderr))
+			}
+		}
+	}
+	for _, d := range orphans.webroots {
+		if keptRefs[d] {
+			continue // paired with a kept lineage: its renewal conf still points here
+		}
+		if res, err := r.Run(ctx, "rm -rf "+shQuote(acmeWebroot(d)), nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("remove orphan ACME webroot for %s: %s", d, strings.TrimSpace(res.Stderr))
+		}
+	}
+	for _, d := range orphans.sslDirs {
+		if res, err := r.Run(ctx, "rm -rf "+shQuote(selfSignedCertDir(d)), nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("remove orphan self-signed dir for %s: %s", d, strings.TrimSpace(res.Stderr))
 		}
 	}
 	return nil

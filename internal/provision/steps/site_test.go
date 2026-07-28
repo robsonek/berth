@@ -904,6 +904,7 @@ func TestSiteCheckSatisfiedAfterTLSSwap(t *testing.T) {
 	fApply.On("systemctl reload nginx", bssh.Result{})
 	stubFPMApply(s, fApply)
 	// tls.Apply (self-signed) commands:
+	stubNoTLSOrphans(fApply)
 	fApply.On("DEBIAN_FRONTEND=noninteractive apt-get install -y openssl", bssh.Result{})
 	fApply.On("install -d -m 0755 "+shQuote(certDir(site)), bssh.Result{})
 	openssl := fmt.Sprintf("openssl req -x509 -newkey rsa:2048 -nodes -days 825 -keyout %s -out %s -subj %s -addext %s",
