@@ -57,6 +57,50 @@ const appKeyShape = `base64:[A-Za-z0-9+/]{43}=`
 // second shared/.env line.
 var reAppKey = regexp.MustCompile(`^` + appKeyShape + `$`)
 
+// validateCachedDBPassword refuses a non-empty cached database password whose
+// shape is outside the charset secret.Generate uses; an empty entry is legal
+// everywhere (it just means "not cached"). This is the ONE source for the rule
+// and the refusal wording — the preflight validator and newPassword's
+// helper-level defence both delegate here. The error names the cache key,
+// never the value.
+func validateCachedDBPassword(dbUser, pw string) error {
+	if pw != "" && !reDBPassword.MatchString(pw) {
+		return fmt.Errorf("cached password for %s is outside the allowed charset; refusing to use it", dbUser)
+	}
+	return nil
+}
+
+// validateCachedAppKey is validateCachedDBPassword's APP_KEY sibling: a
+// non-empty cached key must be in exactly the shape berth generates
+// (reAppKey); an empty entry stays legal.
+func validateCachedAppKey(dbUser, key string) error {
+	if key != "" && !reAppKey.MatchString(key) {
+		return fmt.Errorf("cached APP_KEY for %s is malformed; refusing to use it", dbUser)
+	}
+	return nil
+}
+
+// validateCachedSecrets shape-validates every configured site's cached secrets
+// (DB password and APP_KEY backup). It is this step's preflight invariant:
+// Check and Apply both run it BEFORE any unsatisfied early-return and BEFORE
+// any remote mutation, so a hand-corrupted cache value can never stay green
+// behind an operator-shaped live key, ride into Apply behind an unrelated
+// unsatisfied reason, or surface only after SQL already ran. The strict
+// charsets also exclude CR/LF, so nothing validated here can smuggle a second
+// line past the agreement probes' `read`.
+func validateCachedSecrets(s *config.Server, cache map[string]string) error {
+	for _, site := range s.Sites {
+		dbUser := s.SiteDBUser(site)
+		if err := validateCachedDBPassword(dbUser, cache[dbUser]); err != nil {
+			return err
+		}
+		if err := validateCachedAppKey(dbUser, cache[appKeyCacheKey(dbUser)]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 type database struct {
 	redactor *secret.Redactor
 }
@@ -69,6 +113,28 @@ func Database(red *secret.Redactor) provision.Step { return database{redactor: r
 
 func (database) Name() string       { return "database" }
 func (database) Requires() []string { return []string{"base", "appdirs"} }
+
+// loadValidatedSecrets is the preflight cache read Check and Apply share:
+// load the verified cache, register every per-site secret with the redactor
+// the moment it is in memory (BEFORE the next fallible operation, whose error
+// text could otherwise carry an unmasked value — including the validation
+// refusal itself, which names only the cache key), then shape-validate via
+// validateCachedSecrets. It never locks — Check must stay side-effect-free;
+// Apply takes the lock itself before calling.
+func (d database) loadValidatedSecrets(s *config.Server) (map[string]string, error) {
+	cache, err := loadVerifiedSecrets(s)
+	if err != nil {
+		return nil, fmt.Errorf("load local secret cache: %w", err)
+	}
+	for _, site := range s.Sites {
+		d.redactor.Add(cache[s.SiteDBUser(site)])
+		d.redactor.Add(cache[appKeyCacheKey(s.SiteDBUser(site))])
+	}
+	if err := validateCachedSecrets(s, cache); err != nil {
+		return nil, err
+	}
+	return cache, nil
+}
 
 // sharedEnvPath is the server-side path of a site's shared .env.
 func sharedEnvPath(site config.Site) string {
@@ -160,7 +226,8 @@ func envValueMatchScript(path, key string) string {
 // whitespace, the same set passwordFromEnv trims). The expected value travels
 // via STDIN (read into a shell variable — never argv, never stdout); the
 // comparison is shell string equality, so no grep pattern semantics apply.
-// The caller MUST have shape-validated expected (reDBPassword / reAppKey):
+// The caller MUST have shape-validated expected — the preflight
+// validateCachedSecrets does, for every cached value, before any probe runs:
 // a value with CR/LF could otherwise smuggle a second line past `read`, and
 // a corrupt cache must fail loudly, not compare.
 // Exit map: 0 = match; 1 = present but different; 3 = no <key>= line
@@ -242,9 +309,23 @@ func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	// Engine/env conflict is checked FIRST — before the installed probe —
-	// because an engine switch makes Check early-return on the missing new
-	// server package and never reach the per-site probes otherwise.
+	// Preflight (shared with Apply): load and shape-validate the local secret
+	// cache BEFORE any remote probe or unsatisfied early-return — a
+	// hand-corrupted cache value must refuse loudly on every path, never stay
+	// green behind an operator-shaped live APP_KEY (which skips the agreement
+	// block) or hide behind an unrelated unsatisfied reason and ride into
+	// Apply. Read-only load — never LockCache here (it creates files; Check
+	// must stay side-effect-free). The cache is also part of this step's
+	// convergence: the recovery promise (re-seed a lost shared/.env with the
+	// SAME secrets) holds only while the LOCAL cache carries them, probed per
+	// site below.
+	cache, err := d.loadValidatedSecrets(s)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	// Engine/env conflict is checked before the installed probe because an
+	// engine switch makes Check early-return on the missing new server package
+	// and never reach the per-site probes otherwise.
 	driver, _, _, _ := eng.EnvConnection()
 	for _, site := range s.Sites {
 		if err := assertEnvEngineMatch(ctx, r, s, site, driver); err != nil {
@@ -269,14 +350,6 @@ func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	if !installed || !sourceOK {
 		// No server to probe yet (or the wrong source): Apply reconciles.
 		return d.unsatisfied(eng, "database server or configured source not yet provisioned"), nil
-	}
-	// The recovery promise (re-seed a lost shared/.env with the SAME secrets)
-	// holds only while the LOCAL cache carries them, so the cache is part of
-	// this step's convergence, probed per site below. Read-only load — never
-	// LockCache here (it creates files; Check must stay side-effect-free).
-	cache, err := loadVerifiedSecrets(s)
-	if err != nil {
-		return provision.CheckResult{}, err
 	}
 	// The server is installed: every site needs its credential persisted AND
 	// its database + user actually present. Probing real state (not just the
@@ -341,16 +414,11 @@ func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Serve
 		// (older) .env would otherwise leave the role on the cache's password and
 		// the cache holding a WRONG APP_KEY forever, with every run green —
 		// Apply's passwordFromEnv branch reconciles the role and the cache toward
-		// .env once triggered. Cached values are shape-validated BEFORE they ride
-		// stdin: the strict charsets exclude CR/LF (nothing can smuggle a second
-		// line past the script's `read`), and a corrupt cache must fail loudly,
-		// never compare (mirroring newPassword/recoverOrNewAppKey's refusals).
-		cachedPW := cache[s.SiteDBUser(site)]
-		d.redactor.Add(cachedPW)
-		if !reDBPassword.MatchString(cachedPW) {
-			return provision.CheckResult{}, fmt.Errorf("cached password for %s is outside the allowed charset; refusing to use it", s.SiteDBUser(site))
-		}
-		match, err := envValueMatches(ctx, r, site, dbPasswordKey, cachedPW)
+		// .env once triggered. Cached values rode through the preflight validator
+		// (validateCachedSecrets) before any probe: the strict charsets exclude
+		// CR/LF, so nothing can smuggle a second line past the script's `read`,
+		// and a corrupt cache already failed loudly up front.
+		match, err := envValueMatches(ctx, r, site, dbPasswordKey, cache[s.SiteDBUser(site)])
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
@@ -359,14 +427,11 @@ func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Serve
 		}
 		// An operator-shaped APP_KEY berth does not back up must NOT be compared
 		// (berthKey false): it would flag drift Apply never clears — the exact
-		// brick envHasBerthAppKey's comment warns about.
+		// brick envHasBerthAppKey's comment warns about. Its cached copy was
+		// still preflight-validated — skipping the comparison never hides
+		// corruption.
 		if berthKey && cache[appKeyCacheKey(s.SiteDBUser(site))] != "" {
-			cachedKey := cache[appKeyCacheKey(s.SiteDBUser(site))]
-			d.redactor.Add(cachedKey)
-			if !reAppKey.MatchString(cachedKey) {
-				return provision.CheckResult{}, fmt.Errorf("cached APP_KEY for %s is malformed; refusing to use it", s.SiteDBUser(site))
-			}
-			match, err = envValueMatches(ctx, r, site, appKeyKey, cachedKey)
+			match, err = envValueMatches(ctx, r, site, appKeyKey, cache[appKeyCacheKey(s.SiteDBUser(site))])
 			if err != nil {
 				return provision.CheckResult{}, err
 			}
@@ -448,6 +513,24 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	if err != nil {
 		return err
 	}
+	// Preflight (shared with Check): lock, load and shape-validate the local
+	// secret cache BEFORE anything touches the host — Check's unsatisfied
+	// early-returns can hand a hand-corrupted cache straight to Apply, and the
+	// refusal must land ahead of the repo/apt install, the SQL and the seeds.
+	// A cache that cannot be READ is a hard error, not an empty map — saving
+	// over it would clobber every credential it held (LoadCache treats only
+	// never-written as empty). The lock is held for the whole run: per-site
+	// secrets accumulate and are written back once at the end, so sites do not
+	// clobber each other's cached passwords.
+	release, err := secret.LockCache(s.CacheKey())
+	if err != nil {
+		return fmt.Errorf("lock local secret cache: %w", err)
+	}
+	defer release()
+	cache, err := d.loadValidatedSecrets(s)
+	if err != nil {
+		return err
+	}
 	driver, host, port, socket := eng.EnvConnection()
 	// Pre-scan every site BEFORE touching apt/repos/SQL: an engine switch must
 	// abort before the new server is even installed.
@@ -468,26 +551,13 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 		return fmt.Errorf("install %s: %w", eng.ServerPackage(), err)
 	}
 
-	// Accumulate per-site secrets and write the local cache once at the end so
-	// sites do not clobber each other's cached passwords. A cache that cannot
-	// be READ is a hard error, not an empty map — saving over it would clobber
-	// every credential it held (LoadCache treats only never-written as empty).
-	release, err := secret.LockCache(s.CacheKey())
-	if err != nil {
-		return fmt.Errorf("lock local secret cache: %w", err)
-	}
-	defer release()
-	cache, err := loadVerifiedSecrets(s)
-	if err != nil {
-		return fmt.Errorf("load local secret cache: %w", err)
-	}
 	for _, site := range s.Sites {
 		dbName, dbUser := s.SiteDBName(site), s.SiteDBUser(site)
 		// The client-auth reconciliation below must compare against what the
 		// cache held BEFORE this run backfills it toward .env, so the pre-Apply
-		// value is captured (and registered as a secret) up front.
+		// value is captured up front (the preflight already registered it with
+		// the redactor and shape-validated it).
 		oldPW := cache[dbUser]
-		d.redactor.Add(oldPW)
 		envExists, err := fileExists(ctx, r, sharedEnvPath(site))
 		if err != nil {
 			return err
@@ -570,13 +640,10 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 		// The containment probe's contract requires a shape-validated password
 		// (a value whose FIRST line is empty would feed grep -F an EMPTY
 		// pattern, which matches EVERY line and would rewrite an
-		// operator-customized file). Check validates the same value, but its
-		// earlier unsatisfied-returns can hand a corrupted cache straight to
-		// Apply — so the tripwire fires here too, loudly, exactly as
-		// newPassword refuses.
-		if oldPW != "" && !reDBPassword.MatchString(oldPW) {
-			return fmt.Errorf("cached password for %s is outside the allowed charset; refusing to use it", dbUser)
-		}
+		// operator-customized file). The preflight validator guarantees that:
+		// oldPW came out of the cache Apply validated before touching the
+		// host, so a corrupt value can never reach this probe.
+		//
 		// A reconciled role password strands ~/.my.cnf|~/.pgpass on the old
 		// credential (seed-if-absent). Rewrite ONLY a file that provably holds
 		// berth's old cached password — an operator-customized file (no old
@@ -682,8 +749,11 @@ func (d database) appKeyFromEnv(ctx context.Context, r bssh.Runner, site config.
 // prior successful run is reused so the existing role keeps working.
 func newPassword(dbUser string, cache map[string]string) (string, error) {
 	if pw := cache[dbUser]; pw != "" {
-		if !reDBPassword.MatchString(pw) {
-			return "", fmt.Errorf("cached password for %s is outside the allowed charset; refusing to use it", dbUser)
+		// Helper-level defence, single-sourced: Apply's preflight already
+		// validated the cache, but the helper holds its own contract for any
+		// future caller.
+		if err := validateCachedDBPassword(dbUser, pw); err != nil {
+			return "", err
 		}
 		return pw, nil
 	}
@@ -698,8 +768,9 @@ func newPassword(dbUser string, cache map[string]string) (string, error) {
 // stores it — mirroring newPassword's reuse-not-rotate rule.
 func recoverOrNewAppKey(dbUser string, cache map[string]string) (string, error) {
 	if k := cache[appKeyCacheKey(dbUser)]; k != "" {
-		if !reAppKey.MatchString(k) {
-			return "", fmt.Errorf("cached APP_KEY for %s is malformed; refusing to use it", dbUser)
+		// Helper-level defence, single-sourced (see newPassword).
+		if err := validateCachedAppKey(dbUser, k); err != nil {
+			return "", err
 		}
 		return k, nil
 	}

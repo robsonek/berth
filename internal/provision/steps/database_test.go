@@ -589,6 +589,65 @@ func TestDatabaseCheckFlagsEnvCacheAppKeyDisagreement(t *testing.T) {
 	}
 }
 
+func TestDatabaseCheckRefusesCorruptCachedAppKeyWhenLiveKeyOperatorShaped(t *testing.T) {
+	// With an operator-shaped live APP_KEY the probe answers non-berth, the
+	// agreement block never runs, and inline validation living inside it let a
+	// hand-corrupted cached APP_KEY keep every run green. The preflight
+	// validator must refuse loudly instead: the corrupt backup is unusable the
+	// day the .env is lost, and green runs would hide that until then.
+	chdirTemp(t)
+	s := databaseServer()
+	dbUser := s.SiteDBUser(s.Sites[0])
+	seedCache(t, s, map[string]string{
+		dbUser:             "pw123",
+		"appkey:" + dbUser: "base64:corrupt",
+	})
+	f := bssh.NewFakeRunner()
+	stubGreenRemote(f, s)
+	f.On(appKeyProbe(s), bssh.Result{ExitCode: 3}) // live key present but not berth-shaped
+	f.On(envValueMatchScript(envPath(s), "DB_PASSWORD"), bssh.Result{ExitCode: 0})
+	_, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("Check() = %v, want the malformed-cached-APP_KEY refusal", err)
+	}
+}
+
+func TestDatabaseCheckRefusesCorruptCachedPasswordBeforeUnsatisfiedReturn(t *testing.T) {
+	// An earlier unsatisfied condition (here: the client-auth file is missing)
+	// must not mask cache corruption behind an unrelated reason and hand the
+	// corrupt value straight to Apply — the preflight validator hard-errors
+	// before ANY unsatisfied early-return.
+	chdirTemp(t)
+	s := databaseServer()
+	dbUser := s.SiteDBUser(s.Sites[0])
+	seedCache(t, s, map[string]string{dbUser: "\nsneaky"})
+	f := bssh.NewFakeRunner()
+	stubGreenRemote(f, s)
+	f.On("test -e "+shQuote("/home/deploy/.my.cnf"), bssh.Result{ExitCode: 1}) // unsatisfied condition ahead of the old inline check
+	_, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "outside the allowed charset") {
+		t.Fatalf("Check() = %v, want the charset refusal for a corrupt cached password", err)
+	}
+}
+
+func TestDatabaseCheckRefusesCorruptCacheWhenPackageMissing(t *testing.T) {
+	// The missing-package/source early return used to happen BEFORE the cache
+	// was even loaded, so validation placed after the load was not preflight:
+	// a first run on a fresh host sailed past a corrupt cache and Apply
+	// consumed it. Check must load + validate ahead of that return.
+	chdirTemp(t)
+	s := databaseServer()
+	dbUser := s.SiteDBUser(s.Sites[0])
+	seedCache(t, s, map[string]string{dbUser: "bad value!"})
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // no .env, engine guard passes
+	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 1})       // not installed
+	_, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "outside the allowed charset") {
+		t.Fatalf("Check() = %v, want a hard error instead of the not-installed unsatisfied result", err)
+	}
+}
+
 // shellExit runs a production-built probe script through the local /bin/sh
 // with the given stdin and returns its exit code — a FakeRunner stub can only
 // echo back what we assume, so these tests pin the ACTUAL shell semantics.
@@ -869,6 +928,7 @@ func TestDatabaseCheckUnsatisfiedWhenEnvLacksValidPassword(t *testing.T) {
 }
 
 func TestDatabaseCheckSkipsProbesWhenNotInstalled(t *testing.T) {
+	chdirTemp(t) // Check preflight-reads the local secret cache
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env, guard passes
@@ -888,6 +948,7 @@ func TestDatabaseCheckSkipsProbesWhenNotInstalled(t *testing.T) {
 }
 
 func TestDatabaseCheckSourceMariaDBRequiresRepo(t *testing.T) {
+	chdirTemp(t) // Check preflight-reads the local secret cache
 	s := databaseServer()
 	s.Database.Source = "mariadb"
 	f := bssh.NewFakeRunner()
@@ -1304,13 +1365,11 @@ func TestDatabaseApplyLeavesOperatorClientAuthAlone(t *testing.T) {
 }
 
 func TestDatabaseApplyRefusesCorruptCachedPasswordBeforeContainmentProbe(t *testing.T) {
-	// Check's shape validation can be short-circuited by earlier unsatisfied
-	// returns (database missing, cache missing the APP_KEY backup, ...), so
-	// Apply can reach the containment probe with a manually corrupted cache
-	// value. One whose FIRST LINE is empty would feed grep -F -f - an EMPTY
-	// pattern — which matches EVERY line (exit 0) and would rewrite an
-	// operator-customized client-auth file. The probe's contract requires the
-	// caller to shape-validate, so Apply must refuse loudly BEFORE probing.
+	// A manually corrupted cached password whose FIRST LINE is empty would
+	// feed the containment probe's grep -F -f - an EMPTY pattern — which
+	// matches EVERY line (exit 0) and would rewrite an operator-customized
+	// client-auth file. This now pins the PREFLIGHT validator: Apply refuses
+	// before ANY remote command, not merely before the probe.
 	chdirTemp(t)
 	s := databaseServer()
 	dbUser := s.SiteDBUser(s.Sites[0])
@@ -1321,13 +1380,32 @@ func TestDatabaseApplyRefusesCorruptCachedPasswordBeforeContainmentProbe(t *test
 	if err == nil || !strings.Contains(err.Error(), "outside the allowed charset") {
 		t.Fatalf("Apply() = %v, want the charset refusal for a corrupt cached password", err)
 	}
-	for _, c := range f.Calls() {
-		if strings.Contains(c.Cmd, "IFS= read -r old") {
-			t.Fatalf("the containment probe must never run with an unvalidated cached password; saw %q", c.Cmd)
-		}
+	if n := len(f.Calls()); n != 0 {
+		t.Fatalf("Apply must refuse before any remote command; ran %d (first: %q)", n, f.Calls()[0].Cmd)
 	}
 	if writtenContent(f, "/home/deploy/.my.cnf") != nil {
 		t.Fatal("the client-auth file must not be rewritten on the refusal path")
+	}
+}
+
+func TestDatabaseApplyRefusesCorruptCachedAppKeyBeforeAnyRemoteCall(t *testing.T) {
+	// Fresh host, corrupt cached APP_KEY: the preflight validator must refuse
+	// before ANY remote command — deliberately nothing is stubbed, and the
+	// call log must stay empty (no repo, no apt-get, no SQL, no seeds).
+	chdirTemp(t)
+	s := databaseServer()
+	dbUser := s.SiteDBUser(s.Sites[0])
+	seedCache(t, s, map[string]string{"appkey:" + dbUser: "base64:tampered"})
+	f := bssh.NewFakeRunner()
+	err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("Apply() = %v, want the malformed-cached-APP_KEY refusal", err)
+	}
+	if n := len(f.Calls()); n != 0 {
+		t.Fatalf("Apply must refuse before any remote command; ran %d (first: %q)", n, f.Calls()[0].Cmd)
+	}
+	if len(f.Writes()) != 0 {
+		t.Fatal("Apply must not write any remote file on the refusal path")
 	}
 }
 
@@ -1417,6 +1495,7 @@ func TestDatabaseCheckUnsatisfiedWhenClientAuthMissing(t *testing.T) {
 }
 
 func TestDatabaseCheckFailsLoudlyOnEngineEnvConflict(t *testing.T) {
+	chdirTemp(t)          // Check preflight-reads the local secret cache
 	s := databaseServer() // engine mariadb -> seeds DB_CONNECTION=mysql
 	f := bssh.NewFakeRunner()
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present
@@ -1433,6 +1512,7 @@ func TestDatabaseCheckFailsLoudlyOnEngineEnvConflict(t *testing.T) {
 }
 
 func TestDatabaseCheckConflictGuardIgnoresForce(t *testing.T) {
+	chdirTemp(t) // Check preflight-reads the local secret cache
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
@@ -1444,6 +1524,7 @@ func TestDatabaseCheckConflictGuardIgnoresForce(t *testing.T) {
 }
 
 func TestDatabaseCheckFailsWhenExistingEnvLacksDBConnection(t *testing.T) {
+	chdirTemp(t) // Check preflight-reads the local secret cache
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})                    // .env present...
@@ -1455,6 +1536,7 @@ func TestDatabaseCheckFailsWhenExistingEnvLacksDBConnection(t *testing.T) {
 }
 
 func TestDatabaseCheckFailsLoudlyOnEngineEnvConflictPostgres(t *testing.T) {
+	chdirTemp(t) // Check preflight-reads the local secret cache
 	s := databaseServer()
 	s.Database = config.Database{Engine: "postgres", Source: "debian"}
 	f := bssh.NewFakeRunner()
@@ -1513,6 +1595,7 @@ func TestDatabaseApplyPreScansAllSitesBeforeMutating(t *testing.T) {
 }
 
 func TestDatabaseCheckFailsWhenGrepErrors(t *testing.T) {
+	chdirTemp(t) // Check preflight-reads the local secret cache
 	// grep exit >= 2 (unreadable input / I/O error) must be a hard error, not
 	// silently treated as "key absent".
 	s := databaseServer()
@@ -1531,6 +1614,7 @@ func TestDatabaseCheckPassesWhenDBConnectionMatchesOrFileAbsent(t *testing.T) {
 	// existing file that merely lacks the key is covered separately (it errors).
 	// Trailing space, vertical tab, and form feed after the value are all
 	// trimmed (mirrors passwordFromEnv's ASCII set), so they still match.
+	chdirTemp(t) // Check preflight-reads the local secret cache
 	cases := map[string]struct {
 		envExists int // test -e exit code
 		grep      *bssh.Result
