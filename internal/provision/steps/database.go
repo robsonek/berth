@@ -95,15 +95,39 @@ func clientAuthContainsScript(path string) string {
 	return "IFS= read -r old; printf '%s\\n' \"$old\" | grep -qF -f - " + shQuote(path)
 }
 
+// cLocalePin is prepended to every whitespace-sensitive probe script so its
+// grep/sed run under the C locale no matter what the host sets: Debian's
+// default is LANG=C.UTF-8, where [[:space:]] also matches Unicode whitespace
+// (e.g. U+2003) while the Go side (passwordFromEnv, appKeyFromEnv) trims
+// ASCII only — left unpinned, that divergence can produce a false-green
+// password agreement or endless APP_KEY drift. The leading assignment+export
+// applies to every stage of the subsequent pipelines (an inline `LC_ALL=C
+// cmd` prefix would cover only one stage) and survives berth's
+// `sudo /bin/sh -c` wrapping. clientAuthContainsScript deliberately has no
+// pin: fixed-string grep (-F) has no locale-sensitive operation. The test
+// suite pins these prefix bytes independently of this constant.
+const cLocalePin = "LC_ALL=C; export LC_ALL; "
+
+// envCredentialPresentScript builds the exact shell script envCredentialPresent
+// runs: grep -m1 selects the FIRST DB_PASSWORD line (a missing file or key
+// yields empty input); the second grep validates it strictly and only its exit
+// code answers (-q), so the secret never enters stdout. The C-locale pin keeps
+// the trailing [[:space:]]* tolerance ASCII-only — exactly the set
+// passwordFromEnv trims — so the probe never answers green over a value whose
+// Unicode whitespace Apply's charset check refuses. Shared with the
+// real-shell test in database_test.go so the tested bytes are the production
+// bytes.
+func envCredentialPresentScript(path string) string {
+	return cLocalePin + "grep -m1 '^" + dbPasswordKey + "=' " + shQuote(path) + " | grep -Eq '^" + dbPasswordKey + "=[A-Za-z0-9]+[[:space:]]*$'"
+}
+
 // envCredentialPresent reports whether the FIRST DB_PASSWORD line of a site's
 // shared/.env carries a charset-valid value — the same line passwordFromEnv
 // reads, so Check and Apply always judge the same credential (a valid value on
 // a later duplicate line must not satisfy Check when Apply would read the
-// first). grep -m1 selects that line (a missing file or key yields empty
-// input); the second grep validates it strictly and only its exit code
-// answers (-q), so the secret never enters stdout.
+// first).
 func envCredentialPresent(ctx context.Context, r bssh.Runner, site config.Site) (bool, error) {
-	res, err := r.Run(ctx, "grep -m1 '^"+dbPasswordKey+"=' "+shQuote(sharedEnvPath(site))+" | grep -Eq '^"+dbPasswordKey+"=[A-Za-z0-9]+[[:space:]]*$'", nil)
+	res, err := r.Run(ctx, envCredentialPresentScript(sharedEnvPath(site)), nil)
 	if err != nil {
 		return false, err
 	}
@@ -116,12 +140,15 @@ func envCredentialPresent(ctx context.Context, r bssh.Runner, site config.Site) 
 // the comparison is plain quoted shell string equality — no grep pattern
 // semantics, no pattern-file/input fd sharing. Shared with the real-shell
 // test in database_test.go so the tested bytes are the production bytes.
-// `sed 's/[[:space:]]*$//'` in the C locale trims exactly the ASCII set
-// passwordFromEnv trims, and the $(...) substitutions already strip trailing
-// newlines — so a trailing-whitespace env line compares equal to the trimmed
-// cached value (Check must never flag drift Apply cannot clear).
+// The C locale is enforced by cLocalePin, not assumed: under the pin,
+// `sed 's/[[:space:]]*$//'` trims exactly the ASCII set passwordFromEnv
+// trims, and the $(...) substitutions already strip trailing newlines — so a
+// trailing-whitespace env line compares equal to the trimmed cached value
+// (Check must never flag drift Apply cannot clear). Unpinned, the live-box
+// C.UTF-8 default would also trim Unicode whitespace Go keeps in the value —
+// a false-green match over a credential Apply refuses.
 func envValueMatchScript(path, key string) string {
-	return "IFS= read -r want; " +
+	return cLocalePin + "IFS= read -r want; " +
 		"line=$(grep -m1 '^" + key + "=' " + shQuote(path) + "); s=$?; " +
 		"if [ $s -eq 1 ]; then exit 3; elif [ $s -ne 0 ]; then exit 2; fi; " +
 		`line=$(printf '%s' "$line" | sed 's/[[:space:]]*$//'); ` +
@@ -357,10 +384,15 @@ func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Serve
 // berth key with a trailing space would read as non-berth here and silently
 // skip both the cache requirement and the agreement comparison for exactly
 // the keys Apply DOES back up. The trim rides a pipeline stage (not the
-// capture) so `s=$?` keeps grep's exit status. Shared with the real-shell
-// test in database_test.go so the tested bytes are the production bytes.
+// capture) so `s=$?` keeps grep's exit status. The C-locale pin keeps that
+// trim ASCII-only, matching appKeyFromEnv: unpinned under the live-box
+// C.UTF-8 default, sed would also strip Unicode whitespace, the probe would
+// see a berth-shaped key appKeyFromEnv treats as absent, and Check would
+// demand a cache entry Apply never writes — endless drift. Shared with the
+// real-shell test in database_test.go so the tested bytes are the production
+// bytes.
 func envBerthAppKeyScript(path string) string {
-	return "line=$(grep -m1 '^" + appKeyKey + "=' " + shQuote(path) + "); s=$?; " +
+	return cLocalePin + "line=$(grep -m1 '^" + appKeyKey + "=' " + shQuote(path) + "); s=$?; " +
 		"if [ $s -eq 1 ]; then exit 1; elif [ $s -ne 0 ]; then exit 2; fi; " +
 		`printf '%s' "$line" | sed 's/[[:space:]]*$//' | grep -Eq '^` + appKeyKey + `=` + appKeyShape + `$' && exit 0; exit 3`
 }
