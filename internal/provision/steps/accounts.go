@@ -284,7 +284,7 @@ func (a accounts) Check(ctx context.Context, rc provision.RunCtx, s *config.Serv
 			return provision.CheckResult{}, err
 		}
 		user := s.SiteUser(site)
-		keyPath := fmt.Sprintf("/home/%s/.ssh/id_ed25519", user)
+		keyPath := deployKeyPath(user)
 		for _, p := range []string{keyPath, keyPath + ".pub"} {
 			ok, err := fileExists(ctx, r, p)
 			if err != nil {
@@ -771,6 +771,10 @@ func installAuthorizedKey(ctx context.Context, r bssh.Runner, force bool, user s
 	return nil
 }
 
+// deployKeyPath is the site user's git deploy private key. The derivation
+// lives in config because `berth site key` (cmd) prints the .pub beside it.
+func deployKeyPath(user string) string { return config.DeployKeyPath(user) }
+
 // ensureDeployKey generates a deploy SSH key under the site user's ~/.ssh,
 // re-derives a missing .pub from an existing private key, and scans the Git
 // host (honoring a non-22 ssh:// port) into that user's known_hosts, only when
@@ -784,7 +788,7 @@ func (accounts) ensureDeployKey(ctx context.Context, s *config.Server, site conf
 		return fmt.Errorf("parse git host from %q: %w", site.Repository, err)
 	}
 	user := s.SiteUser(site)
-	keyPath := fmt.Sprintf("/home/%s/.ssh/id_ed25519", user)
+	keyPath := deployKeyPath(user)
 	exists, err := fileExists(ctx, r, keyPath)
 	if err != nil {
 		return err

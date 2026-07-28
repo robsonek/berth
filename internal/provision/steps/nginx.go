@@ -19,7 +19,7 @@ func (nginx) Requires() []string { return []string{"base"} }
 
 // nginxOrgSourceList is the apt source file the nginx.org repo is written to; its
 // presence is how Check knows the configured upstream source is in effect.
-const nginxOrgSourceList = "/etc/apt/sources.list.d/nginx-org.list"
+var nginxOrgSourceList = apt.NginxOrg().SourceListPath()
 
 // nginxConfPath is nginx's main config. The nginx.org package ships it with
 // `user nginx;`, but berth's permission model (deploy_path group www-data, FPM

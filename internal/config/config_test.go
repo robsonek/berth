@@ -389,4 +389,22 @@ func TestDerivationsAreFrozen(t *testing.T) {
 	if got := PoolName("app.example.com"); got != "app_example_com" {
 		t.Fatalf("PoolName derivation changed: %s", got)
 	}
+	if got := FPMSocketPath("app_example_com"); got != "/run/php/berth-app_example_com.sock" {
+		t.Fatalf("FPMSocketPath derivation changed: %s", got)
+	}
+	if got := ValkeySocketPath("app_example_com"); got != "/run/berth-valkey/app_example_com/valkey.sock" {
+		t.Fatalf("ValkeySocketPath derivation changed: %s", got)
+	}
+	if ValkeyStateBase != "/var/lib/berth-valkey" {
+		t.Fatalf("ValkeyStateBase changed: %s", ValkeyStateBase)
+	}
+	if got := SiteWorkerProgram("app.example.com"); got != "berth-app_example_com" {
+		t.Fatalf("SiteWorkerProgram derivation changed: %s", got)
+	}
+	if got := SiteDaemonProgram("app.example.com", "pulse"); got != "berth-app_example_com-pulse" {
+		t.Fatalf("SiteDaemonProgram derivation changed: %s", got)
+	}
+	if got := DeployKeyPath("b_appexamplecom_dd46c94b"); got != "/home/b_appexamplecom_dd46c94b/.ssh/id_ed25519" {
+		t.Fatalf("DeployKeyPath derivation changed: %s", got)
+	}
 }

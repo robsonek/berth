@@ -69,6 +69,10 @@ type Repo struct {
 	Fingerprint string // pinned; EnsureRepo aborts on mismatch
 }
 
+// SourceListPath is the apt source file EnsureRepo writes this repo to; steps
+// probe its presence to know the configured upstream source is in effect.
+func (r Repo) SourceListPath() string { return "/etc/apt/sources.list.d/" + r.Name + ".list" }
+
 // Sury returns the Ondřej Surý PHP repository definition for Debian 13 (used by
 // the php step when php.source selects it, e.g. for PHP versions Debian does not
 // ship). Fingerprint is the full 40-hex DEB.SURY.ORG signing key.
@@ -215,7 +219,7 @@ func (m *Manager) EnsureRepo(ctx context.Context, repo Repo) error {
 	src := fmt.Sprintf("deb [signed-by=%s] %s %s %s\n",
 		keyring, repo.URI, repo.Suite, strings.Join(repo.Components, " "))
 	if err := m.r.WriteFile(ctx, bssh.FileSpec{
-		Path:    "/etc/apt/sources.list.d/" + repo.Name + ".list",
+		Path:    repo.SourceListPath(),
 		Content: []byte(src), Mode: 0o644, Sudo: true,
 	}); err != nil {
 		return fmt.Errorf("write source: %w", err)

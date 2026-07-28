@@ -585,8 +585,10 @@ func (b Backups) validate() error {
 // with every feature, and every longer one breaks something. The Valkey
 // budget applies unconditionally (never gate this on valkey being enabled: a
 // domain valid only while valkey is off would blow up the day the knob is
-// switched on). Recompute this bound if any prefix above ever grows — there
-// is deliberately no headroom, because headroom rejects working domains.
+// switched on). TestDomainCapMatchesPrefixArithmetic recomputes this bound
+// from the live prefix constants (ValkeyRunBase, FPMSocketPrefix), so growing
+// a prefix fails the build's tests instead of silently shrinking the budget.
+// There is deliberately no headroom, because headroom rejects working domains.
 // Without the guard a longer (still RFC-valid, up to 253 chars) domain passed
 // validation and then EVERY Apply failed creating the derived artifact,
 // permanently, after services were already reloaded.

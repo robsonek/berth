@@ -260,6 +260,29 @@ func TestValidateDomainLengthBoundary(t *testing.T) {
 	}
 }
 
+// TestDomainCapMatchesPrefixArithmetic derives the domain cap from the LIVE
+// name-prefix constants instead of restating 77: growing a prefix must break
+// this test at build time, not re-open the every-Apply-fails bug the cap fixed
+// (an accepted domain whose derived socket path exceeds sun_path).
+func TestDomainCapMatchesPrefixArithmetic(t *testing.T) {
+	// poolName only swaps dots for underscores, so len(pool) == len(domain).
+	// The tightest budget is the per-site Valkey socket against the 107 usable
+	// sun_path bytes; it applies unconditionally (a domain must never turn
+	// invalid the day valkey: true is switched on).
+	valkeyBudget := 107 - len(ValkeyRunBase+"/") - len("/valkey.sock")
+	if maxSiteDomainLen != valkeyBudget {
+		t.Errorf("maxSiteDomainLen = %d, want %d = 107 - len(%q+\"/\") - len(\"/valkey.sock\")",
+			maxSiteDomainLen, valkeyBudget, ValkeyRunBase)
+	}
+	// The FPM socket budget must stay at least as loose, or the Valkey budget
+	// is no longer the tightest bound and the cap needs recomputing.
+	fpmBudget := 107 - len(FPMSocketPrefix) - len(".sock")
+	if fpmBudget < maxSiteDomainLen {
+		t.Errorf("FPM socket budget %d (from FPMSocketPrefix %q) is tighter than maxSiteDomainLen %d — recompute the cap",
+			fpmBudget, FPMSocketPrefix, maxSiteDomainLen)
+	}
+}
+
 func TestValidateDeployPathDeniesEverySystemRoot(t *testing.T) {
 	// Every entry of the deny-list must be refused both as an exact path (the
 	// depth>=2 rule catches single-component roots) and as a parent of the

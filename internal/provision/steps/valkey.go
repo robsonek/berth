@@ -14,10 +14,11 @@ import (
 // valkeyUnit is the systemd unit shipped by the Debian valkey-server package.
 const valkeyUnit = "valkey-server.service"
 
+// The run/state bases live in config (the domain-length cap is computed from
+// their byte lengths); the state alias keeps valkeyDataDir short.
 const (
 	valkeyUnitDir   = "/etc/systemd/system"
-	valkeyRunBase   = "/run/berth-valkey"
-	valkeyStateBase = "/var/lib/berth-valkey"
+	valkeyStateBase = config.ValkeyStateBase
 )
 
 // Per-site instance identity. One Valkey per site, reachable only via a unix
@@ -28,7 +29,7 @@ const (
 func valkeyInstanceUnit(domain string) string { return "berth-valkey-" + poolName(domain) + ".service" }
 func valkeyUnitPath(domain string) string     { return valkeyUnitDir + "/" + valkeyInstanceUnit(domain) }
 func valkeySocketPath(domain string) string {
-	return valkeyRunBase + "/" + poolName(domain) + "/valkey.sock"
+	return config.ValkeySocketPath(poolName(domain))
 }
 func valkeyDataDir(domain string) string { return valkeyStateBase + "/" + poolName(domain) }
 

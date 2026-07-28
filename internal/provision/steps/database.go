@@ -14,12 +14,6 @@ import (
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
 
-// upstreamSourceList is the apt source file an engine's producer repo is written
-// to; its presence is how Check knows the configured upstream source is in effect.
-func upstreamSourceList(repo apt.Repo) string {
-	return "/etc/apt/sources.list.d/" + repo.Name + ".list"
-}
-
 // dbPasswordKey is the .env key under which the database password lives.
 const dbPasswordKey = "DB_PASSWORD"
 
@@ -336,7 +330,7 @@ func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	sourceOK := true
 	if s.Database.Source != "debian" {
 		if repo, ok := eng.UpstreamRepo(); ok {
-			sourceOK, err = fileExists(ctx, r, upstreamSourceList(repo))
+			sourceOK, err = fileExists(ctx, r, repo.SourceListPath())
 			if err != nil {
 				return provision.CheckResult{}, err
 			}

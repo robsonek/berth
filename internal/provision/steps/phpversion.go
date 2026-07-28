@@ -22,7 +22,7 @@ func phpPoolConflictProbeCmd(version string) string {
 	// The listen match tolerates FPM's INI whitespace freedom (`listen=`,
 	// indentation, an optional quote) — a rigid `listen = ` would
 	// false-negative exactly the foreign files this branch exists for.
-	return `for f in /etc/php/*/fpm/pool.d/*.conf; do [ -e "$f" ] || continue; case "$f" in /etc/php/` + version + `/fpm/pool.d/*) continue;; esac; if [ "$(head -n 1 "$f" 2>/dev/null)" = '` + managedMarkerINI + `' ]; then printf 'M %s\n' "$f"; elif grep -Eq '^[[:space:]]*listen[[:space:]]*=[[:space:]]*"?/run/php/berth-' "$f" 2>/dev/null; then printf 'S %s\n' "$f"; fi; done`
+	return `for f in /etc/php/*/fpm/pool.d/*.conf; do [ -e "$f" ] || continue; case "$f" in /etc/php/` + version + `/fpm/pool.d/*) continue;; esac; if [ "$(head -n 1 "$f" 2>/dev/null)" = '` + managedMarkerINI + `' ]; then printf 'M %s\n' "$f"; elif grep -Eq '^[[:space:]]*listen[[:space:]]*=[[:space:]]*"?` + config.FPMSocketPrefix + `' "$f" 2>/dev/null; then printf 'S %s\n' "$f"; fi; done`
 }
 
 // assertPHPVersionExclusive refuses to proceed while FPM pools of another PHP
