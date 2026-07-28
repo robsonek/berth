@@ -61,7 +61,9 @@ func AuthMethods(keyPath string) ([]xssh.AuthMethod, error) { return authMethods
 func authMethods(keyPath string) ([]xssh.AuthMethod, error) {
 	var methods []xssh.AuthMethod
 	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
-		if conn, err := net.Dial("unix", sock); err == nil {
+		// Bounded dial: a wedged agent socket must not stall connection setup.
+		d := net.Dialer{Timeout: 5 * time.Second}
+		if conn, err := d.Dial("unix", sock); err == nil {
 			methods = append(methods, xssh.PublicKeysCallback(agent.NewClient(conn).Signers))
 		}
 	}

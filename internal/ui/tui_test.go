@@ -43,7 +43,7 @@ func TestUpdateCtrlCKeepsStepFailure(t *testing.T) {
 	m = m.apply(provision.Event{Step: "tls", Kind: provision.EventFailed, Err: errTest})
 	tm := teaModel{m: m}
 	next, _ := tm.Update(tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl}))
-	if got := next.(teaModel).m.err; got != errTest {
+	if got := next.(teaModel).m.err; !errors.Is(got, errTest) {
 		t.Errorf("err = %v, want the original step failure %v", got, errTest)
 	}
 }

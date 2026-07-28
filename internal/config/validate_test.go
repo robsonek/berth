@@ -44,7 +44,7 @@ func TestValidateAllowsManyValkeySites(t *testing.T) {
 	s := base()
 	s.Valkey = true
 	s.Sites = nil
-	for i := 0; i < 17; i++ {
+	for i := range 17 {
 		s.Sites = append(s.Sites, Site{
 			Domain:     fmt.Sprintf("site%02d.example.com", i),
 			DeployPath: fmt.Sprintf("/var/www/site%02d", i),
