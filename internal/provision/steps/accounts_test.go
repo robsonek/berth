@@ -39,13 +39,20 @@ func testServerWithKey(t *testing.T) *config.Server {
 }
 
 // stubAccountExists stubs the read-only checks that report a fully-provisioned
-// account (user present, sudoers content up to date, authorized_keys up to date).
+// account (user present, sudoers content AND root:root 0440 metadata up to
+// date, authorized_keys up to date).
 func stubAccountExists(f *bssh.FakeRunner, user string, sudoers, want []byte) {
 	f.On("id "+user, bssh.Result{ExitCode: 0})
 	f.On(groupProbeCmd(user), bssh.Result{Stdout: user + "\n"})
 	f.On(sshDirOwnerCmd(user), bssh.Result{Stdout: user + " directory\n"})
 	f.On("cat "+shQuote(accountSudoersPath(user)), bssh.Result{Stdout: string(sudoers), ExitCode: 0})
+	f.On(sudoersStatCmd(user), bssh.Result{Stdout: "root:root 440\n"})
 	f.On("cat "+shQuote(authorizedKeysPath(user)), bssh.Result{Stdout: string(want), ExitCode: 0})
+}
+
+// sudoersStatCmd mirrors statOwnerMode's probe for an account's sudoers file.
+func sudoersStatCmd(user string) string {
+	return "stat -c '%U:%G %a' " + shQuote(accountSudoersPath(user))
 }
 
 // stubAccountCreate stubs the mutating commands for creating + configuring an
@@ -306,6 +313,53 @@ func TestAccountsCheckUnsatisfiedWhenSudoersDrifted(t *testing.T) {
 	}
 	if cr.Satisfied {
 		t.Errorf("expected unsatisfied when site sudoers content has drifted; got %+v", cr)
+	}
+}
+
+func TestAccountsCheckUnsatisfiedWhenSudoersMetadataDrifted(t *testing.T) {
+	// Content-only probing used to bless a correct-content sudoers file with
+	// drifted owner/mode forever: sudo REFUSES a drop-in that is not
+	// root-owned 0440 wide, so the grant was broken and no run would heal it
+	// (Apply only fires on an unsatisfied Check). Both account classes carry
+	// the contract: berth's own /etc/sudoers.d/berth and the per-site
+	// berth-<user> grant.
+	cases := []struct {
+		name string
+		user string // the account whose stat probe drifts
+		meta string
+	}{
+		{"berth account world-readable", "berth", "root:root 644"},
+		{"site user grant not root-owned", "deploy", "deploy:root 440"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			chdirTemp(t)
+			s := testServerWithKey(t)
+			want := authorizedKeys(testOperatorKey)
+			deploySudoers, err := renderSiteSudoers(s, s.Sites[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			f := bssh.NewFakeRunner()
+			f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+			stubSiteTreeFresh(f, "/var/www/app")
+			stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
+			stubAccountExists(f, "deploy", deploySudoers, want)
+			f.On(sudoersStatCmd(tc.user), bssh.Result{Stdout: tc.meta + "\n"}) // override the healthy stub
+			cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cr.Satisfied {
+				t.Fatalf("expected unsatisfied on sudoers metadata drift; got %+v", cr)
+			}
+			if !strings.Contains(cr.Reason, accountSudoersPath(tc.user)) || !strings.Contains(cr.Reason, tc.meta) {
+				t.Errorf("Reason = %q, want it to name the path and the drifted metadata", cr.Reason)
+			}
+			if !strings.Contains(strings.Join(cr.Changes, "\n"), "fix owner/mode") {
+				t.Errorf("Changes = %q, want a fix owner/mode entry", cr.Changes)
+			}
+		})
 	}
 }
 

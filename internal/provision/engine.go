@@ -133,8 +133,18 @@ func (e *Engine) Run(ctx context.Context, s *config.Server, r bssh.Runner, opt O
 				return
 			default:
 			}
+			// Force is scoped to the --only TARGET: the always-run steps that
+			// execute ahead of it (identity, preflight) must not inherit an
+			// authorization aimed at a different step — identity reads Force as
+			// "re-bind the cache endpoint", so an unscoped `--only site --force`
+			// would silently re-bind the secret cache. Full runs keep Force on
+			// every step (a bare --force deliberately authorizes the whole run).
+			stepRC := rc
+			if opt.Only != "" && step.Name() != opt.Only {
+				stepRC.Force = false
+			}
 			emit(Event{Step: step.Name(), Kind: EventStarted})
-			cr, err := step.Check(ctx, rc, s, r)
+			cr, err := step.Check(ctx, stepRC, s, r)
 			if err != nil {
 				emit(Event{Step: step.Name(), Kind: EventFailed, Err: fmt.Errorf("%s: check: %w", step.Name(), err)})
 				return
@@ -154,7 +164,7 @@ func (e *Engine) Run(ctx context.Context, s *config.Server, r bssh.Runner, opt O
 			// after ctrl+c). Apply runs in this goroutine, so the append is
 			// race-free.
 			var warnings []string
-			applyRC := rc
+			applyRC := stepRC
 			applyRC.Warn = func(msg string) { warnings = append(warnings, msg) }
 			if err := step.Apply(ctx, applyRC, s, r); err != nil {
 				emit(Event{Step: step.Name(), Kind: EventFailed, Warnings: warnings, Err: fmt.Errorf("%s: apply: %w", step.Name(), err)})

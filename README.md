@@ -210,10 +210,14 @@ the same current `host:port`. Rules:
 - The cache records the endpoint it was bound to. A mismatch is a hard error:
   if it is a *different* server, give it its own `id`; if the endpoint really
   changed, update every config sharing the id first, then re-bind once with
-  the narrow form `berth provision <config> --only identity --force` — a bare
-  `--force` would ALSO authorize overwriting unmanaged files in every other
-  step of the run. Endpoint metadata is an operator-error tripwire, not
-  authentication — SSH host-key verification is unaffected and never bypassed.
+  the narrow form `berth provision <config> --only identity --force`. Under
+  `--only`, `--force` applies to the target step alone (the always-run steps
+  ahead of it run unforced), so the narrow form authorizes exactly the
+  re-bind and a forced run of any *other* step can never re-bind the cache as
+  a side effect — while a bare `--force` (full run) would ALSO authorize
+  overwriting unmanaged files in every other step. Endpoint metadata is an
+  operator-error tripwire, not authentication — SSH host-key verification is
+  unaffected and never bypassed.
 - Downgrading berth below this version after an `id`/envelope exists is not
   supported (older binaries reject both the config key and the cache format).
 

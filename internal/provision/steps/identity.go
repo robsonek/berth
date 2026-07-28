@@ -77,6 +77,11 @@ func (identity) Check(ctx context.Context, rc provision.RunCtx, s *config.Server
 			// a mismatch is a renamed `id`, never a fresh bind.
 			return provision.CheckResult{}, foreignHostTombstone(hostEnv.MigratedTo, s.ID)
 		}
+		if hostEnv != nil && hostEnv.MigratedTo == s.ID && env == nil {
+			// The tombstone points at OUR id but the id-keyed envelope is gone
+			// (lost cache) — binding fresh here would disown its secrets.
+			return provision.CheckResult{}, secret.TombstoneWithoutEnvelope(s.ID, s.Host)
+		}
 		hostReal := hostEnv != nil && hostEnv.MigratedTo == ""
 		if hostReal && env != nil {
 			return provision.CheckResult{}, fmt.Errorf("both %s.secrets.json and %s.secrets.json exist under ~/.berth — refusing to guess which holds this machine's secrets; keep the correct one under the id and remove (or tombstone) the other", s.ID, s.Host)
@@ -172,6 +177,14 @@ func (identity) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server
 		}
 		if hostEnv != nil && hostEnv.MigratedTo == "" {
 			return fmt.Errorf("a host-keyed cache %s.secrets.json reappeared during identity reconciliation (a concurrent run without `id`?); re-run after making every config of this machine use `id: %s`", s.Host, s.ID)
+		}
+		// After the two refusals above, a present hostEnv can only be OUR OWN
+		// tombstone; with the id-keyed envelope missing that is a lost cache —
+		// the env==nil branch below must never bind a fresh empty envelope over
+		// it. MigrateCache refuses this state too, but under its own locks;
+		// re-assert under ours (a concurrent run may have changed the files).
+		if hostEnv != nil && env == nil {
+			return secret.TombstoneWithoutEnvelope(s.ID, s.Host)
 		}
 	}
 	ep := endpointOf(s)

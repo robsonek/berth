@@ -20,7 +20,15 @@ type CheckResult struct {
 
 // RunCtx carries run-time flags steps need beyond the static config.
 type RunCtx struct {
-	Force      bool // overwrite resources not managed by berth (drift policy, §6.5)
+	// Force authorizes overwriting resources not managed by berth (drift
+	// policy, §6.5) and, in the identity step, re-binding the secret cache's
+	// endpoint. Under --only the engine scopes it to the TARGET step: the
+	// always-run steps executing ahead of the target see Force=false, so
+	// `--only site --force` can never silently re-bind the identity cache
+	// (and `--only identity --force` stays the narrow re-bind form the
+	// endpoint-mismatch advice prescribes). Full runs hand Force to every
+	// step unchanged.
+	Force      bool
 	SSLStaging bool // use Let's Encrypt staging in the TLS step
 	// FullRun is true when the whole registered pipeline executes (no --only
 	// target), i.e. every later step is guaranteed to run barring fail-fast.

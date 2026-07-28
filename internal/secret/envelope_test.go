@@ -189,6 +189,25 @@ func TestMigrateCache(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	// A tombstone pointing at the caller's OWN id with the id-keyed envelope
+	// MISSING is a lost cache, not a fresh machine: the `!sourceIsReal`
+	// shortcut used to return nil and the caller then bound an EMPTY envelope,
+	// disowning every secret the lost cache held (console:berth included).
+	t.Run("own tombstone with missing target is refused", func(t *testing.T) {
+		berth := cacheHome(t)
+		writeRawCache(t, berth, "host.example.com", `{"version":1,"endpoint":{"host":"host.example.com","port":22},"migratedTo":"id-1","secrets":{}}`)
+		err := MigrateCache("id-1", "host.example.com", 22)
+		if err == nil || !strings.Contains(err.Error(), "restore") || !strings.Contains(err.Error(), "passwd -l berth") {
+			t.Fatalf("lost id-keyed cache must be refused with restore/settle advice; got %v", err)
+		}
+		if _, statErr := os.Stat(filepath.Join(berth, "id-1.secrets.json")); !os.IsNotExist(statErr) {
+			t.Fatal("the refusal must not create an envelope at the id")
+		}
+		tomb, terr := LoadEnvelope("host.example.com")
+		if terr != nil || tomb == nil || tomb.MigratedTo != "id-1" {
+			t.Fatalf("the tombstone must stay untouched: %+v err=%v", tomb, terr)
+		}
+	})
 	// A tombstone pointing at a DIFFERENT id means the config's id was renamed:
 	// proceeding would orphan the old id's cache. Both early-return shortcuts
 	// (existing target, non-real source) used to swallow this — guard first.

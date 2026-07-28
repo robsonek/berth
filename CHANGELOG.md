@@ -80,12 +80,37 @@ Notable changes to berth. Older releases are documented on the
   no future field silently gains an alias spelling.
 - The endpoint re-bind advice now prescribes the narrow
   `--only identity --force` form (a bare `--force` would also authorize
-  unmanaged-file overwrites in every other step of that run).
+  unmanaged-file overwrites in every other step of that run) — and the
+  engine now enforces that scoping: under `--only`, `--force` reaches the
+  target step alone, while the always-run steps executing ahead of it run
+  unforced. Previously `--only site --force` also handed `--force` to the
+  identity step, which reads it as re-bind authorization — an unrelated
+  forced run could silently re-bind the secret cache's endpoint.
 - The backup retention prune now matches only berth's own artifact names —
   an operator-parked `.gz` in the backup directory is no longer deleted.
 
 ### Fixed
 
+- **A lost id-keyed secret cache no longer reads as fresh state.** A host
+  tombstone pointing at the config's OWN id while
+  `~/.berth/<id>.secrets.json` is missing (deleted, incomplete restore) used
+  to bind a fresh EMPTY envelope, silently disowning every secret the lost
+  cache held — including the console-password ownership marker, without
+  which `break_glass: false` leaves a still-usable berth-set password
+  behind forever. All three reconciliation sites (identity check, identity
+  apply, the cache migration itself) now refuse with advice: restore the
+  file from backup, or settle the console password manually
+  (`passwd -l berth`) and remove the tombstone to rebuild.
+- The apt lock-timeout drop-in
+  (`/etc/apt/apt.conf.d/99-berth-lock-timeout`) now obeys the managed-file
+  drift policy it carries the marker for: a foreign file at that path
+  aborts the run unless `--force`, instead of being clobbered by the
+  always-run preflight on every run (even under `--only`).
+- The accounts step now probes every sudoers drop-in's owner and mode
+  (root:root 0440), not just its content. sudo refuses a drop-in that is
+  not root-owned 0440 wide, so a correct-content grant broken by metadata
+  drift stayed both broken and permanently green; it now heals on the next
+  run.
 - **Restores are order-insensitive.** The `database` step now detects when
   the live `shared/.env` and the local secret cache hold DIFFERENT values for
   the DB password or `APP_KEY` (e.g. an older `.env` restored over a freshly

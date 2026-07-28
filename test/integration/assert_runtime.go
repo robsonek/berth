@@ -22,17 +22,15 @@ import (
 // assertRuntime verifies the deployer-handoff runtime, each invariant on its OWN gate:
 // every site has an FPM socket; queue-enabled sites have a DORMANT worker (supervisor
 // active + all processes STOPPED, never FATAL/BACKOFF); sites without a worker (queue
-// off or the queue: none opt-out) have NO program file; scheduler-enabled sites have
-// a valid managed scheduler cron.
+// off or the queue: none opt-out) have NO program file; daemons are independent of the
+// queue knob (rendered, loaded and sudoers-granted even for queue: none sites, whose
+// worker target must stay denied); scheduler-enabled sites have a valid managed
+// scheduler cron.
 func assertRuntime(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server) {
 	t.Helper()
-	anyQueue := false
-	for _, site := range srv.Sites {
-		if srv.QueueEnabled(site) {
-			anyQueue = true
-		}
-	}
-	if anyQueue {
+	// Daemons alone (a queue-less config) already require supervisord — the
+	// same gate the supervisor pipeline step keys on.
+	if srv.NeedsSupervisor() {
 		assertExitZero(ctx, t, c, "supervisor active", "systemctl is-active supervisor")
 	}
 	for _, site := range srv.Sites {
@@ -55,6 +53,37 @@ func assertRuntime(ctx context.Context, t *testing.T, c *bssh.Client, srv *confi
 			// global sweep removes a stale copy left by an earlier config.
 			assertExitZero(ctx, t, c, "no worker program "+site.Domain,
 				"test ! -e /etc/supervisor/conf.d/"+prog+".conf")
+		}
+
+		// Daemons ride beside the worker on the same knobs but are independent
+		// of queue: each must be rendered, loaded in supervisord, and granted
+		// to the site user — including the queue: none cross-product, where the
+		// worker is absent but the daemons stay.
+		user := srv.SiteUser(site)
+		for _, d := range site.Daemons {
+			dprog := config.SiteDaemonProgram(site.Domain, d.Name)
+			assertExitZero(ctx, t, c, "daemon program conf "+dprog,
+				"test -e /etc/supervisor/conf.d/"+dprog+".conf")
+			// Loaded (known to supervisord), whatever its process state: a
+			// dormant autostart=false daemon reports STOPPED with a non-zero
+			// supervisorctl exit, so only "no such process" / empty output is
+			// a failure here.
+			st, err := c.Run(ctx, "sudo supervisorctl status '"+dprog+":*'", nil)
+			if err != nil {
+				t.Fatalf("%s: supervisorctl status %s: %v", site.Domain, dprog, err)
+			}
+			if strings.TrimSpace(st.Stdout) == "" || strings.Contains(st.Stdout, "no such process") {
+				t.Errorf("%s: daemon %s not loaded in supervisord:\n%s", site.Domain, dprog, st.Stdout)
+			}
+			assertExitZero(ctx, t, c, user+" authorized for daemon "+dprog,
+				fmt.Sprintf("sudo -u %s sudo -n -l /usr/bin/supervisorctl restart '%s:*'", user, dprog))
+		}
+		if len(site.Daemons) > 0 && !srv.QueueEnabled(site) {
+			// The site's own (absent) worker program is the natural NON-granted
+			// target: sudoers must grant exactly the daemon programs, so the
+			// worker spelling has to be denied.
+			assertDenied(ctx, t, c, user+" authorized for the opted-out worker program",
+				fmt.Sprintf("sudo -u %s sudo -n -l /usr/bin/supervisorctl restart '%s:*'", user, prog))
 		}
 
 		if srv.SchedulerEnabled(site) {

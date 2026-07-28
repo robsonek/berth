@@ -196,6 +196,18 @@ func VerifyEnvelope(env *Envelope, host string, port int) error {
 	return nil
 }
 
+// TombstoneWithoutEnvelope renders the refusal for a host tombstone that
+// points at the caller's OWN id while the id-keyed envelope is missing (lost,
+// deleted, restored incompletely). The tombstone proves an id-keyed cache
+// existed, so silently binding a fresh EMPTY one would disown every secret it
+// held — including the console-password ownership marker, without which
+// `break_glass: false` leaves a still-usable berth-set root-equivalent
+// password behind forever. Shared by MigrateCache and the identity step so
+// all three guard sites speak with one voice.
+func TombstoneWithoutEnvelope(id, host string) error {
+	return fmt.Errorf("the tombstone at ~/.berth/%s.secrets.json records a migration to server id %q, but ~/.berth/%s.secrets.json is missing — rebinding fresh would disown every secret that cache held (including the console-password ownership marker); restore ~/.berth/%s.secrets.json from backup, or settle the console password manually (`passwd -l berth` on the host) and remove the tombstone to let berth rebuild the cache", host, id, id, id)
+}
+
 // MigrateCache moves a host-keyed cache to an id-keyed file (atomic rename)
 // and leaves a tombstone at the old path so a stale host-keyed config fails
 // loudly instead of silently regenerating or disowning secrets. It takes BOTH
@@ -229,6 +241,12 @@ func MigrateCache(id, host string, port int) error {
 	// path would then bind an empty cache, orphaning the old id's secrets).
 	if source != nil && source.MigratedTo != "" && source.MigratedTo != id {
 		return fmt.Errorf("the cache for host %s was already migrated to server id %q but this run declares id %q — a renamed id would orphan the existing cache (including the console-password ownership marker); restore `id: %s`, or migrate deliberately by renaming ~/.berth/%s.secrets.json to %s.secrets.json and updating the tombstone", host, source.MigratedTo, id, source.MigratedTo, source.MigratedTo, id)
+	}
+	// A tombstone pointing at OUR id with the id-keyed envelope gone is a lost
+	// cache, not a fresh machine: the `!sourceIsReal` shortcut below would
+	// return nil and let the caller bind an empty envelope over it.
+	if source != nil && source.MigratedTo == id && target == nil {
+		return TombstoneWithoutEnvelope(id, host)
 	}
 	sourceIsReal := source != nil && source.MigratedTo == ""
 	if target != nil && sourceIsReal {

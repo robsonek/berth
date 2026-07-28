@@ -21,6 +21,7 @@ type stepStub struct {
 	applied   *bool
 	checked   *bool
 	onCheck   func()       // invoked at the top of Check when non-nil (e.g. to cancel the run context)
+	onCheckRC func(RunCtx) // like onCheck but observing the RunCtx Check received
 	onApply   func(RunCtx) // invoked inside Apply when non-nil (e.g. to warn or observe the RunCtx)
 	alwaysRun bool
 }
@@ -28,9 +29,12 @@ type stepStub struct {
 func (s *stepStub) Name() string       { return s.name }
 func (s *stepStub) Requires() []string { return s.requires }
 func (s *stepStub) AlwaysRun() bool    { return s.alwaysRun }
-func (s *stepStub) Check(context.Context, RunCtx, *config.Server, bssh.Runner) (CheckResult, error) {
+func (s *stepStub) Check(_ context.Context, rc RunCtx, _ *config.Server, _ bssh.Runner) (CheckResult, error) {
 	if s.onCheck != nil {
 		s.onCheck()
+	}
+	if s.onCheckRC != nil {
+		s.onCheckRC(rc)
 	}
 	if s.checked != nil {
 		*s.checked = true
@@ -409,6 +413,56 @@ func TestEngineFullRunFlag(t *testing.T) {
 	collect(events)
 	if sawOnly == nil || *sawOnly {
 		t.Error("FullRun must be false under --only")
+	}
+}
+
+func TestEngineOnlyScopesForceToTarget(t *testing.T) {
+	// `--only site --force` must hand Force to the TARGET step only: the
+	// always-run steps executing ahead of it (identity, preflight) read Force
+	// as their own authorization (identity: re-bind the cache endpoint), so an
+	// unscoped copy would let an unrelated forced run silently re-bind the
+	// secret cache. Both Check and Apply must see the scoped value.
+	var alwaysCheck, alwaysApply, targetCheck, targetApply []bool
+	always := &stepStub{name: "pre", alwaysRun: true,
+		onCheckRC: func(rc RunCtx) { alwaysCheck = append(alwaysCheck, rc.Force) },
+		onApply:   func(rc RunCtx) { alwaysApply = append(alwaysApply, rc.Force) }}
+	target := &stepStub{name: "site",
+		onCheckRC: func(rc RunCtx) { targetCheck = append(targetCheck, rc.Force) },
+		onApply:   func(rc RunCtx) { targetApply = append(targetApply, rc.Force) }}
+	eng := New(always, target)
+	events, err := eng.Run(context.Background(), &config.Server{}, bssh.NewFakeRunner(), Options{Only: "site", Force: true})
+	if err != nil {
+		t.Fatalf("Run(--only site --force) error = %v", err)
+	}
+	collect(events)
+	for phase, got := range map[string][]bool{"Check": alwaysCheck, "Apply": alwaysApply} {
+		if len(got) != 1 || got[0] {
+			t.Errorf("always-run step %s: Force = %v, want exactly one call with false under --only <other> --force", phase, got)
+		}
+	}
+	for phase, got := range map[string][]bool{"Check": targetCheck, "Apply": targetApply} {
+		if len(got) != 1 || !got[0] {
+			t.Errorf("target step %s: Force = %v, want exactly one call with true", phase, got)
+		}
+	}
+}
+
+func TestEngineFullRunKeepsForceEverywhere(t *testing.T) {
+	// A bare --force (no --only) deliberately authorizes the whole run: every
+	// step, always-run included, keeps Force.
+	var forces []bool
+	see := func(rc RunCtx) { forces = append(forces, rc.Force) }
+	eng := New(
+		&stepStub{name: "pre", alwaysRun: true, onApply: see},
+		&stepStub{name: "site", onApply: see},
+	)
+	events, err := eng.Run(context.Background(), &config.Server{}, bssh.NewFakeRunner(), Options{Force: true})
+	if err != nil {
+		t.Fatalf("Run(--force) error = %v", err)
+	}
+	collect(events)
+	if len(forces) != 2 || !forces[0] || !forces[1] {
+		t.Errorf("full-run Force = %v, want true for every step", forces)
 	}
 }
 

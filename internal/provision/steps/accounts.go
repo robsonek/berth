@@ -225,6 +225,21 @@ func (a accounts) Check(ctx context.Context, rc provision.RunCtx, s *config.Serv
 		if !okSudo {
 			return provision.CheckResult{Satisfied: false, Reason: p + " not up to date", Changes: a.changes()}, nil
 		}
+		// The metadata is part of the sudoers contract, not cosmetics: sudo
+		// refuses a drop-in that is not root-owned 0440 wide, so a correct-
+		// content file with drifted owner/mode is a BROKEN grant that a
+		// content-only probe would bless forever. Apply's write path re-applies
+		// root:root 0440 unconditionally (ssh.WriteFile installs with -o/-g/-m
+		// on every write), so flagging here is all the healing needs.
+		if meta, present, err := statOwnerMode(ctx, r, p); err != nil {
+			return provision.CheckResult{}, err
+		} else if !present || meta != "root:root 440" {
+			return provision.CheckResult{
+				Satisfied: false,
+				Reason:    fmt.Sprintf("%s owner/mode %q, want \"root:root 440\"", p, meta),
+				Changes:   []string{"fix owner/mode of " + p + " (root:root 440)"},
+			}, nil
+		}
 		// authorized_keys carries the managed marker + the expected key.
 		state, err = checkManagedFile(ctx, r, authorizedKeysPath(u), want)
 		if err != nil {
