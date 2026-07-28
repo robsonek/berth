@@ -3,6 +3,17 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Added
+
+- **CI hardening pack** — tests now run on ubuntu, macOS and Windows with
+  `-race -shuffle=on`; an ubuntu `checks` job cross-builds all five release
+  targets, lints the workflows themselves (actionlint) and runs
+  `govulncheck` on every PR; weekly scheduled `Vulnerability scan` and
+  `CodeQL` workflows watch `main` between releases. Tools run via
+  `go run <module>@<pinned-version>` — no new third-party actions.
+
 ## [0.25.0] — 2026-07-28
 
 ### Added
