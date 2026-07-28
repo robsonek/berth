@@ -640,14 +640,24 @@ then reloaded. `--dry-run` previews every planned removal.
 > (not `--only`) and finally remove the old account, its sudoers file and
 > its home once everything serves.
 
+TLS artifacts are swept automatically: the next provision run deletes the
+removed site's Let's Encrypt lineage (`certbot delete`, so the failing
+renewal stops cleanly), its ACME webroot and any self-signed material
+under `/etc/ssl/berth/`. Only lineages berth issued are touched — a
+renewal config whose parameters do not point at berth's ACME webroot
+namespace is left alone, as is any lineage still serving a configured
+domain. Edges worth knowing: a site merely switched to `ssl: false`
+(still in the config) is NOT swept — its certificate keeps renewing
+silently and survives a later flip back; re-adding a REMOVED domain
+re-issues from scratch, so mind the Let's Encrypt rate limit
+(5 certificates per domain set per 168 h) when removing and re-adding a
+site repeatedly; and if certbot itself was uninstalled, the lineage and
+its webroot are kept with a warning until certbot returns or you remove
+the lineage manually.
+
 **Data and access are deliberately kept** — berth never deletes data
 implicitly. Remove manually if you want them gone:
 
-- certificates — **required for Let's Encrypt sites**: `certbot delete
-  --cert-name <domain>`. The retained lineage keeps a webroot renewal job
-  whose ACME challenge now lands on the wrong vhost, so `certbot.timer`
-  fails on every renewal attempt until the lineage is deleted. Self-signed
-  certificates are inert; `rm -r /etc/ssl/berth/<domain>` is optional cleanup.
 - database + DB user: `DROP DATABASE`/`DROP USER` (MariaDB) or
   `dropdb`/`dropuser` (PostgreSQL)
 - the OS account (its home also holds the git deploy key) and its sudoers

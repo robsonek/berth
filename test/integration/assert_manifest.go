@@ -27,16 +27,41 @@ const managedMarkerLine = "# managed by berth"
 // provisioned this host.
 const hostManifestPath = "/var/lib/berth/manifest"
 
+// hostManifestState is a point-in-time snapshot of the host manifest:
+// whether the file exists and its exact bytes. Taken before the provisioning
+// run so a --skip-ssl run can be proven not to have touched it.
+type hostManifestState struct {
+	exists  bool
+	content string
+}
+
+// snapshotHostManifest reads the host manifest's current state; a missing
+// file is a legitimate state (fresh box), not an error.
+func snapshotHostManifest(ctx context.Context, t *testing.T, c *bssh.Client) hostManifestState {
+	t.Helper()
+	res, err := c.Run(ctx, "cat "+sqQuote(hostManifestPath), nil)
+	if err != nil {
+		t.Fatalf("snapshot %s: %v", hostManifestPath, err)
+	}
+	if res.ExitCode != 0 {
+		return hostManifestState{}
+	}
+	return hostManifestState{exists: true, content: res.Stdout}
+}
+
 // assertManifests verifies the two provenance manifests the upgrade machinery
 // writes. The host manifest (expectHost) exists only when the manifest step was
 // registered — steps.Pipeline drops it when --skip-ssl artificially truncated a
 // pipeline that would otherwise carry TLS, so the caller passes the same
 // condition. It must be berth-marked and record exactly this binary's version
 // (the suite imports internal packages, so version.Version IS the binary under
-// test). Every backups-enabled site must additionally have a self-describing
-// root:root 0600 manifest beside its archives whose derivation facts match the
-// loaded config — the offsite restore contract.
-func assertManifests(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server, expectHost bool) {
+// test). When the step is unregistered, the run must have left the host
+// manifest byte-identical to preRun (the caller's before-the-run snapshot):
+// absent stays absent, content stays identical. Every backups-enabled site
+// must additionally have a self-describing root:root 0600 manifest beside its
+// archives whose derivation facts match the loaded config — the offsite
+// restore contract.
+func assertManifests(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server, expectHost bool, preRun hostManifestState) {
 	t.Helper()
 
 	if expectHost {
@@ -51,7 +76,17 @@ func assertManifests(ctx context.Context, t *testing.T, c *bssh.Client, srv *con
 			}
 		}
 	} else {
-		t.Logf("host manifest not asserted: skip-ssl truncated the pipeline, so the manifest step is unregistered")
+		post := snapshotHostManifest(ctx, t, c)
+		switch {
+		case post.exists != preRun.exists:
+			t.Errorf("%s: exists = %v before the run, %v after — a skip-ssl-truncated pipeline must never create or remove the host manifest",
+				hostManifestPath, preRun.exists, post.exists)
+		case post.content != preRun.content:
+			t.Errorf("%s: content changed under --skip-ssl — a truncated pipeline must not attest (before %q, after %q)",
+				hostManifestPath, preRun.content, post.content)
+		default:
+			t.Logf("host manifest untouched under --skip-ssl (exists=%v), as required", post.exists)
+		}
 	}
 
 	for _, site := range srv.Sites {

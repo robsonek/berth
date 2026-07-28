@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -903,6 +904,7 @@ func TestSiteCheckSatisfiedAfterTLSSwap(t *testing.T) {
 	fApply.On("systemctl reload nginx", bssh.Result{})
 	stubFPMApply(s, fApply)
 	// tls.Apply (self-signed) commands:
+	stubNoTLSOrphans(fApply)
 	fApply.On("DEBIAN_FRONTEND=noninteractive apt-get install -y openssl", bssh.Result{})
 	fApply.On("install -d -m 0755 "+shQuote(certDir(site)), bssh.Result{})
 	openssl := fmt.Sprintf("openssl req -x509 -newkey rsa:2048 -nodes -days 825 -keyout %s -out %s -subj %s -addext %s",
@@ -2187,5 +2189,28 @@ func TestRenderFPMPoolLogPathMatchesLogrotateGlob(t *testing.T) {
 	glob := phpLogDir + "/*-fpm.error.log\n"
 	if !strings.Contains(string(lr), glob) {
 		t.Errorf("logrotate template's glob diverged from phpLogDir (%s), missing %q:\n%s", phpLogDir, glob, lr)
+	}
+}
+
+func TestFindDirectories(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("if [ -d '/etc/ssl/berth' ]; then find '/etc/ssl/berth' -mindepth 1 -maxdepth 1 -type d; fi",
+		bssh.Result{Stdout: "/etc/ssl/berth/old.example.com\n/etc/ssl/berth/kept.example.com\n"})
+	got, err := findDirectories(context.Background(), f, "/etc/ssl/berth")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/etc/ssl/berth/old.example.com", "/etc/ssl/berth/kept.example.com"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("findDirectories = %v, want %v", got, want)
+	}
+}
+
+func TestFindDirectoriesErrorsOnFindFailure(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("if [ -d '/etc/ssl/berth' ]; then find '/etc/ssl/berth' -mindepth 1 -maxdepth 1 -type d; fi",
+		bssh.Result{ExitCode: 1, Stderr: "find: permission denied"})
+	if _, err := findDirectories(context.Background(), f, "/etc/ssl/berth"); err == nil {
+		t.Fatal("a failing find must be an error, not an empty result")
 	}
 }

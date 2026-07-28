@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"path"
 	"strings"
 	"time"
 
@@ -21,6 +22,272 @@ const certRenewWindow = 30 * 24 * time.Hour
 // executable in this directory after EACH successful renewal (of any cert), so
 // one managed script covers all present and future certificates on the host.
 const certbotDeployHookPath = "/etc/letsencrypt/renewal-hooks/deploy/berth-nginx-reload"
+
+// tlsLineage is one berth-owned Let's Encrypt lineage slated for the orphan
+// sweep: its certbot cert name plus the berth-webroot DOMAIN names its
+// renewal conf references.
+type tlsLineage struct {
+	name     string
+	webroots []string
+}
+
+// renewalConf is parseRenewalConf's verdict about one lineage. Ownership and
+// protection are deliberately separate: only a berth-shaped conf may be swept
+// (owned), but ANY webroot reference into berth's namespace — nested,
+// trailing-slash or otherwise — still protects the top-level directory it
+// lands in, because sweeping that directory would break the surviving
+// lineage's next renewal. Retention wins every ambiguity: a false keep costs
+// a lingering file, a false delete would destroy a live certificate.
+type renewalConf struct {
+	owned     bool     // berth-issued: webroot authenticator + >=1 webroot value, ALL exactly one clean level under acmeWebrootBase
+	refs      []string // protection roots: first path component under acmeWebrootBase of ANY webroot value (deduped, order of appearance)
+	domains   []string // identifiers the conf serves: [[webroot_map]] keys (deduped, order of appearance)
+	unbounded bool     // some webroot value covers acmeWebrootBase itself: every webroot dir is potentially referenced
+}
+
+// parseRenewalConf classifies a certbot renewal conf. berth issues
+// exclusively via `certbot certonly --webroot -w
+// /var/www/berth-acme/<domain>`, so an owned conf has authenticator = webroot
+// — with NO other authenticator line anywhere; duplicate or contradictory
+// evidence reads as foreign — and every webroot value exactly one level under
+// acmeWebrootBase after path.Clean (so `..`/`.`/trailing-slash spellings can
+// neither smuggle a foreign path into the namespace nor a namespace path out
+// of it). Only the authenticator/webroot_path keys and [[webroot_map]]
+// entries are consulted — a hook line that merely MENTIONS the namespace
+// (renew_hook = ...) must never count as ownership or protection.
+func parseRenewalConf(conf string) renewalConf {
+	var out renewalConf
+	sawWebrootAuth := false // some authenticator line says webroot
+	nonWebrootAuth := false // some authenticator line says anything else
+	inWebrootMap := false
+	sawWebroot := false
+	foreignWebroot := false
+	seenRef := map[string]bool{}
+	seenDomain := map[string]bool{}
+	add := func(v string) {
+		v = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(v), ","))
+		if v == "" {
+			return
+		}
+		sawWebroot = true
+		cleaned := path.Clean(v)
+		if cleaned == acmeWebrootBase {
+			// The namespace root itself: every webroot dir is potentially
+			// referenced, so the caller must not sweep ANY of them.
+			foreignWebroot = true
+			out.unbounded = true
+			return
+		}
+		d, ok := strings.CutPrefix(cleaned, acmeWebrootBase+"/")
+		if !ok {
+			foreignWebroot = true // fully outside the namespace: no protection root
+			return
+		}
+		// path.Clean left no "."/".." components in the absolute path, so the
+		// first component is a real directory name under the namespace.
+		first, rest, _ := strings.Cut(d, "/")
+		if !seenRef[first] {
+			seenRef[first] = true
+			out.refs = append(out.refs, first)
+		}
+		if rest != "" {
+			foreignWebroot = true // nested: not berth-shaped, but the top-level dir IS protected
+		}
+	}
+	for _, line := range strings.Split(conf, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "[[webroot_map]]":
+			inWebrootMap = true
+			continue
+		case strings.HasPrefix(line, "["):
+			inWebrootMap = false
+			continue
+		}
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		switch key = strings.TrimSpace(key); {
+		case inWebrootMap:
+			if key != "" && !seenDomain[key] {
+				seenDomain[key] = true
+				out.domains = append(out.domains, key)
+			}
+			add(val)
+		case key == "authenticator":
+			if strings.TrimSpace(val) == "webroot" {
+				sawWebrootAuth = true
+			} else {
+				nonWebrootAuth = true
+			}
+		case key == "webroot_path":
+			for _, v := range strings.Split(val, ",") {
+				add(v)
+			}
+		}
+	}
+	out.owned = sawWebrootAuth && !nonWebrootAuth && sawWebroot && !foreignWebroot && !out.unbounded
+	return out
+}
+
+const letsencryptRenewalDir = "/etc/letsencrypt/renewal"
+
+// listRenewalConfs inventories certbot's renewal directory the way certbot
+// itself does (a *.conf glob): -H follows a symlinked renewal dir and the
+// listing deliberately has NO -type filter, so symlinked confs are included
+// and any exotic *.conf entry that cat cannot read fails the run loudly —
+// an invisible lineage must never cost a surviving renewal its webroot.
+// Same contract as findRegularFiles otherwise: a missing directory is a
+// quiet empty result, a failing find is a loud error.
+func listRenewalConfs(ctx context.Context, r bssh.Runner) ([]string, error) {
+	cmd := "if [ -d " + shQuote(letsencryptRenewalDir) + " ]; then find -H " +
+		shQuote(letsencryptRenewalDir) + " -mindepth 1 -maxdepth 1 -name " + shQuote("*.conf") + "; fi"
+	res, err := r.Run(ctx, cmd, nil)
+	if err != nil {
+		return nil, err
+	}
+	if res.ExitCode != 0 {
+		return nil, fmt.Errorf("list %s for orphan discovery: find exited %d: %s", letsencryptRenewalDir, res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	var paths []string
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		if p := strings.TrimSpace(line); p != "" {
+			paths = append(paths, p)
+		}
+	}
+	return paths, nil
+}
+
+// certNameBase returns name with certbot's numeric collision suffix stripped
+// (kept.example.com-0001 -> kept.example.com); ok is false when the name
+// carries no such suffix.
+func certNameBase(name string) (base string, ok bool) {
+	i := strings.LastIndexByte(name, '-')
+	if i <= 0 || i == len(name)-1 {
+		return "", false
+	}
+	for _, c := range name[i+1:] {
+		if c < '0' || c > '9' {
+			return "", false
+		}
+	}
+	return name[:i], true
+}
+
+// tlsOrphans holds the TLS artifacts of sites no longer in the config:
+// berth-owned Let's Encrypt lineages plus leftover ACME-webroot and
+// self-signed directory names (domains) in berth's namespaces.
+type tlsOrphans struct {
+	lineages []tlsLineage
+	webroots []string
+	sslDirs  []string
+}
+
+// changes lists the exact sweep actions in Apply's order. Appended to EVERY
+// unsatisfied Check result, so a dry-run can never hide the destructive sweep
+// behind an earlier certificate drift.
+func (o tlsOrphans) changes() []string {
+	var out []string
+	for _, l := range o.lineages {
+		out = append(out, "certbot delete --cert-name "+l.name)
+	}
+	for _, d := range o.webroots {
+		out = append(out, "rm -rf "+acmeWebroot(d))
+	}
+	for _, d := range o.sslDirs {
+		out = append(out, "rm -rf "+selfSignedCertDir(d))
+	}
+	return out
+}
+
+// discoverTLSOrphans finds the TLS artifacts left behind by sites no longer
+// in the config. Every renewal conf is read; parseRenewalConf decides
+// ownership and extracts berth-webroot references. A lineage is swept iff it
+// is berth-owned and NOTHING it provably serves is still desired: not its
+// cert name, not the cert name minus certbot's collision suffix (-0001), not
+// any [[webroot_map]] key, and not any webroot reference. The webroot
+// references of every SURVIVING lineage (configured name, shielded, or
+// foreign-but-referencing) are protected from the directory sweep — a
+// surviving renewal must keep the directory its challenge lands in — and a
+// surviving conf whose webroot value covers the namespace root suppresses
+// the webroot-dir sweep entirely (every dir is potentially referenced).
+// Directory classes are owned by their berth-only namespaces. Retention wins
+// every ambiguity.
+func discoverTLSOrphans(ctx context.Context, r bssh.Runner, s *config.Server) (tlsOrphans, error) {
+	desired := make(map[string]bool, len(s.Sites))
+	for _, site := range s.Sites {
+		desired[site.Domain] = true
+	}
+	var o tlsOrphans
+	protected := map[string]bool{}
+	sweepWebroots := true
+	confs, err := listRenewalConfs(ctx, r)
+	if err != nil {
+		return tlsOrphans{}, err
+	}
+	for _, p := range confs {
+		name := strings.TrimSuffix(strings.TrimPrefix(p, letsencryptRenewalDir+"/"), ".conf")
+		res, err := r.Run(ctx, "cat "+shQuote(p), nil)
+		if err != nil {
+			return tlsOrphans{}, err
+		}
+		if res.ExitCode != 0 {
+			return tlsOrphans{}, fmt.Errorf("read %s for the orphan sweep: cat exited %d: %s", p, res.ExitCode, strings.TrimSpace(res.Stderr))
+		}
+		pc := parseRenewalConf(res.Stdout)
+		shielded := false
+		for _, d := range pc.refs {
+			if desired[d] {
+				shielded = true
+			}
+		}
+		for _, d := range pc.domains {
+			if desired[d] {
+				shielded = true
+			}
+		}
+		if base, ok := certNameBase(name); ok && desired[base] {
+			shielded = true
+		}
+		if pc.owned && !desired[name] && !shielded {
+			o.lineages = append(o.lineages, tlsLineage{name: name, webroots: pc.refs})
+			continue
+		}
+		// The lineage stays (configured name, shielded, or foreign): the
+		// directories it references stay with it. An unbounded reference
+		// makes every webroot dir potentially served, so the whole webroot
+		// sweep is off for this run. (An orphaned lineage can never be
+		// unbounded: unbounded implies not owned, which implies surviving.)
+		for _, d := range pc.refs {
+			protected[d] = true
+		}
+		if pc.unbounded {
+			sweepWebroots = false
+		}
+	}
+	if sweepWebroots {
+		webrootDirs, err := findDirectories(ctx, r, acmeWebrootBase)
+		if err != nil {
+			return tlsOrphans{}, err
+		}
+		for _, d := range webrootDirs {
+			if name := strings.TrimPrefix(d, acmeWebrootBase+"/"); !desired[name] && !protected[name] {
+				o.webroots = append(o.webroots, name)
+			}
+		}
+	}
+	sslDirs, err := findDirectories(ctx, r, selfSignedCertBase)
+	if err != nil {
+		return tlsOrphans{}, err
+	}
+	for _, d := range sslDirs {
+		if name := strings.TrimPrefix(d, selfSignedCertBase+"/"); !desired[name] {
+			o.sslDirs = append(o.sslDirs, name)
+		}
+	}
+	return o, nil
+}
 
 // renderCertbotDeployHook renders the static nginx validate-then-reload hook.
 func renderCertbotDeployHook() ([]byte, error) {
@@ -53,6 +320,14 @@ func (tls) Name() string       { return "tls" }
 func (tls) Requires() []string { return []string{"site"} }
 
 func (tls) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
+	// Orphan discovery runs FIRST and its actions ride along every drift
+	// result below: a dry-run must preview the sweep even when an earlier
+	// certificate drift would otherwise short-circuit the report.
+	orphans, err := discoverTLSOrphans(ctx, r, s)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	orphanChanges := orphans.changes()
 	for _, site := range s.Sites {
 		if !site.SSL {
 			continue
@@ -79,8 +354,12 @@ func (tls) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 			reason = "staging certificate present for " + site.Domain + "; will re-issue against production"
 			changes = []string{"re-issue production certificate for " + site.Domain + " (--force-renewal)", "install 443 server block"}
 		}
-		return provision.CheckResult{Satisfied: false, Reason: reason, Changes: changes}, nil
+		return provision.CheckResult{Satisfied: false, Reason: reason, Changes: append(changes, orphanChanges...)}, nil
 	}
+	// Post-loop tail is ONE accumulator: orphan sweep actions and deploy-hook
+	// drift merge into a single unsatisfied result. An orphan-only early
+	// return would hide hook drift from a dry-run that Apply then converges.
+	var reasons, hookChanges []string
 	// Renewal deploy hook: without it a renewed cert lands on disk while nginx
 	// keeps serving the old one from memory (expired at ~day 90). Same gate as
 	// Apply — anyLetsEncrypt AND certbot installed — so a DNS-skipped box where
@@ -104,25 +383,20 @@ func (tls) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 				return provision.CheckResult{}, err
 			}
 			if !ok {
-				return provision.CheckResult{
-					Satisfied: false,
-					Reason:    "certbot renewal deploy hook missing or out of date",
-					Changes:   []string{"install certbot renewal deploy hook (nginx validate + reload)"},
-				}, nil
-			}
-			// The renewal timer must actually be running, or a cert left
-			// untouched (e.g. a near-expiry production cert under --ssl-staging,
-			// which we deliberately do not reissue) will silently expire.
-			active, err := r.Run(ctx, "systemctl is-active certbot.timer", nil)
-			if err != nil {
-				return provision.CheckResult{}, err
-			}
-			if strings.TrimSpace(active.Stdout) != "active" {
-				return provision.CheckResult{
-					Satisfied: false,
-					Reason:    "certbot.timer is not active; automatic Let's Encrypt renewal is disabled",
-					Changes:   []string{"enable certbot.timer"},
-				}, nil
+				reasons = append(reasons, "certbot renewal deploy hook missing or out of date")
+				hookChanges = append(hookChanges, "install certbot renewal deploy hook (nginx validate + reload)")
+			} else {
+				// The renewal timer must actually be running, or a cert left
+				// untouched (e.g. a near-expiry production cert under --ssl-staging,
+				// which we deliberately do not reissue) will silently expire.
+				active, err := r.Run(ctx, "systemctl is-active certbot.timer", nil)
+				if err != nil {
+					return provision.CheckResult{}, err
+				}
+				if strings.TrimSpace(active.Stdout) != "active" {
+					reasons = append(reasons, "certbot.timer is not active; automatic Let's Encrypt renewal is disabled")
+					hookChanges = append(hookChanges, "enable certbot.timer")
+				}
 			}
 		}
 	} else {
@@ -131,14 +405,22 @@ func (tls) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 			return provision.CheckResult{}, err
 		}
 		if present {
-			return provision.CheckResult{
-				Satisfied: false,
-				Reason:    "certbot deploy hook lingers but no site uses Let's Encrypt",
-				Changes:   []string{"remove certbot renewal deploy hook"},
-			}, nil
+			reasons = append(reasons, "certbot deploy hook lingers but no site uses Let's Encrypt")
+			hookChanges = append(hookChanges, "remove certbot renewal deploy hook")
 		}
 	}
-	return provision.CheckResult{Satisfied: true, Reason: "valid certificates present"}, nil
+	if len(orphanChanges) > 0 {
+		reasons = append([]string{"TLS artifacts linger for sites no longer in the config"}, reasons...)
+	}
+	if len(orphanChanges) > 0 || len(hookChanges) > 0 {
+		return provision.CheckResult{
+			Satisfied: false,
+			Reason:    strings.Join(reasons, "; "),
+			// Apply's order: the sweep runs before hook convergence.
+			Changes: append(orphanChanges, hookChanges...),
+		}, nil
+	}
+	return provision.CheckResult{Satisfied: true, Reason: "TLS state converged"}, nil
 }
 
 func (st tls) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
@@ -187,6 +469,9 @@ func (st tls) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 			return err
 		}
 	}
+	if err := st.sweepOrphans(ctx, rc, s, r); err != nil {
+		return err
+	}
 	// Converge the renewal deploy hook regardless of whether any cert was
 	// (re)issued this run — an already-provisioned LE host must pick it up.
 	if anyLetsEncrypt(s) {
@@ -226,6 +511,63 @@ func (st tls) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 			} else if res.ExitCode != 0 {
 				return fmt.Errorf("remove certbot deploy hook: %s", res.Stderr)
 			}
+		}
+	}
+	return nil
+}
+
+// sweepOrphans removes the TLS artifacts of sites no longer in the config.
+// Order: certbot deletes first (the lineage is the part that actively
+// misbehaves, and it references the webroot), then the ACME webroots, then
+// the self-signed dirs. Lineages go through certbot's own CLI only — never
+// rm inside /etc/letsencrypt. If certbot itself was uninstalled, each orphan
+// lineage is kept together with every webroot it references (warning +
+// unconverged mark) and the rest is still swept; --force is deliberately not
+// consulted — this is plain drift convergence like the site step's P6 sweep.
+func (tls) sweepOrphans(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
+	orphans, err := discoverTLSOrphans(ctx, r, s)
+	if err != nil {
+		return err
+	}
+	keptRefs := map[string]bool{}
+	if len(orphans.lineages) > 0 {
+		installed, err := pkgInstalled(ctx, r, "certbot")
+		if err != nil {
+			return err
+		}
+		for _, l := range orphans.lineages {
+			if !installed {
+				for _, d := range l.webroots {
+					keptRefs[d] = true
+				}
+				rc.Warnf("cannot sweep the orphan Let's Encrypt lineage %s: certbot is not installed; reinstall certbot and re-run, or remove it manually (certbot delete --cert-name %s)", l.name, l.name)
+				rc.MarkUnconverged("tls kept the orphan lineage " + l.name + ": certbot is not installed")
+				continue
+			}
+			res, err := r.Run(ctx, "certbot delete --cert-name "+shQuote(l.name)+" -n", nil)
+			if err != nil {
+				return err
+			}
+			if res.ExitCode != 0 {
+				return fmt.Errorf("certbot delete --cert-name %s: %s", l.name, strings.TrimSpace(res.Stderr))
+			}
+		}
+	}
+	for _, d := range orphans.webroots {
+		if keptRefs[d] {
+			continue // paired with a kept lineage: its renewal conf still points here
+		}
+		if res, err := r.Run(ctx, "rm -rf "+shQuote(acmeWebroot(d)), nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("remove orphan ACME webroot for %s: %s", d, strings.TrimSpace(res.Stderr))
+		}
+	}
+	for _, d := range orphans.sslDirs {
+		if res, err := r.Run(ctx, "rm -rf "+shQuote(selfSignedCertDir(d)), nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("remove orphan self-signed dir for %s: %s", d, strings.TrimSpace(res.Stderr))
 		}
 	}
 	return nil
