@@ -10,6 +10,11 @@ import (
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
 
+// acmeWebrootBase is berth's own namespace for ACME webroots; berth issues
+// Let's Encrypt certificates exclusively via --webroot under it, which is
+// also the ownership fingerprint the TLS orphan sweep keys on.
+const acmeWebrootBase = "/var/www/berth-acme"
+
 // acmeWebroot is the dedicated ACME challenge root for a domain, kept separate
 // from the application's deploy_path (design §6.4). It is owned by root:root:
 // certbot runs as root and creates .well-known/acme-challenge/<token> itself,
@@ -19,7 +24,7 @@ import (
 // arbitrary path — the ancestry gate stops AT the webroot and does not protect
 // its descendants, so the webroot itself must be root-controlled too.
 func acmeWebroot(domain string) string {
-	return "/var/www/berth-acme/" + domain
+	return acmeWebrootBase + "/" + domain
 }
 
 type appDirs struct{}

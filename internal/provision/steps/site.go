@@ -169,11 +169,17 @@ func managedSiteFiles(ctx context.Context, r bssh.Runner, s *config.Server) ([]s
 	return files, nil
 }
 
+// selfSignedCertBase is berth's own namespace for self-signed material; the
+// TLS orphan sweep treats everything under it as berth-owned.
+const selfSignedCertBase = "/etc/ssl/berth"
+
+func selfSignedCertDir(domain string) string { return selfSignedCertBase + "/" + domain }
+
 // certDir is where a site's TLS certificate lives: Let's Encrypt's live dir, or
 // a berth-managed dir for self-signed certs.
 func certDir(site config.Site) string {
 	if site.CertMode() == "selfsigned" {
-		return "/etc/ssl/berth/" + site.Domain
+		return selfSignedCertDir(site.Domain)
 	}
 	return "/etc/letsencrypt/live/" + site.Domain
 }
@@ -414,6 +420,28 @@ func findRegularFiles(ctx context.Context, r bssh.Runner, dir, namePattern strin
 		}
 	}
 	return paths, nil
+}
+
+// findDirectories lists the immediate subdirectories of dir. A missing dir is
+// simply an empty result (mirrors findRegularFiles); a failing find is an
+// error — orphan discovery must never mistake "could not look" for "nothing
+// there".
+func findDirectories(ctx context.Context, r bssh.Runner, dir string) ([]string, error) {
+	cmd := "if [ -d " + shQuote(dir) + " ]; then find " + shQuote(dir) + " -mindepth 1 -maxdepth 1 -type d; fi"
+	res, err := r.Run(ctx, cmd, nil)
+	if err != nil {
+		return nil, err
+	}
+	if res.ExitCode != 0 {
+		return nil, fmt.Errorf("list %s for orphan discovery: find exited %d: %s", dir, res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	var dirs []string
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			dirs = append(dirs, line)
+		}
+	}
+	return dirs, nil
 }
 
 // orphanSiteFiles returns remove-entries for berth-managed vhosts, FPM pools
