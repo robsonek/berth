@@ -22,6 +22,77 @@ const certRenewWindow = 30 * 24 * time.Hour
 // one managed script covers all present and future certificates on the host.
 const certbotDeployHookPath = "/etc/letsencrypt/renewal-hooks/deploy/berth-nginx-reload"
 
+// tlsLineage is one berth-owned Let's Encrypt lineage slated for the orphan
+// sweep: its certbot cert name plus the berth-webroot DOMAIN names its
+// renewal conf references.
+//
+//nolint:unused // consumed by the orphan-sweep discovery, added next on this branch
+type tlsLineage struct {
+	name     string
+	webroots []string
+}
+
+// parseRenewalConf decides whether a certbot renewal conf describes a
+// berth-issued lineage and extracts the berth-webroot domains it references.
+// berth issues exclusively via `certbot certonly --webroot -w
+// /var/www/berth-acme/<domain>`, so a berth conf has authenticator = webroot
+// and every webroot value directly under acmeWebrootBase. Only the
+// authenticator/webroot_path keys and [[webroot_map]] entries are consulted —
+// a hook line that merely MENTIONS the namespace (renew_hook = ...) must
+// never count as ownership. Any webroot value outside the namespace (or
+// nested deeper than one level) makes the lineage foreign; the berth-webroot
+// references are still returned so the caller can protect the directories a
+// surviving lineage points at. Retention wins every ambiguity: a false keep
+// costs a lingering file, a false delete would destroy a live certificate.
+func parseRenewalConf(conf string) (owned bool, webroots []string) {
+	authenticatorWebroot := false
+	inWebrootMap := false
+	sawWebroot := false
+	foreignWebroot := false
+	seen := map[string]bool{}
+	add := func(v string) {
+		v = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(v), ","))
+		if v == "" {
+			return
+		}
+		sawWebroot = true
+		if d, ok := strings.CutPrefix(v, acmeWebrootBase+"/"); ok && d != "" && !strings.Contains(d, "/") {
+			if !seen[d] {
+				seen[d] = true
+				webroots = append(webroots, d)
+			}
+			return
+		}
+		foreignWebroot = true
+	}
+	for _, line := range strings.Split(conf, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "[[webroot_map]]":
+			inWebrootMap = true
+			continue
+		case strings.HasPrefix(line, "["):
+			inWebrootMap = false
+			continue
+		}
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		switch key = strings.TrimSpace(key); {
+		case inWebrootMap:
+			add(val)
+		case key == "authenticator":
+			authenticatorWebroot = strings.TrimSpace(val) == "webroot"
+		case key == "webroot_path":
+			for _, v := range strings.Split(val, ",") {
+				add(v)
+			}
+		}
+	}
+	return authenticatorWebroot && sawWebroot && !foreignWebroot, webroots
+}
+
 // renderCertbotDeployHook renders the static nginx validate-then-reload hook.
 func renderCertbotDeployHook() ([]byte, error) {
 	return templates.Render("certbot_deploy_hook.sh.tmpl", nil)

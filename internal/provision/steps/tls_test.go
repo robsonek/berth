@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -795,5 +796,74 @@ func TestTLSRemovesLingeringHookWhenNoLetsEncryptSites(t *testing.T) {
 	f3.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 0, Stdout: "service apache2 reload\n"})
 	if err := TLS().Apply(context.Background(), provision.RunCtx{}, s, f3); err != nil {
 		t.Fatalf("Apply() must leave a foreign hook alone; got %v", err)
+	}
+}
+
+func TestParseRenewalConf(t *testing.T) {
+	berth := `# renew_before_expiry = 30 days
+version = 2.1.0
+archive_dir = /etc/letsencrypt/archive/old.example.com
+cert = /etc/letsencrypt/live/old.example.com/cert.pem
+
+[renewalparams]
+account = 0123456789abcdef
+authenticator = webroot
+server = https://acme-v02.api.letsencrypt.org/directory
+webroot_path = /var/www/berth-acme/old.example.com,
+[[webroot_map]]
+old.example.com = /var/www/berth-acme/old.example.com
+`
+	foreignHookMention := `[renewalparams]
+authenticator = nginx
+installer = nginx
+renew_hook = /usr/local/bin/sync-cdn /var/www/berth-acme/old.example.com
+`
+	foreignWebroot := `[renewalparams]
+authenticator = webroot
+webroot_path = /var/www/html,
+[[webroot_map]]
+foreign.example = /var/www/html
+`
+	mixedWebroots := `[renewalparams]
+authenticator = webroot
+webroot_path = /var/www/berth-acme/old.example.com, /var/www/html,
+[[webroot_map]]
+old.example.com = /var/www/berth-acme/old.example.com
+foreign.example = /var/www/html
+`
+	multiBerth := `[renewalparams]
+authenticator = webroot
+webroot_path = /var/www/berth-acme/old.example.com, /var/www/berth-acme/kept.example.com,
+[[webroot_map]]
+old.example.com = /var/www/berth-acme/old.example.com
+kept.example.com = /var/www/berth-acme/kept.example.com
+`
+	subdirWebroot := `[renewalparams]
+authenticator = webroot
+webroot_path = /var/www/berth-acme/old.example.com/public,
+`
+	cases := []struct {
+		name     string
+		conf     string
+		owned    bool
+		webroots []string
+	}{
+		{"berth-issued", berth, true, []string{"old.example.com"}},
+		{"foreign-authenticator-hook-mentions-namespace", foreignHookMention, false, nil},
+		{"foreign-webroot", foreignWebroot, false, nil},
+		{"mixed-webroots-foreign-but-refs-collected", mixedWebroots, false, []string{"old.example.com"}},
+		{"multi-berth-webroots", multiBerth, true, []string{"old.example.com", "kept.example.com"}},
+		{"subdir-webroot-is-foreign", subdirWebroot, false, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			owned, webroots := parseRenewalConf(c.conf)
+			if owned != c.owned {
+				t.Errorf("owned = %v, want %v", owned, c.owned)
+			}
+			if !reflect.DeepEqual(webroots, c.webroots) {
+				t.Errorf("webroots = %v, want %v", webroots, c.webroots)
+			}
+		})
 	}
 }
