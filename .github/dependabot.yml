@@ -1,0 +1,11 @@
+# Keeps the SHA-pinned workflow actions from fossilizing: dependabot proposes
+# pin bumps as ordinary PRs, which still go through review and CI before any
+# pin moves. Go module updates are deliberately NOT enabled - the Charm v2
+# dependency set is managed by hand (see the repo guidelines on `go mod tidy`).
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
