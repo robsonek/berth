@@ -72,7 +72,10 @@ func assertEnvIdentityFidelity(ctx context.Context, t *testing.T, c *bssh.Client
 		if exit := envFieldExit(ctx, t, c, envPath, "DB_SOCKET", conn.socket); exit != 0 {
 			fidelityFatal(t, label, "DB_SOCKET", envPath, conn.socket, exit)
 		}
-	} else if exit := envFieldExit(ctx, t, c, envPath, "DB_SOCKET", ""); exit != 3 {
+	} else if exit := envFieldExit(ctx, t, c, envPath, "DB_SOCKET", ""); exit == 2 {
+		t.Fatalf("%s: probing DB_SOCKET in %s failed with an I/O error (exit 2) — the file could not be read, no fidelity verdict",
+			label, envPath)
+	} else if exit != 3 {
 		t.Fatalf("%s: %s carries a DB_SOCKET line but the engine connects over TCP (probe exit %d: %s, want 3 = key absent) — the app connects elsewhere than berth believes",
 			label, envPath, exit, envExitMeaning(exit))
 	}

@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -210,15 +211,15 @@ func assertDeployReload(ctx context.Context, t *testing.T, c *bssh.Client, srv *
 // or pool answered; the per-tenant routing/pool proof lives in
 // assertSiteServesOwnContent.
 func phpPathServes(host, domain string, useHTTPS, insecureTLS bool) bool {
-	scheme := "http"
+	scheme, port := "http", "80"
 	tr := &http.Transport{}
 	if useHTTPS {
-		scheme = "https"
+		scheme, port = "https", "443"
 		tr.TLSClientConfig = &tls.Config{ServerName: domain, InsecureSkipVerify: insecureTLS}
 	}
 	cl := &http.Client{Timeout: 10 * time.Second, Transport: tr,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	req, err := http.NewRequest(http.MethodGet, scheme+"://"+host+"/berth-probe.php", nil)
+	req, err := http.NewRequest(http.MethodGet, scheme+"://"+net.JoinHostPort(host, port)+"/berth-probe.php", nil)
 	if err != nil {
 		return false
 	}
@@ -252,6 +253,21 @@ func siteCertInstalled(ctx context.Context, t *testing.T, c *bssh.Client, site c
 	return res.ExitCode == 0
 }
 
+// insecureHTTPSProbes is the single trust decision for every HTTPS probe in
+// the suite: CA verification runs only when it can actually succeed against
+// a publicly trusted chain. Self-signed certs are untrusted by design;
+// without the explicit real-DNS opt-in (BERTH_TEST_SKIP_SSL=false) a public
+// chain has no DNS guarantee to validate against; and a
+// BERTH_TEST_SSL_STAGING=true run may hold certificates from the Let's
+// Encrypt staging CA, which no client trusts. The staging relaxation is
+// deliberately uniform: a staging-flagged run may have PRESERVED an earlier
+// production certificate (the tls step never replaces a valid one), and the
+// suite does not classify lineages to tell them apart — full CA verification
+// requires an unflagged BERTH_TEST_SKIP_SSL=false run.
+func insecureHTTPSProbes(selfSigned, sslExplicit, sslStaging bool) bool {
+	return selfSigned || !sslExplicit || sslStaging
+}
+
 // siteHTTPSProbe reports whether a site's tenant probe must run over HTTPS, and
 // whether certificate verification must be skipped. Eligibility is decided from
 // the ACTUAL on-host cert state, never from how this run was configured: the
@@ -259,18 +275,16 @@ func siteCertInstalled(ctx context.Context, t *testing.T, c *bssh.Client, site c
 // serves HTTPS and 301s all HTTP — even on a later BERTH_TEST_SKIP_SSL=true
 // re-run — while a cert-less site (e.g. Let's Encrypt whose issuance was
 // skipped without DNS) serves the HTTP-only vhost. CA verification is applied
-// only on a real-DNS Let's Encrypt run (BERTH_TEST_SKIP_SSL=false): self-signed
-// certs are untrusted by design, and without that explicit opt-in a public CA
-// chain has no DNS guarantee to validate against.
+// only on a real-DNS Let's Encrypt run (BERTH_TEST_SKIP_SSL=false) — see
+// insecureHTTPSProbes for the full trust decision, including the staging-CA
+// relaxation.
 func siteHTTPSProbe(ctx context.Context, t *testing.T, c *bssh.Client, site config.Site, sslExplicit bool) (useHTTPS, insecureTLS bool) {
 	t.Helper()
 	if !site.SSL || !siteCertInstalled(ctx, t, c, site) {
 		return false, false
 	}
-	if site.CertMode() == "selfsigned" || !sslExplicit {
-		return true, true
-	}
-	return true, false
+	return true, insecureHTTPSProbes(site.CertMode() == "selfsigned", sslExplicit,
+		os.Getenv("BERTH_TEST_SSL_STAGING") == "true")
 }
 
 // shQuote single-quotes s for a POSIX shell (mirrors the unexported steps.shQuote).

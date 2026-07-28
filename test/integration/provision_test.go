@@ -76,13 +76,14 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	// a site is probed over HTTPS at all is decided per site from the actual
 	// on-host cert state — see siteHTTPSProbe.
 	sslExplicit := sslEnv == "false"
+	sslStaging := os.Getenv("BERTH_TEST_SSL_STAGING") == "true"
 
 	// Run the full pipeline.
 	red := secret.NewRedactor()
 	eng := provision.New(steps.Pipeline(srv, red, skipSSL)...)
 	events, err := eng.Run(ctx, srv, client, provision.Options{
 		Force:      os.Getenv("BERTH_TEST_FORCE") == "true",
-		SSLStaging: os.Getenv("BERTH_TEST_SSL_STAGING") == "true",
+		SSLStaging: sslStaging,
 		Redact:     red,
 	})
 	if err != nil {
@@ -119,7 +120,8 @@ func TestProvisionFreshDebian13(t *testing.T) {
 
 	// When TLS was actually provisioned, the site must answer over HTTPS too.
 	if !skipSSL && anySiteSSL(srv) {
-		assertHTTPServes(t, "https://"+srv.Host+"/", anySiteSelfSigned(srv))
+		assertHTTPServes(t, "https://"+net.JoinHostPort(srv.Host, "443")+"/",
+			insecureHTTPSProbes(anySiteSelfSigned(srv), sslExplicit, sslStaging))
 	}
 
 	// Self-signed certs are asserted directly on disk (no public CA to validate).

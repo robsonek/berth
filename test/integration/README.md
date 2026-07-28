@@ -91,8 +91,28 @@ either pin it via `ssh.fingerprint` in the config, or add it to your
 ## Running
 
 ```bash
-BERTH_TEST_SERVER=servers/smoke.yml go test -tags integration -v ./test/integration/...
+# BERTH_TEST_SERVER must be an ABSOLUTE path: `go test` runs each test with
+# the package directory as its working directory, so a repo-relative path
+# would resolve under test/integration/ and the test fails to load the config.
+BERTH_TEST_SERVER="$PWD/servers/smoke.yml" go test -tags integration -v ./test/integration/...
 ```
+
+Optional knobs: `BERTH_TEST_SKIP_SSL=false` exercises TLS end-to-end (needs
+real public DNS pointing at the host), and `BERTH_TEST_SSL_STAGING=true`
+issues from the Let's Encrypt staging CA (use it for repeated runs — the
+production CA rate-limits to 5 certificates per domain set per 168 h). The
+suite skips CA verification on staging-flagged runs: a staging certificate
+is untrusted by design, and such a run may equally have preserved an
+earlier production certificate (berth never replaces a valid one), which
+the suite deliberately does not try to tell apart. Full CA verification
+happens only on an unflagged `BERTH_TEST_SKIP_SSL=false` run.
 
 Tear the host down afterwards (`incus delete -f berth-smoke`, or destroy the
 VPS). Re-running against the same host is safe: every step is idempotent.
+
+One asymmetry to know about: a re-run with `BERTH_TEST_SKIP_SSL=true`
+against a host that ALREADY has certificates from an earlier TLS run keeps
+serving HTTPS — the cert-aware `site` step never reverts a vhost to HTTP.
+The HTTP-side probes then see the vhost's 301 redirect instead of the
+tenant marker, so a failure reported as broken tenant routing on such a
+re-run usually just means "this host has certs; drop the skip flag".

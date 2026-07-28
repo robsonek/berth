@@ -81,3 +81,24 @@ func TestSupervisorAllStopped(t *testing.T) {
 		t.Error("no processes must not count as dormant")
 	}
 }
+
+func TestInsecureHTTPSProbes(t *testing.T) {
+	cases := []struct {
+		name                             string
+		selfSigned, sslExplicit, staging bool
+		want                             bool
+	}{
+		{"le-real-dns-production-verifies", false, true, false, false},
+		{"le-real-dns-staging-skips", false, true, true, true},
+		{"selfsigned-always-untrusted", true, true, false, true},
+		{"no-real-dns-opt-in-skips", false, false, false, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := insecureHTTPSProbes(c.selfSigned, c.sslExplicit, c.staging); got != c.want {
+				t.Errorf("insecureHTTPSProbes(%v, %v, %v) = %v, want %v",
+					c.selfSigned, c.sslExplicit, c.staging, got, c.want)
+			}
+		})
+	}
+}
