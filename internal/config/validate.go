@@ -511,11 +511,11 @@ func (t Tuning) validate() error {
 			return err
 		}
 	}
-	if t.PHPMaxExecutionTime > phpMaxExecutionCeiling {
-		return fmt.Errorf("tuning.php_max_execution_time %d exceeds the %d s cap (long-running work belongs in queue workers)", t.PHPMaxExecutionTime, phpMaxExecutionCeiling)
+	if t.PHPMaxExecutionTime < 0 || t.PHPMaxExecutionTime > phpMaxExecutionCeiling {
+		return fmt.Errorf("tuning.php_max_execution_time %d out of range (0-%d s; 0 = default, long-running work belongs in queue workers)", t.PHPMaxExecutionTime, phpMaxExecutionCeiling)
 	}
-	if t.PHPMaxInputVars > phpMaxInputVarsCeiling {
-		return fmt.Errorf("tuning.php_max_input_vars %d exceeds %d", t.PHPMaxInputVars, phpMaxInputVarsCeiling)
+	if t.PHPMaxInputVars < 0 || t.PHPMaxInputVars > phpMaxInputVarsCeiling {
+		return fmt.Errorf("tuning.php_max_input_vars %d out of range (0-%d; 0 = default)", t.PHPMaxInputVars, phpMaxInputVarsCeiling)
 	}
 	if t.PHPFPMMaxChildren != 0 && (t.PHPFPMMaxChildren < 4 || t.PHPFPMMaxChildren > 10000) {
 		return fmt.Errorf("tuning.php_fpm_max_children %d out of range (4-10000; the static pm.max_spare_servers = 4 must not exceed it)", t.PHPFPMMaxChildren)

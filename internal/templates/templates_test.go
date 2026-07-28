@@ -275,6 +275,7 @@ func TestRenderSysctlBerthGolden(t *testing.T) {
 func TestRenderBackupScriptGolden(t *testing.T) {
 	checkGolden(t, "backup.sh.tmpl", "backup_sh.golden", struct {
 		Pool, DumpCommand, DBName, DeployPath, BackupDir, LogFile, LockFile string
+		BerthVersion, Domain, Engine, DBUser, SiteUser                      string
 		RetentionDays                                                       int
 	}{
 		Pool:          "app_example_com",
@@ -284,6 +285,11 @@ func TestRenderBackupScriptGolden(t *testing.T) {
 		BackupDir:     "/var/backups/berth/app_example_com",
 		LogFile:       "/var/log/berth/backup-app_example_com.log",
 		LockFile:      "/var/backups/berth/app_example_com/.lock",
+		BerthVersion:  "v9.9.9",
+		Domain:        "app.example.com",
+		Engine:        "mariadb",
+		DBUser:        "myapp",
+		SiteUser:      "b_appexamplecom_dd46c94b",
 		RetentionDays: 7,
 	})
 }

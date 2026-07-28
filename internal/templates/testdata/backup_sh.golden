@@ -7,7 +7,8 @@ flock -n 9 || { echo "[$(date -u +%FT%TZ)] berth backup app_example_com: skipped
 ts="$(date -u +%Y%m%dT%H%M%SZ)"
 db_tmp=""
 files_tmp=""
-trap 'rm -f -- "$db_tmp" "$files_tmp"' EXIT
+meta_tmp=""
+trap 'rm -f -- "$db_tmp" "$files_tmp" "$meta_tmp"' EXIT
 find "/var/backups/berth/app_example_com" -maxdepth 1 -type f -name '.tmp-*' -mmin +1440 -delete
 echo "[$(date -u +%FT%TZ)] berth backup app_example_com: start"
 db_tmp="$(mktemp "/var/backups/berth/app_example_com/.tmp-XXXXXXXX")"
@@ -18,5 +19,14 @@ files_tmp="$(mktemp "/var/backups/berth/app_example_com/.tmp-XXXXXXXX")"
 tar --exclude='shared/tmp' -czf "$files_tmp" -C "/home/deploy/myapp" shared || [ $? -eq 1 ]
 chmod 0600 "$files_tmp"
 mv "$files_tmp" "/var/backups/berth/app_example_com/app_example_com-files-$ts.tar.gz"
-find "/var/backups/berth/app_example_com" -maxdepth 1 -type f -name '*.gz' -mtime +7 -delete
+meta_tmp="$(mktemp "/var/backups/berth/app_example_com/.tmp-XXXXXXXX")"
+{
+  printf 'BERTH_VERSION=%s\n' 'v9.9.9'
+  printf 'DOMAIN=%s\nPOOL=%s\nENGINE=%s\n' 'app.example.com' 'app_example_com' 'mariadb'
+  printf 'DB_NAME=%s\nDB_USER=%s\nSITE_USER=%s\nDEPLOY_PATH=%s\n' 'myapp' 'myapp' 'b_appexamplecom_dd46c94b' '/home/deploy/myapp'
+  printf 'TIMESTAMP=%s\n' "$ts"
+} > "$meta_tmp"
+chmod 0600 "$meta_tmp"
+mv "$meta_tmp" "/var/backups/berth/app_example_com/app_example_com-meta-$ts.manifest"
+find "/var/backups/berth/app_example_com" -maxdepth 1 -type f \( -name 'myapp-*.sql.gz' -o -name 'app_example_com-files-*.tar.gz' -o -name 'app_example_com-meta-*.manifest' \) -mtime +7 -delete
 echo "[$(date -u +%FT%TZ)] berth backup app_example_com: done"

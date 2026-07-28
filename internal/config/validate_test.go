@@ -428,6 +428,20 @@ func TestValidateRejectsNegativeKnob(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsNegativePHPTuning(t *testing.T) {
+	s := validQueueServer()
+	s.Tuning = Tuning{PHPMaxExecutionTime: -5}
+	if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "php_max_execution_time") {
+		t.Errorf("negative php_max_execution_time must be rejected; got %v", err)
+	}
+
+	s = validQueueServer()
+	s.Tuning = Tuning{PHPMaxInputVars: -1}
+	if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "php_max_input_vars") {
+		t.Errorf("negative php_max_input_vars must be rejected; got %v", err)
+	}
+}
+
 func TestValidateRejectsBadDaemonName(t *testing.T) {
 	s := validQueueServer()
 	s.Sites[0].Daemons = []Daemon{{Name: "Bad Name", Command: "php artisan x"}}
