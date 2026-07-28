@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -25,6 +26,9 @@ const overwriteSeedEnv = "APP_ENV=production\n" +
 // where the test can look for secret-bearing survivors. Returns the exit code.
 func runOverwrite(t *testing.T, tmpDir, envPath, stdin string) int {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell required")
+	}
 	cmd := exec.Command("/bin/sh", "-c", envOverwriteScript(envPath))
 	cmd.Stdin = strings.NewReader(stdin)
 	cmd.Env = append(os.Environ(), "TMPDIR="+tmpDir)

@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -117,7 +118,8 @@ func TestUnknownHostTOFUConfirmsAndPins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("known_hosts not created: %v", err)
 	}
-	if fi.Mode().Perm() != 0o600 {
+	// The mode check is Unix-only; Windows reports 0666 for writable files.
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Errorf("known_hosts mode = %v, want 0600", fi.Mode().Perm())
 	}
 	cb2 := HostKeyChecker(HostKeyPolicy{KnownHosts: kh})

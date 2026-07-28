@@ -45,7 +45,9 @@ func TestSaveEnvelopeAndLoadCacheRoundTrip(t *testing.T) {
 	if err != nil || got["DB_PASSWORD"] != "x" {
 		t.Fatalf("round-trip failed: %v %v", got, err)
 	}
-	if fi, _ := os.Stat(filepath.Join(berth, "srv.secrets.json")); fi == nil || fi.Mode().Perm() != 0o600 {
+	// The 0600 half is Unix-only; Windows reports 0666 for writable files.
+	fi, _ := os.Stat(filepath.Join(berth, "srv.secrets.json"))
+	if fi == nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600) {
 		t.Errorf("cache must be written under $HOME/.berth at mode 0600")
 	}
 }
@@ -92,6 +94,9 @@ func TestLoadCacheNullFailsLoud(t *testing.T) {
 }
 
 func TestSaveEnvelopeTightensPermissiveModes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits not applicable")
+	}
 	berth := cacheHome(t)
 	if err := os.MkdirAll(berth, 0o755); err != nil {
 		t.Fatal(err)
@@ -114,6 +119,9 @@ func TestSaveEnvelopeTightensPermissiveModes(t *testing.T) {
 }
 
 func TestLockCacheTightensDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits not applicable")
+	}
 	berth := cacheHome(t)
 	if err := os.MkdirAll(berth, 0o755); err != nil { // pre-existing permissive dir
 		t.Fatal(err)

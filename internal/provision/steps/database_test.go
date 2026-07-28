@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -674,6 +675,9 @@ func TestDatabaseCheckRefusesCorruptCacheWhenPackageMissing(t *testing.T) {
 // echo back what we assume, so these tests pin the ACTUAL shell semantics.
 func shellExit(t *testing.T, script, stdin string) int {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell required")
+	}
 	cmd := exec.Command("/bin/sh", "-c", script)
 	cmd.Stdin = strings.NewReader(stdin)
 	err := cmd.Run()
