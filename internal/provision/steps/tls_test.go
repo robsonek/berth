@@ -62,6 +62,7 @@ func certbotStagingCertsOutput(domain string, expiry time.Time) string {
 func TestTLSCheckSatisfiedWhenValidCertPresent(t *testing.T) {
 	s := tlsServer()
 	f := bssh.NewFakeRunner()
+	stubNoTLSOrphans(f)
 	f.On("certbot certificates", bssh.Result{
 		ExitCode: 0,
 		Stdout:   certbotCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour)),
@@ -81,6 +82,7 @@ func TestTLSCheckSatisfiedWhenValidCertPresent(t *testing.T) {
 func TestTLSCheckUnsatisfiedWhenNoCert(t *testing.T) {
 	s := tlsServer()
 	f := bssh.NewFakeRunner()
+	stubNoTLSOrphans(f)
 	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: "No certificates found.\n"})
 	cr, err := TLS().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
@@ -94,6 +96,7 @@ func TestTLSCheckUnsatisfiedWhenNoCert(t *testing.T) {
 func TestTLSCheckUnsatisfiedWhenNearExpiry(t *testing.T) {
 	s := tlsServer()
 	f := bssh.NewFakeRunner()
+	stubNoTLSOrphans(f)
 	f.On("certbot certificates", bssh.Result{
 		ExitCode: 0,
 		Stdout:   certbotCertsOutput(s.Sites[0].Domain, time.Now().Add(5*24*time.Hour)),
@@ -303,6 +306,7 @@ func TestParseCertStatusRejectsExactNameWithoutSAN(t *testing.T) {
 func TestTLSCheckReplacesStagingCertOnProductionRun(t *testing.T) {
 	s := tlsServer()
 	f := bssh.NewFakeRunner()
+	stubNoTLSOrphans(f)
 	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: certbotStagingCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour))})
 	cr, err := TLS().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
@@ -319,6 +323,7 @@ func TestTLSCheckReplacesStagingCertOnProductionRun(t *testing.T) {
 func TestTLSCheckAcceptsStagingCertUnderStagingRun(t *testing.T) {
 	s := tlsServer()
 	f := bssh.NewFakeRunner()
+	stubNoTLSOrphans(f)
 	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: certbotStagingCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour))})
 	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	hookStub(t, f)
@@ -554,6 +559,7 @@ func TestTLSSelfSignedCertValidUsesOpenssl(t *testing.T) {
 	s.Sites[0].SSLMode = "selfsigned"
 	site := s.Sites[0]
 	f := bssh.NewFakeRunner()
+	stubNoTLSOrphans(f)
 	f.On("test -e "+shQuote(certFullchainPath(site)), bssh.Result{ExitCode: 0})
 	f.On(fmt.Sprintf("openssl x509 -checkend %d -noout -in %s", int(certRenewWindow.Seconds()), shQuote(certFullchainPath(site))), bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(certbotDeployHookPath), bssh.Result{ExitCode: 1}) // no lingering hook
@@ -579,6 +585,7 @@ func hookStub(t *testing.T, f *bssh.FakeRunner) {
 func TestTLSCheckUnsatisfiedWhenDeployHookMissing(t *testing.T) {
 	s := tlsServer()
 	f := bssh.NewFakeRunner()
+	stubNoTLSOrphans(f)
 	f.On("certbot certificates", bssh.Result{
 		ExitCode: 0,
 		Stdout:   certbotCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour)),
@@ -598,6 +605,7 @@ func TestTLSCheckAbortsOnForeignDeployHook(t *testing.T) {
 	s := tlsServer()
 	stubs := func() *bssh.FakeRunner {
 		f := bssh.NewFakeRunner()
+		stubNoTLSOrphans(f)
 		f.On("certbot certificates", bssh.Result{
 			ExitCode: 0,
 			Stdout:   certbotCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour)),
@@ -660,6 +668,7 @@ func TestTLSApplyWritesDeployHook(t *testing.T) {
 func TestTLSCheckUnsatisfiedWhenCertbotTimerInactive(t *testing.T) {
 	s := tlsServer()
 	f := bssh.NewFakeRunner()
+	stubNoTLSOrphans(f)
 	// A valid production cert exists (per-site loop short-circuits)...
 	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: certbotCertsOutput(s.Sites[0].Domain, time.Now().Add(60*24*time.Hour))})
 	f.On("dpkg -s certbot", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
@@ -762,6 +771,7 @@ func TestTLSRemovesLingeringHookWhenNoLetsEncryptSites(t *testing.T) {
 
 	// Check: a lingering berth-managed hook with no LE site is drift.
 	f := bssh.NewFakeRunner()
+	stubNoTLSOrphans(f)
 	certStubs(f)
 	f.On("cat "+shQuote(certbotDeployHookPath), lingering)
 	cr, err := TLS().Check(context.Background(), provision.RunCtx{}, s, f)
@@ -865,5 +875,199 @@ webroot_path = /var/www/berth-acme/old.example.com/public,
 				t.Errorf("webroots = %v, want %v", webroots, c.webroots)
 			}
 		})
+	}
+}
+
+// stubNoTLSOrphans satisfies the orphan-sweep discovery probes with empty
+// results — "no TLS leftovers on this host". Discovery runs FIRST in Check
+// and again in Apply, so every tls test needs these.
+func stubNoTLSOrphans(f *bssh.FakeRunner) {
+	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find '/etc/letsencrypt/renewal' -maxdepth 1 -type f -name '*.conf'; fi", bssh.Result{})
+	f.On("if [ -d '/var/www/berth-acme' ]; then find '/var/www/berth-acme' -mindepth 1 -maxdepth 1 -type d; fi", bssh.Result{})
+	f.On("if [ -d '/etc/ssl/berth' ]; then find '/etc/ssl/berth' -mindepth 1 -maxdepth 1 -type d; fi", bssh.Result{})
+}
+
+// tlsNoSSLServer is a config whose only site does not use SSL — the tls step
+// still runs (always registered) and owns only sweep + hook drift-removal.
+func tlsNoSSLServer() *config.Server {
+	return &config.Server{
+		Host: "203.0.113.10",
+		PHP:  config.PHP{Version: "8.4", Source: "auto"},
+		Sites: []config.Site{{
+			Domain:     "kept.example.com",
+			DeployPath: "/var/www/kept",
+		}},
+	}
+}
+
+// berthRenewalConf renders a minimal berth-shaped renewal conf whose webroot
+// references are the given domains.
+func berthRenewalConf(domains ...string) string {
+	b := "[renewalparams]\nauthenticator = webroot\nwebroot_path = "
+	for i, d := range domains {
+		if i > 0 {
+			b += ", "
+		}
+		b += "/var/www/berth-acme/" + d
+	}
+	b += ",\n[[webroot_map]]\n"
+	for _, d := range domains {
+		b += d + " = /var/www/berth-acme/" + d + "\n"
+	}
+	return b
+}
+
+func TestTLSCheckFlagsOrphanTLSArtifacts(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find '/etc/letsencrypt/renewal' -maxdepth 1 -type f -name '*.conf'; fi",
+		bssh.Result{Stdout: "/etc/letsencrypt/renewal/old.example.com.conf\n"})
+	f.On("cat '/etc/letsencrypt/renewal/old.example.com.conf'",
+		bssh.Result{Stdout: berthRenewalConf("old.example.com")})
+	f.On("if [ -d '/var/www/berth-acme' ]; then find '/var/www/berth-acme' -mindepth 1 -maxdepth 1 -type d; fi",
+		bssh.Result{Stdout: "/var/www/berth-acme/old.example.com\n/var/www/berth-acme/kept.example.com\n"})
+	f.On("if [ -d '/etc/ssl/berth' ]; then find '/etc/ssl/berth' -mindepth 1 -maxdepth 1 -type d; fi",
+		bssh.Result{Stdout: "/etc/ssl/berth/old.example.com\n"})
+
+	res, err := TLS().Check(context.Background(), provision.RunCtx{}, tlsNoSSLServer(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Satisfied {
+		t.Fatal("orphan TLS artifacts must be unsatisfied drift")
+	}
+	want := []string{
+		"certbot delete --cert-name old.example.com",
+		"rm -rf /var/www/berth-acme/old.example.com",
+		"rm -rf /etc/ssl/berth/old.example.com",
+	}
+	if !reflect.DeepEqual(res.Changes, want) {
+		t.Errorf("Changes = %v, want %v", res.Changes, want)
+	}
+	if !strings.Contains(res.Reason, "no longer in the config") {
+		t.Errorf("Reason should explain the orphan drift; got %q", res.Reason)
+	}
+}
+
+func TestTLSCheckIgnoresForeignLineage(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find '/etc/letsencrypt/renewal' -maxdepth 1 -type f -name '*.conf'; fi",
+		bssh.Result{Stdout: "/etc/letsencrypt/renewal/foreign.example.conf\n"})
+	// Foreign lineage whose renew_hook merely MENTIONS berth's namespace: the
+	// parser must not read that as ownership.
+	f.On("cat '/etc/letsencrypt/renewal/foreign.example.conf'",
+		bssh.Result{Stdout: "[renewalparams]\nauthenticator = nginx\nrenew_hook = /usr/local/bin/sync-cdn /var/www/berth-acme/old.example.com\n"})
+	f.On("if [ -d '/var/www/berth-acme' ]; then find '/var/www/berth-acme' -mindepth 1 -maxdepth 1 -type d; fi", bssh.Result{})
+	f.On("if [ -d '/etc/ssl/berth' ]; then find '/etc/ssl/berth' -mindepth 1 -maxdepth 1 -type d; fi", bssh.Result{})
+	f.On("cat '/etc/letsencrypt/renewal-hooks/deploy/berth-nginx-reload'", bssh.Result{ExitCode: 1})
+
+	res, err := TLS().Check(context.Background(), provision.RunCtx{}, tlsNoSSLServer(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Satisfied {
+		t.Fatalf("a foreign lineage must be invisible to the sweep; got unsatisfied: %s %v", res.Reason, res.Changes)
+	}
+}
+
+func TestTLSCheckShieldedLineageProtectsItsWebroots(t *testing.T) {
+	// A suffixed lineage (certbot's -0001) referencing BOTH a configured and a
+	// removed domain survives (shield), and BOTH its webroot dirs survive with
+	// it — deleting old.example.com's webroot would break the surviving
+	// lineage's next renewal. Only the self-signed dir of the removed domain
+	// is genuinely orphaned here.
+	f := bssh.NewFakeRunner()
+	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find '/etc/letsencrypt/renewal' -maxdepth 1 -type f -name '*.conf'; fi",
+		bssh.Result{Stdout: "/etc/letsencrypt/renewal/old.example.com-0001.conf\n"})
+	f.On("cat '/etc/letsencrypt/renewal/old.example.com-0001.conf'",
+		bssh.Result{Stdout: berthRenewalConf("old.example.com", "kept.example.com")})
+	f.On("if [ -d '/var/www/berth-acme' ]; then find '/var/www/berth-acme' -mindepth 1 -maxdepth 1 -type d; fi",
+		bssh.Result{Stdout: "/var/www/berth-acme/old.example.com\n/var/www/berth-acme/kept.example.com\n"})
+	f.On("if [ -d '/etc/ssl/berth' ]; then find '/etc/ssl/berth' -mindepth 1 -maxdepth 1 -type d; fi",
+		bssh.Result{Stdout: "/etc/ssl/berth/old.example.com\n"})
+
+	res, err := TLS().Check(context.Background(), provision.RunCtx{}, tlsNoSSLServer(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Satisfied {
+		t.Fatal("the removed domain's self-signed dir is still orphaned drift")
+	}
+	want := []string{"rm -rf /etc/ssl/berth/old.example.com"}
+	if !reflect.DeepEqual(res.Changes, want) {
+		t.Errorf("Changes = %v, want %v (no certbot delete, no webroot removal)", res.Changes, want)
+	}
+}
+
+func TestTLSCheckErrorsWhenLineageConfUnreadable(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find '/etc/letsencrypt/renewal' -maxdepth 1 -type f -name '*.conf'; fi",
+		bssh.Result{Stdout: "/etc/letsencrypt/renewal/old.example.com.conf\n"})
+	f.On("cat '/etc/letsencrypt/renewal/old.example.com.conf'",
+		bssh.Result{ExitCode: 2, Stderr: "cat: I/O error"})
+	// Deliberately stub everything a WRONG implementation (treating the read
+	// failure as "foreign" and carrying on) would hit next — the test must
+	// fail on the assertion below, not on an unstubbed command.
+	f.On("if [ -d '/var/www/berth-acme' ]; then find '/var/www/berth-acme' -mindepth 1 -maxdepth 1 -type d; fi", bssh.Result{})
+	f.On("if [ -d '/etc/ssl/berth' ]; then find '/etc/ssl/berth' -mindepth 1 -maxdepth 1 -type d; fi", bssh.Result{})
+	f.On("cat '/etc/letsencrypt/renewal-hooks/deploy/berth-nginx-reload'", bssh.Result{ExitCode: 1})
+
+	_, err := TLS().Check(context.Background(), provision.RunCtx{}, tlsNoSSLServer(), f)
+	if err == nil || !strings.Contains(err.Error(), "read /etc/letsencrypt/renewal/old.example.com.conf") {
+		t.Fatalf("an unreadable renewal conf must be a loud error naming the file, never 'foreign' or 'orphan'; got %v", err)
+	}
+}
+
+func TestTLSCheckAppendsOrphanChangesToCertDrift(t *testing.T) {
+	// Dry-run completeness: a cert-drift early return must still preview the
+	// sweep, or --dry-run hides destructive removals a real run performs.
+	s := tlsServer() // one Let's Encrypt site, app.example.com
+	f := bssh.NewFakeRunner()
+	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find '/etc/letsencrypt/renewal' -maxdepth 1 -type f -name '*.conf'; fi",
+		bssh.Result{Stdout: "/etc/letsencrypt/renewal/old.example.com.conf\n"})
+	f.On("cat '/etc/letsencrypt/renewal/old.example.com.conf'",
+		bssh.Result{Stdout: berthRenewalConf("old.example.com")})
+	f.On("if [ -d '/var/www/berth-acme' ]; then find '/var/www/berth-acme' -mindepth 1 -maxdepth 1 -type d; fi",
+		bssh.Result{Stdout: "/var/www/berth-acme/old.example.com\n"})
+	f.On("if [ -d '/etc/ssl/berth' ]; then find '/etc/ssl/berth' -mindepth 1 -maxdepth 1 -type d; fi", bssh.Result{})
+	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: "No certificates found.\n"})
+
+	res, err := TLS().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Satisfied {
+		t.Fatal("missing cert must stay unsatisfied")
+	}
+	joined := strings.Join(res.Changes, "\n")
+	if !strings.Contains(joined, "issue letsencrypt certificate for app.example.com") {
+		t.Errorf("cert-drift changes lost: %v", res.Changes)
+	}
+	for _, want := range []string{
+		"certbot delete --cert-name old.example.com",
+		"rm -rf /var/www/berth-acme/old.example.com",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("orphan action %q must be appended to the cert-drift changes; got %v", want, res.Changes)
+		}
+	}
+}
+
+func TestTLSCheckNoSSLCleanHostConvergedReason(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	stubNoTLSOrphans(f)
+	f.On("cat '/etc/letsencrypt/renewal-hooks/deploy/berth-nginx-reload'", bssh.Result{ExitCode: 1})
+
+	res, err := TLS().Check(context.Background(), provision.RunCtx{}, tlsNoSSLServer(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Satisfied {
+		t.Fatalf("clean no-SSL host must be satisfied; got %s %v", res.Reason, res.Changes)
+	}
+	if res.Reason != "TLS state converged" {
+		t.Errorf("Reason = %q; a no-SSL run must not claim %q", res.Reason, "valid certificates present")
+	}
+	if got := len(f.Calls()); got != 4 {
+		t.Errorf("clean no-SSL Check cost %d probes, want 4 (three discovery + hook)", got)
 	}
 }

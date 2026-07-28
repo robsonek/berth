@@ -25,8 +25,6 @@ const certbotDeployHookPath = "/etc/letsencrypt/renewal-hooks/deploy/berth-nginx
 // tlsLineage is one berth-owned Let's Encrypt lineage slated for the orphan
 // sweep: its certbot cert name plus the berth-webroot DOMAIN names its
 // renewal conf references.
-//
-//nolint:unused // consumed by the orphan-sweep discovery, added next on this branch
 type tlsLineage struct {
 	name     string
 	webroots []string
@@ -93,6 +91,101 @@ func parseRenewalConf(conf string) (owned bool, webroots []string) {
 	return authenticatorWebroot && sawWebroot && !foreignWebroot, webroots
 }
 
+const letsencryptRenewalDir = "/etc/letsencrypt/renewal"
+
+// tlsOrphans holds the TLS artifacts of sites no longer in the config:
+// berth-owned Let's Encrypt lineages plus leftover ACME-webroot and
+// self-signed directory names (domains) in berth's namespaces.
+type tlsOrphans struct {
+	lineages []tlsLineage
+	webroots []string
+	sslDirs  []string
+}
+
+// changes lists the exact sweep actions in Apply's order. Appended to EVERY
+// unsatisfied Check result, so a dry-run can never hide the destructive sweep
+// behind an earlier certificate drift.
+func (o tlsOrphans) changes() []string {
+	var out []string
+	for _, l := range o.lineages {
+		out = append(out, "certbot delete --cert-name "+l.name)
+	}
+	for _, d := range o.webroots {
+		out = append(out, "rm -rf "+acmeWebroot(d))
+	}
+	for _, d := range o.sslDirs {
+		out = append(out, "rm -rf "+selfSignedCertDir(d))
+	}
+	return out
+}
+
+// discoverTLSOrphans finds the TLS artifacts left behind by sites no longer
+// in the config. Every renewal conf is read; parseRenewalConf decides
+// ownership and extracts berth-webroot references. A lineage is swept iff it
+// is berth-owned, its cert name is not a configured domain, and NONE of its
+// webroot references serves a configured domain. The webroot references of
+// every SURVIVING lineage (configured name, shielded, or foreign-but-
+// referencing) are protected from the directory sweep — a surviving renewal
+// must keep the directory its challenge lands in. Directory classes are
+// owned by their berth-only namespaces. Retention wins every ambiguity.
+func discoverTLSOrphans(ctx context.Context, r bssh.Runner, s *config.Server) (tlsOrphans, error) {
+	desired := make(map[string]bool, len(s.Sites))
+	for _, site := range s.Sites {
+		desired[site.Domain] = true
+	}
+	var o tlsOrphans
+	protected := map[string]bool{}
+	confs, err := findRegularFiles(ctx, r, letsencryptRenewalDir, "*.conf")
+	if err != nil {
+		return tlsOrphans{}, err
+	}
+	for _, p := range confs {
+		name := strings.TrimSuffix(strings.TrimPrefix(p, letsencryptRenewalDir+"/"), ".conf")
+		res, err := r.Run(ctx, "cat "+shQuote(p), nil)
+		if err != nil {
+			return tlsOrphans{}, err
+		}
+		if res.ExitCode != 0 {
+			return tlsOrphans{}, fmt.Errorf("read %s for the orphan sweep: cat exited %d: %s", p, res.ExitCode, strings.TrimSpace(res.Stderr))
+		}
+		owned, refs := parseRenewalConf(res.Stdout)
+		shielded := false
+		for _, d := range refs {
+			if desired[d] {
+				shielded = true
+			}
+		}
+		if owned && !desired[name] && !shielded {
+			o.lineages = append(o.lineages, tlsLineage{name: name, webroots: refs})
+			continue
+		}
+		// The lineage stays (configured name, shielded, or foreign): the
+		// directories it references stay with it.
+		for _, d := range refs {
+			protected[d] = true
+		}
+	}
+	webrootDirs, err := findDirectories(ctx, r, acmeWebrootBase)
+	if err != nil {
+		return tlsOrphans{}, err
+	}
+	for _, d := range webrootDirs {
+		if name := strings.TrimPrefix(d, acmeWebrootBase+"/"); !desired[name] && !protected[name] {
+			o.webroots = append(o.webroots, name)
+		}
+	}
+	sslDirs, err := findDirectories(ctx, r, selfSignedCertBase)
+	if err != nil {
+		return tlsOrphans{}, err
+	}
+	for _, d := range sslDirs {
+		if name := strings.TrimPrefix(d, selfSignedCertBase+"/"); !desired[name] {
+			o.sslDirs = append(o.sslDirs, name)
+		}
+	}
+	return o, nil
+}
+
 // renderCertbotDeployHook renders the static nginx validate-then-reload hook.
 func renderCertbotDeployHook() ([]byte, error) {
 	return templates.Render("certbot_deploy_hook.sh.tmpl", nil)
@@ -124,6 +217,14 @@ func (tls) Name() string       { return "tls" }
 func (tls) Requires() []string { return []string{"site"} }
 
 func (tls) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
+	// Orphan discovery runs FIRST and its actions ride along every drift
+	// result below: a dry-run must preview the sweep even when an earlier
+	// certificate drift would otherwise short-circuit the report.
+	orphans, err := discoverTLSOrphans(ctx, r, s)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	orphanChanges := orphans.changes()
 	for _, site := range s.Sites {
 		if !site.SSL {
 			continue
@@ -150,7 +251,14 @@ func (tls) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 			reason = "staging certificate present for " + site.Domain + "; will re-issue against production"
 			changes = []string{"re-issue production certificate for " + site.Domain + " (--force-renewal)", "install 443 server block"}
 		}
-		return provision.CheckResult{Satisfied: false, Reason: reason, Changes: changes}, nil
+		return provision.CheckResult{Satisfied: false, Reason: reason, Changes: append(changes, orphanChanges...)}, nil
+	}
+	if len(orphanChanges) > 0 {
+		return provision.CheckResult{
+			Satisfied: false,
+			Reason:    "TLS artifacts linger for sites no longer in the config",
+			Changes:   orphanChanges,
+		}, nil
 	}
 	// Renewal deploy hook: without it a renewed cert lands on disk while nginx
 	// keeps serving the old one from memory (expired at ~day 90). Same gate as
@@ -209,7 +317,7 @@ func (tls) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 			}, nil
 		}
 	}
-	return provision.CheckResult{Satisfied: true, Reason: "valid certificates present"}, nil
+	return provision.CheckResult{Satisfied: true, Reason: "TLS state converged"}, nil
 }
 
 func (st tls) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
