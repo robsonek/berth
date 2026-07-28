@@ -45,10 +45,13 @@ func TestSaveEnvelopeAndLoadCacheRoundTrip(t *testing.T) {
 	if err != nil || got["DB_PASSWORD"] != "x" {
 		t.Fatalf("round-trip failed: %v %v", got, err)
 	}
-	// The 0600 half is Unix-only; Windows reports 0666 for writable files.
+	// Existence is asserted everywhere; the mode check is Unix-only (Windows
+	// reports 0666 for writable files).
 	fi, _ := os.Stat(filepath.Join(berth, "srv.secrets.json"))
-	if fi == nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600) {
-		t.Errorf("cache must be written under $HOME/.berth at mode 0600")
+	if fi == nil {
+		t.Errorf("cache must be written under $HOME/.berth")
+	} else if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
+		t.Errorf("cache file mode = %v, want 0600", fi.Mode().Perm())
 	}
 }
 
@@ -94,9 +97,6 @@ func TestLoadCacheNullFailsLoud(t *testing.T) {
 }
 
 func TestSaveEnvelopeTightensPermissiveModes(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Unix permission bits not applicable")
-	}
 	berth := cacheHome(t)
 	if err := os.MkdirAll(berth, 0o755); err != nil {
 		t.Fatal(err)
@@ -110,11 +110,20 @@ func TestSaveEnvelopeTightensPermissiveModes(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if di, _ := os.Stat(berth); di == nil || di.Mode().Perm() != 0o700 {
-		t.Errorf(".berth mode must be tightened to 0700")
+	di, _ := os.Stat(berth)
+	fi, _ := os.Stat(filepath.Join(berth, "h.secrets.json"))
+	if di == nil || fi == nil {
+		t.Fatal("cache dir or file missing after SaveEnvelope")
 	}
-	if fi, _ := os.Stat(filepath.Join(berth, "h.secrets.json")); fi == nil || fi.Mode().Perm() != 0o600 {
-		t.Errorf("cache file mode must be 0600")
+	// Mode tightening is Unix-only (Windows reports 0777/0666 for writable
+	// dirs/files); the overwrite-an-existing-file path above still ran.
+	if runtime.GOOS != "windows" {
+		if di.Mode().Perm() != 0o700 {
+			t.Errorf(".berth mode must be tightened to 0700")
+		}
+		if fi.Mode().Perm() != 0o600 {
+			t.Errorf("cache file mode must be 0600")
+		}
 	}
 }
 
