@@ -340,7 +340,8 @@ type SiteDatabase struct {
 // QueueConfig tunes a site's queue worker. nil => the server-default worker
 // (when Server.Queue) or none. Driver "" / "work" => queue:work; "horizon" =>
 // `artisan horizon` (Horizon manages its own workers; queue:work-only knobs are
-// rejected by validation and numprocs is forced to 1).
+// rejected by validation and numprocs is forced to 1); "none" => no worker for
+// this site even under a server-wide queue: true (every other knob rejected).
 type QueueConfig struct {
 	Driver     string `mapstructure:"driver" yaml:"driver,omitempty"`
 	Processes  int    `mapstructure:"processes" yaml:"processes,omitempty"`
@@ -465,10 +466,15 @@ func (s *Server) AnyBackupsEnabled() bool {
 // steps package and validation so program names never diverge.
 func PoolName(domain string) string { return strings.ReplaceAll(domain, ".", "_") }
 
-// QueueEnabled reports whether a site gets a queue worker: an explicit per-site
-// queue block, OR the server-wide Server.Queue default. site.Queue works
-// independently of Server.Queue.
-func (s *Server) QueueEnabled(site Site) bool { return site.Queue != nil || s.Queue }
+// QueueEnabled reports whether a site gets a queue worker: an explicit
+// per-site queue block (driver "none" opts OUT — the only per-site off
+// switch against a server-wide queue: true), else the server-wide default.
+func (s *Server) QueueEnabled(site Site) bool {
+	if site.Queue != nil {
+		return site.Queue.Driver != "none"
+	}
+	return s.Queue
+}
 
 // NeedsSupervisor reports whether the supervisor step must run: any site has a
 // queue worker or any daemons.

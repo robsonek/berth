@@ -95,6 +95,33 @@ func TestQueueHorizonBareStringDecodes(t *testing.T) {
 	}
 }
 
+func TestQueueEnabledDriverNoneOverridesServerDefault(t *testing.T) {
+	s := &Server{Queue: true, Sites: []Site{
+		{Domain: "a.example.com", Queue: &QueueConfig{Driver: "none"}},
+		{Domain: "b.example.com"},
+	}}
+	if s.QueueEnabled(s.Sites[0]) {
+		t.Fatal("queue: none must opt the site out of the server-wide worker")
+	}
+	if !s.QueueEnabled(s.Sites[1]) {
+		t.Fatal("sites without a queue block keep inheriting the server default")
+	}
+}
+
+func TestQueueNoneBareStringDecodes(t *testing.T) {
+	s, err := Load(writeTmpConfig(t, baseCfg+"    queue: none\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := s.Sites[0].Queue
+	if q == nil || q.Driver != "none" {
+		t.Fatalf("queue: none must decode to {Driver: none}; got %+v", q)
+	}
+	if s.QueueEnabled(s.Sites[0]) {
+		t.Error("a decoded queue: none site must not get a worker")
+	}
+}
+
 func TestQueueMapDecodes(t *testing.T) {
 	s, err := Load(writeTmpConfig(t, baseCfg+"    queue: {processes: 3, tries: 5, queue: emails}\n"))
 	if err != nil {

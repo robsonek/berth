@@ -202,10 +202,17 @@ func (h *huhPrompter) Queue(q *QueueAnswers) error {
 	}
 	procs := "1"
 	driverForm := huh.NewForm(huh.NewGroup(
-		huh.NewSelect[string]().Title("Queue driver").Options(huh.NewOptions("work", "horizon")...).Value(&q.Driver),
+		huh.NewSelect[string]().Title("Queue driver").Options(huh.NewOptions("work", "horizon", "none")...).Value(&q.Driver),
 	))
 	if err := driverForm.Run(); err != nil {
 		return err
+	}
+	if q.Driver == "none" {
+		// none opts the site out of the server-wide worker; validation rejects
+		// every other knob, so clear them all instead of prompting.
+		q.Processes, q.Sleep, q.Tries, q.Timeout, q.MaxMemory = 0, 0, 0, 0, 0
+		q.Connection, q.Queue = "", ""
+		return nil
 	}
 	if q.Driver == "horizon" {
 		// Horizon manages its own workers; leave the work-only knobs zero.

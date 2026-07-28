@@ -984,6 +984,24 @@ func TestManagedSiteFilesNoWorkerWhenQueueDisabled(t *testing.T) {
 	}
 }
 
+func TestManagedSiteFilesNoWorkerWhenSiteQueueNone(t *testing.T) {
+	s := siteServer()
+	s.Queue = true // server-wide default ON; the site opts out below
+	s.Sites[0].Queue = &config.QueueConfig{Driver: "none"}
+	f := bssh.NewFakeRunner()
+	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{ExitCode: 0, Stdout: ""})
+	stubEmptyDiscovery(f, s)
+	mfs, err := managedSiteFiles(context.Background(), f, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range mfs {
+		if mf.path == "/etc/supervisor/conf.d/berth-app_example_com.conf" && !mf.remove {
+			t.Error("queue: none must opt the site out of the server-wide worker program")
+		}
+	}
+}
+
 func TestManagedSiteFilesFlagsOrphanProgram(t *testing.T) {
 	s := siteServer()
 	s.Queue = true // worker berth-app_example_com is desired; berth-app_example_com-old is NOT
@@ -1316,6 +1334,56 @@ func TestSiteApplyReloadsSupervisorAfterOrphanRemovalWithoutQueue(t *testing.T) 
 	}
 	if !sawReread || !sawUpdate {
 		t.Errorf("orphan removal on a supervisor host must refresh supervisord; reread=%v update=%v", sawReread, sawUpdate)
+	}
+}
+
+// TestSiteApplyQueueNoneSweepsExistingWorker covers the opt-out transition on
+// an already-provisioned host: the server-wide queue stays true, but the site
+// flips to queue: none. Its worker program is no longer desired, so the global
+// sweep must drift-remove the conf and reread/update supervisord to unload it
+// (NeedsSupervisor is false — the reload rides the removed-orphan gate).
+func TestSiteApplyQueueNoneSweepsExistingWorker(t *testing.T) {
+	s := siteServer()
+	s.Queue = true
+	s.Sites[0].Queue = &config.QueueConfig{Driver: "none"}
+	f := bssh.NewFakeRunner()
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{ExitCode: 0})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+	// The worker a previous (pre-opt-out) run installed still exists on the host.
+	worker := "/etc/supervisor/conf.d/berth-app_example_com.conf"
+	f.On("ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null", bssh.Result{Stdout: worker + "\n"})
+	f.On("cat "+shQuote(worker), bssh.Result{ExitCode: 0, Stdout: managedMarker + "\n[program:berth-app_example_com]\n"})
+	f.On("rm -f "+shQuote(worker), bssh.Result{})
+	// supervisord is present, so the removal must be followed by reread/update.
+	f.On("systemctl is-active supervisor", bssh.Result{ExitCode: 0, Stdout: "active\n"})
+	f.On("systemctl is-enabled supervisor", bssh.Result{ExitCode: 0, Stdout: "enabled\n"})
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var removed, sawReread, sawUpdate bool
+	for _, c := range f.Calls() {
+		switch c.Cmd {
+		case "rm -f " + shQuote(worker):
+			removed = true
+		case "supervisorctl reread":
+			sawReread = true
+		case "supervisorctl update":
+			sawUpdate = true
+		}
+	}
+	if !removed {
+		t.Error("flipping to queue: none must remove the site's existing worker program")
+	}
+	if !sawReread || !sawUpdate {
+		t.Errorf("removing the opted-out worker must refresh supervisord; reread=%v update=%v", sawReread, sawUpdate)
+	}
+	for _, w := range f.Writes() {
+		if w.Path == worker {
+			t.Errorf("queue: none site must not have its worker program re-written")
+		}
 	}
 }
 

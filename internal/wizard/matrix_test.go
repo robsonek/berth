@@ -751,6 +751,40 @@ func TestConfigMatrix(t *testing.T) {
 		mustContain(t, err, "horizon forces numprocs=1")
 	})
 
+	t.Run("none-driver-opt-out-roundtrip", func(t *testing.T) {
+		a := base("qn1", "203.0.113.10")
+		a.Queue = true // server-wide default ON; the site below opts out
+		a.Sites = []SiteAnswers{{
+			Domain: "a.example.com", DeployPath: "/srv/a", DBName: "adb", DBUser: "ausr", SchedulerOverride: "inherit",
+			Queue: &QueueAnswers{Driver: "none"},
+		}}
+		srv, _ := writeValid(t, a)
+		q := srv.Sites[0].Queue
+		if q == nil || q.Driver != "none" ||
+			q.Processes != 0 || q.Connection != "" || q.Queue != "" || q.Sleep != 0 || q.Tries != 0 || q.Timeout != 0 || q.MaxMemory != 0 {
+			t.Fatalf("queue = %+v", q)
+		}
+		if srv.QueueEnabled(srv.Sites[0]) {
+			t.Fatalf("queue: none must opt the site out of the server-wide worker")
+		}
+		if progs := srv.SiteProgramNames(srv.Sites[0]); len(progs) != 0 {
+			t.Fatalf("programs = %v, want none", progs)
+		}
+	})
+
+	t.Run("none-stray-processes-invalid", func(t *testing.T) {
+		// The exact config the pre-fix wizard fall-through produced: driver
+		// "none" carrying the work-knob defaults. It must never validate.
+		a := base("qn2", "203.0.113.10")
+		a.Queue = true
+		a.Sites = []SiteAnswers{{
+			Domain: "a.example.com", DeployPath: "/srv/a", DBName: "adb", DBUser: "ausr", SchedulerOverride: "inherit",
+			Queue: &QueueAnswers{Driver: "none", Processes: 1, Tries: 3, Timeout: 60, Sleep: 3},
+		}}
+		err := writeInvalid(t, a)
+		mustContain(t, err, "queue: none disables the worker")
+	})
+
 	t.Run("queue-and-daemons-together-multi-daemon", func(t *testing.T) {
 		a := base("qd5", "203.0.113.10")
 		a.Sites = []SiteAnswers{{
@@ -932,6 +966,44 @@ func TestConfigMatrix(t *testing.T) {
 		}
 		if !eqStrings(srv.SiteProgramNames(srv.Sites[0]), []string{"berth-a_example_com"}) {
 			t.Fatalf("programs = %v", srv.SiteProgramNames(srv.Sites[0]))
+		}
+	})
+
+	t.Run("run-queue-none-opts-out-of-server-queue", func(t *testing.T) {
+		f := &fakePrompter{
+			serverCore: func(a *Answers) { baseServer(a); a.Queue = true },
+			siteCore: []func(int, *SiteAnswers){
+				func(_ int, sa *SiteAnswers) {
+					sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "a.example.com", "/srv/a", "adb", "ausr"
+				},
+			},
+			siteOverrides: func(sa *SiteAnswers) { sa.SchedulerOverride = "inherit" },
+			// Models the fixed prompter: selecting "none" returns with every
+			// work-only knob zero (no worker-knob prompts run).
+			queue: func(q *QueueAnswers) { *q = QueueAnswers{Driver: "none"} },
+			// srv-adv? site-adv? dedicated-queue? add-daemon? add-site?
+			confirms: []bool{false, true, true, false, false},
+		}
+		a, err := run(f)
+		if err != nil {
+			t.Fatalf("run error = %v", err)
+		}
+		if len(f.errors) != 0 {
+			t.Fatalf("a none selection must assemble a valid site without re-prompts: %v", f.errors)
+		}
+		q := a.Sites[0].Queue
+		if q == nil || q.Driver != "none" || q.Processes != 0 || q.Tries != 0 || q.Timeout != 0 || q.Sleep != 0 {
+			t.Fatalf("queue = %+v", q)
+		}
+		srv := a.ToServer()
+		if verr := srv.Validate(); verr != nil {
+			t.Fatalf("validate = %v", verr)
+		}
+		if srv.QueueEnabled(srv.Sites[0]) {
+			t.Fatalf("QueueEnabled must be false for the opted-out site")
+		}
+		if progs := srv.SiteProgramNames(srv.Sites[0]); len(progs) != 0 {
+			t.Fatalf("programs = %v, want none", progs)
 		}
 	})
 
@@ -1660,7 +1732,7 @@ func addGapScenarios(
 			Queue: &QueueAnswers{Driver: "sync", Processes: 1},
 		}}
 		err := writeInvalid(t, a)
-		mustContain(t, err, "must be work or horizon")
+		mustContain(t, err, "must be work, horizon or none")
 	})
 
 	// ---- Gap 7: daemon negatives ----

@@ -358,6 +358,26 @@ func TestValidateRejectsControlCharInCommand(t *testing.T) {
 	}
 }
 
+func TestValidateQueueDriverNone(t *testing.T) {
+	s := validQueueServer()
+	s.Sites[0].Queue = &QueueConfig{Driver: "none"}
+	if err := s.Validate(); err != nil {
+		t.Errorf("driver none alone must be valid: %v", err)
+	}
+
+	s = validQueueServer()
+	s.Sites[0].Queue = &QueueConfig{Driver: "none", Processes: 2}
+	if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "queue: none disables the worker") {
+		t.Errorf("none + processes must be rejected with the none-excludes-knobs message; got %v", err)
+	}
+
+	s = validQueueServer()
+	s.Sites[0].Queue = &QueueConfig{Driver: "none", Connection: "redis"}
+	if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "queue: none disables the worker") {
+		t.Errorf("none + connection must be rejected with the none-excludes-knobs message; got %v", err)
+	}
+}
+
 func TestValidateRejectsHorizonWithKnobs(t *testing.T) {
 	s := validQueueServer()
 	s.Sites[0].Queue = &QueueConfig{Driver: "horizon", Tries: 5}

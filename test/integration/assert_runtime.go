@@ -21,8 +21,9 @@ import (
 
 // assertRuntime verifies the deployer-handoff runtime, each invariant on its OWN gate:
 // every site has an FPM socket; queue-enabled sites have a DORMANT worker (supervisor
-// active + all processes STOPPED, never FATAL/BACKOFF); scheduler-enabled sites have a
-// valid managed scheduler cron.
+// active + all processes STOPPED, never FATAL/BACKOFF); sites without a worker (queue
+// off or the queue: none opt-out) have NO program file; scheduler-enabled sites have
+// a valid managed scheduler cron.
 func assertRuntime(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server) {
 	t.Helper()
 	anyQueue := false
@@ -39,8 +40,8 @@ func assertRuntime(ctx context.Context, t *testing.T, c *bssh.Client, srv *confi
 		// Every site has its own FPM pool socket.
 		assertExitZero(ctx, t, c, "fpm socket "+site.Domain, "test -S /run/php/berth-"+pool+".sock")
 
+		prog := "berth-" + pool
 		if srv.QueueEnabled(site) {
-			prog := "berth-" + pool
 			st, err := c.Run(ctx, "sudo supervisorctl status '"+prog+":*'", nil)
 			if err != nil {
 				t.Fatalf("%s: supervisorctl status: %v", site.Domain, err)
@@ -48,6 +49,12 @@ func assertRuntime(ctx context.Context, t *testing.T, c *bssh.Client, srv *confi
 			if !supervisorAllStopped(st.Stdout) {
 				t.Errorf("%s: worker %s not fully dormant (want every process STOPPED):\n%s", site.Domain, prog, st.Stdout)
 			}
+		} else {
+			// No worker desired (queue: none opt-out, or no queue at all): the
+			// program file must be ABSENT — the site step never writes it and its
+			// global sweep removes a stale copy left by an earlier config.
+			assertExitZero(ctx, t, c, "no worker program "+site.Domain,
+				"test ! -e /etc/supervisor/conf.d/"+prog+".conf")
 		}
 
 		if srv.SchedulerEnabled(site) {

@@ -679,9 +679,14 @@ func hasControlChars(s string) bool {
 func (st *Site) validateQueueDaemons() error {
 	if q := st.Queue; q != nil {
 		switch q.Driver {
-		case "", "work", "horizon":
+		case "", "work", "horizon", "none":
 		default:
-			return fmt.Errorf("queue.driver %q must be work or horizon", q.Driver)
+			return fmt.Errorf("queue.driver %q must be work, horizon or none", q.Driver)
+		}
+		if q.Driver == "none" {
+			if q.Connection != "" || q.Queue != "" || q.Processes != 0 || q.Sleep != 0 || q.Tries != 0 || q.Timeout != 0 || q.MaxMemory != 0 {
+				return fmt.Errorf("queue: none disables the worker; remove the other queue settings")
+			}
 		}
 		for _, kv := range []struct {
 			name string

@@ -361,6 +361,25 @@ func TestSiteSudoersIncludesDaemonPrograms(t *testing.T) {
 	}
 }
 
+func TestSiteSudoersNoProgramGrantsForQueueNoneSite(t *testing.T) {
+	s := &config.Server{PHP: config.PHP{Version: "8.4"}, Queue: true,
+		Sites: []config.Site{{Domain: "a.example.com", DeployPath: "/var/www/a", User: "auser",
+			Queue: &config.QueueConfig{Driver: "none"}}}}
+	body, err := renderSiteSudoers(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// queue: none opts the site out of the server-wide worker, so no
+	// supervisorctl grant may appear — there is no program to control.
+	if strings.Contains(string(body), "supervisorctl") {
+		t.Errorf("queue: none site sudoers must carry no supervisorctl grants:\n%s", body)
+	}
+	// The version-stable FPM reload grant is unrelated to the queue and stays.
+	if !strings.Contains(string(body), "/usr/local/sbin/berth-reload-fpm") {
+		t.Errorf("queue: none site sudoers must keep the FPM reload grant:\n%s", body)
+	}
+}
+
 func TestSiteSudoersHasNoUnscopedSupervisorGrants(t *testing.T) {
 	s := &config.Server{PHP: config.PHP{Version: "8.4"}, Queue: true,
 		Sites: []config.Site{{Domain: "a.example.com", DeployPath: "/var/www/a", User: "auser"}}}
