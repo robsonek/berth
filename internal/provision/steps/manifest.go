@@ -25,7 +25,13 @@ const manifestPath = berthStateDir + "/manifest"
 // PROVISIONED_AT timestamp never reads as drift. Partial runs (--only,
 // FullRun=false) neither read nor write it: a partial run proves nothing
 // about the whole pipeline, and a manifest claiming otherwise would mislead
-// future migrations that branch on "last fully provisioned by <= vX".
+// future migrations that branch on "last fully provisioned by <= vX". For
+// the same reason Apply withholds the stamp (warn-and-skip, P13 precedent)
+// when the run marked itself unconverged (tls skipped issuance on a DNS
+// mismatch): a manifest from a prior converged run stays intact rather than
+// being overwritten with a false attestation — and Check reports unsatisfied
+// on such a run even over a same-version manifest, so that withhold path is
+// actually reachable.
 type manifest struct{}
 
 func Manifest() provision.Step { return manifest{} }
@@ -36,6 +42,16 @@ func (manifest) Requires() []string { return nil }
 func (manifest) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
 	if !rc.FullRun {
 		return provision.CheckResult{Satisfied: true, Reason: "manifest is written only by full runs"}, nil
+	}
+	// The withhold guard must be REACHABLE: a same-version manifest would
+	// otherwise satisfy Check and skip Apply, so the warn-and-skip could never
+	// fire on exactly the run that matters — a same-version re-run that NEWLY
+	// left work unconverged (e.g. DNS stopped matching since the converged run
+	// that wrote the manifest). Unsatisfied routes into Apply, which warns and
+	// withholds the write. Unreachable in dry-runs (only Apply phases mark the
+	// run unconverged), so Planned output never carries this reason.
+	if rc.RunUnconverged() {
+		return provision.CheckResult{Satisfied: false, Reason: "run left steps unconverged — manifest write withheld"}, nil
 	}
 	res, err := r.Run(ctx, "cat "+manifestPath, nil)
 	if err != nil {
@@ -52,7 +68,7 @@ func (manifest) Check(ctx context.Context, rc provision.RunCtx, s *config.Server
 		}
 	}
 	if recorded == version.Version {
-		return provision.CheckResult{Satisfied: true, Reason: "host fully provisioned by " + recorded}, nil
+		return provision.CheckResult{Satisfied: true, Reason: "full pipeline completed by " + recorded}, nil
 	}
 	return provision.CheckResult{Satisfied: false, Reason: fmt.Sprintf("manifest records %q, this binary is %s", recorded, version.Version), Changes: manifestChanges()}, nil
 }
@@ -62,6 +78,13 @@ func manifestChanges() []string {
 }
 
 func (manifest) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
+	// A run that knowingly left work undone must not attest full convergence:
+	// warn and skip the write, leaving any manifest from a PRIOR converged
+	// run untouched.
+	if rc.RunUnconverged() {
+		rc.Warnf("manifest withheld: the run left steps unconverged (%s)", strings.Join(rc.UnconvergedReasons(), "; "))
+		return nil
+	}
 	ts, err := r.Run(ctx, "date -u +%Y-%m-%dT%H:%M:%SZ", nil)
 	if err != nil {
 		return err

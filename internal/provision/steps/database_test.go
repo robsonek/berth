@@ -313,7 +313,7 @@ func TestDatabaseCheckSatisfiedDoesNotReseedExistingEnv(t *testing.T) {
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present, driver matches
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
-	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0})
+	f.On("LC_ALL=C; export LC_ALL; grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0})
 	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
 	f.On(mariadbGrantProbe, bssh.Result{Stdout: "1\n"})
 	f.On("test -e "+shQuote("/home/deploy/.my.cnf"), bssh.Result{ExitCode: 0}) // client creds already seeded
@@ -341,7 +341,7 @@ func stubGreenRemote(f *bssh.FakeRunner, s *config.Server) {
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
-	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0})
+	f.On("LC_ALL=C; export LC_ALL; grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0})
 	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
 	f.On(mariadbGrantProbe, bssh.Result{Stdout: "1\n"})
 	f.On("test -e "+shQuote("/home/deploy/.my.cnf"), bssh.Result{ExitCode: 0})
@@ -352,7 +352,7 @@ func stubGreenRemote(f *bssh.FakeRunner, s *config.Server) {
 // envHasBerthAppKey verbatim — kept a literal, not a call into the production
 // builder, so an accidental command change still trips these stubs).
 func appKeyProbe(s *config.Server) string {
-	return "line=$(grep -m1 '^APP_KEY=' " + shQuote(envPath(s)) + "); s=$?; " +
+	return "LC_ALL=C; export LC_ALL; line=$(grep -m1 '^APP_KEY=' " + shQuote(envPath(s)) + "); s=$?; " +
 		"if [ $s -eq 1 ]; then exit 1; elif [ $s -ne 0 ]; then exit 2; fi; " +
 		`printf '%s' "$line" | sed 's/[[:space:]]*$//' | grep -Eq '^APP_KEY=base64:[A-Za-z0-9+/]{43}=$' && exit 0; exit 3`
 }
@@ -376,6 +376,11 @@ func TestEnvBerthAppKeyShellScript(t *testing.T) {
 		{"empty-placeholder", "APP_KEY=\n", 3},
 		{"missing-key", "OTHER=x\n", 1},
 		{"first-line-wins", "APP_KEY=\nAPP_KEY=" + key + "\n", 3},
+		// Unicode whitespace (U+2003) after the key must NOT be trimmed:
+		// appKeyFromEnv keeps it (ASCII-only trim), sees a non-berth shape
+		// and treats the key as absent — the probe must agree (exit 3), or
+		// Check would demand a cache entry Apply never writes.
+		{"unicode-ws-not-berth", "APP_KEY=" + key + "\u2003\n", 3},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -584,6 +589,86 @@ func TestDatabaseCheckFlagsEnvCacheAppKeyDisagreement(t *testing.T) {
 	}
 }
 
+func TestDatabaseCheckRefusesCorruptCachedAppKeyWhenLiveKeyOperatorShaped(t *testing.T) {
+	// With an operator-shaped live APP_KEY the probe answers non-berth, the
+	// agreement block never runs, and inline validation living inside it let a
+	// hand-corrupted cached APP_KEY keep every run green. The preflight
+	// validator must refuse loudly instead: the corrupt backup is unusable the
+	// day the .env is lost, and green runs would hide that until then.
+	chdirTemp(t)
+	s := databaseServer()
+	dbUser := s.SiteDBUser(s.Sites[0])
+	seedCache(t, s, map[string]string{
+		dbUser:             "pw123",
+		"appkey:" + dbUser: "base64:corrupt",
+	})
+	f := bssh.NewFakeRunner()
+	stubGreenRemote(f, s)
+	f.On(appKeyProbe(s), bssh.Result{ExitCode: 3}) // live key present but not berth-shaped
+	f.On(envValueMatchScript(envPath(s), "DB_PASSWORD"), bssh.Result{ExitCode: 0})
+	_, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("Check() = %v, want the malformed-cached-APP_KEY refusal", err)
+	}
+}
+
+func TestDatabaseCheckRefusesCorruptCachedPasswordBeforeUnsatisfiedReturn(t *testing.T) {
+	// An earlier unsatisfied condition (here: the client-auth file is missing)
+	// must not mask cache corruption behind an unrelated reason and hand the
+	// corrupt value straight to Apply — the preflight validator hard-errors
+	// before ANY unsatisfied early-return.
+	chdirTemp(t)
+	s := databaseServer()
+	dbUser := s.SiteDBUser(s.Sites[0])
+	seedCache(t, s, map[string]string{dbUser: "\nsneaky"})
+	f := bssh.NewFakeRunner()
+	stubGreenRemote(f, s)
+	f.On("test -e "+shQuote("/home/deploy/.my.cnf"), bssh.Result{ExitCode: 1}) // unsatisfied condition ahead of the old inline check
+	_, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "outside the allowed charset") {
+		t.Fatalf("Check() = %v, want the charset refusal for a corrupt cached password", err)
+	}
+}
+
+func TestDatabasePreflightRefusalDiagnosticNotRedactedByCorruptValue(t *testing.T) {
+	// A corrupt cached value must NOT reach the redactor: the refusal
+	// diagnostic names only the cache key, so there is nothing to leak — but
+	// a corrupt value colliding with innocent wording (here: the refusal text
+	// itself) would mask pieces of the very message explaining the refusal.
+	// Only validated values may register.
+	chdirTemp(t)
+	s := databaseServer()
+	dbUser := s.SiteDBUser(s.Sites[0])
+	seedCache(t, s, map[string]string{dbUser: "outside the allowed charset"}) // invalid (spaces) AND a diagnostic substring
+	f := bssh.NewFakeRunner()
+	red := secret.NewRedactor()
+	_, err := Database(red).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "outside the allowed charset") {
+		t.Fatalf("Check() = %v, want the charset refusal", err)
+	}
+	if got := red.Apply(err.Error()); got != err.Error() {
+		t.Errorf("refusal diagnostic garbled by a corrupt-value redaction:\n%q", got)
+	}
+}
+
+func TestDatabaseCheckRefusesCorruptCacheWhenPackageMissing(t *testing.T) {
+	// The missing-package/source early return used to happen BEFORE the cache
+	// was even loaded, so validation placed after the load was not preflight:
+	// a first run on a fresh host sailed past a corrupt cache and Apply
+	// consumed it. Check must load + validate ahead of that return.
+	chdirTemp(t)
+	s := databaseServer()
+	dbUser := s.SiteDBUser(s.Sites[0])
+	seedCache(t, s, map[string]string{dbUser: "bad value!"})
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // no .env, engine guard passes
+	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 1})       // not installed
+	_, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "outside the allowed charset") {
+		t.Fatalf("Check() = %v, want a hard error instead of the not-installed unsatisfied result", err)
+	}
+}
+
 // shellExit runs a production-built probe script through the local /bin/sh
 // with the given stdin and returns its exit code — a FakeRunner stub can only
 // echo back what we assume, so these tests pin the ACTUAL shell semantics.
@@ -617,6 +702,11 @@ func TestEnvValueMatchesShellScript(t *testing.T) {
 		{"mismatch", "DB_PASSWORD=other999\n", "abc123", 1},
 		{"missing-key", "OTHER=x\n", "abc123", 3},
 		{"first-line-wins", "DB_PASSWORD=abc123\nDB_PASSWORD=other999\n", "abc123", 0},
+		// Unicode whitespace (U+2003 EM SPACE) must NOT be trimmed: Go's
+		// passwordFromEnv trims ASCII only, so trimming it here would let
+		// Check compare equal a value Apply refuses — the locale pin makes
+		// this deterministic regardless of the host's LANG.
+		{"unicode-ws-not-trimmed", "DB_PASSWORD=abc123\u2003\n", "abc123", 1},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -628,6 +718,57 @@ func TestEnvValueMatchesShellScript(t *testing.T) {
 				t.Fatalf("exit = %d, want %d", got, c.exit)
 			}
 		})
+	}
+}
+
+// Pins the real shell semantics of envCredentialPresent's script: only a
+// charset-valid FIRST DB_PASSWORD line answers 0, trailing ASCII whitespace
+// is tolerated (passwordFromEnv trims it), and Unicode whitespace is NOT —
+// it stays in the value, fails the charset check here exactly as it fails
+// reDBPassword in Apply (no false-green Check over a value Apply refuses).
+func TestEnvCredentialPresentShellScript(t *testing.T) {
+	dir := t.TempDir()
+	env := filepath.Join(dir, ".env")
+	cases := []struct {
+		name, fileLine string
+		exit           int
+	}{
+		{"valid", "DB_PASSWORD=abc123\n", 0},
+		{"valid-trailing-ascii-ws", "DB_PASSWORD=abc123 \t\n", 0},
+		{"unicode-ws-rejected", "DB_PASSWORD=abc123\u2003\n", 1},
+		{"empty-value", "DB_PASSWORD=\n", 1},
+		{"invalid-charset", "DB_PASSWORD=abc-123\n", 1},
+		{"missing-key", "OTHER=x\n", 1},
+		{"first-line-wins", "DB_PASSWORD=\nDB_PASSWORD=abc123\n", 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if err := os.WriteFile(env, []byte(c.fileLine), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got := shellExit(t, envCredentialPresentScript(env), ""); got != c.exit {
+				t.Fatalf("exit = %d, want %d", got, c.exit)
+			}
+		})
+	}
+}
+
+// Every whitespace-sensitive probe script must pin the C locale itself: the
+// live boxes run LANG=C.UTF-8, where grep/sed's [[:space:]] also matches
+// Unicode whitespace while the Go side (passwordFromEnv, appKeyFromEnv)
+// trims ASCII only — left unpinned, that divergence can produce a false-green
+// password agreement or endless APP_KEY drift. The prefix bytes are pinned
+// here literally (not via the production constant) so a prefix change is a
+// conscious decision in both places.
+func TestProbeScriptsPinTheCLocale(t *testing.T) {
+	for name, script := range map[string]string{
+		"envValueMatch":        envValueMatchScript("/tmp/e", "DB_PASSWORD"),
+		"envBerthAppKey":       envBerthAppKeyScript("/tmp/e"),
+		"envCredentialPresent": envCredentialPresentScript("/tmp/e"),
+	} {
+		if !strings.HasPrefix(script, "LC_ALL=C; export LC_ALL; ") {
+			t.Errorf("%s script does not pin the C locale: %q", name, script)
+		}
 	}
 }
 
@@ -746,8 +887,8 @@ func TestDatabaseCheckUnsatisfiedWhenDatabaseMissing(t *testing.T) {
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present, driver matches
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
-	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0}) // credential present
-	f.On(mariadbDBProbe, bssh.Result{Stdout: ""})                                                                                          // database absent
+	f.On("LC_ALL=C; export LC_ALL; grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0}) // credential present
+	f.On(mariadbDBProbe, bssh.Result{Stdout: ""})                                                                                                                   // database absent
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -767,7 +908,7 @@ func TestDatabaseCheckUnsatisfiedWhenUserOrGrantMissing(t *testing.T) {
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present, driver matches
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
-	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0})
+	f.On("LC_ALL=C; export LC_ALL; grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0})
 	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
 	f.On(mariadbGrantProbe, bssh.Result{Stdout: ""}) // role or its grant absent
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
@@ -789,7 +930,7 @@ func TestDatabaseCheckUnsatisfiedWhenEnvLacksValidPassword(t *testing.T) {
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present, driver matches
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
-	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 1}) // no valid DB_PASSWORD on the first line (or key absent — same outcome)
+	f.On("LC_ALL=C; export LC_ALL; grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 1}) // no valid DB_PASSWORD on the first line (or key absent — same outcome)
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -808,6 +949,7 @@ func TestDatabaseCheckUnsatisfiedWhenEnvLacksValidPassword(t *testing.T) {
 }
 
 func TestDatabaseCheckSkipsProbesWhenNotInstalled(t *testing.T) {
+	chdirTemp(t) // Check preflight-reads the local secret cache
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env, guard passes
@@ -827,6 +969,7 @@ func TestDatabaseCheckSkipsProbesWhenNotInstalled(t *testing.T) {
 }
 
 func TestDatabaseCheckSourceMariaDBRequiresRepo(t *testing.T) {
+	chdirTemp(t) // Check preflight-reads the local secret cache
 	s := databaseServer()
 	s.Database.Source = "mariadb"
 	f := bssh.NewFakeRunner()
@@ -1243,13 +1386,11 @@ func TestDatabaseApplyLeavesOperatorClientAuthAlone(t *testing.T) {
 }
 
 func TestDatabaseApplyRefusesCorruptCachedPasswordBeforeContainmentProbe(t *testing.T) {
-	// Check's shape validation can be short-circuited by earlier unsatisfied
-	// returns (database missing, cache missing the APP_KEY backup, ...), so
-	// Apply can reach the containment probe with a manually corrupted cache
-	// value. One whose FIRST LINE is empty would feed grep -F -f - an EMPTY
-	// pattern — which matches EVERY line (exit 0) and would rewrite an
-	// operator-customized client-auth file. The probe's contract requires the
-	// caller to shape-validate, so Apply must refuse loudly BEFORE probing.
+	// A manually corrupted cached password whose FIRST LINE is empty would
+	// feed the containment probe's grep -F -f - an EMPTY pattern — which
+	// matches EVERY line (exit 0) and would rewrite an operator-customized
+	// client-auth file. This now pins the PREFLIGHT validator: Apply refuses
+	// before ANY remote command, not merely before the probe.
 	chdirTemp(t)
 	s := databaseServer()
 	dbUser := s.SiteDBUser(s.Sites[0])
@@ -1260,13 +1401,32 @@ func TestDatabaseApplyRefusesCorruptCachedPasswordBeforeContainmentProbe(t *test
 	if err == nil || !strings.Contains(err.Error(), "outside the allowed charset") {
 		t.Fatalf("Apply() = %v, want the charset refusal for a corrupt cached password", err)
 	}
-	for _, c := range f.Calls() {
-		if strings.Contains(c.Cmd, "IFS= read -r old") {
-			t.Fatalf("the containment probe must never run with an unvalidated cached password; saw %q", c.Cmd)
-		}
+	if n := len(f.Calls()); n != 0 {
+		t.Fatalf("Apply must refuse before any remote command; ran %d (first: %q)", n, f.Calls()[0].Cmd)
 	}
 	if writtenContent(f, "/home/deploy/.my.cnf") != nil {
 		t.Fatal("the client-auth file must not be rewritten on the refusal path")
+	}
+}
+
+func TestDatabaseApplyRefusesCorruptCachedAppKeyBeforeAnyRemoteCall(t *testing.T) {
+	// Fresh host, corrupt cached APP_KEY: the preflight validator must refuse
+	// before ANY remote command — deliberately nothing is stubbed, and the
+	// call log must stay empty (no repo, no apt-get, no SQL, no seeds).
+	chdirTemp(t)
+	s := databaseServer()
+	dbUser := s.SiteDBUser(s.Sites[0])
+	seedCache(t, s, map[string]string{"appkey:" + dbUser: "base64:tampered"})
+	f := bssh.NewFakeRunner()
+	err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("Apply() = %v, want the malformed-cached-APP_KEY refusal", err)
+	}
+	if n := len(f.Calls()); n != 0 {
+		t.Fatalf("Apply must refuse before any remote command; ran %d (first: %q)", n, f.Calls()[0].Cmd)
+	}
+	if len(f.Writes()) != 0 {
+		t.Fatal("Apply must not write any remote file on the refusal path")
 	}
 }
 
@@ -1339,7 +1499,7 @@ func TestDatabaseCheckUnsatisfiedWhenClientAuthMissing(t *testing.T) {
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present, driver matches
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
-	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0})
+	f.On("LC_ALL=C; export LC_ALL; grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0})
 	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
 	f.On(mariadbGrantProbe, bssh.Result{Stdout: "1\n"})
 	f.On("test -e '/home/deploy/.my.cnf'", bssh.Result{ExitCode: 1}) // creds file missing
@@ -1356,6 +1516,7 @@ func TestDatabaseCheckUnsatisfiedWhenClientAuthMissing(t *testing.T) {
 }
 
 func TestDatabaseCheckFailsLoudlyOnEngineEnvConflict(t *testing.T) {
+	chdirTemp(t)          // Check preflight-reads the local secret cache
 	s := databaseServer() // engine mariadb -> seeds DB_CONNECTION=mysql
 	f := bssh.NewFakeRunner()
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present
@@ -1372,6 +1533,7 @@ func TestDatabaseCheckFailsLoudlyOnEngineEnvConflict(t *testing.T) {
 }
 
 func TestDatabaseCheckConflictGuardIgnoresForce(t *testing.T) {
+	chdirTemp(t) // Check preflight-reads the local secret cache
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
@@ -1383,6 +1545,7 @@ func TestDatabaseCheckConflictGuardIgnoresForce(t *testing.T) {
 }
 
 func TestDatabaseCheckFailsWhenExistingEnvLacksDBConnection(t *testing.T) {
+	chdirTemp(t) // Check preflight-reads the local secret cache
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})                    // .env present...
@@ -1394,6 +1557,7 @@ func TestDatabaseCheckFailsWhenExistingEnvLacksDBConnection(t *testing.T) {
 }
 
 func TestDatabaseCheckFailsLoudlyOnEngineEnvConflictPostgres(t *testing.T) {
+	chdirTemp(t) // Check preflight-reads the local secret cache
 	s := databaseServer()
 	s.Database = config.Database{Engine: "postgres", Source: "debian"}
 	f := bssh.NewFakeRunner()
@@ -1452,6 +1616,7 @@ func TestDatabaseApplyPreScansAllSitesBeforeMutating(t *testing.T) {
 }
 
 func TestDatabaseCheckFailsWhenGrepErrors(t *testing.T) {
+	chdirTemp(t) // Check preflight-reads the local secret cache
 	// grep exit >= 2 (unreadable input / I/O error) must be a hard error, not
 	// silently treated as "key absent".
 	s := databaseServer()
@@ -1470,6 +1635,7 @@ func TestDatabaseCheckPassesWhenDBConnectionMatchesOrFileAbsent(t *testing.T) {
 	// existing file that merely lacks the key is covered separately (it errors).
 	// Trailing space, vertical tab, and form feed after the value are all
 	// trimmed (mirrors passwordFromEnv's ASCII set), so they still match.
+	chdirTemp(t) // Check preflight-reads the local secret cache
 	cases := map[string]struct {
 		envExists int // test -e exit code
 		grep      *bssh.Result

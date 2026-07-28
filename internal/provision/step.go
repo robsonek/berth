@@ -34,6 +34,33 @@ type RunCtx struct {
 	// event. Nil outside an engine run (step unit tests, the --only
 	// dependency pre-flight) — call it through Warnf, which nil-guards.
 	Warn func(msg string)
+	// NoteUnconverged records that this run knowingly left provisioning work
+	// undone (tls skipping issuance because DNS does not point at the host
+	// yet). Unlike Warn it is RUN-scoped, not per-step: every LATER step in
+	// the same run sees the mark, so the terminal manifest step can withhold
+	// its "full pipeline completed" attestation. Engine-wired; nil outside an
+	// engine run — call it through MarkUnconverged, which nil-guards.
+	NoteUnconverged func(reason string)
+	// UnconvergedReasons returns every reason recorded via NoteUnconverged so
+	// far in this run (empty = no step marked yet). Engine-wired; nil outside
+	// an engine run — gate on RunUnconverged before calling it directly.
+	UnconvergedReasons func() []string
+}
+
+// MarkUnconverged records that the run knowingly left work undone, so steps
+// that attest full convergence (manifest) can withhold. Safe on a zero RunCtx
+// (no-op), like Warnf.
+func (rc RunCtx) MarkUnconverged(reason string) {
+	if rc.NoteUnconverged == nil {
+		return
+	}
+	rc.NoteUnconverged(reason)
+}
+
+// RunUnconverged reports whether an earlier step in this run marked it
+// unconverged. Safe on a zero RunCtx (false).
+func (rc RunCtx) RunUnconverged() bool {
+	return rc.UnconvergedReasons != nil && len(rc.UnconvergedReasons()) > 0
 }
 
 // Warnf formats and records a warning via rc.Warn. It is safe on a zero

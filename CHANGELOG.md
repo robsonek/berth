@@ -10,15 +10,20 @@ Notable changes to berth. Older releases are documented on the
 - **Host provisioning manifest** — a new terminal `manifest` step records
   `/var/lib/berth/manifest` (`VERSION`, plus `PROVISIONED_AT` = when that
   version first fully provisioned the host), so future upgrades can branch
-  on "last fully provisioned by" instead of probing the filesystem. Partial
-  (`--only`) runs neither read nor write it, and a pipeline truncated by
-  `--skip-ssl` does not attest at all.
+  on "last fully provisioned by" instead of probing the filesystem. The
+  manifest attests that the full pipeline completed AND converged on that
+  version: a run that knowingly left work undone (e.g. Let's Encrypt
+  issuance skipped because DNS does not point at the host yet) withholds
+  the write with a warning, leaving any attestation from a prior converged
+  run intact. Partial (`--only`) runs neither read nor write it, and a
+  pipeline truncated by `--skip-ssl` does not attest at all.
 - **Per-site backup manifest** — `/var/backups/berth/<pool>/manifest` records
   the berth version, engine, database/user names, site user and deploy path
-  the archives were made under; the offsite copy of a backup directory is now
-  self-describing. The recorded version makes the backups step re-apply once
-  after every berth upgrade (byte-identical rewrites of its other files, no
-  reload).
+  of the site's current configuration (archives created before a config
+  change may predate it — match dump/tar pairs by their UTC timestamp); the
+  offsite copy of a backup directory is now self-describing. The recorded
+  version makes the backups step re-apply once after every berth upgrade
+  (byte-identical rewrites of its other files, no reload).
 
 ### Changed
 
@@ -62,8 +67,19 @@ Notable changes to berth. Older releases are documented on the
   longer hard-errors the `database` step's apply — it is treated as "not
   berth's to back up" (previously any apply on such a host failed).
 - A cached DB password or `APP_KEY` whose shape is corrupt (a hand-edited or
-  tampered `~/.berth/` cache) now fails the `database` step's check loudly
-  instead of riding into the value comparison or onto the host.
+  tampered `~/.berth/` cache) now fails the `database` step loudly and
+  unconditionally: every per-site cached secret is shape-validated up front
+  in both check and apply, before any value comparison or remote mutation.
+  Previously the validation was inline and path-dependent — a corrupt cached
+  `APP_KEY` behind an operator-shaped live key stayed green forever, and a
+  corrupt value handed to apply surfaced only after packages and SQL had
+  already run.
+- The `database` step's three whitespace-sensitive `.env` probe scripts now
+  pin `LC_ALL=C`. Under `LANG=C.UTF-8` (the target hosts' default),
+  `[[:space:]]` in grep/sed also matches Unicode whitespace that the Go side
+  does not trim, which could produce a false-green password agreement or
+  endless `APP_KEY` drift. (The client-auth containment probe stays unpinned
+  on purpose: fixed-string grep has no locale-sensitive operation.)
 
 ## [0.23.0] — 2026-07-27
 

@@ -13,6 +13,7 @@ import (
 	"github.com/robsonek/berth/internal/config"
 	dbpkg "github.com/robsonek/berth/internal/database"
 	"github.com/robsonek/berth/internal/provision"
+	"github.com/robsonek/berth/internal/provision/steps"
 	"github.com/robsonek/berth/internal/secret"
 	bssh "github.com/robsonek/berth/internal/ssh"
 	"github.com/robsonek/berth/internal/version"
@@ -123,8 +124,11 @@ func assertManagedMarker(t *testing.T, path, content string) {
 //
 // Secret hygiene is a hard rule here: replacement values are freshly random
 // (secret.Generate / secret.AppKey), travel exclusively over SSH stdin — never
-// argv, never the command string, never test output — and are registered with
-// the suite's shared redactor before any engine run can mention them.
+// argv, never the command string, never test output, never stdout (every
+// on-host verification is exit-code-only through the production
+// envValueMatchScript; the drill never reads the .env back) — and are
+// registered with the suite's shared redactor before any engine run can
+// mention them.
 //
 // It runs LAST in the suite on purpose: it deliberately mutates live state.
 func assertRestoreDrill(t *testing.T, eng *provision.Engine, red *secret.Redactor, srv *config.Server, client *bssh.Client) {
@@ -135,14 +139,28 @@ func assertRestoreDrill(t *testing.T, eng *provision.Engine, red *secret.Redacto
 	}
 	site := drillSite(srv)
 	dbUser := srv.SiteDBUser(site)
+	dbName := srv.SiteDBName(site)
 	// appKeyCK mirrors steps.appKeyCacheKey (unexported): the cache key a
 	// site's APP_KEY backup lives under, beside the DB password.
 	appKeyCK := "appkey:" + dbUser
+	dbEng, err := dbpkg.Get(srv.Database.Engine)
+	if err != nil {
+		t.Fatalf("restore drill: engine %q: %v", srv.Database.Engine, err)
+	}
+	driver, host, port, socket := dbEng.EnvConnection()
+	envPath := site.DeployPath + "/shared/.env"
 
 	// Fresh deadline (mirrors assertSecondRunIdempotent): re-runs over a
 	// converged host are Check-dominated and fast.
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
+
+	// Fidelity guard, BEFORE the drill mutates or probes anything: the
+	// role-login probe below is built EXCLUSIVELY from the trusted identities
+	// above, so the live .env must first be proven to agree with them — see
+	// assertEnvIdentityFidelity.
+	assertEnvIdentityFidelity(ctx, t, client, "restore drill", envPath,
+		trustedDBConn{driver: driver, host: host, port: port, socket: socket}, dbUser, dbName)
 
 	// Precondition: the local cache holds the site's CURRENT secrets — the
 	// suite's provision converged them. Without that, the drill would not be
@@ -170,7 +188,6 @@ func assertRestoreDrill(t *testing.T, eng *provision.Engine, red *secret.Redacto
 
 	// 1. Diverge: overwrite the live .env values as root. Both secrets ride
 	// SSH stdin (one per line) straight into awk — see envOverwriteScript.
-	envPath := site.DeployPath + "/shared/.env"
 	res, err := client.Run(ctx, envOverwriteScript(envPath), []byte(newPW+"\n"+newKey+"\n"))
 	if err != nil {
 		t.Fatalf("restore drill: overwrite %s: %v", envPath, err)
@@ -178,10 +195,14 @@ func assertRestoreDrill(t *testing.T, eng *provision.Engine, red *secret.Redacto
 	if res.ExitCode != 0 {
 		t.Fatalf("restore drill: overwrite %s: exit %d, stderr %q", envPath, res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
-	env := readSiteEnv(ctx, t, client, site)
-	if env["DB_PASSWORD"] != newPW || env["APP_KEY"] != newKey {
-		t.Fatalf("restore drill: %s did not take the fresh values (DB_PASSWORD swapped: %t, APP_KEY swapped: %t)",
-			envPath, env["DB_PASSWORD"] == newPW, env["APP_KEY"] == newKey)
+	// The overwrite took — proven WITHOUT reading the file back: each fresh
+	// value rides stdin into the production match script and only the exit
+	// code answers, so the new secrets never travel over SSH stdout.
+	if exit := envFieldExit(ctx, t, client, envPath, "DB_PASSWORD", newPW); exit != 0 {
+		t.Fatalf("restore drill: %s did not take the fresh DB_PASSWORD (probe exit %d)", envPath, exit)
+	}
+	if exit := envFieldExit(ctx, t, client, envPath, "APP_KEY", newKey); exit != 0 {
+		t.Fatalf("restore drill: %s did not take the fresh APP_KEY (probe exit %d)", envPath, exit)
 	}
 
 	// 2. A read-only dry-run must SEE the divergence: the database step plans,
@@ -202,10 +223,12 @@ func assertRestoreDrill(t *testing.T, eng *provision.Engine, red *secret.Redacto
 		t.Errorf("restore drill: database step did not re-apply on the diverged host (got kind %v)", ev.Kind)
 	}
 
-	// 4a. The role authenticates with the NEW password over the app's own
-	// .env connection path; the password rides stdin into an env assignment
-	// (never argv — unlike dbProbeCmd's inline form).
-	res, err = client.Run(ctx, dbProbeStdinCmd(env, env["DB_DATABASE"], "SELECT 1"), []byte(newPW+"\n"))
+	// 4a. The role authenticates with the NEW password over the connection
+	// path the app uses — rebuilt here from the TRUSTED identities the
+	// fidelity guard proved the live .env agrees with, never from the
+	// tenant-writable file itself; the password rides stdin into an env
+	// assignment, never argv.
+	res, err = client.Run(ctx, dbProbeStdinCmd(driver, host, port, socket, dbUser, dbName, "SELECT 1"), []byte(newPW+"\n"))
 	if err != nil {
 		t.Fatalf("restore drill: role login probe: %v", err)
 	}
@@ -229,10 +252,6 @@ func assertRestoreDrill(t *testing.T, eng *provision.Engine, red *secret.Redacto
 
 	// 4c. The seeded client-auth file (~/.my.cnf / ~/.pgpass) was rewritten
 	// with the NEW password — it provably held berth's old cached one.
-	dbEng, err := dbpkg.Get(srv.Database.Engine)
-	if err != nil {
-		t.Fatalf("restore drill: engine %q: %v", srv.Database.Engine, err)
-	}
 	authPath := "/home/" + srv.SiteUser(site) + "/" + dbEng.ClientAuthFileName()
 	res, err = client.Run(ctx, clientAuthContainsCmd(authPath), []byte(newPW+"\n"))
 	if err != nil {
@@ -297,42 +316,46 @@ func drillRun(ctx context.Context, t *testing.T, eng *provision.Engine, red *sec
 	return terminal
 }
 
-// envOverwriteScript builds the remote script that swaps the DB_PASSWORD and
-// APP_KEY values of a live shared/.env in place. The two replacement values
-// are awk's FIRST input file — SSH stdin, one per line — so they never touch
-// argv, the command string, or stdout (the production probes' transport
-// contract). `cat > file` rewrites through the existing inode, so the site
-// user's ownership and 0600 mode survive the root write.
-func envOverwriteScript(envPath string) string {
-	q := sqQuote(envPath)
-	return "tmp=$(mktemp) && " +
-		`awk 'NR==FNR{v[NR]=$0;next} /^DB_PASSWORD=/{print "DB_PASSWORD=" v[1];next} /^APP_KEY=/{print "APP_KEY=" v[2];next} {print}' - ` + q + ` > "$tmp" && ` +
-		"cat \"$tmp\" > " + q + " && rm -f -- \"$tmp\""
-}
-
-// dbProbeStdinCmd is dbProbeCmd with the password moved OFF the command string:
+// dbProbeStdinCmd runs sql against dbName as the app's DB role, the way
+// Laravel connects (socket or TCP), with the password OFF the command string:
 // `IFS= read -r` takes it from SSH stdin into a shell variable, and it reaches
 // the client only as an environment assignment (MYSQL_PWD / PGPASSWORD) — never
-// argv. Connection parameters still come from the site's .env, the way the app
-// connects.
-func dbProbeStdinCmd(env map[string]string, targetDB, sql string) string {
-	user := env["DB_USERNAME"]
-	host := env["DB_HOST"]
-	if host == "" {
-		host = "127.0.0.1"
-	}
-	switch env["DB_CONNECTION"] {
+// argv. This command runs as ROOT, so every connection parameter comes from
+// TRUSTED identities — the loaded config (dbUser, dbName) and the engine's
+// EnvConnection() (driver, host, port, socket) — never from the tenant-writable
+// .env; every caller first proves the live .env agrees with these values via
+// assertEnvIdentityFidelity. Every interpolated token is sqQuoted anyway
+// (defence in depth).
+func dbProbeStdinCmd(driver, host, port, socket, dbUser, dbName, sql string) string {
+	switch driver {
 	case "mysql":
-		conn := "-h" + host
-		if sock := env["DB_SOCKET"]; sock != "" {
-			conn = "--socket=" + sock
+		conn := "-h" + sqQuote(host)
+		if socket != "" {
+			conn = "--socket=" + sqQuote(socket)
+		} else if port != "" {
+			conn += " -P" + sqQuote(port)
 		}
-		return fmt.Sprintf(`IFS= read -r pw; MYSQL_PWD="$pw" mysql %s -u%s %s -e %s`, conn, user, targetDB, sqQuote(sql))
+		return fmt.Sprintf(`IFS= read -r pw; MYSQL_PWD="$pw" mysql %s -u%s %s -e %s`, conn, sqQuote(dbUser), sqQuote(dbName), sqQuote(sql))
 	case "pgsql":
-		return fmt.Sprintf(`IFS= read -r pw; PGPASSWORD="$pw" psql -h%s -U%s -d%s -tAc %s`, host, user, targetDB, sqQuote(sql))
+		return fmt.Sprintf(`IFS= read -r pw; PGPASSWORD="$pw" psql -h%s -p%s -U%s -d%s -tAc %s`, sqQuote(host), sqQuote(port), sqQuote(dbUser), sqQuote(dbName), sqQuote(sql))
 	default:
 		return "false"
 	}
+}
+
+// envFieldExit runs the PRODUCTION envValueMatchScript (bridged from the steps
+// package so the drill exercises the exact bytes provisioning runs) against a
+// live .env: the expected KEY=value line rides SSH stdin and ONLY the exit
+// code comes back (0 match / 1 present-but-different / 3 no such key / 2 I/O
+// error) — safe for secrets and non-secrets alike, nothing rides stdout. A
+// transport error is fatal; exit-code interpretation is the caller's.
+func envFieldExit(ctx context.Context, t *testing.T, c *bssh.Client, envPath, key, want string) int {
+	t.Helper()
+	res, err := c.Run(ctx, steps.EnvValueMatchScript(envPath, key), []byte(key+"="+want+"\n"))
+	if err != nil {
+		t.Fatalf("probe %s in %s: %v", key, envPath, err)
+	}
+	return res.ExitCode
 }
 
 // clientAuthContainsCmd mirrors steps.clientAuthContainsScript: stdin carries

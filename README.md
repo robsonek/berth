@@ -180,9 +180,10 @@ sites:                         # one or more
 
 Generated passwords are cached in `~/.berth/` (the secrets file is mode 0600)
 and reused across runs — never rotated. The `APP_KEY` backup covers
-berth-seeded keys (`base64:` + 32 bytes); a key in any other format is not
-backed up, and a present-but-corrupt key makes berth refuse loudly rather than
-cache it. The thematic sections below explain each area in depth.
+berth-seeded keys (`base64:` + 32 bytes); a live key in any other shape is
+treated as operator-managed — left alone and simply not backed up — while a
+malformed key already in the local cache makes berth refuse loudly rather
+than propagate it. The thematic sections below explain each area in depth.
 
 ### Server identity (`id:`)
 
@@ -482,8 +483,10 @@ that writes, into `/var/backups/berth/<pool>/` (**`root:root`, mode 0700**):
 - `<db>-<UTC-timestamp>.sql.gz` — passwordless engine dump (MariaDB socket-root / Postgres peer)
 - `<pool>-files-<UTC-timestamp>.tar.gz` — a tar of the site's `shared/` (`.env` + `storage/`)
 - `manifest` — written by `berth provision` itself (not the cron): the berth
-  version, engine, database/user names, site user and `deploy_path` the
-  archives were made under, so a copy of the directory stays self-describing
+  version, engine, database/user names, site user and `deploy_path` of the
+  site's **current** configuration, so a copy of the directory stays
+  self-describing. Archives created before a config change may predate what
+  the manifest records — match dump/tar pairs by their UTC timestamp
 
 Old archives are pruned by age. Disabling backups (per site, or removing the site)
 deletes the cron + script + manifest but **never** the existing archive files.
@@ -523,7 +526,9 @@ cannot reach its database and the cache would poison any future re-seed with
 a wrong `APP_KEY`. When `~/.berth/` survived, the same sequence simply makes
 step (4) report everything satisfied. Each backup directory carries a
 `manifest` file recording the engine, database/user names, site user and
-`deploy_path` the archives were made under — trust it over re-deriving.
+`deploy_path` as of the last provision run — a useful starting point, but it
+describes the current configuration, not necessarily the one an older archive
+was made under; verify against the dump/tar UTC timestamps before restoring.
 
 **Limitations:** local only (no offsite copy) — backups are root-owned so they survive a
 compromised *site*, but a lost *host* loses them; the DB dump and files tar are independent,
@@ -539,8 +544,11 @@ nginx; its PHP-FPM pool, queue worker and cron all run as that user), and each
 site gets **its own database + user**. Alongside the seeded `shared/.env`,
 berth also seeds the site user's DB client-credentials file — `~/.my.cnf`
 (MariaDB) or `~/.pgpass` (PostgreSQL), `0600`, written once and never
-rewritten — so `mariadb`, `mariadb-dump`, `psql` and `pg_dump` run as that
-user without pasting the password:
+rewritten (single exception: when a provision run resets the database
+password to a restored `.env`'s value and the file provably still holds
+berth's previous credential, it is refreshed to match; an
+operator-customized file is never touched) — so `mariadb`, `mariadb-dump`,
+`psql` and `pg_dump` run as that user without pasting the password:
 
 ```yaml
 database:

@@ -3,8 +3,13 @@
 package integration
 
 import (
-	"fmt"
+	"context"
 	"strings"
+	"testing"
+
+	"github.com/robsonek/berth/internal/config"
+	dbpkg "github.com/robsonek/berth/internal/database"
+	bssh "github.com/robsonek/berth/internal/ssh"
 )
 
 // parseEnv parses Laravel-style KEY=VALUE lines into a map (comments and blanks
@@ -23,38 +28,57 @@ func parseEnv(content string) map[string]string {
 	return m
 }
 
-// dbProbeCmd builds a shell command that runs sql against targetDB as the app user
-// from a site's .env, the way Laravel connects: MariaDB over DB_SOCKET when set (else
-// TCP to DB_HOST), Postgres over TCP to DB_HOST. The password rides in the inline
-// MYSQL_PWD= / PGPASSWORD= assignment — off the mysql/psql argv (no -p<pass>); it does
-// reach the wrapping sh -c, which is acceptable on the disposable test box. Exit 0 means
-// connect + statement succeeded.
-func dbProbeCmd(env map[string]string, targetDB, sql string) string {
-	user, pass := env["DB_USERNAME"], env["DB_PASSWORD"]
-	switch env["DB_CONNECTION"] {
-	case "mysql":
-		host := env["DB_HOST"]
-		if host == "" {
-			host = "127.0.0.1"
-		}
-		conn := "-h" + host
-		if sock := env["DB_SOCKET"]; sock != "" {
-			conn = "--socket=" + sock
-		}
-		return fmt.Sprintf("MYSQL_PWD=%s mysql %s -u%s %s -e %s", pass, conn, user, targetDB, sqQuote(sql))
-	case "pgsql":
-		host := env["DB_HOST"]
-		if host == "" {
-			host = "127.0.0.1"
-		}
-		return fmt.Sprintf("PGPASSWORD=%s psql -h%s -U%s -d%s -tAc %s", pass, host, user, targetDB, sqQuote(sql))
-	default:
-		return "false"
-	}
+// trustedDBConn carries the engine-level connection identity every root
+// probe is built from — the engine's EnvConnection(), never the
+// tenant-writable .env.
+type trustedDBConn struct {
+	driver, host, port, socket string
 }
 
-// sqQuote single-quotes s for safe embedding in a shell command.
-func sqQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+// trustedDBConnFor resolves the configured engine's EnvConnection into a
+// trustedDBConn; an unknown engine is fatal.
+func trustedDBConnFor(t *testing.T, srv *config.Server) trustedDBConn {
+	t.Helper()
+	eng, err := dbpkg.Get(srv.Database.Engine)
+	if err != nil {
+		t.Fatalf("engine %q: %v", srv.Database.Engine, err)
+	}
+	driver, host, port, socket := eng.EnvConnection()
+	return trustedDBConn{driver: driver, host: host, port: port, socket: socket}
+}
+
+// assertEnvIdentityFidelity proves a live shared/.env's non-secret DB fields
+// agree with the trusted identities root probes are built from: shared/.env
+// is seed-if-absent and never rewritten, so a pre-existing file's connection
+// fields can legitimately differ from what the current config would seed.
+// Every field is exit-code-verified through the production match script
+// (nothing rides stdout); a mismatch is fatal — it means the app connects
+// elsewhere than berth believes, so probing the trusted endpoint would prove
+// nothing about the app. label prefixes every failure.
+func assertEnvIdentityFidelity(ctx context.Context, t *testing.T, c *bssh.Client, label, envPath string, conn trustedDBConn, dbUser, dbName string) {
+	t.Helper()
+	for _, f := range [][2]string{
+		{"DB_CONNECTION", conn.driver},
+		{"DB_HOST", conn.host},
+		{"DB_PORT", conn.port},
+		{"DB_USERNAME", dbUser},
+		{"DB_DATABASE", dbName},
+	} {
+		if exit := envFieldExit(ctx, t, c, envPath, f[0], f[1]); exit != 0 {
+			t.Fatalf("%s: live %s in %s disagrees with the trusted value %q (probe exit %d) — the app connects elsewhere than berth believes",
+				label, f[0], envPath, f[1], exit)
+		}
+	}
+	if conn.socket != "" {
+		if exit := envFieldExit(ctx, t, c, envPath, "DB_SOCKET", conn.socket); exit != 0 {
+			t.Fatalf("%s: live DB_SOCKET in %s disagrees with the trusted value %q (probe exit %d) — the app connects elsewhere than berth believes",
+				label, envPath, conn.socket, exit)
+		}
+	} else if exit := envFieldExit(ctx, t, c, envPath, "DB_SOCKET", ""); exit != 3 {
+		t.Fatalf("%s: %s carries a DB_SOCKET line but the engine connects over TCP (probe exit %d, want 3 = key absent) — the app connects elsewhere than berth believes",
+			label, envPath, exit)
+	}
+}
 
 // dbServiceName maps a berth engine name to its systemd unit.
 func dbServiceName(engine string) string {

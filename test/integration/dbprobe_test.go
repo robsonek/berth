@@ -11,30 +11,36 @@ func TestParseEnv(t *testing.T) {
 	}
 }
 
-func TestDBProbeCmdMariaDBSocket(t *testing.T) {
-	env := map[string]string{"DB_CONNECTION": "mysql", "DB_SOCKET": "/run/mysqld/mysqld.sock", "DB_USERNAME": "sync", "DB_PASSWORD": "pw"}
-	got := dbProbeCmd(env, "sync", "SELECT 1")
-	want := "MYSQL_PWD=pw mysql --socket=/run/mysqld/mysqld.sock -usync sync -e 'SELECT 1'"
+// dbProbeStdinCmd builds from TRUSTED identities (config + EnvConnection) and
+// sqQuotes every token; these pins mirror the two engines' EnvConnection
+// shapes the drill actually feeds it.
+func TestDBProbeStdinCmdMariaDBSocket(t *testing.T) {
+	got := dbProbeStdinCmd("mysql", "localhost", "3306", "/run/mysqld/mysqld.sock", "b_app_1234abcd", "app_db", "SELECT 1")
+	want := `IFS= read -r pw; MYSQL_PWD="$pw" mysql --socket='/run/mysqld/mysqld.sock' -u'b_app_1234abcd' 'app_db' -e 'SELECT 1'`
 	if got != want {
 		t.Errorf("got  %q\nwant %q", got, want)
 	}
 }
 
-func TestDBProbeCmdMariaDBTCPFallback(t *testing.T) {
-	env := map[string]string{"DB_CONNECTION": "mysql", "DB_HOST": "127.0.0.1", "DB_USERNAME": "sync", "DB_PASSWORD": "pw"}
-	got := dbProbeCmd(env, "sync", "SELECT 1")
-	want := "MYSQL_PWD=pw mysql -h127.0.0.1 -usync sync -e 'SELECT 1'"
+func TestDBProbeStdinCmdMySQLTCP(t *testing.T) {
+	got := dbProbeStdinCmd("mysql", "127.0.0.1", "3306", "", "b_app_1234abcd", "app_db", "SELECT 1")
+	want := `IFS= read -r pw; MYSQL_PWD="$pw" mysql -h'127.0.0.1' -P'3306' -u'b_app_1234abcd' 'app_db' -e 'SELECT 1'`
 	if got != want {
 		t.Errorf("got  %q\nwant %q", got, want)
 	}
 }
 
-func TestDBProbeCmdPostgresTCP(t *testing.T) {
-	env := map[string]string{"DB_CONNECTION": "pgsql", "DB_HOST": "127.0.0.1", "DB_USERNAME": "sync", "DB_PASSWORD": "pw"}
-	got := dbProbeCmd(env, "sync", "SELECT 1")
-	want := "PGPASSWORD=pw psql -h127.0.0.1 -Usync -dsync -tAc 'SELECT 1'"
+func TestDBProbeStdinCmdPostgresTCP(t *testing.T) {
+	got := dbProbeStdinCmd("pgsql", "127.0.0.1", "5432", "", "b_app_1234abcd", "app_db", "SELECT 1")
+	want := `IFS= read -r pw; PGPASSWORD="$pw" psql -h'127.0.0.1' -p'5432' -U'b_app_1234abcd' -d'app_db' -tAc 'SELECT 1'`
 	if got != want {
 		t.Errorf("got  %q\nwant %q", got, want)
+	}
+}
+
+func TestDBProbeStdinCmdUnknownDriver(t *testing.T) {
+	if got := dbProbeStdinCmd("sqlite", "", "", "", "u", "d", "SELECT 1"); got != "false" {
+		t.Errorf("got %q, want the always-failing command", got)
 	}
 }
 

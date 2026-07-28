@@ -35,10 +35,12 @@ func Pipeline(s *config.Server, red *secret.Redactor, skipSSL bool) []provision.
 	// completed on this binary's version, so nothing may run after it — and
 	// it is NOT registered when --skip-ssl artificially truncated a pipeline
 	// that would otherwise carry TLS (the attestation would be a lie).
-	// Semantics note: "completed" includes runs that ended with warnings
-	// (e.g. the documented LE DNS-mismatch skip) — warnings never affect the
-	// exit code by contract, and future migrations branch on VERSION, not on
-	// certificate state.
+	// Semantics note: "completed" means completed AND converged — a run that
+	// knowingly left work undone (the documented LE DNS-mismatch skip) marks
+	// itself unconverged via RunCtx, and manifest's Apply then withholds the
+	// write with a warning, leaving any attestation from a prior converged
+	// run intact. Warnings alone (host still converged) do not block the
+	// stamp, and warnings never affect the exit code by contract.
 	if !(skipSSL && anySiteSSL(s)) {
 		steps = append(steps, Manifest())
 	}
