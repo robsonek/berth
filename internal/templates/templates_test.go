@@ -44,6 +44,21 @@ func checkGoldenRender(t *testing.T, render func(string, any) ([]byte, error), n
 	}
 }
 
+// The marker text is FROZEN FOREVER as of the first real deployment: it is
+// the first line of every managed file on every host, and the drift
+// machinery classifies files by comparing it exactly. Changing either
+// constant would make every already-provisioned host read as foreign
+// (abort-unless--force on every write) and blind every marker-guarded sweep.
+// If this test fails, you are about to break every live host — stop.
+func TestManagedMarkerIsFrozen(t *testing.T) {
+	if ManagedMarker != "# managed by berth" {
+		t.Fatalf("ManagedMarker changed: %q", ManagedMarker)
+	}
+	if ManagedMarkerINI != "; managed by berth" {
+		t.Fatalf("ManagedMarkerINI changed: %q", ManagedMarkerINI)
+	}
+}
+
 type nginxData struct {
 	Domain, DeployPath, ACMEWebroot, Socket, CertPath, KeyPath, BodyMax string
 	HTTP3, QUICReuseport, HSTS, CloudflareOnly                          bool

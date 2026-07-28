@@ -12,16 +12,17 @@ import (
 
 	"github.com/robsonek/berth/internal/apt"
 	bssh "github.com/robsonek/berth/internal/ssh"
+	"github.com/robsonek/berth/internal/templates"
 )
 
 // managedMarker / managedMarkerINI are the first line berth writes into every
 // config file it owns (templates.Render / RenderINI prepend one of them). Their
 // presence distinguishes a berth-managed file from a pre-existing, unmanaged one
-// (drift policy, §6.5). Two variants exist because '#' starts a comment in most
-// configs but PHP-FPM's INI parser only accepts ';'.
+// (drift policy, §6.5). Thin aliases of the single source in the templates
+// package, so writer and reader can never diverge.
 const (
-	managedMarker    = "# managed by berth"
-	managedMarkerINI = "; managed by berth"
+	managedMarker    = templates.ManagedMarker
+	managedMarkerINI = templates.ManagedMarkerINI
 )
 
 // hasManagedMarker reports whether the FIRST LINE of content is exactly one
