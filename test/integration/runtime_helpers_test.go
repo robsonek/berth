@@ -82,6 +82,38 @@ func TestSupervisorAllStopped(t *testing.T) {
 	}
 }
 
+func TestSSLRunSwitches(t *testing.T) {
+	cases := []struct {
+		name                 string
+		env                  string
+		anySelfSigned        bool
+		skipSSL, sslExplicit bool
+		wantErr              bool
+	}{
+		{"unset-le-only-skips", "", false, true, false, false},
+		{"unset-selfsigned-runs", "", true, false, false, false},
+		{"true-hard-skip", "true", true, true, false, false},
+		{"false-explicit-optin", "false", false, false, true, false},
+		{"typo-rejected", "False", false, false, false, true},
+		{"garbage-rejected", "1", true, false, false, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			skipSSL, sslExplicit, err := sslRunSwitches(c.env, c.anySelfSigned)
+			if (err != nil) != c.wantErr {
+				t.Fatalf("sslRunSwitches(%q, %v) err = %v, wantErr %v", c.env, c.anySelfSigned, err, c.wantErr)
+			}
+			if err != nil {
+				return
+			}
+			if skipSSL != c.skipSSL || sslExplicit != c.sslExplicit {
+				t.Errorf("sslRunSwitches(%q, %v) = (%v, %v), want (%v, %v)",
+					c.env, c.anySelfSigned, skipSSL, sslExplicit, c.skipSSL, c.sslExplicit)
+			}
+		})
+	}
+}
+
 func TestInsecureHTTPSProbes(t *testing.T) {
 	cases := []struct {
 		name                             string

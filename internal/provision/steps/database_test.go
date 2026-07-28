@@ -1860,6 +1860,6 @@ func TestDatabaseApplyRegistersCachedPasswordBeforeCachedAppKeyValidationFails(t
 		t.Fatalf("Apply must fail on the malformed cached APP_KEY; got %v", err)
 	}
 	if got := red.Apply("leak Hunter22pw leak"); strings.Contains(got, "Hunter22pw") {
-		t.Fatalf("the password must already be registered when APP_KEY recovery fails; Apply => %q", got)
+		t.Fatalf("the password must already be registered when cached APP_KEY validation fails; Apply => %q", got)
 	}
 }

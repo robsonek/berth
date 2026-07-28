@@ -98,9 +98,11 @@ BERTH_TEST_SERVER="$PWD/servers/smoke.yml" go test -tags integration -v ./test/i
 ```
 
 Optional knobs: `BERTH_TEST_SKIP_SSL=false` exercises TLS end-to-end (needs
-real public DNS pointing at the host), and `BERTH_TEST_SSL_STAGING=true`
-issues from the Let's Encrypt staging CA (use it for repeated runs — the
-production CA rate-limits to 5 certificates per domain set per 168 h). The
+real public DNS pointing at the host), and `BERTH_TEST_SSL_STAGING=true` —
+effective only together with `BERTH_TEST_SKIP_SSL=false`, since Let's
+Encrypt issuance is otherwise skipped — issues from the staging CA (use it
+for repeated runs; the production CA rate-limits to 5 certificates per
+domain set per 168 h). The
 suite skips CA verification on staging-flagged runs: a staging certificate
 is untrusted by design, and such a run may equally have preserved an
 earlier production certificate (berth never replaces a valid one), which
@@ -110,9 +112,9 @@ happens only on an unflagged `BERTH_TEST_SKIP_SSL=false` run.
 Tear the host down afterwards (`incus delete -f berth-smoke`, or destroy the
 VPS). Re-running against the same host is safe: every step is idempotent.
 
-One asymmetry to know about: a re-run with `BERTH_TEST_SKIP_SSL=true`
-against a host that ALREADY has certificates from an earlier TLS run keeps
-serving HTTPS — the cert-aware `site` step never reverts a vhost to HTTP.
-The HTTP-side probes then see the vhost's 301 redirect instead of the
-tenant marker, so a failure reported as broken tenant routing on such a
-re-run usually just means "this host has certs; drop the skip flag".
+One asymmetry to know about: berth never reverts a vhost from HTTPS to
+HTTP, so a re-run with `BERTH_TEST_SKIP_SSL=true` against a host that
+already has certificates from an earlier TLS run keeps serving HTTPS. The
+suite handles this by deciding per site from the actual on-host cert state
+(such sites are probed over HTTPS with CA verification skipped) — the skip
+flag only prevents NEW issuance, it does not downgrade existing sites.
