@@ -6,10 +6,13 @@ LDFLAGS := -s -w \
 	-X github.com/robsonek/berth/internal/version.Commit=$(COMMIT) \
 	-X github.com/robsonek/berth/internal/version.Date=$(DATE)
 
-.PHONY: build test
+.PHONY: build test lint
 
 build:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o berth .
 
 test:
 	go test ./...
+
+lint:
+	golangci-lint run ./...
