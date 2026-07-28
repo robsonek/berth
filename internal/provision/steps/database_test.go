@@ -1838,7 +1838,7 @@ func TestDatabaseApplyRegistersPasswordBeforeAppKeyAcquisitionFails(t *testing.T
 	}
 }
 
-func TestDatabaseApplyRegistersFreshPasswordBeforeAppKeyRecoveryFails(t *testing.T) {
+func TestDatabaseApplyRegistersCachedPasswordBeforeCachedAppKeyValidationFails(t *testing.T) {
 	// The malformed cached APP_KEY aborts in loadValidatedSecrets' preflight
 	// (the fresh-seed branch and recoverOrNewAppKey are never reached), and
 	// the cached password, validated and registered just before it, must
