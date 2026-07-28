@@ -168,7 +168,16 @@ func writeCacheBytes(key string, b []byte) error {
 	}
 	// The directory-durability fsync is Unix-only: os.Open yields a read-only
 	// handle, and on Windows FlushFileBuffers demands GENERIC_WRITE, so the
-	// Sync always fails there with "Access is denied".
+	// Sync always fails there with "Access is denied". On Windows the renamed
+	// entry's durability therefore rides on NTFS metadata journaling
+	// (os.Rename is MoveFileEx without WRITE_THROUGH) — a crash right after
+	// SaveEnvelope may lose the new file. Acceptable for this cache: every
+	// secret in it stays recoverable. Database credentials and APP_KEY are
+	// backfilled from the authoritative live shared/.env (before that file is
+	// seeded, a generated password has no remote effect yet — the cache is
+	// written first — so a retry regenerates losslessly), and the break-glass
+	// console password is re-minted once `passwd -S` reports it unusable;
+	// root access rides the SSH key, never this cache.
 	if runtime.GOOS != "windows" {
 		d, err := os.Open(dir)
 		if err != nil {

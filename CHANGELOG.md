@@ -19,9 +19,10 @@ Notable changes to berth. Older releases are documented on the
 
 - Secret-cache writes on Windows failed deterministically on the directory
   fsync ("Access is denied": a directory handle opened for reading cannot
-  be flushed there). The directory-durability fsync is now Unix-only;
-  file-level durability (fsync + atomic rename) is unchanged on every
-  platform.
+  be flushed there). The directory-durability fsync is now Unix-only. File
+  contents are still fsynced on every platform; the replacing rename is
+  atomic on Unix, while on Windows directory-entry durability is
+  best-effort via NTFS metadata journaling.
 
 ## [0.25.0] — 2026-07-28
 
