@@ -376,3 +376,17 @@ func TestCacheKey(t *testing.T) {
 		t.Errorf("CacheKey with id = %q, want the id", got)
 	}
 }
+
+// These derivations name OS users, FPM sockets, systemd units, supervisor
+// programs and the role names inside PostgreSQL dumps on every live host.
+// FROZEN FOREVER as of the first real deployment: changing either function
+// re-identifies every implicitly-named tenant — the owner guard would
+// refuse loudly rather than corrupt, but the config would stop converging.
+func TestDerivationsAreFrozen(t *testing.T) {
+	if got := DerivedSiteUser("app.example.com"); got != "b_appexamplecom_dd46c94b" {
+		t.Fatalf("DerivedSiteUser derivation changed: %s", got)
+	}
+	if got := PoolName("app.example.com"); got != "app_example_com" {
+		t.Fatalf("PoolName derivation changed: %s", got)
+	}
+}

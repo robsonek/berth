@@ -461,6 +461,8 @@ func (s *Server) AnyBackupsEnabled() bool {
 	return false
 }
 
+// FROZEN FOREVER (see TestDerivationsAreFrozen): this slug names FPM pools,
+// sockets, supervisor programs and systemd units on every live host.
 // PoolName derives the FPM pool / supervisor program slug from a domain
 // (filesystem-safe: dots -> underscores). Single source of truth shared by the
 // steps package and validation so program names never diverge.
@@ -509,6 +511,8 @@ func (s *Server) SiteDBName(site Site) string { return site.Database.Name }
 
 func (s *Server) SiteDBUser(site Site) string { return site.Database.User }
 
+// FROZEN FOREVER (see TestDerivationsAreFrozen): this name is the OS user
+// owning every implicitly-named tenant's files, DB role and dump contents.
 // DerivedSiteUser builds a Linux-valid, collision-resistant username from a
 // domain: "b_" + a sanitized domain prefix + "_" + an 8-hex fnv hash, lowercased
 // and capped at 32 characters. Stable across runs (deterministic hash).

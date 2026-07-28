@@ -34,6 +34,12 @@ func (e *Endpoint) valid() bool {
 // an envelope into a tombstone: a non-secret marker left at the old host-keyed
 // path after a migration to an id-keyed file, so a stale config still keyed by
 // host fails loudly instead of regenerating (or silently disowning) secrets.
+//
+// The secrets-map key grammar is FROZEN as of the first real deployment:
+// bare "<dbUser>" (DB password), "appkey:<dbUser>" (APP_KEY backup),
+// "console:berth" (break-glass ownership marker). New secret kinds get NEW
+// "<kind>:" prefixes; the three existing spellings never change (renaming
+// them would orphan every live cache).
 type Envelope struct {
 	Version    int               `json:"version"`
 	Endpoint   *Endpoint         `json:"endpoint"`
