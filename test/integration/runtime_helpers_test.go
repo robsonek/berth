@@ -93,7 +93,9 @@ func TestSSLRunSwitches(t *testing.T) {
 		{"unset-le-only-skips", "", false, true, false, false},
 		{"unset-selfsigned-runs", "", true, false, false, false},
 		{"true-hard-skip", "true", true, true, false, false},
+		{"true-hard-skip-le-only", "true", false, true, false, false},
 		{"false-explicit-optin", "false", false, false, true, false},
+		{"false-explicit-optin-selfsigned", "false", true, false, true, false},
 		{"typo-rejected", "False", false, false, false, true},
 		{"garbage-rejected", "1", true, false, false, true},
 	}
