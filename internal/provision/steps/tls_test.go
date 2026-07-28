@@ -864,29 +864,114 @@ kept.example.com = /var/www/berth-acme/kept.example.com
 authenticator = webroot
 webroot_path = /var/www/berth-acme/old.example.com/public,
 `
+	trailingSlash := `[renewalparams]
+authenticator = webroot
+webroot_path = /var/www/berth-acme/old.example.com/,
+`
+	dotdotEscape := `[renewalparams]
+authenticator = webroot
+webroot_path = /var/www/berth-acme/..,
+`
+	namespaceRoot := `[renewalparams]
+authenticator = webroot
+webroot_path = /var/www/berth-acme,
+`
+	authenticatorConflict := `[renewalparams]
+authenticator = dns-cloudflare
+dns_cloudflare_credentials = /root/.secrets/cloudflare.ini
+webroot_path = /var/www/berth-acme/old.example.com,
+
+[stray]
+authenticator = webroot
+`
+	hookOnly := `[renewalparams]
+authenticator = webroot
+renew_hook = /usr/local/bin/sync-cdn /var/www/berth-acme/old.example.com
+`
 	cases := []struct {
-		name     string
-		conf     string
-		owned    bool
-		webroots []string
+		name string
+		conf string
+		want renewalConf
 	}{
-		{"berth-issued", berth, true, []string{"old.example.com"}},
-		{"foreign-authenticator-hook-mentions-namespace", foreignHookMention, false, nil},
-		{"foreign-webroot", foreignWebroot, false, nil},
-		{"mixed-webroots-foreign-but-refs-collected", mixedWebroots, false, []string{"old.example.com"}},
-		{"multi-berth-webroots", multiBerth, true, []string{"old.example.com", "kept.example.com"}},
-		{"subdir-webroot-is-foreign", subdirWebroot, false, nil},
+		{"berth-issued", berth,
+			renewalConf{owned: true, refs: []string{"old.example.com"}, domains: []string{"old.example.com"}}},
+		{"foreign-authenticator-hook-mentions-namespace", foreignHookMention, renewalConf{}},
+		{"foreign-webroot", foreignWebroot,
+			renewalConf{domains: []string{"foreign.example"}}},
+		{"mixed-webroots-foreign-but-refs-collected", mixedWebroots,
+			renewalConf{refs: []string{"old.example.com"}, domains: []string{"old.example.com", "foreign.example"}}},
+		{"multi-berth-webroots", multiBerth,
+			renewalConf{owned: true, refs: []string{"old.example.com", "kept.example.com"}, domains: []string{"old.example.com", "kept.example.com"}}},
+		// Nested value: not berth-shaped for ownership, but the top-level dir
+		// it lands in IS a protection root — sweeping it would break this
+		// surviving lineage's next renewal.
+		{"subdir-webroot-is-foreign-but-protects", subdirWebroot,
+			renewalConf{refs: []string{"old.example.com"}}},
+		// A trailing slash cleans to berth's exact namespace shape: owned.
+		{"trailing-slash-is-berth-shaped", trailingSlash,
+			renewalConf{owned: true, refs: []string{"old.example.com"}}},
+		// path.Clean resolves the escape to /var/www: fully foreign, no refs.
+		{"dotdot-escapes-namespace", dotdotEscape, renewalConf{}},
+		// The namespace root itself: every webroot dir potentially serves it.
+		{"namespace-root-is-unbounded", namespaceRoot, renewalConf{unbounded: true}},
+		// Conflicting authenticator evidence is never ownership, wherever the
+		// webroot line sits; the berth-webroot reference still protects.
+		{"authenticator-conflict-is-foreign", authenticatorConflict,
+			renewalConf{refs: []string{"old.example.com"}}},
+		// webroot authenticator but no webroot value at all (hook-only conf):
+		// no evidence berth issued it, nothing to protect.
+		{"hook-only-no-webroot-values", hookOnly, renewalConf{}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			owned, webroots := parseRenewalConf(c.conf)
-			if owned != c.owned {
-				t.Errorf("owned = %v, want %v", owned, c.owned)
-			}
-			if !reflect.DeepEqual(webroots, c.webroots) {
-				t.Errorf("webroots = %v, want %v", webroots, c.webroots)
+			if got := parseRenewalConf(c.conf); !reflect.DeepEqual(got, c.want) {
+				t.Errorf("parseRenewalConf = %+v, want %+v", got, c.want)
 			}
 		})
+	}
+}
+
+func TestListRenewalConfs(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find -H '/etc/letsencrypt/renewal' -mindepth 1 -maxdepth 1 -name '*.conf'; fi",
+		bssh.Result{Stdout: "/etc/letsencrypt/renewal/a.example.com.conf\n/etc/letsencrypt/renewal/b.example.com.conf\n"})
+	got, err := listRenewalConfs(context.Background(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/etc/letsencrypt/renewal/a.example.com.conf", "/etc/letsencrypt/renewal/b.example.com.conf"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("listRenewalConfs = %v, want %v", got, want)
+	}
+}
+
+func TestListRenewalConfsErrorsOnFindFailure(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find -H '/etc/letsencrypt/renewal' -mindepth 1 -maxdepth 1 -name '*.conf'; fi",
+		bssh.Result{ExitCode: 1, Stderr: "find: permission denied"})
+	if _, err := listRenewalConfs(context.Background(), f); err == nil {
+		t.Fatal("a failing find must be an error, not an empty result")
+	}
+}
+
+func TestCertNameBase(t *testing.T) {
+	cases := []struct {
+		name string
+		base string
+		ok   bool
+	}{
+		{"kept.example.com-0001", "kept.example.com", true},
+		{"kept.example.com-1", "kept.example.com", true},
+		{"kept.example.com", "", false},
+		{"kept.example.com-", "", false},
+		{"kept.example.com-abc", "", false},
+		{"kept.example.com-00a1", "", false},
+		{"-0001", "", false},
+	}
+	for _, c := range cases {
+		if base, ok := certNameBase(c.name); base != c.base || ok != c.ok {
+			t.Errorf("certNameBase(%q) = (%q, %v), want (%q, %v)", c.name, base, ok, c.base, c.ok)
+		}
 	}
 }
 
@@ -894,7 +979,7 @@ webroot_path = /var/www/berth-acme/old.example.com/public,
 // results — "no TLS leftovers on this host". Discovery runs FIRST in Check
 // and again in Apply, so every tls test needs these.
 func stubNoTLSOrphans(f *bssh.FakeRunner) {
-	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find '/etc/letsencrypt/renewal' -maxdepth 1 -type f -name '*.conf'; fi", bssh.Result{})
+	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find -H '/etc/letsencrypt/renewal' -mindepth 1 -maxdepth 1 -name '*.conf'; fi", bssh.Result{})
 	f.On("if [ -d '/var/www/berth-acme' ]; then find '/var/www/berth-acme' -mindepth 1 -maxdepth 1 -type d; fi", bssh.Result{})
 	f.On("if [ -d '/etc/ssl/berth' ]; then find '/etc/ssl/berth' -mindepth 1 -maxdepth 1 -type d; fi", bssh.Result{})
 }
@@ -931,7 +1016,7 @@ func berthRenewalConf(domains ...string) string {
 
 func TestTLSCheckFlagsOrphanTLSArtifacts(t *testing.T) {
 	f := bssh.NewFakeRunner()
-	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find '/etc/letsencrypt/renewal' -maxdepth 1 -type f -name '*.conf'; fi",
+	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find -H '/etc/letsencrypt/renewal' -mindepth 1 -maxdepth 1 -name '*.conf'; fi",
 		bssh.Result{Stdout: "/etc/letsencrypt/renewal/old.example.com.conf\n"})
 	f.On("cat '/etc/letsencrypt/renewal/old.example.com.conf'",
 		bssh.Result{Stdout: berthRenewalConf("old.example.com")})
@@ -962,7 +1047,7 @@ func TestTLSCheckFlagsOrphanTLSArtifacts(t *testing.T) {
 
 func TestTLSCheckIgnoresForeignLineage(t *testing.T) {
 	f := bssh.NewFakeRunner()
-	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find '/etc/letsencrypt/renewal' -maxdepth 1 -type f -name '*.conf'; fi",
+	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find -H '/etc/letsencrypt/renewal' -mindepth 1 -maxdepth 1 -name '*.conf'; fi",
 		bssh.Result{Stdout: "/etc/letsencrypt/renewal/foreign.example.conf\n"})
 	// Foreign lineage whose renew_hook merely MENTIONS berth's namespace: the
 	// parser must not read that as ownership.
@@ -988,7 +1073,7 @@ func TestTLSCheckShieldedLineageProtectsItsWebroots(t *testing.T) {
 	// lineage's next renewal. Only the self-signed dir of the removed domain
 	// is genuinely orphaned here.
 	f := bssh.NewFakeRunner()
-	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find '/etc/letsencrypt/renewal' -maxdepth 1 -type f -name '*.conf'; fi",
+	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find -H '/etc/letsencrypt/renewal' -mindepth 1 -maxdepth 1 -name '*.conf'; fi",
 		bssh.Result{Stdout: "/etc/letsencrypt/renewal/old.example.com-0001.conf\n"})
 	f.On("cat '/etc/letsencrypt/renewal/old.example.com-0001.conf'",
 		bssh.Result{Stdout: berthRenewalConf("old.example.com", "kept.example.com")})
@@ -1010,9 +1095,145 @@ func TestTLSCheckShieldedLineageProtectsItsWebroots(t *testing.T) {
 	}
 }
 
+func TestTLSCheckMapKeyShieldsSuffixedLineage(t *testing.T) {
+	// certbot's collision-suffixed lineage kept.example.com-0001 serves the
+	// CONFIGURED kept.example.com through a shared webroot dir: neither the
+	// cert name nor the ref ("shared") is a desired domain, but the
+	// [[webroot_map]] KEY is — the lineage AND its webroot dir must survive.
+	f := bssh.NewFakeRunner()
+	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find -H '/etc/letsencrypt/renewal' -mindepth 1 -maxdepth 1 -name '*.conf'; fi",
+		bssh.Result{Stdout: "/etc/letsencrypt/renewal/kept.example.com-0001.conf\n"})
+	f.On("cat '/etc/letsencrypt/renewal/kept.example.com-0001.conf'",
+		bssh.Result{Stdout: "[renewalparams]\nauthenticator = webroot\nwebroot_path = /var/www/berth-acme/shared,\n[[webroot_map]]\nkept.example.com = /var/www/berth-acme/shared\n"})
+	f.On("if [ -d '/var/www/berth-acme' ]; then find '/var/www/berth-acme' -mindepth 1 -maxdepth 1 -type d; fi",
+		bssh.Result{Stdout: "/var/www/berth-acme/shared\n"})
+	f.On("if [ -d '/etc/ssl/berth' ]; then find '/etc/ssl/berth' -mindepth 1 -maxdepth 1 -type d; fi", bssh.Result{})
+	f.On("cat '/etc/letsencrypt/renewal-hooks/deploy/berth-nginx-reload'", bssh.Result{ExitCode: 1})
+
+	res, err := TLS().Check(context.Background(), provision.RunCtx{}, tlsNoSSLServer(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Satisfied {
+		t.Fatalf("a lineage serving a configured domain via its webroot_map key must survive with its webroot dir; got %s %v", res.Reason, res.Changes)
+	}
+}
+
+func TestTLSCheckSuffixBaseShieldsLineageWithoutMap(t *testing.T) {
+	// Same collision-suffixed lineage but with NO [[webroot_map]] at all: the
+	// cert name minus the -0001 suffix is the configured domain, which alone
+	// must shield it (certbot names the retry lineage after the domain).
+	f := bssh.NewFakeRunner()
+	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find -H '/etc/letsencrypt/renewal' -mindepth 1 -maxdepth 1 -name '*.conf'; fi",
+		bssh.Result{Stdout: "/etc/letsencrypt/renewal/kept.example.com-0001.conf\n"})
+	f.On("cat '/etc/letsencrypt/renewal/kept.example.com-0001.conf'",
+		bssh.Result{Stdout: "[renewalparams]\nauthenticator = webroot\nwebroot_path = /var/www/berth-acme/shared,\n"})
+	f.On("if [ -d '/var/www/berth-acme' ]; then find '/var/www/berth-acme' -mindepth 1 -maxdepth 1 -type d; fi",
+		bssh.Result{Stdout: "/var/www/berth-acme/shared\n"})
+	f.On("if [ -d '/etc/ssl/berth' ]; then find '/etc/ssl/berth' -mindepth 1 -maxdepth 1 -type d; fi", bssh.Result{})
+	f.On("cat '/etc/letsencrypt/renewal-hooks/deploy/berth-nginx-reload'", bssh.Result{ExitCode: 1})
+
+	res, err := TLS().Check(context.Background(), provision.RunCtx{}, tlsNoSSLServer(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Satisfied {
+		t.Fatalf("a lineage whose suffix-stripped name is a configured domain must survive; got %s %v", res.Reason, res.Changes)
+	}
+}
+
+func TestTLSCheckSweepsSuffixedLineageWithUndesiredBase(t *testing.T) {
+	// Negative control for the suffix shield: old.example.com-0001 whose base,
+	// refs and map keys are ALL undesired is still a genuine orphan.
+	f := bssh.NewFakeRunner()
+	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find -H '/etc/letsencrypt/renewal' -mindepth 1 -maxdepth 1 -name '*.conf'; fi",
+		bssh.Result{Stdout: "/etc/letsencrypt/renewal/old.example.com-0001.conf\n"})
+	f.On("cat '/etc/letsencrypt/renewal/old.example.com-0001.conf'",
+		bssh.Result{Stdout: berthRenewalConf("old.example.com")})
+	f.On("if [ -d '/var/www/berth-acme' ]; then find '/var/www/berth-acme' -mindepth 1 -maxdepth 1 -type d; fi",
+		bssh.Result{Stdout: "/var/www/berth-acme/old.example.com\n"})
+	f.On("if [ -d '/etc/ssl/berth' ]; then find '/etc/ssl/berth' -mindepth 1 -maxdepth 1 -type d; fi", bssh.Result{})
+	f.On("cat '/etc/letsencrypt/renewal-hooks/deploy/berth-nginx-reload'", bssh.Result{ExitCode: 1})
+
+	res, err := TLS().Check(context.Background(), provision.RunCtx{}, tlsNoSSLServer(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Satisfied {
+		t.Fatal("a suffixed lineage serving nothing configured is orphaned drift")
+	}
+	want := []string{
+		"certbot delete --cert-name old.example.com-0001",
+		"rm -rf /var/www/berth-acme/old.example.com",
+	}
+	if !reflect.DeepEqual(res.Changes, want) {
+		t.Errorf("Changes = %v, want %v", res.Changes, want)
+	}
+}
+
+func TestTLSCheckNestedForeignWebrootProtectsTopLevelDir(t *testing.T) {
+	// A surviving foreign lineage whose webroot value is NESTED under a berth
+	// webroot dir (…/old.example.com/public) still renews out of that
+	// directory: the top-level dir must survive the sweep even though
+	// old.example.com is not configured. Only the genuinely unreferenced
+	// gone.example.com dir is orphaned.
+	f := bssh.NewFakeRunner()
+	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find -H '/etc/letsencrypt/renewal' -mindepth 1 -maxdepth 1 -name '*.conf'; fi",
+		bssh.Result{Stdout: "/etc/letsencrypt/renewal/legacy.example.net.conf\n"})
+	f.On("cat '/etc/letsencrypt/renewal/legacy.example.net.conf'",
+		bssh.Result{Stdout: "[renewalparams]\nauthenticator = webroot\nwebroot_path = /var/www/berth-acme/old.example.com/public,\n"})
+	f.On("if [ -d '/var/www/berth-acme' ]; then find '/var/www/berth-acme' -mindepth 1 -maxdepth 1 -type d; fi",
+		bssh.Result{Stdout: "/var/www/berth-acme/old.example.com\n/var/www/berth-acme/gone.example.com\n"})
+	f.On("if [ -d '/etc/ssl/berth' ]; then find '/etc/ssl/berth' -mindepth 1 -maxdepth 1 -type d; fi", bssh.Result{})
+	f.On("cat '/etc/letsencrypt/renewal-hooks/deploy/berth-nginx-reload'", bssh.Result{ExitCode: 1})
+
+	res, err := TLS().Check(context.Background(), provision.RunCtx{}, tlsNoSSLServer(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Satisfied {
+		t.Fatal("the unreferenced gone.example.com webroot dir is still orphaned drift")
+	}
+	want := []string{"rm -rf /var/www/berth-acme/gone.example.com"}
+	if !reflect.DeepEqual(res.Changes, want) {
+		t.Errorf("Changes = %v, want %v (the nested-referenced dir survives, the lineage is never deleted)", res.Changes, want)
+	}
+}
+
+func TestTLSCheckUnboundedWebrootSuppressesWebrootSweep(t *testing.T) {
+	// A surviving foreign conf whose webroot value is the namespace root
+	// itself potentially serves EVERY webroot dir: the whole webroot-dir
+	// sweep must be suppressed for the run, while the independent
+	// self-signed-dir sweep still works.
+	f := bssh.NewFakeRunner()
+	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find -H '/etc/letsencrypt/renewal' -mindepth 1 -maxdepth 1 -name '*.conf'; fi",
+		bssh.Result{Stdout: "/etc/letsencrypt/renewal/foreign.example.conf\n"})
+	f.On("cat '/etc/letsencrypt/renewal/foreign.example.conf'",
+		bssh.Result{Stdout: "[renewalparams]\nauthenticator = webroot\nwebroot_path = /var/www/berth-acme,\n"})
+	// Stubbed so an implementation that still lists (but must not collect)
+	// fails on the assertion below, not on an unstubbed probe.
+	f.On("if [ -d '/var/www/berth-acme' ]; then find '/var/www/berth-acme' -mindepth 1 -maxdepth 1 -type d; fi",
+		bssh.Result{Stdout: "/var/www/berth-acme/a.example.com\n/var/www/berth-acme/b.example.com\n"})
+	f.On("if [ -d '/etc/ssl/berth' ]; then find '/etc/ssl/berth' -mindepth 1 -maxdepth 1 -type d; fi",
+		bssh.Result{Stdout: "/etc/ssl/berth/old.example.com\n"})
+	f.On("cat '/etc/letsencrypt/renewal-hooks/deploy/berth-nginx-reload'", bssh.Result{ExitCode: 1})
+
+	res, err := TLS().Check(context.Background(), provision.RunCtx{}, tlsNoSSLServer(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Satisfied {
+		t.Fatal("the orphan self-signed dir is still drift")
+	}
+	want := []string{"rm -rf /etc/ssl/berth/old.example.com"}
+	if !reflect.DeepEqual(res.Changes, want) {
+		t.Errorf("Changes = %v, want %v (no webroot removal may be planned under an unbounded reference)", res.Changes, want)
+	}
+}
+
 func TestTLSCheckErrorsWhenLineageConfUnreadable(t *testing.T) {
 	f := bssh.NewFakeRunner()
-	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find '/etc/letsencrypt/renewal' -maxdepth 1 -type f -name '*.conf'; fi",
+	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find -H '/etc/letsencrypt/renewal' -mindepth 1 -maxdepth 1 -name '*.conf'; fi",
 		bssh.Result{Stdout: "/etc/letsencrypt/renewal/old.example.com.conf\n"})
 	f.On("cat '/etc/letsencrypt/renewal/old.example.com.conf'",
 		bssh.Result{ExitCode: 2, Stderr: "cat: I/O error"})
@@ -1034,7 +1255,7 @@ func TestTLSCheckAppendsOrphanChangesToCertDrift(t *testing.T) {
 	// sweep, or --dry-run hides destructive removals a real run performs.
 	s := tlsServer() // one Let's Encrypt site, app.example.com
 	f := bssh.NewFakeRunner()
-	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find '/etc/letsencrypt/renewal' -maxdepth 1 -type f -name '*.conf'; fi",
+	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find -H '/etc/letsencrypt/renewal' -mindepth 1 -maxdepth 1 -name '*.conf'; fi",
 		bssh.Result{Stdout: "/etc/letsencrypt/renewal/old.example.com.conf\n"})
 	f.On("cat '/etc/letsencrypt/renewal/old.example.com.conf'",
 		bssh.Result{Stdout: berthRenewalConf("old.example.com")})
@@ -1087,7 +1308,7 @@ func TestTLSCheckNoSSLCleanHostConvergedReason(t *testing.T) {
 // stubOrphanTLSHost stubs a host holding all three orphan classes for
 // old.example.com plus the no-LE deploy-hook fallthrough of Apply.
 func stubOrphanTLSHost(f *bssh.FakeRunner) {
-	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find '/etc/letsencrypt/renewal' -maxdepth 1 -type f -name '*.conf'; fi",
+	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find -H '/etc/letsencrypt/renewal' -mindepth 1 -maxdepth 1 -name '*.conf'; fi",
 		bssh.Result{Stdout: "/etc/letsencrypt/renewal/old.example.com.conf\n"})
 	f.On("cat '/etc/letsencrypt/renewal/old.example.com.conf'",
 		bssh.Result{Stdout: berthRenewalConf("old.example.com")})
@@ -1151,7 +1372,7 @@ func TestTLSApplyKeepsLineageWebrootPairWhenCertbotMissing(t *testing.T) {
 	// old.example.com-0001 but references old.example.com's webroot — the
 	// pairing must follow the REFERENCES, not the cert name.
 	f := bssh.NewFakeRunner()
-	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find '/etc/letsencrypt/renewal' -maxdepth 1 -type f -name '*.conf'; fi",
+	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find -H '/etc/letsencrypt/renewal' -mindepth 1 -maxdepth 1 -name '*.conf'; fi",
 		bssh.Result{Stdout: "/etc/letsencrypt/renewal/old.example.com-0001.conf\n"})
 	f.On("cat '/etc/letsencrypt/renewal/old.example.com-0001.conf'",
 		bssh.Result{Stdout: berthRenewalConf("old.example.com")})
