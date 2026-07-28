@@ -9,10 +9,11 @@ Notable changes to berth. Older releases are documented on the
 
 - **CI hardening pack** — tests now run on ubuntu, macOS and Windows with
   `-race -shuffle=on`; an ubuntu `checks` job cross-builds all five release
-  targets, lints the workflows themselves (actionlint) and runs
-  `govulncheck` on every PR; weekly scheduled `Vulnerability scan` and
-  `CodeQL` workflows watch `main` between releases. Tools run via
-  `go run <module>@<pinned-version>` — no new third-party actions.
+  targets and lints the workflows themselves (actionlint); a separate
+  `vuln` job, gated on the core gates, runs `govulncheck` on every PR;
+  weekly scheduled `Vulnerability scan` and `CodeQL` workflows watch
+  `main` between releases. Tools run via `go run <module>@<pinned-version>`
+  — no new third-party actions.
 
 ### Fixed
 
