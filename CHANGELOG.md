@@ -23,6 +23,22 @@ Notable changes to berth. Older releases are documented on the
   lineage kept failing its renewals until a manual `certbot delete`. A
   site merely switched to `ssl: false` but still present in the config is
   deliberately left alone.
+- **Seven more bug-finder linters** — gosec, errorlint, bodyclose, nilerr,
+  copyloopvar, intrange and unparam join the hard lint gate; 44 reported
+  findings cleaned across the two lint passes (36 on the default tree, 8
+  more on the `-tags integration` leg, one G204 reported by both), still
+  zero `//nolint` directives and no linter dropped. gosec runs with
+  G301/G302/G304/G306 globally excluded (file modes and operator-supplied
+  paths are this tool's domain) plus exactly three path+text-scoped
+  exclusion rules, all justified in `.golangci.yml`: two deliberate
+  local-`/bin/sh` test fixtures (G204) and the integration harness's
+  explicit-trust HTTPS probes against the operator's own test box
+  (G402/G704). The three G106 findings were fixed outright by pinning the
+  SSH test harness's real host key, and both nilerr sites were
+  restructured behavior-identically — neither needed an exclusion.
+  Cleanup byproducts: `slices.Equal` replaces a hand-rolled comparison,
+  the ssh-agent dial gained a bounded timeout, and a dead test-only
+  production method was deleted.
 
 ### Changed
 
