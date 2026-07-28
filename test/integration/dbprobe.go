@@ -53,9 +53,6 @@ func dbProbeCmd(env map[string]string, targetDB, sql string) string {
 	}
 }
 
-// sqQuote single-quotes s for safe embedding in a shell command.
-func sqQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
-
 // dbServiceName maps a berth engine name to its systemd unit.
 func dbServiceName(engine string) string {
 	if engine == "postgres" {
