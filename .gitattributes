@@ -1,0 +1,5 @@
+# Force LF in every checkout: the testdata/*.golden files are byte-compared
+# against LF-rendered output, and *.tmpl files are compiled into the binary
+# via go:embed — a CRLF checkout (the Windows-runner autocrlf default)
+# corrupts both.
+* text=auto eol=lf
