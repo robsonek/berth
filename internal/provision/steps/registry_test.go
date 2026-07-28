@@ -48,17 +48,24 @@ func TestPipelineSkipSSLOmitsTLS(t *testing.T) {
 	}
 }
 
-func TestPipelineNoSiteSSLOmitsTLS(t *testing.T) {
+// TestPipelineIncludesTLSWithoutSiteSSL asserts tls is registered even when
+// no site requests SSL: outside --skip-ssl the step still owns the orphan
+// sweep and the deploy-hook drift-removal for traces earlier SSL configs left.
+func TestPipelineIncludesTLSWithoutSiteSSL(t *testing.T) {
 	s := &config.Server{Sites: []config.Site{{Domain: "app.example.com", SSL: false}}}
 	names := stepNames(steps.Pipeline(s, secret.NewRedactor(), false))
-	if contains(names, "tls") {
-		t.Errorf("tls present despite no SSL site: %v", names)
+	if !contains(names, "tls") {
+		t.Errorf("tls missing for a no-SSL config: %v", names)
+	}
+	if names[len(names)-1] != "manifest" {
+		t.Errorf("manifest must remain the LAST step; got %v", names)
 	}
 }
 
-// TestTLSPresenceTracksAnySiteSSL asserts the pipeline includes the tls step
-// exactly when SSL is enabled for some site and not skipped on the command line.
-func TestTLSPresenceTracksAnySiteSSL(t *testing.T) {
+// TestTLSAndManifestTrackSkipSSLOnly asserts both gates depend on --skip-ssl
+// alone, regardless of whether any site requests SSL: skipSSL omits both tls
+// and manifest; without it both are present and manifest closes the pipeline.
+func TestTLSAndManifestTrackSkipSSLOnly(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		ssl     bool
@@ -67,20 +74,27 @@ func TestTLSPresenceTracksAnySiteSSL(t *testing.T) {
 		{"ssl-on", true, false},
 		{"ssl-off", false, false},
 		{"ssl-on-skipped", true, true},
+		{"ssl-off-skipped", false, true},
 	} {
 		s := &config.Server{Sites: []config.Site{{Domain: "app.example.com", SSL: tc.ssl}}}
 		names := stepNames(steps.Pipeline(s, secret.NewRedactor(), tc.skipSSL))
-		want := anySiteSSL(s) && !tc.skipSSL
+		want := !tc.skipSSL
 		if got := contains(names, "tls"); got != want {
 			t.Errorf("%s: tls presence = %v, want %v (names=%v)", tc.name, got, want, names)
+		}
+		if got := contains(names, "manifest"); got != want {
+			t.Errorf("%s: manifest presence = %v, want %v (names=%v)", tc.name, got, want, names)
+		}
+		if want && names[len(names)-1] != "manifest" {
+			t.Errorf("%s: manifest must be the LAST step; got %v", tc.name, names)
 		}
 	}
 }
 
 // TestPipelineManifestLastAndSkipSSLGate asserts the manifest step closes
-// every pipeline that is not artificially truncated, and is absent when
-// --skip-ssl removed a TLS step the config asked for — a "fully provisioned"
-// attestation for that run would be a lie.
+// every pipeline that is not artificially truncated, and is absent under
+// --skip-ssl entirely — tls is an always-run step now, so every --skip-ssl
+// run omits it and a "fully provisioned" attestation would be a lie.
 func TestPipelineManifestLastAndSkipSSLGate(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -90,7 +104,7 @@ func TestPipelineManifestLastAndSkipSSLGate(t *testing.T) {
 	}{
 		{"ssl-on", true, false, true},
 		{"ssl-off", false, false, true},
-		{"ssl-off-skip-flag", false, true, true},
+		{"ssl-off-skip-flag", false, true, false},
 		{"ssl-on-skipped", true, true, false},
 	} {
 		s := &config.Server{Sites: []config.Site{{Domain: "app.example.com", SSL: tc.ssl}}}
@@ -221,13 +235,4 @@ func indexOf(names []string, want string) int {
 		}
 	}
 	return -1
-}
-
-func anySiteSSL(s *config.Server) bool {
-	for _, site := range s.Sites {
-		if site.SSL {
-			return true
-		}
-	}
-	return false
 }

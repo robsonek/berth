@@ -28,31 +28,28 @@ func Pipeline(s *config.Server, red *secret.Redactor, skipSSL bool) []provision.
 		steps = append(steps, Tuning())
 	}
 	steps = append(steps, Site(), Backups())
-	if !skipSSL && anySiteSSL(s) {
+	// tls is ALWAYS registered outside --skip-ssl (the valkey/P14 pattern):
+	// with no SSL site left in the config it still owns the orphan sweep
+	// (lineages, webroots, self-signed dirs) and the deploy-hook
+	// drift-removal — a config that drops its last SSL site would otherwise
+	// strand both forever. On a host with no TLS traces this costs three
+	// discovery probes plus the existing deploy-hook probe per run.
+	if !skipSSL {
 		steps = append(steps, TLS())
 	}
 	// manifest LAST: it attests that the FULL pipeline for this config
 	// completed on this binary's version, so nothing may run after it — and
-	// it is NOT registered when --skip-ssl artificially truncated a pipeline
-	// that would otherwise carry TLS (the attestation would be a lie).
+	// it is NOT registered under --skip-ssl at all: tls is an always-run
+	// step now (orphan sweep + hook drift-removal), so every --skip-ssl run
+	// truncates the pipeline and must not attest, SSL sites or not.
 	// Semantics note: "completed" means completed AND converged — a run that
 	// knowingly left work undone (the documented LE DNS-mismatch skip) marks
 	// itself unconverged via RunCtx, and manifest's Apply then withholds the
 	// write with a warning, leaving any attestation from a prior converged
 	// run intact. Warnings alone (host still converged) do not block the
 	// stamp, and warnings never affect the exit code by contract.
-	if !(skipSSL && anySiteSSL(s)) {
+	if !skipSSL {
 		steps = append(steps, Manifest())
 	}
 	return steps
-}
-
-// anySiteSSL reports whether at least one configured site requests TLS.
-func anySiteSSL(s *config.Server) bool {
-	for _, site := range s.Sites {
-		if site.SSL {
-			return true
-		}
-	}
-	return false
 }

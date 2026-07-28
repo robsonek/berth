@@ -152,10 +152,11 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	assertSwapSysctl(invCtx, t, client, srv)
 	assertBackups(invCtx, t, client, srv)
 	// Upgrade machinery: the host + per-site backup manifests. The host
-	// manifest step is unregistered when skip-ssl truncated a pipeline that
-	// would otherwise carry TLS (steps.Pipeline's exact condition, mirrored
-	// here), so only then is it exempt from the assert.
-	assertManifests(invCtx, t, client, srv, !(skipSSL && anySiteSSL(srv)))
+	// manifest step is unregistered under --skip-ssl entirely (tls is an
+	// always-run step, so every skip-ssl run truncates the pipeline —
+	// steps.Pipeline's exact condition, mirrored here), so only then is it
+	// exempt from the assert.
+	assertManifests(invCtx, t, client, srv, !skipSSL)
 
 	// iter-5: runtime + deploy-reload (#36) and apt provenance (#35).
 	assertRuntime(invCtx, t, client, srv)
