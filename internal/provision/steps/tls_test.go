@@ -1050,11 +1050,14 @@ func TestTLSCheckIgnoresForeignLineage(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find -H '/etc/letsencrypt/renewal' -mindepth 1 -maxdepth 1 -name '*.conf'; fi",
 		bssh.Result{Stdout: "/etc/letsencrypt/renewal/foreign.example.conf\n"})
-	// Foreign lineage whose renew_hook merely MENTIONS berth's namespace: the
-	// parser must not read that as ownership.
+	// Webroot authenticator but NO webroot value anywhere — only a renew_hook
+	// MENTIONS berth's namespace. Airtight both ways: an implementation
+	// counting hook lines as webroot evidence would either own the lineage
+	// (certbot delete below) or protect the mentioned dir (no rm below).
 	f.On("cat '/etc/letsencrypt/renewal/foreign.example.conf'",
-		bssh.Result{Stdout: "[renewalparams]\nauthenticator = nginx\nrenew_hook = /usr/local/bin/sync-cdn /var/www/berth-acme/old.example.com\n"})
-	f.On("if [ -d '/var/www/berth-acme' ]; then find '/var/www/berth-acme' -mindepth 1 -maxdepth 1 -type d; fi", bssh.Result{})
+		bssh.Result{Stdout: "[renewalparams]\nauthenticator = webroot\nrenew_hook = /usr/local/bin/sync-cdn /var/www/berth-acme/old.example.com\n"})
+	f.On("if [ -d '/var/www/berth-acme' ]; then find '/var/www/berth-acme' -mindepth 1 -maxdepth 1 -type d; fi",
+		bssh.Result{Stdout: "/var/www/berth-acme/old.example.com\n"})
 	f.On("if [ -d '/etc/ssl/berth' ]; then find '/etc/ssl/berth' -mindepth 1 -maxdepth 1 -type d; fi", bssh.Result{})
 	f.On("cat '/etc/letsencrypt/renewal-hooks/deploy/berth-nginx-reload'", bssh.Result{ExitCode: 1})
 
@@ -1062,8 +1065,14 @@ func TestTLSCheckIgnoresForeignLineage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Satisfied {
-		t.Fatalf("a foreign lineage must be invisible to the sweep; got unsatisfied: %s %v", res.Reason, res.Changes)
+	if res.Satisfied {
+		t.Fatal("the hook-mentioned (never webroot-referenced) dir of a removed site is orphaned drift")
+	}
+	// Exactly the webroot rm: the foreign lineage itself survives (no certbot
+	// delete), and a hook mention grants no protection.
+	want := []string{"rm -rf /var/www/berth-acme/old.example.com"}
+	if !reflect.DeepEqual(res.Changes, want) {
+		t.Errorf("Changes = %v, want %v", res.Changes, want)
 	}
 }
 
@@ -1437,6 +1446,7 @@ func TestTLSApplyKeepsLineageWebrootPairWhenCertbotMissing(t *testing.T) {
 	if len(unconverged) != 1 {
 		t.Errorf("a knowingly kept orphan lineage must mark the run unconverged; got %v", unconverged)
 	}
+	var sweptSSLDir bool
 	for _, c := range f.Calls() {
 		if c.Cmd == "rm -rf '/var/www/berth-acme/old.example.com'" {
 			t.Fatal("the kept lineage's REFERENCED webroot must be kept as a pair")
@@ -1444,5 +1454,11 @@ func TestTLSApplyKeepsLineageWebrootPairWhenCertbotMissing(t *testing.T) {
 		if strings.HasPrefix(c.Cmd, "certbot delete") {
 			t.Fatal("no certbot delete may run without certbot")
 		}
+		if c.Cmd == "rm -rf '/etc/ssl/berth/old.example.com'" {
+			sweptSSLDir = true
+		}
+	}
+	if !sweptSSLDir {
+		t.Error("the self-signed dir is independent of the kept lineage/webroot pair and must still be swept")
 	}
 }

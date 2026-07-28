@@ -76,6 +76,11 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	}
 	sslStaging := os.Getenv("BERTH_TEST_SSL_STAGING") == "true"
 
+	// Snapshot the host manifest BEFORE the run: under --skip-ssl the manifest
+	// step is unregistered (a truncated pipeline must not attest), so the run
+	// must leave the file exactly as found — asserted in assertManifests.
+	preManifest := snapshotHostManifest(ctx, t, client)
+
 	// Run the full pipeline.
 	red := secret.NewRedactor()
 	eng := provision.New(steps.Pipeline(srv, red, skipSSL)...)
@@ -154,9 +159,9 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	// Upgrade machinery: the host + per-site backup manifests. The host
 	// manifest step is unregistered under --skip-ssl entirely (tls is an
 	// always-run step, so every skip-ssl run truncates the pipeline —
-	// steps.Pipeline's exact condition, mirrored here), so only then is it
-	// exempt from the assert.
-	assertManifests(invCtx, t, client, srv, !skipSSL)
+	// steps.Pipeline's exact condition, mirrored here); a skip-ssl run must
+	// then leave the host manifest byte-identical to the pre-run snapshot.
+	assertManifests(invCtx, t, client, srv, !skipSSL, preManifest)
 
 	// iter-5: runtime + deploy-reload (#36) and apt provenance (#35).
 	assertRuntime(invCtx, t, client, srv)
