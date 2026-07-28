@@ -10,6 +10,15 @@ Notable changes to berth. Older releases are documented on the
 - Dependabot now watches the SHA-pinned GitHub Actions, so the workflow pins
   no longer fossilize (Go modules stay hand-managed on purpose).
 
+### Changed
+
+- Go toolchain bumped to 1.26.5 (`go.mod` directive and both CI workflows)
+  and all direct dependencies updated to their latest patch releases:
+  bubbletea 2.0.8, lipgloss 2.0.5, pkg/sftp 1.13.11, x/crypto 0.54.0,
+  x/term 0.45.0 (plus transitive bumps, including x/text 0.40.0 which
+  closes the informational GO-2026-5970 advisory). `govulncheck` reports
+  zero vulnerabilities affecting berth code.
+
 ### Fixed
 
 - The integration suite no longer fails a healthy host when
