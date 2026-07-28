@@ -17,9 +17,16 @@ const (
 	// lexicographically and each directive keeps its FIRST value, so berth
 	// must sort before image drop-ins (e.g. cloud-init's 50-cloud-init.conf
 	// re-enabling PasswordAuthentication).
-	sshdDropInPath   = "/etc/ssh/sshd_config.d/00-berth.conf"
-	sshdDropInBody   = managedMarker + "\nPermitRootLogin no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n"
-	fail2banJailPath = "/etc/fail2ban/jail.local"
+	sshdDropInPath = "/etc/ssh/sshd_config.d/00-berth.conf"
+	sshdDropInBody = managedMarker + "\nPermitRootLogin no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n"
+	// fail2banJailPath lives in jail.d/, NOT jail.local: jail.local is the
+	// canonical operator customization file and loads AFTER jail.d/*.conf,
+	// so an operator can override berth's jail settings there without
+	// tripping drift — berth deliberately does not own that file. 99- (not
+	// 00-): within jail.d the LAST-sorted file wins per key, and Debian
+	// ships jail.d/defaults-debian.conf — berth must sort after every stock
+	// drop-in while still yielding to jail.local.
+	fail2banJailPath = "/etc/fail2ban/jail.d/99-berth.conf"
 )
 
 // sshdEffectiveWant lists the directives (exactly as sshd -T prints them:
@@ -132,8 +139,8 @@ func sshdConflictSources(ctx context.Context, r bssh.Runner) string {
 	return "candidate sources: " + strings.Join(files, ", ")
 }
 
-// renderFail2banJail renders the managed jail.local: a port-bound sshd jail
-// (journald backend) plus the recidive jail, with operator-tunable knobs.
+// renderFail2banJail renders the managed jail.d drop-in: a port-bound sshd
+// jail (journald backend) plus the recidive jail, with operator-tunable knobs.
 func renderFail2banJail(s *config.Server) ([]byte, error) {
 	return templates.Render("fail2ban_jail.tmpl", struct {
 		Bantime, Findtime string
@@ -253,7 +260,7 @@ func (hardening) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 	}
 
 	// The RUNNING fail2ban must postdate the managed jail: a crash between
-	// writing jail.local and reloading leaves the old jails active forever
+	// writing the jail drop-in and reloading leaves the old jails active forever
 	// (e.g. the sshd jail guarding port 22 instead of ssh.port) while the
 	// bytes on disk read converged.
 	f2bLoaded, err := reloadedSince(ctx, r, "fail2ban", fail2banJailPath)

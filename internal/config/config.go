@@ -28,12 +28,12 @@ type Nginx struct {
 	Source string `mapstructure:"source" yaml:"source"` // debian | nginx (nginx.org mainline)
 }
 
-// Fail2ban holds the tunable knobs for berth's managed jail.local. bantime and
-// findtime are a number optionally suffixed s/m/h/d/w (e.g. "1h", "10m");
-// compound forms like "1h30m" are not supported. Zero/empty values mean "use
-// the default"; defaults live in the *Eff accessors (NOT in Load() via
-// SetDefault) so wizard ToServer() and literal Server callers that bypass
-// Load() still render valid, non-empty values into jail.local.
+// Fail2ban holds the tunable knobs for berth's managed jail.d drop-in.
+// bantime and findtime are a number optionally suffixed s/m/h/d/w (e.g. "1h",
+// "10m"); compound forms like "1h30m" are not supported. Zero/empty values
+// mean "use the default"; defaults live in the *Eff accessors (NOT in Load()
+// via SetDefault) so wizard ToServer() and literal Server callers that bypass
+// Load() still render valid, non-empty values into the jail drop-in.
 type Fail2ban struct {
 	Bantime  string `mapstructure:"bantime" yaml:"bantime,omitempty"`
 	Findtime string `mapstructure:"findtime" yaml:"findtime,omitempty"`

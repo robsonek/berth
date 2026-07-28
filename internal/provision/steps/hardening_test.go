@@ -389,7 +389,7 @@ func TestHardeningCheckUnsatisfiedWhenJailMissing(t *testing.T) {
 	f.On("systemctl is-active fail2ban", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled fail2ban", bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{Stdout: sshdDropInBody, ExitCode: 0})
-	f.On("cat "+shQuote(fail2banJailPath), bssh.Result{ExitCode: 1}) // jail.local absent
+	f.On("cat "+shQuote(fail2banJailPath), bssh.Result{ExitCode: 1}) // jail drop-in absent
 	stubSshdEffectiveGood(f)
 	stubStampsGreen(f)
 	cr, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
@@ -397,7 +397,7 @@ func TestHardeningCheckUnsatisfiedWhenJailMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cr.Satisfied {
-		t.Error("expected unsatisfied when the fail2ban jail.local is absent")
+		t.Error("expected unsatisfied when the fail2ban jail drop-in is absent")
 	}
 }
 
@@ -416,7 +416,7 @@ func TestHardeningCheckUnsatisfiedWhenJailDrifted(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cr.Satisfied {
-		t.Error("expected unsatisfied when the managed jail.local content has drifted")
+		t.Error("expected unsatisfied when the managed jail drop-in content has drifted")
 	}
 }
 
@@ -448,7 +448,7 @@ func TestHardeningApplyWritesFail2banJail(t *testing.T) {
 		}
 	}
 	if jail == nil {
-		t.Fatal("fail2ban jail.local was not written")
+		t.Fatal("fail2ban jail drop-in was not written")
 	}
 	body := string(jail.Content)
 	if !strings.Contains(body, "managed by berth") || !strings.Contains(body, "port = 2222") {
@@ -720,7 +720,7 @@ func stubApplyStampsGreen(f *bssh.FakeRunner) {
 }
 
 func TestHardeningCheckUnsatisfiedWhenJailNewerThanStamp(t *testing.T) {
-	// A crash between writing jail.local and reloading fail2ban leaves the
+	// A crash between writing the jail drop-in and reloading fail2ban leaves the
 	// old jails active (e.g. guarding port 22 instead of ssh.port) while the
 	// file bytes read converged — only the reload stamp catches it.
 	f := bssh.NewFakeRunner()
@@ -734,7 +734,7 @@ func TestHardeningCheckUnsatisfiedWhenJailNewerThanStamp(t *testing.T) {
 		t.Fatalf("Check() error = %v", err)
 	}
 	if res.Satisfied {
-		t.Fatal("a jail.local newer than the fail2ban reload stamp must be unsatisfied (written but not reloaded)")
+		t.Fatal("a jail drop-in newer than the fail2ban reload stamp must be unsatisfied (written but not reloaded)")
 	}
 }
 

@@ -366,7 +366,10 @@ scope):
   `unattended-upgrades` actually applies updates (the package alone is inert
   without it).
 - **fail2ban** — a managed jail bans SSH brute-forcers (bound to your configured
-  SSH port) and repeat offenders (`recidive`). Tunable, with safe defaults:
+  SSH port) and repeat offenders (`recidive`). berth writes it as
+  `/etc/fail2ban/jail.d/99-berth.conf`, leaving `jail.local` — which loads
+  after `jail.d/` and keeps final say — free for your own overrides. Tunable,
+  with safe defaults:
 
   ```yaml
   fail2ban:

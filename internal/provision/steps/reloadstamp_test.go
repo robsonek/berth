@@ -56,8 +56,8 @@ func TestReloadedSinceTrueWhenNoFileNewer(t *testing.T) {
 
 func TestReloadedSinceFalseWhenStampMissingOrStale(t *testing.T) {
 	f := bssh.NewFakeRunner()
-	f.On(reloadedSinceCmd("fail2ban", "/etc/fail2ban/jail.local"), bssh.Result{ExitCode: 1})
-	ok, err := reloadedSince(context.Background(), f, "fail2ban", "/etc/fail2ban/jail.local")
+	f.On(reloadedSinceCmd("fail2ban", "/etc/fail2ban/jail.d/99-berth.conf"), bssh.Result{ExitCode: 1})
+	ok, err := reloadedSince(context.Background(), f, "fail2ban", "/etc/fail2ban/jail.d/99-berth.conf")
 	if err != nil || ok {
 		t.Fatalf("reloadedSince() = %v, %v; want false, nil", ok, err)
 	}
