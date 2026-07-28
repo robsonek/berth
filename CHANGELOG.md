@@ -3,7 +3,7 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
-## [Unreleased]
+## [0.25.0] — 2026-07-28
 
 ### Added
 
@@ -28,6 +28,9 @@ Notable changes to berth. Older releases are documented on the
   x/term 0.45.0 (plus transitive bumps, including x/text 0.40.0 which
   closes the informational GO-2026-5970 advisory). `govulncheck` reports
   zero vulnerabilities affecting berth code.
+- First fruits of the dependabot watch: `actions/checkout` bumped to v7.0.1
+  and `actions/setup-go` to v7.0.0 (ESM/dependency migrations upstream; no
+  behavior change for this repo's workflows).
 
 ### Fixed
 
