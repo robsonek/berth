@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 )
 
@@ -165,16 +166,21 @@ func writeCacheBytes(key string, b []byte) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("replace %s: %w", path, err)
 	}
-	d, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("open %s for fsync: %w", dir, err)
-	}
-	if err := d.Sync(); err != nil {
-		_ = d.Close()
-		return fmt.Errorf("fsync %s: %w", dir, err)
-	}
-	if err := d.Close(); err != nil {
-		return fmt.Errorf("close %s: %w", dir, err)
+	// The directory-durability fsync is Unix-only: os.Open yields a read-only
+	// handle, and on Windows FlushFileBuffers demands GENERIC_WRITE, so the
+	// Sync always fails there with "Access is denied".
+	if runtime.GOOS != "windows" {
+		d, err := os.Open(dir)
+		if err != nil {
+			return fmt.Errorf("open %s for fsync: %w", dir, err)
+		}
+		if err := d.Sync(); err != nil {
+			_ = d.Close()
+			return fmt.Errorf("fsync %s: %w", dir, err)
+		}
+		if err := d.Close(); err != nil {
+			return fmt.Errorf("close %s: %w", dir, err)
+		}
 	}
 	return nil
 }

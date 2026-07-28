@@ -14,6 +14,14 @@ Notable changes to berth. Older releases are documented on the
   `CodeQL` workflows watch `main` between releases. Tools run via
   `go run <module>@<pinned-version>` — no new third-party actions.
 
+### Fixed
+
+- Secret-cache writes on Windows failed deterministically on the directory
+  fsync ("Access is denied": a directory handle opened for reading cannot
+  be flushed there). The directory-durability fsync is now Unix-only;
+  file-level durability (fsync + atomic rename) is unchanged on every
+  platform.
+
 ## [0.25.0] — 2026-07-28
 
 ### Added
