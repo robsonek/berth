@@ -53,7 +53,7 @@ func assertDBAuth(ctx context.Context, t *testing.T, c *bssh.Client, srv *config
 		// The cached password must be the one the app reads — exit-code-only,
 		// the secret rides stdin into the production match script.
 		if exit := envFieldExit(ctx, t, c, envPath, "DB_PASSWORD", pw); exit != 0 {
-			t.Fatalf("db auth %s: live DB_PASSWORD in %s disagrees with the local secret cache (probe exit %d)", site.Domain, envPath, exit)
+			t.Fatalf("db auth %s: live DB_PASSWORD in %s vs the local secret cache: %s (probe exit %d)", site.Domain, envPath, envExitMeaning(exit), exit)
 		}
 		// Own DB reachable over the app's real connection path.
 		assertExitZeroIn(ctx, t, c, site.Domain+" app user reaches own db",

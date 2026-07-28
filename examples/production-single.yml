@@ -3,7 +3,7 @@
 # Copy it and edit:  cp examples/production-single.yml servers/myserver.yml
 
 # Stable machine identity keying the local secret cache (~/.berth/<id>.secrets.json).
-# Required; `berth init` generates one. Never rename it — that orphans the cache.
+# Required; `berth init` generates one. A rename is refused; migrate deliberately per the error's recipe.
 id: prod-single-8c1d
 
 host: 203.0.113.10

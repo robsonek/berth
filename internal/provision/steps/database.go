@@ -69,7 +69,7 @@ func validateCachedDBPassword(dbUser, pw string) error {
 // (reAppKey); an empty entry stays legal.
 func validateCachedAppKey(dbUser, key string) error {
 	if key != "" && !reAppKey.MatchString(key) {
-		return fmt.Errorf("cached APP_KEY for %s is malformed; refusing to use it", dbUser)
+		return fmt.Errorf("cached APP_KEY (cache entry %q) is malformed; refusing to use it", appKeyCacheKey(dbUser))
 	}
 	return nil
 }

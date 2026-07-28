@@ -1839,9 +1839,10 @@ func TestDatabaseApplyRegistersPasswordBeforeAppKeyAcquisitionFails(t *testing.T
 }
 
 func TestDatabaseApplyRegistersFreshPasswordBeforeAppKeyRecoveryFails(t *testing.T) {
-	// Fresh-seed branch: the (cache-reused) password registers before
-	// recoverOrNewAppKey — a malformed cached APP_KEY aborts the branch, and
-	// the password must already redact.
+	// The malformed cached APP_KEY aborts in loadValidatedSecrets' preflight
+	// (the fresh-seed branch and recoverOrNewAppKey are never reached), and
+	// the cached password, validated and registered just before it, must
+	// already redact.
 	chdirTemp(t)
 	s := databaseServer()
 	dbUser := s.SiteDBUser(s.Sites[0])

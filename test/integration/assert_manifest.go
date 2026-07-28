@@ -199,10 +199,10 @@ func assertRestoreDrill(t *testing.T, eng *provision.Engine, red *secret.Redacto
 	// value rides stdin into the production match script and only the exit
 	// code answers, so the new secrets never travel over SSH stdout.
 	if exit := envFieldExit(ctx, t, client, envPath, "DB_PASSWORD", newPW); exit != 0 {
-		t.Fatalf("restore drill: %s did not take the fresh DB_PASSWORD (probe exit %d)", envPath, exit)
+		t.Fatalf("restore drill: %s did not take the fresh DB_PASSWORD: %s (probe exit %d)", envPath, envExitMeaning(exit), exit)
 	}
 	if exit := envFieldExit(ctx, t, client, envPath, "APP_KEY", newKey); exit != 0 {
-		t.Fatalf("restore drill: %s did not take the fresh APP_KEY (probe exit %d)", envPath, exit)
+		t.Fatalf("restore drill: %s did not take the fresh APP_KEY: %s (probe exit %d)", envPath, envExitMeaning(exit), exit)
 	}
 
 	// 2. A read-only dry-run must SEE the divergence: the database step plans,
@@ -356,6 +356,23 @@ func envFieldExit(ctx context.Context, t *testing.T, c *bssh.Client, envPath, ke
 		t.Fatalf("probe %s in %s: %v", key, envPath, err)
 	}
 	return res.ExitCode
+}
+
+// envExitMeaning names envValueMatchScript's exit codes for failure
+// messages, so an I/O failure is never reported as a value disagreement.
+func envExitMeaning(exit int) string {
+	switch exit {
+	case 0:
+		return "match"
+	case 1:
+		return "present but different"
+	case 2:
+		return "I/O error reading the file"
+	case 3:
+		return "no such key"
+	default:
+		return "undocumented exit"
+	}
 }
 
 // clientAuthContainsCmd mirrors steps.clientAuthContainsScript: stdin carries

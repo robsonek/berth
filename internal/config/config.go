@@ -392,8 +392,10 @@ func (st Site) CertMode() string {
 // config lists. (Before v0.18 a lone site implicitly kept a shared "deploy"
 // account; pin sites[].user: deploy to keep that identity.)
 // CacheKey is the local secret-cache key: the declared server ID when set,
-// else the host (pre-P14 compatibility). Every LockCache/LoadEnvelope/
-// SaveEnvelope call must go through this — never s.Host directly.
+// else the host. The host branch is unreachable for Load-validated configs
+// (Validate requires id) and survives for step-level tests and as defense in
+// depth against a literal Server that bypassed validation. Every LockCache/
+// LoadEnvelope/SaveEnvelope call must go through this — never s.Host directly.
 func (s *Server) CacheKey() string {
 	if s.ID != "" {
 		return s.ID

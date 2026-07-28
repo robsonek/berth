@@ -166,7 +166,7 @@ sites:                         # one or more
     backups: false                     # per-site override of the server default
                                        # (nil/absent = inherit backups.enabled)
     queue:                             # tune this site's worker (omit = server default)
-      driver: work                     # work (default) | horizon
+      driver: work                     # work (default) | horizon | none (opt out)
       processes: 4                     # numprocs
       connection: redis
       queue: default,emails
@@ -270,8 +270,10 @@ berth tunes the host for production Laravel out of the box:
   knobs apply per instance. Valkey is wired as the cache, session and queue
   backend when berth first seeds a site's `shared/.env` (without Valkey the
   app keeps the database driver), so enable `valkey` before the initial
-  provision — flipping it on later does not rewrite an existing `.env`;
-  update it by hand. Flipping `valkey: false` on a provisioned host makes the
+  provision — the `REDIS_*` lines are seed-time-only: flipping `valkey:` on
+  an already-seeded host never rewrites the existing `.env`; update the
+  site's `.env` by hand, or remove it so the next run re-seeds it (cached
+  secrets are reused). Flipping `valkey: false` on a provisioned host makes the
   next full run (or `--only valkey`) stop and remove every berth-managed
   instance — **first** move each application's `.env` cache/session/queue off
   the Valkey socket, or the app breaks the moment the instance goes away.
@@ -466,6 +468,7 @@ sites:
       timeout: 90
       max_memory: 256        # MB
     # queue: horizon         # …or run Laravel Horizon instead of queue:work
+    # queue: none            # …or opt just this site out of the server-wide worker
     daemons:                 # arbitrary long-running programs (full command)
       - { name: reverb, command: php artisan reverb:start }
 ```
@@ -474,7 +477,10 @@ Every program is installed **dormant** (`autostart=false`) — your deployer sta
 and restarts them; berth never runs them. `queue: horizon` emits an `artisan
 horizon` program instead of `queue:work` (Horizon runs single-process and manages
 its own workers, so the `queue:work` knobs don't apply; configure it in your app's
-`config/horizon.php`, and note it needs the Redis/Valkey queue driver). Each site
+`config/horizon.php`, and note it needs the Redis/Valkey queue driver).
+`queue: none` opts a single site out of the server-wide worker — the only
+per-site off switch under `queue: true` (a shorthand like `horizon`; combining
+it with the other worker knobs is rejected). Each site
 user gets **narrow sudoers** to control only its own programs, and Supervisor is
 installed whenever any site declares a worker or a daemon.
 
@@ -495,13 +501,18 @@ that writes, into `/var/backups/berth/<pool>/` (**`root:root`, mode 0700**):
 
 - `<db>-<UTC-timestamp>.sql.gz` — passwordless engine dump (MariaDB socket-root / Postgres peer)
 - `<pool>-files-<UTC-timestamp>.tar.gz` — a tar of the site's `shared/` (`.env` + `storage/`)
-- `manifest` — written by `berth provision` itself (not the cron): the berth
-  version, engine, database/user names, site user and `deploy_path` of the
-  site's **current** configuration, so a copy of the directory stays
-  self-describing. Archives created before a config change may predate what
-  the manifest records — match dump/tar pairs by their UTC timestamp
+- `<pool>-meta-<UTC-timestamp>.manifest` — a per-pair sidecar written by the
+  same run as its two archives, recording the berth version, engine,
+  database/user names, site user and `deploy_path` **as of that run**.
+- `manifest` — written by `berth provision` itself (not the cron): the same
+  facts for the site's **current** configuration, so a copy of the directory
+  stays self-describing. Archives created before a config change may predate
+  what it records — match dump/tar pairs by their UTC timestamp and trust
+  the pair's own sidecar over the directory manifest.
 
-Old archives are pruned by age. Disabling backups (per site, or removing the site)
+Old archives (and their sidecars) are pruned by age; the prune matches only
+berth's own artifact names, so an operator-parked file in the directory is
+never deleted. Disabling backups (per site, or removing the site)
 deletes the cron + script + manifest but **never** the existing archive files.
 
 Backups are deliberately **root-owned** (directory and files): the dump cron runs as root,
@@ -541,7 +552,9 @@ step (4) report everything satisfied. Each backup directory carries a
 `manifest` file recording the engine, database/user names, site user and
 `deploy_path` as of the last provision run — a useful starting point, but it
 describes the current configuration, not necessarily the one an older archive
-was made under; verify against the dump/tar UTC timestamps before restoring.
+was made under; match the pair by its UTC timestamp and, for archives
+predating a config change, trust the pair's own `<pool>-meta-<ts>.manifest`
+sidecar over the directory manifest.
 
 **Limitations:** local only (no offsite copy) — backups are root-owned so they survive a
 compromised *site*, but a lost *host* loses them; the DB dump and files tar are independent,
@@ -634,15 +647,16 @@ implicitly. Remove manually if you want them gone:
 - database + DB user: `DROP DATABASE`/`DROP USER` (MariaDB) or
   `dropdb`/`dropuser` (PostgreSQL)
 - the OS account (its home also holds the git deploy key) and its sudoers
-  entry: `deluser --remove-home <user>`, `rm /etc/sudoers.d/<user>`
+  entry: `deluser --remove-home <user>`, `rm /etc/sudoers.d/berth-<user>`
 - the application tree: `rm -rf <deploy_path>`
 - Valkey state (`/var/lib/berth-valkey/<pool>`) and backup archives
   (`/var/backups/berth/<pool>/`) are likewise retained
 
-Two related notes: setting `valkey: false` skips the whole Valkey step, so
-orphan instances are cleaned only while it stays `true`; and after changing
-`php.version`, the previous version's FPM unit and pool files are no longer
-managed — clean them up manually.
+Two related notes: the Valkey step always runs — while `valkey: true` a
+removed site's instance is swept as an orphan, and `valkey: false` stops and
+removes every berth-managed instance (data under `/var/lib/berth-valkey/` is
+kept either way); and after changing `php.version`, the previous version's
+FPM unit and pool files are no longer managed — clean them up manually.
 
 ## Beyond v1
 

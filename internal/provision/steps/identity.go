@@ -12,8 +12,10 @@ import (
 )
 
 // Identity reconciles the LOCAL secret-cache identity before any remote
-// mutation: it binds the cache to the config's declared server id (or the
-// host when no id is declared), migrates host-keyed files to id-keyed ones
+// mutation: it binds the cache to the config's declared server id (the
+// host-keyed fallback is unreachable for Load-validated configs — id is
+// required — and survives for step-level tests and as defense in depth
+// against a literal Server), migrates host-keyed files to id-keyed ones
 // (leaving a tombstone so a stale host-keyed config fails loudly instead of
 // regenerating or disowning secrets — a lost console:berth marker can leave
 // a usable root-equivalent password behind), and verifies the recorded

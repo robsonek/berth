@@ -42,8 +42,11 @@ type RunCtx struct {
 	// engine run — call it through MarkUnconverged, which nil-guards.
 	NoteUnconverged func(reason string)
 	// UnconvergedReasons returns every reason recorded via NoteUnconverged so
-	// far in this run (empty = no step marked yet). Engine-wired; nil outside
-	// an engine run — gate on RunUnconverged before calling it directly.
+	// far in this run (empty = no step marked yet). The returned slice aliases
+	// the engine's live accumulator — read it, never mutate it, and re-call
+	// rather than retain it (a later NoteUnconverged may reallocate, so a held
+	// slice can go stale). Engine-wired; nil outside an engine run — gate on
+	// RunUnconverged before calling it directly.
 	UnconvergedReasons func() []string
 }
 

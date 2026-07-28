@@ -65,19 +65,32 @@ func assertEnvIdentityFidelity(ctx context.Context, t *testing.T, c *bssh.Client
 		{"DB_DATABASE", dbName},
 	} {
 		if exit := envFieldExit(ctx, t, c, envPath, f[0], f[1]); exit != 0 {
-			t.Fatalf("%s: live %s in %s disagrees with the trusted value %q (probe exit %d) — the app connects elsewhere than berth believes",
-				label, f[0], envPath, f[1], exit)
+			fidelityFatal(t, label, f[0], envPath, f[1], exit)
 		}
 	}
 	if conn.socket != "" {
 		if exit := envFieldExit(ctx, t, c, envPath, "DB_SOCKET", conn.socket); exit != 0 {
-			t.Fatalf("%s: live DB_SOCKET in %s disagrees with the trusted value %q (probe exit %d) — the app connects elsewhere than berth believes",
-				label, envPath, conn.socket, exit)
+			fidelityFatal(t, label, "DB_SOCKET", envPath, conn.socket, exit)
 		}
 	} else if exit := envFieldExit(ctx, t, c, envPath, "DB_SOCKET", ""); exit != 3 {
-		t.Fatalf("%s: %s carries a DB_SOCKET line but the engine connects over TCP (probe exit %d, want 3 = key absent) — the app connects elsewhere than berth believes",
-			label, envPath, exit)
+		t.Fatalf("%s: %s carries a DB_SOCKET line but the engine connects over TCP (probe exit %d: %s, want 3 = key absent) — the app connects elsewhere than berth believes",
+			label, envPath, exit, envExitMeaning(exit))
 	}
+}
+
+// fidelityFatal reports a failed fidelity probe with the exit-code contract
+// spelled out: exits 1/3 prove the live file disagrees with the trusted
+// identity, while exit 2 is an I/O failure that proves nothing about the
+// value — the two must never read as the same diagnosis. Non-secret values
+// only (the wording includes want).
+func fidelityFatal(t *testing.T, label, key, envPath, want string, exit int) {
+	t.Helper()
+	if exit == 2 {
+		t.Fatalf("%s: probing %s in %s failed with an I/O error (exit 2) — the file could not be read, no fidelity verdict",
+			label, key, envPath)
+	}
+	t.Fatalf("%s: live %s in %s disagrees with the trusted value %q (probe exit %d: %s) — the app connects elsewhere than berth believes",
+		label, key, envPath, want, exit, envExitMeaning(exit))
 }
 
 // dbServiceName maps a berth engine name to its systemd unit.

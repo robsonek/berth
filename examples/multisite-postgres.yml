@@ -6,7 +6,7 @@
 # its own `database:` block and a distinct user/domain/deploy_path.
 
 # Stable machine identity keying the local secret cache (~/.berth/<id>.secrets.json).
-# Required; `berth init` generates one. Never rename it — that orphans the cache.
+# Required; `berth init` generates one. A rename is refused; migrate deliberately per the error's recipe.
 id: prod-multisite-3e7b
 
 host: 203.0.113.20
