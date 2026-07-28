@@ -14,6 +14,27 @@ Notable changes to berth. Older releases are documented on the
   weekly scheduled `Vulnerability scan` and `CodeQL` workflows watch
   `main` between releases. Tools run via `go run <module>@<pinned-version>`
   — no new third-party actions.
+- **TLS orphan sweep** — removing a site from the config now also removes
+  its TLS leftovers on the next run: the Let's Encrypt lineage (via
+  `certbot delete`; ownership is decided by parsing the renewal config's
+  webroot parameters — a foreign lineage, even one whose hooks mention
+  berth's paths, is invisible to the sweep), the ACME webroot, and any
+  self-signed material under `/etc/ssl/berth/`. Previously the abandoned
+  lineage kept failing its renewals until a manual `certbot delete`. A
+  site merely switched to `ssl: false` but still present in the config is
+  deliberately left alone.
+
+### Changed
+
+- **BREAKING (behavioral): `--skip-ssl` runs no longer write the host
+  manifest.** The `tls` step is now always registered except under
+  `--skip-ssl` — it owns the new orphan sweep and the deploy-hook
+  drift-removal even when no SSL site remains (previously a config that
+  dropped its last SSL site stranded both forever). Consequently every
+  `--skip-ssl` run omits an always-run step and therefore withholds the
+  "fully provisioned" attestation (previously a no-SSL config attested
+  even under `--skip-ssl`). On a host with no TLS traces the always-on
+  step costs three discovery probes plus one hook probe per run.
 
 ### Fixed
 
@@ -40,27 +61,9 @@ Notable changes to berth. Older releases are documented on the
   `test/integration/` — mirroring the repo's two `go vet` invocations;
   the whole tree was brought to zero findings with no `//nolint`
   directives, and `make lint` runs the same check locally.
-- **TLS orphan sweep** — removing a site from the config now also removes
-  its TLS leftovers on the next run: the Let's Encrypt lineage (via
-  `certbot delete`; ownership is decided by parsing the renewal config's
-  webroot parameters — a foreign lineage, even one whose hooks mention
-  berth's paths, is invisible to the sweep), the ACME webroot, and any
-  self-signed material under `/etc/ssl/berth/`. Previously the abandoned
-  lineage kept failing its renewals until a manual `certbot delete`. A
-  site merely switched to `ssl: false` but still present in the config is
-  deliberately left alone.
 
 ### Changed
 
-- **BREAKING (behavioral): `--skip-ssl` runs no longer write the host
-  manifest.** The `tls` step is now always registered except under
-  `--skip-ssl` — it owns the new orphan sweep and the deploy-hook
-  drift-removal even when no SSL site remains (previously a config that
-  dropped its last SSL site stranded both forever). Consequently every
-  `--skip-ssl` run omits an always-run step and therefore withholds the
-  "fully provisioned" attestation (previously a no-SSL config attested
-  even under `--skip-ssl`). On a host with no TLS traces the always-on
-  step costs three discovery probes plus one hook probe per run.
 - Go toolchain bumped to 1.26.5 (`go.mod` directive and both CI workflows)
   and all direct dependencies updated to their latest patch releases:
   bubbletea 2.0.8, lipgloss 2.0.5, pkg/sftp 1.13.11, x/crypto 0.54.0,
