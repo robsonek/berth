@@ -3,10 +3,29 @@ version: "2"
 linters:
   default: standard
   enable:
+    - bodyclose
+    - copyloopvar
+    - errorlint
     - gocritic
+    - gosec
+    - intrange
     - misspell
+    - nilerr
     - revive
+    - unparam
   settings:
+    gosec:
+      # Writing files and directories with specific modes, and taking file
+      # paths from the operator, IS this tool's job: berth provisions
+      # servers and manages local config/cache files with deliberate
+      # permissions. G301/G302/G306 (dir/file mode "too permissive") and
+      # G304 (file path from variable) would be ~20 permanent false
+      # positives here. Every other gosec rule stays live.
+      excludes:
+        - G301
+        - G302
+        - G304
+        - G306
     revive:
       # A bare `rules` list REPLACES revive's default rule set (verified on
       # v2.12.2: only-disabled entries left zero active rules). This flag
