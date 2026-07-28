@@ -44,7 +44,7 @@ func stubAccountExists(f *bssh.FakeRunner, user string, sudoers, want []byte) {
 	f.On("id "+user, bssh.Result{ExitCode: 0})
 	f.On(groupProbeCmd(user), bssh.Result{Stdout: user + "\n"})
 	f.On(sshDirOwnerCmd(user), bssh.Result{Stdout: user + " directory\n"})
-	f.On("cat "+shQuote(sudoersPath(user)), bssh.Result{Stdout: string(sudoers), ExitCode: 0})
+	f.On("cat "+shQuote(accountSudoersPath(user)), bssh.Result{Stdout: string(sudoers), ExitCode: 0})
 	f.On("cat "+shQuote(authorizedKeysPath(user)), bssh.Result{Stdout: string(want), ExitCode: 0})
 }
 
@@ -58,9 +58,9 @@ func stubAccountCreate(f *bssh.FakeRunner, user string) {
 	f.On("useradd -m -s /bin/bash "+user, bssh.Result{})
 	f.On("getent passwd "+user, bssh.Result{Stdout: fmt.Sprintf("%s:x:1000:1000::/home/%s:/bin/bash\n", user, user)})
 	f.On(fmt.Sprintf("install -d -o %s -g %s -m 00700 ", user, user)+shQuote(fmt.Sprintf("/home/%s", user)), bssh.Result{})
-	f.On("visudo -cf "+shQuote(sudoersPath(user)), bssh.Result{ExitCode: 0})
+	f.On("visudo -cf "+shQuote(accountSudoersPath(user)), bssh.Result{ExitCode: 0})
 	f.On(fmt.Sprintf("sudo -u %s install -d -g %s -m 00700 ", user, user)+shQuote(fmt.Sprintf("/home/%s/.ssh", user)), bssh.Result{})
-	f.On("cat "+shQuote(sudoersPath(user)), bssh.Result{ExitCode: 1})
+	f.On("cat "+shQuote(accountSudoersPath(user)), bssh.Result{ExitCode: 1})
 	f.On("cat "+shQuote(authorizedKeysPath(user)), bssh.Result{ExitCode: 1})
 	f.On(writeAsUserCmd(user, authorizedKeysPath(user), 0o600), bssh.Result{})
 }
@@ -1328,7 +1328,7 @@ func TestAccountsApplyValidatesEverySudoersAfterWrite(t *testing.T) {
 		return -1
 	}
 	for _, u := range []string{"berth", u1, u2} {
-		p := sudoersPath(u)
+		p := accountSudoersPath(u)
 		write := idx("write:" + p)
 		validate := idx("run:visudo -cf " + shQuote(p))
 		if write < 0 || validate < 0 {

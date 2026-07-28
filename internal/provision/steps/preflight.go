@@ -38,10 +38,12 @@ func (preflight) Check(ctx context.Context, _ provision.RunCtx, _ *config.Server
 // aptLockTimeoutPath/Body make every apt operation wait for the dpkg lock (up to
 // 10 min) instead of failing immediately. A freshly booted VPS runs apt-daily /
 // unattended-upgrades, which holds the lock and would otherwise race berth's
-// installs ("Could not get lock /var/lib/dpkg/lock-frontend").
+// installs ("Could not get lock /var/lib/dpkg/lock-frontend"). The leading
+// managed marker is safe in apt.conf: a line starting with `#` is a comment
+// unless it is the `#include`/`#clear` directive.
 const (
-	aptLockTimeoutPath = "/etc/apt/apt.conf.d/99berth-lock-timeout"
-	aptLockTimeoutBody = `DPkg::Lock::Timeout "600";` + "\n"
+	aptLockTimeoutPath = "/etc/apt/apt.conf.d/99-berth-lock-timeout"
+	aptLockTimeoutBody = managedMarker + "\n" + `DPkg::Lock::Timeout "600";` + "\n"
 )
 
 func (preflight) Apply(ctx context.Context, _ provision.RunCtx, _ *config.Server, r bssh.Runner) error {

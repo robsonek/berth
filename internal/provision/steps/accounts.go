@@ -70,7 +70,23 @@ func managedAccounts(s *config.Server) []string {
 	return append([]string{"berth"}, siteUsers(s)...)
 }
 
-func sudoersPath(user string) string { return "/etc/sudoers.d/" + user }
+// sudoersPath is the per-site deploy grant file. berth- prefixed so every
+// berth-owned sudoers file is enumerable by glob (a removed tenant's grant
+// is privilege, not data — a future sweep must be able to FIND it even for
+// pinned custom user names). Never collides with the berth account's own
+// /etc/sudoers.d/berth: this path always carries a "-<user>" suffix.
+func sudoersPath(user string) string { return "/etc/sudoers.d/berth-" + user }
+
+// accountSudoersPath maps a managed account to its sudoers file: the berth
+// account keeps its own unprefixed /etc/sudoers.d/berth; every site user gets
+// the enumerable berth-<user> grant. Unambiguous because "berth" is a
+// reserved OS user name (config validation refuses it for sites).
+func accountSudoersPath(user string) string {
+	if user == "berth" {
+		return sudoersBerthPath
+	}
+	return sudoersPath(user)
+}
 
 func authorizedKeysPath(user string) string {
 	return fmt.Sprintf("/home/%s/.ssh/authorized_keys", user)
@@ -197,7 +213,7 @@ func (a accounts) Check(ctx context.Context, rc provision.RunCtx, s *config.Serv
 			return provision.CheckResult{Satisfied: false, Reason: "account " + u + " missing", Changes: a.changes()}, nil
 		}
 		// sudoers carries the managed marker and matches the desired content.
-		p := sudoersPath(u)
+		p := accountSudoersPath(u)
 		state, err := checkManagedFile(ctx, r, p, sudoersWant[u])
 		if err != nil {
 			return provision.CheckResult{}, err
