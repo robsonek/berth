@@ -356,13 +356,10 @@ func (tls) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 		}
 		return provision.CheckResult{Satisfied: false, Reason: reason, Changes: append(changes, orphanChanges...)}, nil
 	}
-	if len(orphanChanges) > 0 {
-		return provision.CheckResult{
-			Satisfied: false,
-			Reason:    "TLS artifacts linger for sites no longer in the config",
-			Changes:   orphanChanges,
-		}, nil
-	}
+	// Post-loop tail is ONE accumulator: orphan sweep actions and deploy-hook
+	// drift merge into a single unsatisfied result. An orphan-only early
+	// return would hide hook drift from a dry-run that Apply then converges.
+	var reasons, hookChanges []string
 	// Renewal deploy hook: without it a renewed cert lands on disk while nginx
 	// keeps serving the old one from memory (expired at ~day 90). Same gate as
 	// Apply — anyLetsEncrypt AND certbot installed — so a DNS-skipped box where
@@ -386,25 +383,20 @@ func (tls) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 				return provision.CheckResult{}, err
 			}
 			if !ok {
-				return provision.CheckResult{
-					Satisfied: false,
-					Reason:    "certbot renewal deploy hook missing or out of date",
-					Changes:   []string{"install certbot renewal deploy hook (nginx validate + reload)"},
-				}, nil
-			}
-			// The renewal timer must actually be running, or a cert left
-			// untouched (e.g. a near-expiry production cert under --ssl-staging,
-			// which we deliberately do not reissue) will silently expire.
-			active, err := r.Run(ctx, "systemctl is-active certbot.timer", nil)
-			if err != nil {
-				return provision.CheckResult{}, err
-			}
-			if strings.TrimSpace(active.Stdout) != "active" {
-				return provision.CheckResult{
-					Satisfied: false,
-					Reason:    "certbot.timer is not active; automatic Let's Encrypt renewal is disabled",
-					Changes:   []string{"enable certbot.timer"},
-				}, nil
+				reasons = append(reasons, "certbot renewal deploy hook missing or out of date")
+				hookChanges = append(hookChanges, "install certbot renewal deploy hook (nginx validate + reload)")
+			} else {
+				// The renewal timer must actually be running, or a cert left
+				// untouched (e.g. a near-expiry production cert under --ssl-staging,
+				// which we deliberately do not reissue) will silently expire.
+				active, err := r.Run(ctx, "systemctl is-active certbot.timer", nil)
+				if err != nil {
+					return provision.CheckResult{}, err
+				}
+				if strings.TrimSpace(active.Stdout) != "active" {
+					reasons = append(reasons, "certbot.timer is not active; automatic Let's Encrypt renewal is disabled")
+					hookChanges = append(hookChanges, "enable certbot.timer")
+				}
 			}
 		}
 	} else {
@@ -413,12 +405,20 @@ func (tls) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 			return provision.CheckResult{}, err
 		}
 		if present {
-			return provision.CheckResult{
-				Satisfied: false,
-				Reason:    "certbot deploy hook lingers but no site uses Let's Encrypt",
-				Changes:   []string{"remove certbot renewal deploy hook"},
-			}, nil
+			reasons = append(reasons, "certbot deploy hook lingers but no site uses Let's Encrypt")
+			hookChanges = append(hookChanges, "remove certbot renewal deploy hook")
 		}
+	}
+	if len(orphanChanges) > 0 {
+		reasons = append([]string{"TLS artifacts linger for sites no longer in the config"}, reasons...)
+	}
+	if len(orphanChanges) > 0 || len(hookChanges) > 0 {
+		return provision.CheckResult{
+			Satisfied: false,
+			Reason:    strings.Join(reasons, "; "),
+			// Apply's order: the sweep runs before hook convergence.
+			Changes: append(orphanChanges, hookChanges...),
+		}, nil
 	}
 	return provision.CheckResult{Satisfied: true, Reason: "TLS state converged"}, nil
 }

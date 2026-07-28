@@ -1024,6 +1024,7 @@ func TestTLSCheckFlagsOrphanTLSArtifacts(t *testing.T) {
 		bssh.Result{Stdout: "/var/www/berth-acme/old.example.com\n/var/www/berth-acme/kept.example.com\n"})
 	f.On("if [ -d '/etc/ssl/berth' ]; then find '/etc/ssl/berth' -mindepth 1 -maxdepth 1 -type d; fi",
 		bssh.Result{Stdout: "/etc/ssl/berth/old.example.com\n"})
+	f.On("cat '/etc/letsencrypt/renewal-hooks/deploy/berth-nginx-reload'", bssh.Result{ExitCode: 1})
 
 	res, err := TLS().Check(context.Background(), provision.RunCtx{}, tlsNoSSLServer(), f)
 	if err != nil {
@@ -1081,6 +1082,7 @@ func TestTLSCheckShieldedLineageProtectsItsWebroots(t *testing.T) {
 		bssh.Result{Stdout: "/var/www/berth-acme/old.example.com\n/var/www/berth-acme/kept.example.com\n"})
 	f.On("if [ -d '/etc/ssl/berth' ]; then find '/etc/ssl/berth' -mindepth 1 -maxdepth 1 -type d; fi",
 		bssh.Result{Stdout: "/etc/ssl/berth/old.example.com\n"})
+	f.On("cat '/etc/letsencrypt/renewal-hooks/deploy/berth-nginx-reload'", bssh.Result{ExitCode: 1})
 
 	res, err := TLS().Check(context.Background(), provision.RunCtx{}, tlsNoSSLServer(), f)
 	if err != nil {
@@ -1228,6 +1230,43 @@ func TestTLSCheckUnboundedWebrootSuppressesWebrootSweep(t *testing.T) {
 	want := []string{"rm -rf /etc/ssl/berth/old.example.com"}
 	if !reflect.DeepEqual(res.Changes, want) {
 		t.Errorf("Changes = %v, want %v (no webroot removal may be planned under an unbounded reference)", res.Changes, want)
+	}
+}
+
+func TestTLSCheckMergesOrphanAndLingeringHookDrift(t *testing.T) {
+	// Dry-run completeness for the post-loop tail: with BOTH an orphan
+	// self-signed dir and a lingering berth-managed deploy hook, Check must
+	// report one unsatisfied result carrying both actions (sweep first —
+	// Apply's order), not hide the hook removal behind an orphan-only return.
+	f := bssh.NewFakeRunner()
+	f.On("if [ -d '/etc/letsencrypt/renewal' ]; then find -H '/etc/letsencrypt/renewal' -mindepth 1 -maxdepth 1 -name '*.conf'; fi", bssh.Result{})
+	f.On("if [ -d '/var/www/berth-acme' ]; then find '/var/www/berth-acme' -mindepth 1 -maxdepth 1 -type d; fi", bssh.Result{})
+	f.On("if [ -d '/etc/ssl/berth' ]; then find '/etc/ssl/berth' -mindepth 1 -maxdepth 1 -type d; fi",
+		bssh.Result{Stdout: "/etc/ssl/berth/old.example.com\n"})
+	f.On("cat '/etc/letsencrypt/renewal-hooks/deploy/berth-nginx-reload'",
+		bssh.Result{ExitCode: 0, Stdout: managedMarker + "\nset -eu\nnginx -t\nsystemctl reload nginx\n"})
+
+	res, err := TLS().Check(context.Background(), provision.RunCtx{}, tlsNoSSLServer(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Satisfied {
+		t.Fatal("orphan artifacts plus a lingering hook must be unsatisfied drift")
+	}
+	want := []string{
+		"rm -rf /etc/ssl/berth/old.example.com",
+		"remove certbot renewal deploy hook",
+	}
+	if !reflect.DeepEqual(res.Changes, want) {
+		t.Errorf("Changes = %v, want %v (both drift classes, sweep first)", res.Changes, want)
+	}
+	for _, part := range []string{
+		"TLS artifacts linger for sites no longer in the config",
+		"certbot deploy hook lingers but no site uses Let's Encrypt",
+	} {
+		if !strings.Contains(res.Reason, part) {
+			t.Errorf("Reason %q must name both drift classes (missing %q)", res.Reason, part)
+		}
 	}
 }
 
