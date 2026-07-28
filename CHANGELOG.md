@@ -3,6 +3,23 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Added
+
+- Dependabot now watches the SHA-pinned GitHub Actions, so the workflow pins
+  no longer fossilize (Go modules stay hand-managed on purpose).
+
+### Fixed
+
+- The integration suite no longer fails a healthy host when
+  `BERTH_TEST_SKIP_SSL=false` is combined with `BERTH_TEST_SSL_STAGING=true`:
+  every HTTPS probe now shares one trust decision, and a staging-flagged run
+  never performs CA verification (a staging certificate is untrusted by
+  design, and such a run may equally have preserved an earlier production
+  certificate). The suite README documents the SSL knobs, the required
+  absolute `BERTH_TEST_SERVER` path, and the certed-box re-run asymmetry.
+
 ## [0.24.0] — 2026-07-28
 
 ### Added

@@ -91,8 +91,30 @@ either pin it via `ssh.fingerprint` in the config, or add it to your
 ## Running
 
 ```bash
-BERTH_TEST_SERVER=servers/smoke.yml go test -tags integration -v ./test/integration/...
+# BERTH_TEST_SERVER must be an ABSOLUTE path: `go test` runs each test with
+# the package directory as its working directory, so a repo-relative path
+# would resolve under test/integration/ and the test fails to load the config.
+BERTH_TEST_SERVER="$PWD/servers/smoke.yml" go test -tags integration -v ./test/integration/...
 ```
+
+Optional knobs: `BERTH_TEST_SKIP_SSL=false` exercises TLS end-to-end (needs
+real public DNS pointing at the host), and `BERTH_TEST_SSL_STAGING=true` —
+effective only together with `BERTH_TEST_SKIP_SSL=false`, since Let's
+Encrypt issuance is otherwise skipped — issues from the staging CA (use it
+for repeated runs; the production CA rate-limits to 5 certificates per
+domain set per 168 h). The
+suite skips CA verification on staging-flagged runs: a staging certificate
+is untrusted by design, and such a run may equally have preserved an
+earlier production certificate (berth never replaces a valid one), which
+the suite deliberately does not try to tell apart. Full CA verification
+happens only on an unflagged `BERTH_TEST_SKIP_SSL=false` run.
 
 Tear the host down afterwards (`incus delete -f berth-smoke`, or destroy the
 VPS). Re-running against the same host is safe: every step is idempotent.
+
+One asymmetry to know about: berth never reverts a vhost from HTTPS to
+HTTP, so a re-run with `BERTH_TEST_SKIP_SSL=true` against a host that
+already has certificates from an earlier TLS run keeps serving HTTPS. The
+suite handles this by deciding per site from the actual on-host cert state
+(such sites are probed over HTTPS with CA verification skipped) — the skip
+flag only prevents NEW issuance, it does not downgrade existing sites.

@@ -3,11 +3,35 @@
 package integration
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/robsonek/berth/internal/apt"
 	"github.com/robsonek/berth/internal/config"
 )
+
+// sslRunSwitches validates BERTH_TEST_SKIP_SSL and derives the run's two SSL
+// switches: skipSSL (whether the tls step is registered at all) and
+// sslExplicit (the real-DNS opt-in — only then is a Let's Encrypt site's
+// certificate CA-verified; see insecureHTTPSProbes). Anything but "", "true"
+// or "false" is rejected up front: a typo like "False" would otherwise RUN
+// the TLS pipeline (skipSSL=false) while reading as non-explicit
+// (sslExplicit=false), silently downgrading every HTTPS probe to
+// skip-verification — the worst of both worlds.
+func sslRunSwitches(sslEnv string, anySelfSigned bool) (skipSSL, sslExplicit bool, err error) {
+	switch sslEnv {
+	case "":
+		// Self-signed TLS needs no public DNS, so it runs by default;
+		// Let's Encrypt does, so without the explicit opt-in it is skipped.
+		return !anySelfSigned, false, nil
+	case "true":
+		return true, false, nil
+	case "false":
+		return false, true, nil
+	default:
+		return false, false, fmt.Errorf("BERTH_TEST_SKIP_SSL must be unset, %q or %q; got %q", "true", "false", sslEnv)
+	}
+}
 
 // debianStockPHP mirrors internal/provision/steps.debianStockPHP — the PHP version
 // Debian 13 ships, for which `auto`/`""` does NOT pull the Surý repo.

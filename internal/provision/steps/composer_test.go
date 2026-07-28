@@ -181,20 +181,31 @@ func TestComposerApplyCleanupSurvivesCancelAndIsBounded(t *testing.T) {
 func TestComposerApplyRejectsUnexpectedMktempOutput(t *testing.T) {
 	stubComposerSig(t, "irrelevant", nil)
 
-	f := bssh.NewFakeRunner()
-	f.On("mktemp -d /tmp/berth-composer.XXXXXXXXXX", bssh.Result{Stdout: ""})
+	cases := []struct {
+		name   string
+		stdout string // what the stubbed mktemp -d prints
+	}{
+		{"empty", ""},
+		{"relative-path", "berth-composer.XXXXXXXXXX\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := bssh.NewFakeRunner()
+			f.On("mktemp -d /tmp/berth-composer.XXXXXXXXXX", bssh.Result{Stdout: c.stdout})
 
-	err := Composer().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f)
-	if err == nil {
-		t.Fatal("expected error when mktemp -d returns no path")
-	}
-	if !strings.Contains(err.Error(), "unexpected path") {
-		t.Errorf("error should mention the unexpected path; got %v", err)
-	}
-	// Nothing may be downloaded (or removed) when no private dir exists.
-	for _, c := range f.Calls() {
-		if strings.HasPrefix(c.Cmd, "php -r") || strings.HasPrefix(c.Cmd, "rm ") {
-			t.Errorf("no download or cleanup may run after a bad mktemp result; got %q", c.Cmd)
-		}
+			err := Composer().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f)
+			if err == nil {
+				t.Fatalf("expected error when mktemp -d returns %q", c.stdout)
+			}
+			if !strings.Contains(err.Error(), "unexpected path") {
+				t.Errorf("error should mention the unexpected path; got %v", err)
+			}
+			// Nothing may be downloaded (or removed) when no private dir exists.
+			for _, call := range f.Calls() {
+				if strings.HasPrefix(call.Cmd, "php -r") || strings.HasPrefix(call.Cmd, "rm ") {
+					t.Errorf("no download or cleanup may run after a bad mktemp result; got %q", call.Cmd)
+				}
+			}
+		})
 	}
 }

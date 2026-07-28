@@ -1838,7 +1838,7 @@ func TestDatabaseApplyRegistersPasswordBeforeAppKeyAcquisitionFails(t *testing.T
 	}
 }
 
-func TestDatabaseApplyRegistersFreshPasswordBeforeAppKeyRecoveryFails(t *testing.T) {
+func TestDatabaseApplyRegistersCachedPasswordBeforeCachedAppKeyValidationFails(t *testing.T) {
 	// The malformed cached APP_KEY aborts in loadValidatedSecrets' preflight
 	// (the fresh-seed branch and recoverOrNewAppKey are never reached), and
 	// the cached password, validated and registered just before it, must
@@ -1860,6 +1860,6 @@ func TestDatabaseApplyRegistersFreshPasswordBeforeAppKeyRecoveryFails(t *testing
 		t.Fatalf("Apply must fail on the malformed cached APP_KEY; got %v", err)
 	}
 	if got := red.Apply("leak Hunter22pw leak"); strings.Contains(got, "Hunter22pw") {
-		t.Fatalf("the password must already be registered when APP_KEY recovery fails; Apply => %q", got)
+		t.Fatalf("the password must already be registered when cached APP_KEY validation fails; Apply => %q", got)
 	}
 }

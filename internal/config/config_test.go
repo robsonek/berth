@@ -359,8 +359,17 @@ database:
 				t.Fatal(err)
 			}
 			_, err := Load(path)
-			if err == nil || !strings.Contains(err.Error(), c.wantKey) {
-				t.Fatalf("legacy top-level database.%s must fail to load with an unknown-key error naming it, got %v", c.wantKey, err)
+			if err == nil {
+				t.Fatalf("legacy top-level database.%s must fail to load, got nil", c.wantKey)
+			}
+			// Anchor on the mapstructure unknown-key marker: the error text
+			// starts with the TempDir config path, which contains the SUBTEST
+			// name ("name-only", ...), so a bare Contains(wantKey) would pass
+			// via the path even if the error stopped naming the key.
+			msg := err.Error()
+			idx := strings.Index(msg, "invalid keys:")
+			if idx < 0 || !strings.Contains(msg[idx:], c.wantKey) {
+				t.Fatalf("legacy top-level database.%s must fail with an unknown-key error naming it, got %v", c.wantKey, err)
 			}
 		})
 	}

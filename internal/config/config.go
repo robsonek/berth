@@ -629,8 +629,9 @@ func Load(path string) (*Server, error) {
 	// real ones do, which is why it lands before the first deployment.
 	// Exactly one custom hook: the queue string shorthand. No schema field is
 	// a time.Duration or []string, and keeping the stock hooks for those
-	// types would silently grant any FUTURE such field an alias spelling
-	// (comma-split strings) from day one.
+	// types would silently grant any FUTURE such field an alias spelling from
+	// day one (comma-split strings for []string, "5s"-style strings for
+	// time.Duration).
 	if err := v.UnmarshalExact(&s, viper.DecodeHook(stringToQueueConfigHook)); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}

@@ -272,6 +272,12 @@ func MigrateCache(id, host string, port int) error {
 		return fmt.Errorf("migrate cache %s -> %s: %w", srcPath, dstPath, err)
 	}
 	ep := &Endpoint{Host: host, Port: port}
+	// Deliberately re-save instead of trusting the renamed bytes: SaveEnvelope
+	// canonicalizes the envelope (stamps the version, normalizes nil secrets,
+	// stable indentation) and, like every cache write, re-tightens the file to
+	// 0600 under a 0700 dir — a hand-loosened host-keyed file would otherwise
+	// carry its permissive mode into the id-keyed cache unnoticed, because
+	// loads never check modes. Looks redundant; is load-bearing.
 	env := Envelope{Endpoint: source.Endpoint, Secrets: source.Secrets}
 	if err := SaveEnvelope(id, env); err != nil {
 		return err

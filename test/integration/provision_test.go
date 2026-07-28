@@ -70,19 +70,18 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	// (HTTP-01/ACME) needs real DNS, so it is opt-in via BERTH_TEST_SKIP_SSL=false.
 	// BERTH_TEST_SKIP_SSL=true forces a hard skip even for self-signed.
 	sslEnv := os.Getenv("BERTH_TEST_SKIP_SSL")
-	skipSSL := sslEnv == "true" || (sslEnv == "" && !anySiteSelfSigned(srv))
-	// Explicit opt-in to real-DNS SSL testing: only then is a Let's Encrypt
-	// site's certificate CA-verified (issuance is skipped without DNS). Whether
-	// a site is probed over HTTPS at all is decided per site from the actual
-	// on-host cert state — see siteHTTPSProbe.
-	sslExplicit := sslEnv == "false"
+	skipSSL, sslExplicit, err := sslRunSwitches(sslEnv, anySiteSelfSigned(srv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sslStaging := os.Getenv("BERTH_TEST_SSL_STAGING") == "true"
 
 	// Run the full pipeline.
 	red := secret.NewRedactor()
 	eng := provision.New(steps.Pipeline(srv, red, skipSSL)...)
 	events, err := eng.Run(ctx, srv, client, provision.Options{
 		Force:      os.Getenv("BERTH_TEST_FORCE") == "true",
-		SSLStaging: os.Getenv("BERTH_TEST_SSL_STAGING") == "true",
+		SSLStaging: sslStaging,
 		Redact:     red,
 	})
 	if err != nil {
@@ -119,7 +118,8 @@ func TestProvisionFreshDebian13(t *testing.T) {
 
 	// When TLS was actually provisioned, the site must answer over HTTPS too.
 	if !skipSSL && anySiteSSL(srv) {
-		assertHTTPServes(t, "https://"+srv.Host+"/", anySiteSelfSigned(srv))
+		assertHTTPServes(t, "https://"+net.JoinHostPort(srv.Host, "443")+"/",
+			insecureHTTPSProbes(anySiteSelfSigned(srv), sslExplicit, sslStaging))
 	}
 
 	// Self-signed certs are asserted directly on disk (no public CA to validate).
@@ -289,8 +289,8 @@ func assertSelfSignedCert(ctx context.Context, t *testing.T, c *bssh.Client, srv
 // unexpected server error. A 502 (Bad Gateway) is accepted: nginx is up and
 // correctly proxying to PHP-FPM, but no app is deployed yet ("Primary script
 // unknown"). Any other 5xx signals a real nginx/PHP-FPM regression and fails.
-// insecureTLS skips certificate verification, required when probing a
-// self-signed (intentionally untrusted) HTTPS vhost.
+// insecureTLS skips certificate verification; the HTTPS call site passes the
+// run's shared trust decision (see insecureHTTPSProbes).
 func assertHTTPServes(t *testing.T, url string, insecureTLS bool) {
 	t.Helper()
 	cl := &http.Client{
