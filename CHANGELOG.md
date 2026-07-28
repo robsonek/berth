@@ -3,22 +3,17 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
-## [0.25.0] — 2026-07-28
+## [Unreleased]
 
 ### Added
 
-- Dependabot now watches the SHA-pinned GitHub Actions, so the workflow pins
-  no longer fossilize (Go modules stay hand-managed on purpose).
-- **Lint gate** — golangci-lint v2 (pinned v2.12.2) now runs as a hard gate
-  in CI and before every release: the default bug-finder set plus revive,
-  misspell and gocritic, with the gofmt formatter enforced (previously
-  `gofmt -l` was a by-convention gate CI never checked). Two conscious
-  config exceptions are commented in `.golangci.yml` (revive
-  exported/package-comments, staticcheck QF1001); the gate runs as two
-  passes — the default tree plus `-tags integration` for
-  `test/integration/` — mirroring the repo's two `go vet` invocations;
-  the whole tree was brought to zero findings with no `//nolint`
-  directives, and `make lint` runs the same check locally.
+- **CI hardening pack** — tests now run on ubuntu, macOS and Windows with
+  `-race -shuffle=on`; an ubuntu `checks` job cross-builds all five release
+  targets and lints the workflows themselves (actionlint); a separate
+  `vuln` job, gated on the core gates, runs `govulncheck` on every PR;
+  weekly scheduled `Vulnerability scan` and `CodeQL` workflows watch
+  `main` between releases. Tools run via `go run <module>@<pinned-version>`
+  — no new third-party actions.
 - **TLS orphan sweep** — removing a site from the config now also removes
   its TLS leftovers on the next run: the Let's Encrypt lineage (via
   `certbot delete`; ownership is decided by parsing the renewal config's
@@ -40,6 +35,35 @@ Notable changes to berth. Older releases are documented on the
   "fully provisioned" attestation (previously a no-SSL config attested
   even under `--skip-ssl`). On a host with no TLS traces the always-on
   step costs three discovery probes plus one hook probe per run.
+
+### Fixed
+
+- Secret-cache writes on Windows failed deterministically on the directory
+  fsync ("Access is denied": a directory handle opened for reading cannot
+  be flushed there). The directory-durability fsync is now Unix-only. File
+  contents are still fsynced on every platform; the replacing rename is
+  atomic on Unix, while on Windows directory-entry durability is
+  best-effort via NTFS metadata journaling.
+
+## [0.25.0] — 2026-07-28
+
+### Added
+
+- Dependabot now watches the SHA-pinned GitHub Actions, so the workflow pins
+  no longer fossilize (Go modules stay hand-managed on purpose).
+- **Lint gate** — golangci-lint v2 (pinned v2.12.2) now runs as a hard gate
+  in CI and before every release: the default bug-finder set plus revive,
+  misspell and gocritic, with the gofmt formatter enforced (previously
+  `gofmt -l` was a by-convention gate CI never checked). Two conscious
+  config exceptions are commented in `.golangci.yml` (revive
+  exported/package-comments, staticcheck QF1001); the gate runs as two
+  passes — the default tree plus `-tags integration` for
+  `test/integration/` — mirroring the repo's two `go vet` invocations;
+  the whole tree was brought to zero findings with no `//nolint`
+  directives, and `make lint` runs the same check locally.
+
+### Changed
+
 - Go toolchain bumped to 1.26.5 (`go.mod` directive and both CI workflows)
   and all direct dependencies updated to their latest patch releases:
   bubbletea 2.0.8, lipgloss 2.0.5, pkg/sftp 1.13.11, x/crypto 0.54.0,

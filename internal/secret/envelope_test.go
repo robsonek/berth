@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -238,6 +239,9 @@ func TestMigrateCache(t *testing.T) {
 }
 
 func TestMigrateCacheHoldsBothLocks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("flock is a no-op on Windows")
+	}
 	// A concurrent writer that has taken the HOST lock must not be able to
 	// interleave with a migration: the migration takes both locks, so it
 	// cannot start until the host-lock holder releases.
