@@ -79,10 +79,13 @@ func TestConfigMatrix(t *testing.T) {
 		}
 	}
 
-	// base builds a defaults()-seeded Answers with a name/host.
+	// base builds a defaults()-seeded Answers with a name/host. The id is set
+	// explicitly: run() auto-generates it in production, which the matrix's
+	// answers-path cases bypass.
 	base := func(name, host string) Answers {
 		a := defaults()
 		a.Name = name
+		a.ID = "test-machine-0001"
 		a.Host = host
 		return a
 	}

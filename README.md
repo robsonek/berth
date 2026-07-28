@@ -71,7 +71,7 @@ starting points live in [`examples/`](examples/) — e.g.
 and accepted values:
 
 ```yaml
-id: myserver-1a2b3c4d          # optional — stable machine identity (see below)
+id: myserver-1a2b3c4d          # required — stable machine identity (see below)
 host: 203.0.113.10             # required — server IP or DNS name
 
 ssh:
@@ -187,24 +187,32 @@ than propagate it. The thematic sections below explain each area in depth.
 
 ### Server identity (`id:`)
 
-The local secret cache is keyed by `id` when set, else by `host`. Declare an
-`id` (the wizard generates one) whenever hostnames are ambiguous: two
+The local secret cache is keyed by `id` — a **required** field (`berth init`
+has always generated one; a config predating this requirement keeps working
+after you add the id it was implicitly using, i.e. one already recorded in a
+tombstone, or a fresh one if the machine was only ever host-keyed). Two
 *different* machines reachable through one hostname on different ports must
 have *different* ids (or they would share database passwords, `APP_KEY`
 backups and the break-glass console password), while one machine addressed by
 several configs must use the *same* id in all of them — and, in this version,
 the same current `host:port`. Rules:
 
-- `id` is a stable, immutable machine identity, not a display name. Changing
-  it orphans the cache.
+- `id` is a stable, immutable machine identity, not a display name. Renaming
+  it is refused: the host's tombstone records which id owns the cache, and a
+  mismatch would orphan the old id's secrets (including the console-password
+  ownership marker). Either restore the recorded id, or migrate deliberately
+  by renaming `~/.berth/<old-id>.secrets.json` to `<new-id>.secrets.json` and
+  updating the tombstone.
 - Adding an `id` to an already-provisioned config migrates the cache file
   automatically and leaves a tombstone at the old host-keyed path, so any
   stale config still lacking the `id` fails loudly instead of silently
   regenerating (or disowning) secrets — add the same `id` there too.
 - The cache records the endpoint it was bound to. A mismatch is a hard error:
   if it is a *different* server, give it its own `id`; if the endpoint really
-  changed, update every config sharing the id first, then re-run once with
-  `--force` to re-bind. Endpoint metadata is an operator-error tripwire, not
+  changed, update every config sharing the id first, then re-bind once with
+  the narrow form `berth provision <config> --only identity --force` — a bare
+  `--force` would ALSO authorize overwriting unmanaged files in every other
+  step of the run. Endpoint metadata is an operator-error tripwire, not
   authentication — SSH host-key verification is unaffected and never bypassed.
 - Downgrading berth below this version after an `id`/envelope exists is not
   supported (older binaries reject both the config key and the cache format).

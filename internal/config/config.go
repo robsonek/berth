@@ -535,8 +535,10 @@ type Server struct {
 	// machines behind one hostname get separate credential caches and one
 	// machine addressed by several configs shares a single cache (give every
 	// config of that machine the same id — and, in v1, the same current
-	// host:port). Optional; when empty the cache falls back to the host key
-	// (pre-P14 behavior). Immutable once set — changing it orphans the cache.
+	// host:port). Required by Server.Validate (`berth init` generates one);
+	// CacheKey's host fallback survives only for pre-id tombstone handling.
+	// Immutable once set — the identity step refuses a renamed id (the host
+	// tombstone records the owning id) instead of orphaning the cache.
 	ID             string   `mapstructure:"id" yaml:"id,omitempty"`
 	Host           string   `mapstructure:"host" yaml:"host"`
 	SSH            SSH      `mapstructure:"ssh" yaml:"ssh"`

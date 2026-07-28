@@ -185,7 +185,7 @@ func VerifyEnvelope(env *Envelope, host string, port int) error {
 		return fmt.Errorf("this host's secret cache was migrated to server id %q; add `id: %s` to this config", env.MigratedTo, env.MigratedTo)
 	}
 	if env.Endpoint.Host != host || env.Endpoint.Port != port {
-		return fmt.Errorf("secret cache is bound to endpoint %s but the config targets %s:%d — if this is a DIFFERENT server, give it its own `id`; if the endpoint really changed, re-run with --force to re-bind", env.Endpoint, host, port)
+		return fmt.Errorf("secret cache is bound to endpoint %s but the config targets %s:%d — if this is a DIFFERENT server, give it its own `id`; if the endpoint really changed, re-bind with the narrow form: berth provision <config> --only identity --force (a bare --force would ALSO authorize overwriting unmanaged files in every other step of the run)", env.Endpoint, host, port)
 	}
 	return nil
 }
@@ -217,6 +217,12 @@ func MigrateCache(id, host string, port int) error {
 	source, err := LoadEnvelope(host)
 	if err != nil {
 		return err
+	}
+	// A tombstone pointing at a DIFFERENT id means the caller's id was
+	// renamed; both shortcuts below would swallow it (and the fresh-target
+	// path would then bind an empty cache, orphaning the old id's secrets).
+	if source != nil && source.MigratedTo != "" && source.MigratedTo != id {
+		return fmt.Errorf("the cache for host %s was already migrated to server id %q but this run declares id %q — a renamed id would orphan the existing cache (including the console-password ownership marker); restore `id: %s`, or migrate deliberately by renaming ~/.berth/%s.secrets.json to %s.secrets.json and updating the tombstone", host, source.MigratedTo, id, source.MigratedTo, source.MigratedTo, id)
 	}
 	sourceIsReal := source != nil && source.MigratedTo == ""
 	if target != nil && sourceIsReal {

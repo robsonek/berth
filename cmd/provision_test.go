@@ -17,7 +17,8 @@ func writeValidConfig(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	p := filepath.Join(dir, "srv.yml")
-	cfg := `host: 203.0.113.10
+	cfg := `id: test-machine-0001
+host: 203.0.113.10
 ssh: {user: root, port: 22}
 php: {version: "8.5", source: auto}
 database: {engine: mariadb}

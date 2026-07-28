@@ -62,6 +62,7 @@ Create a throwaway `servers/smoke.yml` pointing at the host (see the project's
 `init` output for the schema). Minimal example:
 
 ```yaml
+id: smoke-test-0001    # required — stable machine identity (secret-cache key)
 host: 10.0.0.42        # container IP or VPS address
 ssh:
   user: root           # bootstrap user; berth creates the `berth` account

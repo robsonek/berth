@@ -189,6 +189,26 @@ func TestMigrateCache(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	// A tombstone pointing at a DIFFERENT id means the config's id was renamed:
+	// proceeding would orphan the old id's cache. Both early-return shortcuts
+	// (existing target, non-real source) used to swallow this — guard first.
+	t.Run("foreign tombstone is refused with a fresh target", func(t *testing.T) {
+		berth := cacheHome(t)
+		writeRawCache(t, berth, "host.example.com", `{"version":1,"endpoint":{"host":"host.example.com","port":22},"migratedTo":"old-id","secrets":{}}`)
+		err := MigrateCache("id-1", "host.example.com", 22)
+		if err == nil || !strings.Contains(err.Error(), "old-id") || !strings.Contains(err.Error(), "id-1") {
+			t.Fatalf("foreign tombstone must be refused naming both ids; got %v", err)
+		}
+	})
+	t.Run("foreign tombstone is refused with an existing target", func(t *testing.T) {
+		berth := cacheHome(t)
+		writeRawCache(t, berth, "id-1", `{"version":1,"endpoint":{"host":"host.example.com","port":22},"secrets":{}}`)
+		writeRawCache(t, berth, "host.example.com", `{"version":1,"endpoint":{"host":"host.example.com","port":22},"migratedTo":"old-id","secrets":{}}`)
+		err := MigrateCache("id-1", "host.example.com", 22)
+		if err == nil || !strings.Contains(err.Error(), "old-id") || !strings.Contains(err.Error(), "id-1") {
+			t.Fatalf("foreign tombstone must be refused naming both ids; got %v", err)
+		}
+	})
 	t.Run("malformed source stays loud", func(t *testing.T) {
 		berth := cacheHome(t)
 		writeRawCache(t, berth, "host.example.com", `{{{`)

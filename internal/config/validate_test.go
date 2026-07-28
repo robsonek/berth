@@ -9,6 +9,7 @@ import (
 
 func base() *Server {
 	return &Server{
+		ID:       "test-machine-0001",
 		Host:     "203.0.113.10",
 		SSH:      SSH{User: "root", Port: 22},
 		PHP:      PHP{Version: "8.5", Source: "auto"},
@@ -68,6 +69,7 @@ func TestValidateHTTP3OK(t *testing.T) {
 
 func multiSite() *Server {
 	return &Server{
+		ID:   "test-machine-0001",
 		Host: "203.0.113.10", SSH: SSH{User: "root", Port: 22},
 		PHP: PHP{Version: "8.5", Source: "auto"}, Nginx: Nginx{Source: "debian"},
 		Database: Database{Engine: "mariadb", Source: "debian"},
@@ -333,6 +335,7 @@ func TestSchedulerEnabled(t *testing.T) {
 
 func validQueueServer() *Server {
 	return &Server{
+		ID:   "test-machine-0001",
 		Host: "app.example.com",
 		SSH:  SSH{Port: 22, User: "deploy", Key: "~/.ssh/id_rsa"},
 		PHP:  PHP{Version: "8.4", Source: "auto"}, Nginx: Nginx{Source: "debian"},
@@ -505,6 +508,7 @@ func TestDatabaseChoices(t *testing.T) {
 	}
 	for _, c := range got {
 		s := &Server{
+			ID:   "test-machine-0001",
 			Host: "h.example", SSH: SSH{Port: 22}, PHP: PHP{Version: "8.5", Source: "auto"},
 			Nginx: Nginx{Source: "debian"}, Database: Database{Engine: c.Engine, Source: c.Source},
 			Sites: []Site{{Domain: "a.example", DeployPath: "/srv/a", Database: SiteDatabase{Name: "a", User: "a"}}},
@@ -620,8 +624,17 @@ func TestIsValidSiteOSUser(t *testing.T) {
 }
 
 func TestValidateServerID(t *testing.T) {
-	ok := []string{"", "ab", "prod-web-1a2b3c", "a.b_c-9", "x0"}
+	// Field-level: "" is deliberately legal HERE — the wizard validates the
+	// prompt BEFORE auto-generating an id, so blank means "generate one".
+	// Only Server.Validate (TestValidateRequiresID) rejects an empty id.
+	if err := ValidateServerID(""); err != nil {
+		t.Errorf(`ValidateServerID("") must stay nil (wizard pre-generation layer): %v`, err)
+	}
+	ok := []string{"ab", "prod-web-1a2b3c", "a.b_c-9", "x0"}
 	for _, id := range ok {
+		if err := ValidateServerID(id); err != nil {
+			t.Errorf("ValidateServerID(%q) = %v, want nil", id, err)
+		}
 		s := base()
 		s.ID = id
 		if err := s.Validate(); err != nil {
@@ -630,11 +643,23 @@ func TestValidateServerID(t *testing.T) {
 	}
 	bad := []string{"a", "A-upper", "-lead", "trail-", "spa ce", "zażółć", strings.Repeat("x", 65)}
 	for _, id := range bad {
+		if err := ValidateServerID(id); err == nil {
+			t.Errorf("ValidateServerID(%q) = nil, want error", id)
+		}
 		s := base()
 		s.ID = id
 		if err := s.Validate(); err == nil {
 			t.Errorf("id %q must be rejected", id)
 		}
+	}
+}
+
+func TestValidateRequiresID(t *testing.T) {
+	s := base()
+	s.ID = ""
+	err := s.Validate()
+	if err == nil || !strings.Contains(err.Error(), "id") || !strings.Contains(err.Error(), "berth init") {
+		t.Fatalf("an empty id must be rejected with `berth init` advice; got %v", err)
 	}
 }
 

@@ -74,7 +74,8 @@ func writeTmpConfig(t *testing.T, body string) string {
 	return p
 }
 
-const baseCfg = `host: app.example.com
+const baseCfg = `id: test-machine-0001
+host: app.example.com
 ssh: {user: deploy, key: ~/.ssh/id_rsa}
 php: {version: "8.4"}
 database: {engine: mariadb, source: mariadb}
@@ -164,6 +165,7 @@ func TestSiteProgramNamesAndEnablement(t *testing.T) {
 
 func TestServerYAMLOmitsEmptyOptionalFields(t *testing.T) {
 	s := &Server{
+		ID:   "test-machine-0001",
 		Host: "h.example", SSH: SSH{User: "root", Port: 22, Key: "~/.ssh/id_ed25519"},
 		PHP: PHP{Version: "8.5", Source: "auto"}, Nginx: Nginx{Source: "debian"},
 		Database: Database{Engine: "mariadb", Source: "debian"},
@@ -284,7 +286,8 @@ func TestLoadRejectsUnknownKeys(t *testing.T) {
 	// convinced they configured something berth never read. All four nesting
 	// levels are covered because viper flattens the tree and it is not obvious
 	// from the call site that every level is checked.
-	base := `host: 203.0.113.10
+	base := `id: test-machine-0001
+host: 203.0.113.10
 ssh:
   user: root
   key: ~/.ssh/id_ed25519
@@ -341,7 +344,8 @@ func TestLoadRejectsLegacyTopLevelDatabaseNameUser(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "legacy.yml")
-			yml := `host: 203.0.113.10
+			yml := `id: test-machine-0001
+host: 203.0.113.10
 php:
   version: "8.5"
 database:

@@ -262,9 +262,12 @@ func ParseSwapBytes(size string) (int64, error) {
 	return bytes, nil
 }
 
-// ValidateServerID guards the optional top-level `id` (the secret-cache key:
-// filename-safe, unambiguous). Exported so the wizard's per-field validation
-// applies exactly the same rule as config loading. Empty = unset (allowed).
+// ValidateServerID guards the FORMAT of the top-level `id` (the secret-cache
+// key: filename-safe, unambiguous). Exported so the wizard's per-field
+// validation applies exactly the same rule as config loading. Empty passes
+// HERE by design — the wizard validates the prompt before auto-generating an
+// id, so blank means "generate one" at that layer; only Server.Validate
+// requires a non-empty id.
 func ValidateServerID(id string) error {
 	if id != "" && !reServerID.MatchString(id) {
 		return fmt.Errorf("id %q is not a valid server id (lowercase [a-z0-9._-], 2-64 chars, must start and end alphanumeric)", id)
@@ -274,6 +277,9 @@ func ValidateServerID(id string) error {
 
 // Validate checks every field that reaches a shell, SQL statement, or path.
 func (s *Server) Validate() error {
+	if s.ID == "" {
+		return fmt.Errorf("id is required: it is the stable identity of the machine's local secret cache (a host rename must never silently re-key it) — run `berth init` to generate one, or add e.g. `id: prod-<name>-<4 random hex>`")
+	}
 	if err := ValidateServerID(s.ID); err != nil {
 		return err
 	}
