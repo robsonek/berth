@@ -1,4 +1,4 @@
-{{ .User }} ALL=(root) NOPASSWD: /usr/bin/systemctl reload php{{ .PHPVersion }}-fpm
+{{ .User }} ALL=(root) NOPASSWD: /bin/sh /usr/local/sbin/berth-reload-fpm
 {{- range .Programs }}
 {{ $.User }} ALL=(root) NOPASSWD: /usr/bin/supervisorctl start {{ . }}\:\*
 {{ $.User }} ALL=(root) NOPASSWD: /usr/bin/supervisorctl stop {{ . }}\:\*

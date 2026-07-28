@@ -163,16 +163,25 @@ func TestRenderSupervisorDaemonGolden(t *testing.T) {
 
 func TestRenderSudoersDeployGolden(t *testing.T) {
 	checkGolden(t, "sudoers_deploy.tmpl", "sudoers_deploy.golden", struct {
-		User, PHPVersion string
-		Programs         []string
-	}{User: "webuser", PHPVersion: "8.5", Programs: []string{"berth-app_example_com"}})
+		User     string
+		Programs []string
+	}{User: "webuser", Programs: []string{"berth-app_example_com"}})
 }
 
 func TestRenderSudoersDeployDaemonsGolden(t *testing.T) {
 	checkGolden(t, "sudoers_deploy.tmpl", "sudoers_deploy_daemons.golden", struct {
-		User, PHPVersion string
-		Programs         []string
-	}{User: "webuser", PHPVersion: "8.5", Programs: []string{"berth-app_example_com", "berth-app_example_com-reverb"}})
+		User     string
+		Programs []string
+	}{User: "webuser", Programs: []string{"berth-app_example_com", "berth-app_example_com-reverb"}})
+}
+
+func TestRenderReloadFPMGolden(t *testing.T) {
+	// The deployer-facing sudoers grant is version-stable (/bin/sh + this
+	// wrapper's path); the PHP version lives only INSIDE the wrapper body, so a
+	// php.version migration rewrites one root-owned file instead of every
+	// deploy pipeline. systemctl is invoked by ABSOLUTE path — the wrapper must
+	// never depend on PATH.
+	checkGolden(t, "reload_fpm.sh.tmpl", "reload_fpm.golden", struct{ PHPVersion string }{"8.5"})
 }
 
 func TestRenderSchedulerCronGolden(t *testing.T) {

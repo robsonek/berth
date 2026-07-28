@@ -16,6 +16,12 @@ import (
 const (
 	sudoersBerthPath = "/etc/sudoers.d/berth"
 	sudoersBerthBody = managedMarker + "\nberth ALL=(ALL) NOPASSWD:ALL\n"
+	// reloadFPMScriptPath is the version-stable FPM reload the per-site sudoers
+	// grant names. Deployers hard-code their sudo line on day one; routing the
+	// reload through this berth-managed wrapper keeps a future php.version
+	// migration out of every deploy pipeline. Marker-first, no shebang (repo
+	// script convention) — the sudoers grant invokes it via /bin/sh.
+	reloadFPMScriptPath = "/usr/local/sbin/berth-reload-fpm"
 	// consoleCacheKey is the local secret-cache key for the berth account's
 	// break-glass console password. The colon keeps it out of the SQL-identifier
 	// namespace the database step keys its per-site passwords by.
@@ -70,8 +76,18 @@ func authorizedKeysPath(user string) string {
 	return fmt.Sprintf("/home/%s/.ssh/authorized_keys", user)
 }
 
-// renderSiteSudoers renders the narrow per-site deploy sudoers (reload its
-// php-fpm version + manage only its own supervisor program), as the site user.
+// renderReloadFPMScript renders the reload wrapper's body: an exec of the
+// configured PHP version's FPM reload via an ABSOLUTE systemctl path — the
+// wrapper must never depend on PATH.
+func renderReloadFPMScript(s *config.Server) ([]byte, error) {
+	return templates.Render("reload_fpm.sh.tmpl", struct{ PHPVersion string }{s.PHP.Version})
+}
+
+// renderSiteSudoers renders the narrow per-site deploy sudoers (FPM reload via
+// the version-stable berth-reload-fpm wrapper + manage only its own supervisor
+// program), as the site user. The PHP version deliberately does NOT appear in
+// the rendered grants: it lives inside the wrapper body only, so it never
+// becomes part of the deployer's hard-coded sudo line.
 //
 // The '*' in the supervisorctl grants is ESCAPED (\*) on purpose. In sudoers, an
 // unescaped '*' is an fnmatch wildcard that matches ACROSS WHITESPACE, so a site
@@ -85,9 +101,9 @@ func authorizedKeysPath(user string) string {
 // control hole.
 func renderSiteSudoers(s *config.Server, site config.Site) ([]byte, error) {
 	return templates.Render("sudoers_deploy.tmpl", struct {
-		User, PHPVersion string
-		Programs         []string
-	}{User: s.SiteUser(site), PHPVersion: s.PHP.Version, Programs: s.SiteProgramNames(site)})
+		User     string
+		Programs []string
+	}{User: s.SiteUser(site), Programs: s.SiteProgramNames(site)})
 }
 
 // authorizedKeys is the managed authorized_keys body for an account: the berth
@@ -114,10 +130,10 @@ func sudoersValid(ctx context.Context, r bssh.Runner, path string) (bool, error)
 
 func (a accounts) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
 	// PHP version-exclusivity guard first: this step renders the configured
-	// PHP version into every site's sudoers reload grant and runs BEFORE the
-	// php step, so a version change must refuse here or a failed run leaves
-	// deploy users granted a reload on the not-yet-installed version while
-	// the old master keeps serving.
+	// PHP version into the shared reload wrapper the site sudoers grants name
+	// (reloadFPMScriptPath) and runs BEFORE the php step, so a version change
+	// must refuse here or a failed run leaves deploy users reloading the
+	// not-yet-installed version's master while the old one keeps serving.
 	if err := assertPHPVersionExclusive(ctx, r, s); err != nil {
 		return provision.CheckResult{}, err
 	}
@@ -205,6 +221,36 @@ func (a accounts) Check(ctx context.Context, rc provision.RunCtx, s *config.Serv
 		if !okKey {
 			return provision.CheckResult{Satisfied: false, Reason: u + " authorized_keys not up to date", Changes: a.changes()}, nil
 		}
+	}
+	// The per-site sudoers reload grant names reloadFPMScriptPath, so the
+	// wrapper is part of the sudoers contract: probe its managed content AND
+	// its root:root 755 metadata. The metadata IS the security boundary —
+	// sudo runs the wrapper as root, so content-only probing would let a
+	// deploy-owned or group/other-writable wrapper stay "Satisfied" and hand
+	// root code execution to whoever can write the file.
+	reloadWant, err := renderReloadFPMScript(s)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	reloadState, err := checkManagedFile(ctx, r, reloadFPMScriptPath, reloadWant)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	okReload, err := managedFileSatisfied(reloadState, reloadFPMScriptPath, rc.Force)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	if !okReload {
+		return provision.CheckResult{Satisfied: false, Reason: reloadFPMScriptPath + " not up to date", Changes: []string{"write " + reloadFPMScriptPath}}, nil
+	}
+	if meta, present, err := statOwnerMode(ctx, r, reloadFPMScriptPath); err != nil {
+		return provision.CheckResult{}, err
+	} else if !present || meta != "root:root 755" {
+		return provision.CheckResult{
+			Satisfied: false,
+			Reason:    fmt.Sprintf("%s owner/mode %q, want \"root:root 755\"", reloadFPMScriptPath, meta),
+			Changes:   []string{"fix owner/mode of " + reloadFPMScriptPath + " (root:root 755)"},
+		}, nil
 	}
 	// Per-site deploy keys must be COMPLETE, not merely present: the private
 	// key (Apply generates it), its .pub (berth site key prints it — and
@@ -316,6 +362,7 @@ func (a accounts) changes() []string {
 	return []string{
 		"create the berth account and one OS user per site",
 		"write /etc/sudoers.d/<account> (berth: full; site users: narrow)",
+		"install the version-stable FPM reload wrapper " + reloadFPMScriptPath,
 		"install operator key into each authorized_keys; per-site deploy keys",
 		"reconcile the berth console password with system.break_glass",
 	}
@@ -372,6 +419,27 @@ func (a accounts) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serv
 	// 2) berth: full NOPASSWD sudo.
 	if err := writeValidatedSudoers(ctx, r, rc.Force, sudoersBerthPath, []byte(sudoersBerthBody)); err != nil {
 		return err
+	}
+
+	// 2b) Version-stable FPM reload wrapper — written BEFORE any per-site
+	// sudoers that grants it, so the grant never names a missing path (a
+	// window where the deployer's reload would fail). The fixed-argument
+	// `/bin/sh <path>` grant is safe on stock Debian 13: sudoers matches the
+	// argument string EXACTLY (an appended argument is denied), Debian's sudo
+	// defaults include env_reset + secure_path, and dash reads ENV only for
+	// interactive shells — the invocation cannot be steered via arguments or
+	// environment. No assertSafeAncestry for this write: /usr/local/sbin's
+	// ancestry is root-controlled on stock Debian, the same trust the
+	// /etc/sudoers.d writes above already rest on, and Check's root:root 755
+	// stat probe guards the file itself.
+	reloadBody, err := renderReloadFPMScript(s)
+	if err != nil {
+		return fmt.Errorf("render %s: %w", reloadFPMScriptPath, err)
+	}
+	if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
+		Path: reloadFPMScriptPath, Content: reloadBody, Owner: "root", Group: "root", Mode: 0o755, Sudo: true,
+	}); err != nil {
+		return fmt.Errorf("write %s: %w", reloadFPMScriptPath, err)
 	}
 
 	// 3) Per-site users: narrow sudoers (validated).

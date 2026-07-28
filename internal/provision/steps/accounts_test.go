@@ -233,6 +233,7 @@ func stubFullApply(t *testing.T, s *config.Server) *bssh.FakeRunner {
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
+	stubReloadScriptAbsent(f)
 	return f
 }
 
@@ -276,6 +277,7 @@ func TestAccountsCheckSatisfiedWhenAllPresent(t *testing.T) {
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want) // user pinned "deploy"
+	stubReloadScriptOK(t, f, s)
 	stubConsoleLocked(f)
 	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
@@ -384,6 +386,7 @@ func TestAccountsApplyCreatesUsersAndWritesSudoers(t *testing.T) {
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
+	stubReloadScriptAbsent(f)
 
 	stubConsoleLocked(f)
 	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -438,6 +441,7 @@ func TestAccountsApplyMultiSiteIsolatesUsers(t *testing.T) {
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, u1)
 	stubAccountCreate(f, u2)
+	stubReloadScriptAbsent(f)
 
 	stubConsoleLocked(f)
 	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -474,6 +478,7 @@ func TestAccountsApplyRefusesForeignAuthorizedKeys(t *testing.T) {
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
+	stubReloadScriptAbsent(f)
 	f.On("cat "+shQuote(sudoersBerthPath), bssh.Result{ExitCode: 1})
 	f.On("cat "+shQuote(sudoersPath("deploy")), bssh.Result{ExitCode: 1})
 	f.On("cat "+shQuote(authorizedKeysPath("berth")), bssh.Result{ExitCode: 1})
@@ -497,6 +502,7 @@ func TestAccountsApplyOverwritesForeignAuthorizedKeysWithForce(t *testing.T) {
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
+	stubReloadScriptAbsent(f)
 	f.On("cat "+shQuote(sudoersBerthPath), bssh.Result{ExitCode: 1})
 	f.On("cat "+shQuote(sudoersPath("deploy")), bssh.Result{ExitCode: 1})
 	f.On("cat "+shQuote(authorizedKeysPath("berth")), bssh.Result{ExitCode: 1})
@@ -520,6 +526,7 @@ func TestAccountsApplyGeneratesDeployKeyWhenRepository(t *testing.T) {
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
+	stubReloadScriptAbsent(f)
 	f.On("test -e '/home/deploy/.ssh/id_ed25519'", bssh.Result{ExitCode: 1}) // key absent
 	f.On("sudo -u deploy ssh-keygen -t ed25519 -N '' -f '/home/deploy/.ssh/id_ed25519' -C 'deploy@github.com'", bssh.Result{})
 	f.On("test -e '/home/deploy/.ssh/id_ed25519.pub'", bssh.Result{}) // keygen just wrote it
@@ -548,6 +555,7 @@ func TestAccountsApplySkipsDeployKeyWithoutRepository(t *testing.T) {
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
+	stubReloadScriptAbsent(f)
 
 	stubConsoleLocked(f)
 	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -614,6 +622,7 @@ func TestAccountsCheckUnsatisfiedWhenDeployKeyMissing(t *testing.T) {
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
+	stubReloadScriptOK(t, f, s)
 	f.On("test -e '/home/deploy/.ssh/id_ed25519'", bssh.Result{ExitCode: 1}) // key missing
 	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
@@ -641,6 +650,7 @@ func TestAccountsCheckSatisfiedWithDeployKeyPresent(t *testing.T) {
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
+	stubReloadScriptOK(t, f, s)
 	f.On("test -e '/home/deploy/.ssh/id_ed25519'", bssh.Result{ExitCode: 0})
 	f.On("test -e '/home/deploy/.ssh/id_ed25519.pub'", bssh.Result{ExitCode: 0})
 	f.On("ssh-keygen -F "+shQuote("github.com")+" -f "+shQuote("/home/deploy/.ssh/known_hosts")+" >/dev/null 2>&1", bssh.Result{})
@@ -669,6 +679,7 @@ func TestAccountsCheckUnsatisfiedWhenPubMissing(t *testing.T) {
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
+	stubReloadScriptOK(t, f, s)
 	f.On("test -e "+shQuote("/home/deploy/.ssh/id_ed25519"), bssh.Result{})
 	f.On("test -e "+shQuote("/home/deploy/.ssh/id_ed25519.pub"), bssh.Result{ExitCode: 1})
 	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
@@ -699,6 +710,7 @@ func TestAccountsCheckUnsatisfiedWhenKnownHostsMissing(t *testing.T) {
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
+	stubReloadScriptOK(t, f, s)
 	f.On("test -e "+shQuote("/home/deploy/.ssh/id_ed25519"), bssh.Result{})
 	f.On("test -e "+shQuote("/home/deploy/.ssh/id_ed25519.pub"), bssh.Result{})
 	f.On("ssh-keygen -F "+shQuote("github.com")+" -f "+shQuote("/home/deploy/.ssh/known_hosts")+" >/dev/null 2>&1", bssh.Result{ExitCode: 1})
@@ -732,6 +744,7 @@ func TestAccountsCheckProbesKnownHostsPortToken(t *testing.T) {
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
+	stubReloadScriptOK(t, f, s)
 	f.On("test -e "+shQuote("/home/deploy/.ssh/id_ed25519"), bssh.Result{})
 	f.On("test -e "+shQuote("/home/deploy/.ssh/id_ed25519.pub"), bssh.Result{})
 	f.On("ssh-keygen -F "+shQuote("[git.example.com]:2222")+" -f "+shQuote("/home/deploy/.ssh/known_hosts")+" >/dev/null 2>&1", bssh.Result{})
@@ -754,6 +767,7 @@ func TestAccountsApplyDerivesMissingPub(t *testing.T) {
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
+	stubReloadScriptAbsent(f)
 	keyPath := "/home/deploy/.ssh/id_ed25519"
 	f.On("test -e "+shQuote(keyPath), bssh.Result{})                   // private key present -> no keygen -t
 	f.On("test -e "+shQuote(keyPath+".pub"), bssh.Result{ExitCode: 1}) // .pub missing
@@ -788,6 +802,7 @@ func TestAccountsApplyScansGitHostPortAware(t *testing.T) {
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
+	stubReloadScriptAbsent(f)
 	f.On("test -e "+shQuote("/home/deploy/.ssh/id_ed25519"), bssh.Result{})
 	f.On("test -e "+shQuote("/home/deploy/.ssh/id_ed25519.pub"), bssh.Result{})
 	kh := "/home/deploy/.ssh/known_hosts"
@@ -808,6 +823,133 @@ func stubConsoleLocked(f *bssh.FakeRunner) {
 	f.On("passwd -S berth", bssh.Result{ExitCode: 0, Stdout: "berth L 07/24/2026 0 99999 7 -1\n"})
 }
 
+// stubReloadScriptAbsent stubs the reload wrapper's write-guard read as absent
+// (a fresh host), the state every Apply fixture starts from.
+func stubReloadScriptAbsent(f *bssh.FakeRunner) {
+	f.On("cat "+shQuote(reloadFPMScriptPath), bssh.Result{ExitCode: 1})
+}
+
+// stubReloadScriptOK stubs the reload wrapper's Check probes green: managed
+// content up to date AND root:root 755 metadata.
+func stubReloadScriptOK(t *testing.T, f *bssh.FakeRunner, s *config.Server) {
+	t.Helper()
+	body, err := renderReloadFPMScript(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.On("cat "+shQuote(reloadFPMScriptPath), bssh.Result{Stdout: string(body)})
+	f.On("stat -c '%U:%G %a' "+shQuote(reloadFPMScriptPath), bssh.Result{Stdout: "root:root 755\n"})
+}
+
+// The deploy user's FPM reload goes through a stable path: the sudoers grant
+// must not name the PHP version, and Apply must write the wrapper script
+// BEFORE the sudoers file that grants it (a grant on a nonexistent path is a
+// window where the deployer's reload fails).
+func TestAccountsApplyWritesReloadScriptBeforeSudoers(t *testing.T) {
+	chdirTemp(t)
+	s := testServerWithKey(t)
+	f := stubFullApply(t, s)
+	stubConsoleLocked(f)
+	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	reloadIdx, sudoersIdx := -1, -1
+	for i, w := range f.Writes() {
+		switch w.Path {
+		case reloadFPMScriptPath:
+			reloadIdx = i
+			if w.Owner != "root" || w.Group != "root" || w.Mode != 0o755 || !w.Sudo {
+				t.Errorf("reload wrapper spec = owner %q group %q mode %#o sudo %v, want root:root 0755 Sudo", w.Owner, w.Group, w.Mode, w.Sudo)
+			}
+			for _, want := range []string{"# managed by berth", "exec /usr/bin/systemctl reload php8.4-fpm"} {
+				if !strings.Contains(string(w.Content), want) {
+					t.Errorf("reload wrapper content missing %q:\n%s", want, w.Content)
+				}
+			}
+		case sudoersPath("deploy"):
+			sudoersIdx = i
+			if !strings.Contains(string(w.Content), "/bin/sh /usr/local/sbin/berth-reload-fpm") {
+				t.Errorf("deploy sudoers must grant the version-stable wrapper:\n%s", w.Content)
+			}
+			if strings.Contains(string(w.Content), "reload php") {
+				t.Errorf("the PHP version must not appear in the deployer's sudoers contract:\n%s", w.Content)
+			}
+		}
+	}
+	if reloadIdx < 0 || sudoersIdx < 0 {
+		t.Fatalf("missing writes: reload wrapper idx %d, deploy sudoers idx %d", reloadIdx, sudoersIdx)
+	}
+	if reloadIdx > sudoersIdx {
+		t.Errorf("the wrapper must be written BEFORE the sudoers that grants it; wrapper=%d sudoers=%d", reloadIdx, sudoersIdx)
+	}
+}
+
+func TestAccountsCheckFlagsMissingReloadScript(t *testing.T) {
+	// Every probe green EXCEPT the reload wrapper's managed-file probe: a grant
+	// on a nonexistent path would break every deploy's reload, so Check must be
+	// unsatisfied with a change entry naming the wrapper.
+	chdirTemp(t)
+	s := testServerWithKey(t)
+	want := authorizedKeys(testOperatorKey)
+	deploySudoers, err := renderSiteSudoers(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	stubSiteTreeFresh(f, "/var/www/app")
+	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
+	stubAccountExists(f, "deploy", deploySudoers, want)
+	stubConsoleLocked(f)
+	f.On("cat "+shQuote(reloadFPMScriptPath), bssh.Result{ExitCode: 1}) // wrapper missing
+	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("a missing reload wrapper must be unsatisfied (the sudoers grant names it)")
+	}
+	if !strings.Contains(strings.Join(cr.Changes, "\n"), reloadFPMScriptPath) {
+		t.Errorf("Changes = %v, want an entry naming %s", cr.Changes, reloadFPMScriptPath)
+	}
+}
+
+func TestAccountsCheckFlagsReloadScriptMetadataDrift(t *testing.T) {
+	// Correct bytes, wrong metadata (mode 775: group-writable). sudo runs the
+	// wrapper as root, so the metadata IS the security boundary — content-only
+	// probing would report Satisfied while whoever can write the file holds
+	// root code execution.
+	chdirTemp(t)
+	s := testServerWithKey(t)
+	want := authorizedKeys(testOperatorKey)
+	deploySudoers, err := renderSiteSudoers(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := renderReloadFPMScript(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	stubSiteTreeFresh(f, "/var/www/app")
+	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
+	stubAccountExists(f, "deploy", deploySudoers, want)
+	stubConsoleLocked(f)
+	f.On("cat "+shQuote(reloadFPMScriptPath), bssh.Result{Stdout: string(body)})
+	f.On("stat -c '%U:%G %a' "+shQuote(reloadFPMScriptPath), bssh.Result{Stdout: "root:root 775\n"})
+	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("a group-writable reload wrapper must be unsatisfied even with correct bytes")
+	}
+	if !strings.Contains(strings.Join(cr.Changes, "\n"), reloadFPMScriptPath) {
+		t.Errorf("Changes = %v, want an owner/mode entry naming %s", cr.Changes, reloadFPMScriptPath)
+	}
+}
+
 func TestAccountsCheckBreakGlassOnPasswordMissingUnsatisfied(t *testing.T) {
 	s := testServerWithKey(t)
 	s.System.BreakGlass = true
@@ -821,6 +963,7 @@ func TestAccountsCheckBreakGlassOnPasswordMissingUnsatisfied(t *testing.T) {
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
+	stubReloadScriptOK(t, f, s)
 	stubConsoleLocked(f)
 	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
@@ -847,6 +990,7 @@ func TestAccountsCheckBreakGlassOffPasswordSetUnsatisfied(t *testing.T) {
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
+	stubReloadScriptOK(t, f, s)
 	f.On("passwd -S berth", bssh.Result{ExitCode: 0, Stdout: "berth P 07/24/2026 0 99999 7 -1\n"})
 	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
@@ -872,6 +1016,7 @@ func TestAccountsCheckBreakGlassOffForeignPasswordSatisfied(t *testing.T) {
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
+	stubReloadScriptOK(t, f, s)
 	f.On("passwd -S berth", bssh.Result{ExitCode: 0, Stdout: "berth P 07/24/2026 0 99999 7 -1\n"})
 	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
@@ -919,6 +1064,7 @@ func TestAccountsCheckBreakGlassSatisfiedBothWays(t *testing.T) {
 			stubSiteTreeFresh(f, "/var/www/app")
 			stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 			stubAccountExists(f, "deploy", deploySudoers, want)
+			stubReloadScriptOK(t, f, s)
 			f.On("passwd -S berth", bssh.Result{ExitCode: 0, Stdout: "berth " + tc.status + " 07/24/2026 0 99999 7 -1\n"})
 			cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 			if err != nil {
@@ -1037,6 +1183,7 @@ func TestAccountsCheckBreakGlassOffStaleMarkerUnsatisfied(t *testing.T) {
 	stubSiteTreeFresh(f, "/var/www/app")
 	stubAccountExists(f, "berth", []byte(sudoersBerthBody), want)
 	stubAccountExists(f, "deploy", deploySudoers, want)
+	stubReloadScriptOK(t, f, s)
 	stubConsoleLocked(f)
 	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
@@ -1133,6 +1280,7 @@ func twoSiteApplyFixture(t *testing.T) (*config.Server, *bssh.FakeRunner, string
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, u1)
 	stubAccountCreate(f, u2)
+	stubReloadScriptAbsent(f)
 	return s, f, u1, u2
 }
 
@@ -1315,6 +1463,7 @@ func TestAccountsApplyOnlyTenantMutatesItsOwnHome(t *testing.T) {
 	stubSafeAncestry(f, "/", "/home")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
+	stubReloadScriptAbsent(f)
 	stubConsoleLocked(f)
 	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -1344,6 +1493,7 @@ func TestAccountsApplyRefusesNonMemberAfterEnsureUser(t *testing.T) {
 	stubSafeAncestry(f, "/", "/home")
 	stubAccountCreate(f, "berth")
 	stubAccountCreate(f, "deploy")
+	stubReloadScriptAbsent(f)
 	// deploy exists after ensureUser but belongs to no group of its own.
 	f.On(groupProbeCmd("deploy"), bssh.Result{Stdout: "www-data staff\n"})
 	err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)

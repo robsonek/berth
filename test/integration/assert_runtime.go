@@ -96,11 +96,15 @@ func assertOpcacheEffective(ctx context.Context, t *testing.T, c *bssh.Client, s
 	}
 }
 
-// assertDeployReload validates the deploy-reload contract: each site user is authorized to
-// reload php<ver>-fpm via its narrow sudoers grant; running that graceful reload keeps
-// EVERY site's FPM socket up and a .php request answering per site (404 fine, never a
-// persistent 5xx gateway error). Each site is probed with its own Host header (and SNI
-// over TLS) on the scheme its TLS state provably serves (siteHTTPSProbe).
+// assertDeployReload validates the deploy-reload contract: each site user is authorized
+// to reload FPM via the version-stable wrapper (`sudo /bin/sh
+// /usr/local/sbin/berth-reload-fpm` — the exact line deployers hard-code; the PHP
+// version never appears in it), the same command with an extra argument is DENIED
+// (sudoers exact-args matching — the property that makes a /bin/sh grant safe), and
+// running the graceful reload keeps EVERY site's FPM socket up and a .php request
+// answering per site (404 fine, never a persistent 5xx gateway error). Each site is
+// probed with its own Host header (and SNI over TLS) on the scheme its TLS state
+// provably serves (siteHTTPSProbe).
 func assertDeployReload(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server, sslExplicit bool) {
 	t.Helper()
 	ver := srv.PHP.Version
@@ -121,8 +125,16 @@ func assertDeployReload(ctx context.Context, t *testing.T, c *bssh.Client, srv *
 		}
 		seen[user] = true
 		assertExitZero(ctx, t, c, user+" authorized to reload fpm",
-			fmt.Sprintf("sudo -u %s sudo -n -l /usr/bin/systemctl reload php%s-fpm", user, ver))
-		if res, err := c.Run(ctx, fmt.Sprintf("sudo -u %s sudo -n /usr/bin/systemctl reload php%s-fpm", user, ver), nil); err != nil {
+			fmt.Sprintf("sudo -u %s sudo -n -l /bin/sh /usr/local/sbin/berth-reload-fpm", user))
+		// Exact-args property, pinned live: the grant authorizes ONLY the bare
+		// wrapper invocation, so the same command with an appended argument must
+		// be denied by sudoers (exit non-zero, nothing executed).
+		if res, err := c.Run(ctx, fmt.Sprintf("sudo -u %s sudo -n /bin/sh /usr/local/sbin/berth-reload-fpm extra-arg", user), nil); err != nil {
+			t.Fatalf("%s: extra-arg denial probe: %v", user, err)
+		} else if res.ExitCode == 0 {
+			t.Errorf("%s: sudoers accepted the reload wrapper WITH an extra argument — the exact-args boundary is broken", user)
+		}
+		if res, err := c.Run(ctx, fmt.Sprintf("sudo -u %s sudo -n /bin/sh /usr/local/sbin/berth-reload-fpm", user), nil); err != nil {
 			t.Fatalf("%s: deploy reload: %v", user, err)
 		} else if res.ExitCode != 0 {
 			t.Errorf("%s: deploy reload exit %d: %s", user, res.ExitCode, strings.TrimSpace(res.Stderr))

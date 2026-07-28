@@ -29,9 +29,10 @@ func phpPoolConflictProbeCmd(version string) string {
 // version could fight over berth's version-independent per-site sockets
 // (/run/php/berth-<pool>.sock): whichever master (re)binds last would serve —
 // a silent, non-deterministic half-state. It runs FIRST in the Check AND
-// Apply of BOTH accounts (which renders the configured version into site
-// sudoers and precedes php in the pipeline) and php (before repo setup, the
-// reload-stamp invalidation and apt — a refusal must change nothing).
+// Apply of BOTH accounts (which renders the configured version into the
+// shared FPM reload wrapper its site sudoers grants name, and precedes php in
+// the pipeline) and php (before repo setup, the reload-stamp invalidation and
+// apt — a refusal must change nothing).
 // Deliberately NOT bypassable with --force, mirroring the owner-guard
 // precedent: the remedy is reverting php.version or the manual migration in
 // the error text. berth does not migrate PHP versions automatically — the old

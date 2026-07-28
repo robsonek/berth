@@ -342,10 +342,12 @@ symlink it must reload FPM (and restart any running queue worker):
 
 ```php
 // deploy.php (Deployer) — berth grants the site user exactly this reload, nothing more.
+// The command is version-stable: the PHP version lives inside the berth-managed
+// wrapper, so a future php version migration never touches your deploy pipeline.
 // Note: it reloads the shared per-version FPM master, gracefully recycling every
 // site's pool on the host (FPM has no per-pool reload).
 after('deploy:publish', function () {
-    run('sudo systemctl reload php{{php_version}}-fpm'); // clear OPcache -> serve new bytecode
+    run('sudo /bin/sh /usr/local/sbin/berth-reload-fpm'); // clear OPcache -> serve new bytecode
 });
 // plus: php artisan queue:restart  (or horizon:terminate) so a running worker picks up the new code
 ```
