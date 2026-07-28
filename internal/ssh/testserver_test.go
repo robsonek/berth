@@ -55,7 +55,7 @@ func startTestServerOpts(t *testing.T, behavior execBehavior, deaf, swallowSessi
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 
 	srv := &testServer{
 		addr:            ln.Addr().String(),
@@ -80,7 +80,7 @@ func (s *testServer) handle(c net.Conn, cfg *xssh.ServerConfig, behavior execBeh
 	if err != nil {
 		return
 	}
-	defer sconn.Close()
+	defer func() { _ = sconn.Close() }()
 	if deaf {
 		// Simulate a dead peer for keepalive probes: drain global requests
 		// WITHOUT replying, so a wantReply SendRequest blocks forever.
@@ -100,7 +100,7 @@ func (s *testServer) handle(c net.Conn, cfg *xssh.ServerConfig, behavior execBeh
 			continue
 		}
 		if newCh.ChannelType() != "session" {
-			newCh.Reject(xssh.UnknownChannelType, "unsupported")
+			_ = newCh.Reject(xssh.UnknownChannelType, "unsupported")
 			continue
 		}
 		ch, reqs, err := newCh.Accept()
@@ -112,16 +112,16 @@ func (s *testServer) handle(c net.Conn, cfg *xssh.ServerConfig, behavior execBeh
 }
 
 func (s *testServer) session(ch xssh.Channel, reqs <-chan *xssh.Request, behavior execBehavior) {
-	defer ch.Close()
+	defer func() { _ = ch.Close() }()
 	for req := range reqs {
 		if req.Type == "exec" {
-			req.Reply(true, nil)
+			_ = req.Reply(true, nil)
 			s.execStarted <- struct{}{}
 			behavior(s, ch, reqs)
 			return
 		}
 		if req.WantReply {
-			req.Reply(false, nil)
+			_ = req.Reply(false, nil)
 		}
 	}
 }
@@ -133,9 +133,9 @@ type exitStatusMsg struct{ Status uint32 }
 func completeExec(stdout string, code uint32) execBehavior {
 	return func(_ *testServer, ch xssh.Channel, _ <-chan *xssh.Request) {
 		if stdout != "" {
-			ch.Write([]byte(stdout))
+			_, _ = ch.Write([]byte(stdout))
 		}
-		ch.SendRequest("exit-status", false, xssh.Marshal(exitStatusMsg{Status: code}))
+		_, _ = ch.SendRequest("exit-status", false, xssh.Marshal(exitStatusMsg{Status: code}))
 	}
 }
 
@@ -152,7 +152,7 @@ func hangExec(srv *testServer, _ xssh.Channel, reqs <-chan *xssh.Request) {
 			}
 		}
 		if req.WantReply {
-			req.Reply(false, nil)
+			_ = req.Reply(false, nil)
 		}
 	}
 }
@@ -170,7 +170,7 @@ func dialTest(t *testing.T, srv *testServer) *Client {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { conn.Close() })
+	t.Cleanup(func() { _ = conn.Close() })
 	return &Client{conn: conn}
 }
 
@@ -303,7 +303,7 @@ func TestDialCancelDuringHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 	accepted := make(chan net.Conn, 1)
 	go func() {
 		c, err := ln.Accept()
@@ -314,7 +314,7 @@ func TestDialCancelDuringHandshake(t *testing.T) {
 	t.Cleanup(func() {
 		select {
 		case c := <-accepted:
-			c.Close()
+			_ = c.Close()
 		default:
 		}
 	})
@@ -352,7 +352,7 @@ func TestKeepaliveClosesDeadConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Shrink the tuning vars (the resolveA stub pattern) and restore after.
 	oldI, oldB, oldM := keepaliveInterval, keepaliveReplyBudget, keepaliveMaxMissed

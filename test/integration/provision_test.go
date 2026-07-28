@@ -64,7 +64,7 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect to %s: %v", srv.Host, err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// Self-signed TLS needs no public DNS, so it runs by default. Let's Encrypt
 	// (HTTP-01/ACME) needs real DNS, so it is opt-in via BERTH_TEST_SKIP_SSL=false.
@@ -306,7 +306,7 @@ func assertHTTPServes(t *testing.T, url string, insecureTLS bool) {
 		t.Errorf("GET %s: %v", url, err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	t.Logf("GET %s -> %d", url, resp.StatusCode)
 	if resp.StatusCode >= 500 && resp.StatusCode != http.StatusBadGateway {
 		t.Errorf("GET %s -> %d, want < 500 or the pre-deploy 502", url, resp.StatusCode)

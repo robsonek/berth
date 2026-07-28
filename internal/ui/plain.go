@@ -27,19 +27,19 @@ func (p *PlainRenderer) Render(events <-chan provision.Event) error {
 		switch e.Kind {
 		case provision.EventSatisfied:
 			if p.verbose && e.Reason != "" {
-				fmt.Fprintf(p.w, "ok    %s (already): %s\n", e.Step, e.Reason)
+				_, _ = fmt.Fprintf(p.w, "ok    %s (already): %s\n", e.Step, e.Reason)
 			} else {
-				fmt.Fprintf(p.w, "ok    %s (already)\n", e.Step)
+				_, _ = fmt.Fprintf(p.w, "ok    %s (already)\n", e.Step)
 			}
 		case provision.EventApplied:
-			fmt.Fprintf(p.w, "apply %s\n", e.Step)
+			_, _ = fmt.Fprintf(p.w, "apply %s\n", e.Step)
 			if p.verbose {
 				changes := e.Changes
 				if e.Sensitive {
 					changes = []string{"[redacted]"}
 				}
 				for _, c := range changes {
-					fmt.Fprintf(p.w, "      + %s\n", c)
+					_, _ = fmt.Fprintf(p.w, "      + %s\n", c)
 				}
 			}
 			p.printWarnings(e)
@@ -48,9 +48,9 @@ func (p *PlainRenderer) Render(events <-chan provision.Event) error {
 			if e.Sensitive {
 				changes = []string{"[redacted]"}
 			}
-			fmt.Fprintf(p.w, "plan  %s: %v\n", e.Step, changes)
+			_, _ = fmt.Fprintf(p.w, "plan  %s: %v\n", e.Step, changes)
 		case provision.EventFailed:
-			fmt.Fprintf(p.w, "FAIL  %s: %v\n", e.Step, e.Err)
+			_, _ = fmt.Fprintf(p.w, "FAIL  %s: %v\n", e.Step, e.Err)
 			p.printWarnings(e)
 			failure = e.Err
 		}
@@ -64,6 +64,6 @@ func (p *PlainRenderer) Render(events <-chan provision.Event) error {
 // Warnf normalizes messages to a single line, keeping the prefix contract.
 func (p *PlainRenderer) printWarnings(e provision.Event) {
 	for _, w := range e.Warnings {
-		fmt.Fprintf(p.w, "warn  %s: %s\n", e.Step, w)
+		_, _ = fmt.Fprintf(p.w, "warn  %s: %s\n", e.Step, w)
 	}
 }

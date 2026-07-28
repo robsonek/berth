@@ -228,7 +228,7 @@ func phpPathServes(host, domain string, useHTTPS, insecureTLS bool) bool {
 	if err != nil {
 		return false
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return resp.StatusCode != http.StatusMovedPermanently &&
 		resp.StatusCode != http.StatusBadGateway &&
 		resp.StatusCode != http.StatusServiceUnavailable &&
@@ -414,7 +414,7 @@ func assertSiteServesOwnContent(ctx context.Context, t *testing.T, c *bssh.Clien
 		t.Errorf("%s: GET %s (Host %s): %v", site.Domain, url, site.Domain, err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	t.Logf("GET %s (Host %s) -> %d %q", url, site.Domain, resp.StatusCode, body)
 	if resp.StatusCode != http.StatusOK || string(body) != marker {

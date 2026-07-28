@@ -30,7 +30,9 @@ type huhPrompter struct{ out io.Writer }
 
 func newHuhPrompter() prompter { return &huhPrompter{out: os.Stderr} }
 
-func (h *huhPrompter) ShowError(err error) { fmt.Fprintf(h.out, "  ✗ %v — please fix it\n", err) }
+func (h *huhPrompter) ShowError(err error) {
+	_, _ = fmt.Fprintf(h.out, "  ✗ %v — please fix it\n", err)
+}
 
 func (h *huhPrompter) Confirm(prompt string) (bool, error) {
 	v := false

@@ -100,8 +100,8 @@ func LockCache(host string) (func(), error) {
 		return nil, fmt.Errorf("open cache lock %s: %w", lockPath, err)
 	}
 	if err := lockFile(lf); err != nil {
-		lf.Close()
+		_ = lf.Close()
 		return nil, fmt.Errorf("lock %s: %w", lockPath, err)
 	}
-	return func() { unlockFile(lf); lf.Close() }, nil
+	return func() { _ = unlockFile(lf); _ = lf.Close() }, nil
 }

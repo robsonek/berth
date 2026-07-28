@@ -172,7 +172,7 @@ var verifyBerthAccess = func(ctx context.Context, s *config.Server) error {
 	if err != nil {
 		return fmt.Errorf("dial as berth: %w", err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	res, err := c.Run(ctx, "sudo -n true", nil)
 	if err != nil {
 		return err

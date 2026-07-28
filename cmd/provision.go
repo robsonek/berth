@@ -70,7 +70,7 @@ func runProvision(cmd *cobra.Command, serverPath string, f *provisionFlags) erro
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// The SAME redactor instance feeds the steps (they register secrets on
 	// acquisition) and the engine's output policy (it masks every event and
@@ -110,9 +110,9 @@ func defaultKnownHosts() string {
 func confirmFingerprint(cmd *cobra.Command) func(host, fingerprint, keyType string) bool {
 	return func(host, fingerprint, keyType string) bool {
 		out := cmd.OutOrStdout()
-		fmt.Fprintf(out, "The authenticity of host %q can't be established.\n", host)
-		fmt.Fprintf(out, "Key fingerprint is %s (%s)\n", fingerprint, keyType)
-		fmt.Fprint(out, "Are you sure you want to continue connecting (y/N)? ")
+		_, _ = fmt.Fprintf(out, "The authenticity of host %q can't be established.\n", host)
+		_, _ = fmt.Fprintf(out, "Key fingerprint is %s (%s)\n", fingerprint, keyType)
+		_, _ = fmt.Fprint(out, "Are you sure you want to continue connecting (y/N)? ")
 		reader := bufio.NewReader(cmd.InOrStdin())
 		line, err := reader.ReadString('\n')
 		if err != nil && line == "" {

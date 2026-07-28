@@ -1,7 +1,6 @@
 package wizard
 
 import (
-	"os"
 	"strings"
 	"testing"
 
@@ -27,10 +26,7 @@ func validSingle() Answers {
 // chdir-ing into a temp dir so servers/<name>.yml lands there.
 func writeAndLoad(t *testing.T, a Answers) *config.Server {
 	t.Helper()
-	dir := t.TempDir()
-	old, _ := os.Getwd()
-	t.Cleanup(func() { os.Chdir(old) })
-	os.Chdir(dir)
+	t.Chdir(t.TempDir())
 	path, err := a.Write()
 	if err != nil {
 		t.Fatalf("Write() error = %v", err)
@@ -96,10 +92,7 @@ func TestRoundTripNginxHTTP3SelfSigned(t *testing.T) {
 }
 
 func TestWriteRejectsLetsEncryptWithoutEmail(t *testing.T) {
-	dir := t.TempDir()
-	old, _ := os.Getwd()
-	t.Cleanup(func() { os.Chdir(old) })
-	os.Chdir(dir)
+	t.Chdir(t.TempDir())
 	a := validSingle()
 	a.Sites[0].SSL = true
 	a.Sites[0].SSLMode = "letsencrypt" // email omitted
@@ -163,10 +156,7 @@ func TestRoundTripNoFingerprintOmitted(t *testing.T) {
 }
 
 func TestWriteRefusesOverwrite(t *testing.T) {
-	dir := t.TempDir()
-	old, _ := os.Getwd()
-	t.Cleanup(func() { os.Chdir(old) })
-	os.Chdir(dir)
+	t.Chdir(t.TempDir())
 	if _, err := validSingle().Write(); err != nil {
 		t.Fatal(err)
 	}
@@ -179,10 +169,7 @@ func TestWriteRejectsPathEscapingNames(t *testing.T) {
 	// The RAW name is validated (filepath.Join would clean "../x" first and
 	// hide the escape); today's barriers against writing outside servers/ are
 	// accidental (refuse-existing + ENOENT on nested paths), not a validator.
-	dir := t.TempDir()
-	old, _ := os.Getwd()
-	t.Cleanup(func() { os.Chdir(old) })
-	os.Chdir(dir)
+	t.Chdir(t.TempDir())
 	for _, name := range []string{"../evil", "a/b", `a\b`, "..", ".hidden", "-lead", ""} {
 		a := validSingle()
 		a.Name = name
@@ -200,10 +187,7 @@ func TestWriteRejectsPathEscapingNames(t *testing.T) {
 }
 
 func TestWriteUsesExclusiveCreate(t *testing.T) {
-	dir := t.TempDir()
-	old, _ := os.Getwd()
-	t.Cleanup(func() { os.Chdir(old) })
-	os.Chdir(dir)
+	t.Chdir(t.TempDir())
 	a := validSingle()
 	a.Name = "dup"
 	if _, err := a.Write(); err != nil {

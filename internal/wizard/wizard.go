@@ -192,12 +192,12 @@ func (a Answers) Write() (string, error) {
 		return "", fmt.Errorf("create %s: %w", path, err)
 	}
 	if _, err := f.Write(b); err != nil {
-		f.Close()
-		os.Remove(path) // never leave a truncated config behind
+		_ = f.Close()
+		_ = os.Remove(path) // never leave a truncated config behind
 		return "", fmt.Errorf("write %s: %w", path, err)
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(path)
+		_ = os.Remove(path)
 		return "", fmt.Errorf("close %s: %w", path, err)
 	}
 	return path, nil
