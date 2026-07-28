@@ -70,6 +70,15 @@ func New(steps ...Step) *Engine { return &Engine{steps: steps} }
 // the renderer (see internal/ui).
 func (e *Engine) Run(ctx context.Context, s *config.Server, r bssh.Runner, opt Options) (<-chan Event, error) {
 	rc := RunCtx{Force: opt.Force, SSLStaging: opt.SSLStaging, FullRun: opt.Only == ""}
+	// Unconverged marking is RUN-scoped (warnings are per-step): a step that
+	// knowingly leaves work undone marks the run, and every LATER step sees
+	// it — the terminal manifest step withholds its attestation. The closures
+	// only mutate this slice, never send events, so the channel buffer bound
+	// below still holds; steps run sequentially in one goroutine, so the
+	// append is race-free.
+	var unconverged []string
+	rc.NoteUnconverged = func(reason string) { unconverged = append(unconverged, reason) }
+	rc.UnconvergedReasons = func() []string { return unconverged }
 	if opt.Only != "" {
 		if err := e.checkDependencies(ctx, rc, s, r, opt.Only); err != nil {
 			// The engine's SECOND output channel — the synchronous pre-flight

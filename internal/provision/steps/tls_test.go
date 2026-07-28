@@ -479,8 +479,11 @@ func TestTLSApplySkipsOnDNSMismatch(t *testing.T) {
 	f.On("certbot certificates", bssh.Result{ExitCode: 0, Stdout: "No certificates found.\n"})
 	f.On("dpkg -s certbot", bssh.Result{ExitCode: 1}) // never installed: issuance was DNS-skipped
 	// install/certonly are NOT stubbed: a DNS mismatch must skip issuance.
-	var warned []string
-	rc := provision.RunCtx{Warn: func(msg string) { warned = append(warned, msg) }}
+	var warned, unconverged []string
+	rc := provision.RunCtx{
+		Warn:            func(msg string) { warned = append(warned, msg) },
+		NoteUnconverged: func(reason string) { unconverged = append(unconverged, reason) },
+	}
 	if err := TLS().Apply(context.Background(), rc, s, f); err != nil {
 		t.Fatalf("Apply() should skip (not error) on DNS mismatch; got %v", err)
 	}
@@ -488,6 +491,11 @@ func TestTLSApplySkipsOnDNSMismatch(t *testing.T) {
 	// raw fmt.Printf that bypasses both renderers.
 	if len(warned) != 1 || !strings.Contains(warned[0], "does not resolve") || !strings.Contains(warned[0], s.Sites[0].Domain) {
 		t.Errorf("want one warning naming the unresolved domain, got %q", warned)
+	}
+	// Skipping issuance knowingly leaves the run unconverged: the terminal
+	// manifest step must be able to withhold its attestation.
+	if len(unconverged) != 1 || !strings.Contains(unconverged[0], s.Sites[0].Domain) || !strings.Contains(unconverged[0], "does not resolve") {
+		t.Errorf("DNS-skip must mark the run unconverged with a matching reason, got %q", unconverged)
 	}
 	for _, c := range f.Calls() {
 		if strings.Contains(c.Cmd, "certonly") {

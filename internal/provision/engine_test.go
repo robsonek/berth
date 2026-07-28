@@ -412,6 +412,51 @@ func TestEngineFullRunFlag(t *testing.T) {
 	}
 }
 
+func TestEngineUnconvergedIsRunScoped(t *testing.T) {
+	// A step that marks the run unconverged makes RunUnconverged() true for
+	// every LATER step in the SAME run; a fresh run on the same engine starts
+	// converged again (the flag is run-scoped, not engine-scoped).
+	var before, after []bool
+	var reasons [][]string
+	eng := New(
+		&stepStub{name: "a", onApply: func(rc RunCtx) {
+			before = append(before, rc.RunUnconverged())
+			rc.MarkUnconverged("tls skipped issuance for app.example.com")
+		}},
+		&stepStub{name: "b", onApply: func(rc RunCtx) {
+			after = append(after, rc.RunUnconverged())
+			reasons = append(reasons, rc.UnconvergedReasons())
+		}},
+	)
+	for i := 0; i < 2; i++ {
+		events, err := eng.Run(context.Background(), &config.Server{}, bssh.NewFakeRunner(), Options{})
+		if err != nil {
+			t.Fatalf("run %d: Run() error = %v", i, err)
+		}
+		collect(events)
+	}
+	for i := 0; i < 2; i++ {
+		if before[i] {
+			t.Errorf("run %d: RunUnconverged() must be false before any step marked (run-scoped flag)", i)
+		}
+		if !after[i] {
+			t.Errorf("run %d: RunUnconverged() must be true for a later step in the same run", i)
+		}
+		if len(reasons[i]) != 1 || reasons[i][0] != "tls skipped issuance for app.example.com" {
+			t.Errorf("run %d: UnconvergedReasons() = %q, want the marked reason", i, reasons[i])
+		}
+	}
+}
+
+func TestRunCtxUnconvergedNilGuards(t *testing.T) {
+	// Literal RunCtx{} (step unit tests, checkDependencies) must not panic
+	// and must read as converged.
+	RunCtx{}.MarkUnconverged("ignored")
+	if (RunCtx{}).RunUnconverged() {
+		t.Error("zero RunCtx must report a converged run")
+	}
+}
+
 func TestRunCtxWarnfNilGuardAndNormalization(t *testing.T) {
 	// Literal RunCtx{} (step unit tests, checkDependencies) must not panic.
 	RunCtx{}.Warnf("ignored %d", 1)
