@@ -43,7 +43,7 @@ func (a Answers) ToServer() *config.Server {
 			Backend: o.Backend, Endpoint: o.Endpoint, Bucket: o.Bucket, Prefix: o.Prefix,
 			Host: o.Host, Port: o.Port, User: o.User, Path: o.Path, HostKey: o.HostKey,
 			Schedule: o.Schedule,
-			Keep:     config.OffsiteKeep{Daily: o.KeepDaily, Weekly: o.KeepWeekly, Monthly: o.KeepMonthly},
+			Keep:     config.OffsiteKeep{Last: o.KeepLast, Hourly: o.KeepHourly, Daily: o.KeepDaily, Weekly: o.KeepWeekly, Monthly: o.KeepMonthly},
 		}
 	}
 	for _, sa := range a.Sites {

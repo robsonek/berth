@@ -86,7 +86,7 @@ func TestToServerMapsOffsite(t *testing.T) {
 	a.Backups = BackupsAnswers{Enabled: true, Offsite: OffsiteAnswers{
 		Enabled: true, Backend: "s3", Endpoint: "s3.example.com", Bucket: "bkt",
 		Prefix: "berth/custom", Schedule: "45 4 * * *",
-		KeepDaily: 10, KeepWeekly: 5, KeepMonthly: 12,
+		KeepLast: 12, KeepHourly: 24, KeepDaily: 10, KeepWeekly: 5, KeepMonthly: 12,
 	}}
 	srv := a.ToServer()
 	off := srv.Backups.Offsite
@@ -95,7 +95,7 @@ func TestToServerMapsOffsite(t *testing.T) {
 	}
 	want := &config.Offsite{Backend: "s3", Endpoint: "s3.example.com", Bucket: "bkt",
 		Prefix: "berth/custom", Schedule: "45 4 * * *",
-		Keep: config.OffsiteKeep{Daily: 10, Weekly: 5, Monthly: 12}}
+		Keep: config.OffsiteKeep{Last: 12, Hourly: 24, Daily: 10, Weekly: 5, Monthly: 12}}
 	if !reflect.DeepEqual(off, want) {
 		t.Errorf("offsite = %+v, want %+v", off, want)
 	}

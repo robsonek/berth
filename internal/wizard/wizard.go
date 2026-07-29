@@ -113,6 +113,7 @@ type OffsiteAnswers struct {
 	HostKey  string // sftp: one ssh-keyscan line
 	Schedule string // blank = default "15 4 * * *"
 
+	KeepLast, KeepHourly               int // 0 = off (sub-daily retention; opt-in)
 	KeepDaily, KeepWeekly, KeepMonthly int // 0 = defaults 7/4/6
 }
 
