@@ -10,6 +10,6 @@ echo "[$(date -u +%FT%TZ)] berth offsite: start"
 set -a
 . /etc/berth/offsite.env
 set +a
-restic -o sftp.command='ssh -i /etc/berth/offsite_ed25519 -o BatchMode=yes backup@sftp.example.com -s sftp' backup /var/backups/berth --host box-1 --exclude '.tmp-*' --exclude '.lock' --exclude '.artifacts.lock' --exclude '.offsite.lock'
-restic -o sftp.command='ssh -i /etc/berth/offsite_ed25519 -o BatchMode=yes backup@sftp.example.com -s sftp' forget --prune --keep-daily 7 --keep-weekly 4 --keep-monthly 6
+restic -o sftp.command='ssh -F /dev/null -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/dev/null -o UserKnownHostsFile=/root/.ssh/berth_offsite_known_hosts -i /root/.ssh/berth_offsite -p 22 backup@sftp.example.com -s sftp' backup /var/backups/berth --host box-1 --exclude '.tmp-*' --exclude '.lock' --exclude '.artifacts.lock' --exclude '.offsite.lock'
+restic -o sftp.command='ssh -F /dev/null -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/dev/null -o UserKnownHostsFile=/root/.ssh/berth_offsite_known_hosts -i /root/.ssh/berth_offsite -p 22 backup@sftp.example.com -s sftp' forget --prune --keep-daily 7 --keep-weekly 4 --keep-monthly 6
 echo "[$(date -u +%FT%TZ)] berth offsite: done"

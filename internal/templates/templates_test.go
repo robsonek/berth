@@ -324,8 +324,9 @@ func TestRenderOffsiteScriptGolden(t *testing.T) {
 func TestRenderOffsiteScriptSFTPGolden(t *testing.T) {
 	// SFTP flavor: ResticOpts is non-empty and MUST begin with a space —
 	// "restic{{ .ResticOpts }}" composes without a separator of its own.
+	// The sample string is the real offsiteResticOpts shape (keep in sync).
 	d := offsiteScriptGoldenBase()
-	d.ResticOpts = " -o sftp.command='ssh -i /etc/berth/offsite_ed25519 -o BatchMode=yes backup@sftp.example.com -s sftp'"
+	d.ResticOpts = " -o sftp.command='ssh -F /dev/null -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/dev/null -o UserKnownHostsFile=/root/.ssh/berth_offsite_known_hosts -i /root/.ssh/berth_offsite -p 22 backup@sftp.example.com -s sftp'"
 	checkGolden(t, "offsite.sh.tmpl", "offsite_sh_sftp.golden", d)
 }
 
@@ -340,6 +341,20 @@ func TestRenderOffsiteEnvGolden(t *testing.T) {
 		S3:         true,
 		AccessKey:  "AKIAEXAMPLE",
 		SecretKey:  "fake/secret+KEY",
+	})
+}
+
+func TestRenderOffsiteEnvSFTPGolden(t *testing.T) {
+	// S3=false must render a password-only file: no AWS block and no stray
+	// blank line where the trimmed conditional was.
+	checkGolden(t, "offsite_env.tmpl", "offsite_env_sftp.golden", struct {
+		Repository, Password string
+		S3                   bool
+		AccessKey, SecretKey string
+	}{
+		Repository: "sftp:off@backup.example.net:/srv/berth/box-1",
+		Password:   "fake-password-123",
+		S3:         false,
 	})
 }
 

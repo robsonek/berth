@@ -1,0 +1,3 @@
+# managed by berth
+RESTIC_REPOSITORY='sftp:off@backup.example.net:/srv/berth/box-1'
+RESTIC_PASSWORD='fake-password-123'

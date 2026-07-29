@@ -494,7 +494,7 @@ func offsiteSFTPServer(t *testing.T) *config.Server {
 
 func TestOffsiteResticOptsSFTP(t *testing.T) {
 	o := offsiteSFTPServer(t).Backups.Offsite
-	want := " -o sftp.command='ssh -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/root/.ssh/berth_offsite_known_hosts -i /root/.ssh/berth_offsite -p 22 off@backup.example.net -s sftp'"
+	want := " -o sftp.command='ssh -F /dev/null -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/dev/null -o UserKnownHostsFile=/root/.ssh/berth_offsite_known_hosts -i /root/.ssh/berth_offsite -p 22 off@backup.example.net -s sftp'"
 	if got := offsiteResticOpts(o); got != want {
 		t.Errorf("opts = %q, want %q", got, want)
 	}

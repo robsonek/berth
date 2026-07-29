@@ -59,16 +59,21 @@ func offsiteStampContent(repo string) []byte {
 // offsiteResticOpts renders the extra restic CLI flags for the backend:
 // empty for s3 (credentials ride the env file); for sftp one fully-pinned
 // sftp.command — -F /dev/null + IdentitiesOnly + StrictHostKeyChecking +
+// GlobalKnownHostsFile=/dev/null (-F /dev/null does NOT neutralize the
+// default /etc/ssh/ssh_known_hosts, which could widen or break the pin) +
 // the dedicated UserKnownHostsFile mean root's personal ssh config, agent
-// identities and TOFU can neither widen nor bypass the pin, and BatchMode
-// keeps cron from ever prompting. Values are config-validated to be quote-
-// and whitespace-free, so the single-quoted composition is sound. Always
-// empty or leading-space so "restic"+opts composes.
+// identities and TOFU can neither widen nor bypass the pin; BatchMode
+// keeps cron from ever prompting, and ServerAliveInterval/CountMax kill
+// the transport when a hung-but-TCP-alive peer stops answering (restic
+// would otherwise wedge forever holding the shared artifacts lock).
+// Values are config-validated to be quote- and whitespace-free, so the
+// single-quoted composition is sound. Always empty or leading-space so
+// "restic"+opts composes.
 func offsiteResticOpts(o *config.Offsite) string {
 	if o.Backend != "sftp" {
 		return ""
 	}
-	return fmt.Sprintf(" -o sftp.command='ssh -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=%s -i %s -p %d %s@%s -s sftp'",
+	return fmt.Sprintf(" -o sftp.command='ssh -F /dev/null -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/dev/null -o UserKnownHostsFile=%s -i %s -p %d %s@%s -s sftp'",
 		offsiteKnownHostsPath, offsiteSSHKeyPath, o.PortEff(), o.User, o.Host)
 }
 
