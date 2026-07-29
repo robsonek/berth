@@ -420,7 +420,7 @@ func TestDerivationsAreFrozen(t *testing.T) {
 
 func TestOffsiteRepositoryAndDefaults(t *testing.T) {
 	s3 := &Offsite{Backend: "s3", Endpoint: "s3.example.com", Bucket: "bkt"}
-	if got, want := s3.Repository("box-1"), "s3:https://s3.example.com/bkt/berth/box-1"; got != want {
+	if got, want := s3.Repository("box-1"), "s3:https://s3.example.com/bkt/box-1"; got != want {
 		t.Errorf("s3 Repository = %q, want %q", got, want)
 	}
 	s3.Prefix = "custom/prefix"

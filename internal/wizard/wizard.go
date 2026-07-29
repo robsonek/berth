@@ -105,7 +105,7 @@ type OffsiteAnswers struct {
 	Backend  string // s3 | sftp
 	Endpoint string // s3
 	Bucket   string // s3
-	Prefix   string // s3; blank = default berth/<id>
+	Prefix   string // s3; blank = default <id>
 	Host     string // sftp
 	Port     int    // sftp; 0 = 22
 	User     string // sftp

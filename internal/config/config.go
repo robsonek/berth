@@ -335,7 +335,7 @@ type Offsite struct {
 	Backend  string      `mapstructure:"backend"  yaml:"backend"`            // s3 | sftp
 	Endpoint string      `mapstructure:"endpoint" yaml:"endpoint,omitempty"` // s3: endpoint host
 	Bucket   string      `mapstructure:"bucket"   yaml:"bucket,omitempty"`   // s3
-	Prefix   string      `mapstructure:"prefix"   yaml:"prefix,omitempty"`   // s3: default "berth/<id>"
+	Prefix   string      `mapstructure:"prefix"   yaml:"prefix,omitempty"`   // s3: default <id>
 	Host     string      `mapstructure:"host"     yaml:"host,omitempty"`     // sftp
 	Port     int         `mapstructure:"port"     yaml:"port,omitempty"`     // sftp: default 22
 	User     string      `mapstructure:"user"     yaml:"user,omitempty"`     // sftp
@@ -366,12 +366,15 @@ const (
 // guarantees an enabled offsite always rides on enabled backups.
 func (s *Server) OffsiteEnabled() bool { return s.Backups.Offsite != nil }
 
-// PrefixEff returns the configured repo prefix or the id-derived default.
+// PrefixEff returns the configured repo prefix or, unset, the server id — the
+// repo already lands inside the operator's chosen bucket, so the id alone
+// keeps each host in its own path without a redundant leading segment (set an
+// explicit prefix to namespace a shared bucket differently).
 func (o *Offsite) PrefixEff(id string) string {
 	if o.Prefix != "" {
 		return o.Prefix
 	}
-	return "berth/" + id
+	return id
 }
 
 // Repository composes the restic repository string from the typed fields.

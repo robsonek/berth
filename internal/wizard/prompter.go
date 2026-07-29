@@ -185,7 +185,7 @@ func (h *huhPrompter) ServerOps(a *Answers) error {
 		s3 := huh.NewForm(huh.NewGroup(
 			huh.NewInput().Title("S3 endpoint host (e.g. s3.eu-central-1.amazonaws.com)").Value(&o.Endpoint).Validate(offsiteWord("backups.offsite.endpoint", true)),
 			huh.NewInput().Title("S3 bucket").Value(&o.Bucket).Validate(offsiteWord("backups.offsite.bucket", true)),
-			huh.NewInput().Title("Repository prefix (blank = default berth/<id>)").Value(&o.Prefix).Validate(offsiteWord("backups.offsite.prefix", false)),
+			huh.NewInput().Title("Repository prefix (blank = default <id>)").Value(&o.Prefix).Validate(offsiteWord("backups.offsite.prefix", false)),
 		))
 		if err := s3.Run(); err != nil {
 			return err
