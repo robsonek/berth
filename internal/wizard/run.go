@@ -41,6 +41,11 @@ func run(p prompter) (Answers, error) {
 			return Answers{}, err
 		}
 	}
+	repos, err := collectAptRepos(p)
+	if err != nil {
+		return Answers{}, err
+	}
+	a.AptRepos = repos
 
 	for {
 		var sa SiteAnswers
@@ -134,6 +139,37 @@ func run(p prompter) (Answers, error) {
 		}
 	}
 	return a, nil
+}
+
+// collectAptRepos runs the "add an extra apt repository?" sub-loop. Duplicate
+// names are caught HERE (ShowError + re-prompt): the per-field validator
+// cannot see the collection, and the authoritative Server.Validate would only
+// fire later inside the site loop, where re-prompting cannot reach the
+// server-level repo list anymore.
+func collectAptRepos(p prompter) ([]AptRepoAnswers, error) {
+	add, err := p.Confirm("Add an extra apt repository (third-party, pinned by fingerprint)?")
+	if err != nil {
+		return nil, err
+	}
+	var out []AptRepoAnswers
+	seen := map[string]bool{}
+	for add {
+		var ar AptRepoAnswers
+		if err := p.AptRepo(&ar); err != nil {
+			return nil, err
+		}
+		if seen[ar.Name] {
+			p.ShowError(fmt.Errorf("duplicate repo name %q — every apt repo needs a unique name", ar.Name))
+		} else {
+			seen[ar.Name] = true
+			out = append(out, ar)
+		}
+		add, err = p.Confirm("Add another apt repository?")
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 // collectDaemons runs the "add another daemon?" sub-loop.

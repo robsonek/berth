@@ -427,7 +427,7 @@ func TestConfigMatrix(t *testing.T) {
 					sa.SSL, sa.SSLMode, sa.SSLEmail, sa.HTTP3 = true, "letsencrypt", "x@y.com", true
 				},
 			},
-			confirms: []bool{false, true, false, false},
+			confirms: []bool{false, false, true, false, false},
 		}
 		a, err := run(f)
 		if err != nil {
@@ -453,7 +453,7 @@ func TestConfigMatrix(t *testing.T) {
 					sa.SSL, sa.SSLMode, sa.SSLEmail, sa.HTTP3 = true, "letsencrypt", "x@y.com", true
 				},
 			},
-			confirms: []bool{false, false, false, false},
+			confirms: []bool{false, false, false, false, false},
 		}
 		a, err := run(f)
 		if err != nil {
@@ -682,7 +682,7 @@ func TestConfigMatrix(t *testing.T) {
 					sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser, sa.User = "b.example.com", "/srv/b", "b_db", "b_usr", "app_two" // fixed
 				},
 			},
-			confirms: []bool{false, false, true, false, false},
+			confirms: []bool{false, false, false, true, false, false},
 		}
 		a, err := run(f)
 		if err != nil {
@@ -906,8 +906,8 @@ func TestConfigMatrix(t *testing.T) {
 			daemons: []func(*DaemonAnswers){
 				func(d *DaemonAnswers) { d.Name, d.Command, d.Processes = "reverb", "php artisan reverb:start", 1 },
 			},
-			// srv-adv? site-adv? dedicated-queue? add-daemon? another-daemon? add-site?
-			confirms: []bool{false, true, true, true, false, false},
+			// srv-adv? apt-repo? site-adv? dedicated-queue? add-daemon? another-daemon? add-site?
+			confirms: []bool{false, false, true, true, true, false, false},
 		}
 		a, err := run(f)
 		if err != nil {
@@ -943,7 +943,7 @@ func TestConfigMatrix(t *testing.T) {
 					sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "a.example.com", "/srv/a", "adb", "ausr"
 				},
 			},
-			confirms: []bool{false, false, false},
+			confirms: []bool{false, false, false, false},
 		}
 		a, err := run(f)
 		if err != nil {
@@ -985,8 +985,8 @@ func TestConfigMatrix(t *testing.T) {
 			// Models the fixed prompter: selecting "none" returns with every
 			// work-only knob zero (no worker-knob prompts run).
 			queue: func(q *QueueAnswers) { *q = QueueAnswers{Driver: "none"} },
-			// srv-adv? site-adv? dedicated-queue? add-daemon? add-site?
-			confirms: []bool{false, true, true, false, false},
+			// srv-adv? apt-repo? site-adv? dedicated-queue? add-daemon? add-site?
+			confirms: []bool{false, false, true, true, false, false},
 		}
 		a, err := run(f)
 		if err != nil {
@@ -1238,8 +1238,8 @@ func TestConfigMatrix(t *testing.T) {
 				},
 			},
 			siteOverrides: func(sa *SiteAnswers) { sa.SchedulerOverride = "on" },
-			// server-advanced? (yes) | site-advanced? (no) | add-another? (no)
-			confirms: []bool{true, false, false},
+			// server-advanced? (yes) | apt-repo? (no) | site-advanced? (no) | add-another? (no)
+			confirms: []bool{true, false, false, false},
 		}
 		a, err := run(f)
 		if err != nil {
@@ -1275,8 +1275,8 @@ func TestConfigMatrix(t *testing.T) {
 				},
 			},
 			siteOverrides: func(sa *SiteAnswers) { sa.SchedulerOverride = "off" },
-			// server-advanced? (no) | site-advanced? (yes) | dedicated-queue? (no) | add-daemon? (no) | add-another? (no)
-			confirms: []bool{false, true, false, false, false},
+			// server-advanced? (no) | apt-repo? (no) | site-advanced? (yes) | dedicated-queue? (no) | add-daemon? (no) | add-another? (no)
+			confirms: []bool{false, false, true, false, false, false},
 		}
 		a, err := run(f)
 		if err != nil {
@@ -1410,7 +1410,7 @@ func TestConfigMatrix(t *testing.T) {
 					sa.SSL, sa.SSLMode, sa.SSLEmail, sa.HTTP3 = true, "selfsigned", "", true
 				},
 			},
-			confirms: []bool{false, true, false, false},
+			confirms: []bool{false, false, true, false, false},
 		}
 		a, err := run(f)
 		if err != nil {
@@ -1436,7 +1436,7 @@ func TestConfigMatrix(t *testing.T) {
 					sa.SSL, sa.SSLMode, sa.SSLEmail, sa.HTTP3 = true, "letsencrypt", "x@y.com", true
 				},
 			},
-			confirms: []bool{false, false, false, false},
+			confirms: []bool{false, false, false, false, false},
 		}
 		a, err := run(f)
 		if err != nil {
@@ -1467,7 +1467,7 @@ func TestConfigMatrix(t *testing.T) {
 					sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "b.example.com", "/srv/b", "bd", "bu" // fixed
 				},
 			},
-			confirms: []bool{false, false, true, false, false},
+			confirms: []bool{false, false, false, true, false, false},
 		}
 		a, err := run(f)
 		if err != nil {

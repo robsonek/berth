@@ -1,6 +1,10 @@
 package wizard
 
-import "github.com/robsonek/berth/internal/config"
+import (
+	"strings"
+
+	"github.com/robsonek/berth/internal/config"
+)
 
 // ToServer maps collected answers into a *config.Server. It is a pure, total
 // mapping — no I/O, no mutation of server-level choices (HTTP/3↔nginx is resolved
@@ -46,6 +50,15 @@ func (a Answers) ToServer() *config.Server {
 			Keep:     config.OffsiteKeep{Last: o.KeepLast, Hourly: o.KeepHourly, Daily: o.KeepDaily, Weekly: o.KeepWeekly, Monthly: o.KeepMonthly},
 		}
 	}
+	for _, ar := range a.AptRepos {
+		srv.Apt.Repos = append(srv.Apt.Repos, config.AptRepo{
+			Name: ar.Name, URI: ar.URI, Suite: ar.Suite,
+			Components:  strings.Fields(ar.Components),
+			KeyURL:      ar.KeyURL,
+			Fingerprint: ar.Fingerprint,
+		})
+	}
+	srv.Apt.Packages = strings.Fields(a.AptPackages)
 	for _, sa := range a.Sites {
 		user := sa.User
 		if user == "" {

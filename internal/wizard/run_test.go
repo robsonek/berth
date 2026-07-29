@@ -19,6 +19,7 @@ type fakePrompter struct {
 	queue          func(*QueueAnswers)
 	daemons        []func(*DaemonAnswers)
 	daemonsN       int
+	aptRepo        func(*AptRepoAnswers)
 	confirms       []bool
 	confirmsN      int
 	errors         []error
@@ -51,6 +52,12 @@ func (f *fakePrompter) Daemon(d *DaemonAnswers) error {
 	fn(d)
 	return nil
 }
+func (f *fakePrompter) AptRepo(ar *AptRepoAnswers) error {
+	if f.aptRepo != nil {
+		f.aptRepo(ar)
+	}
+	return nil
+}
 func (f *fakePrompter) Confirm(string) (bool, error) {
 	b := f.confirms[f.confirmsN]
 	f.confirmsN++
@@ -77,8 +84,8 @@ func TestRunSingleSiteNoAdvanced(t *testing.T) {
 				sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "a.example.com", "/srv/a", "adb", "ausr"
 			},
 		},
-		// confirms: server-advanced? site-advanced? add-another?
-		confirms: []bool{false, false, false},
+		// confirms: server-advanced? apt-repo? site-advanced? add-another?
+		confirms: []bool{false, false, false, false},
 	}
 	a, err := run(f)
 	if err != nil {
@@ -86,6 +93,9 @@ func TestRunSingleSiteNoAdvanced(t *testing.T) {
 	}
 	if len(a.Sites) != 1 || a.Sites[0].Domain != "a.example.com" {
 		t.Fatalf("sites = %+v", a.Sites)
+	}
+	if len(a.AptRepos) != 0 {
+		t.Errorf("declined apt-repo confirm must leave AptRepos empty: %+v", a.AptRepos)
 	}
 	if err := a.ToServer().Validate(); err != nil {
 		t.Fatalf("assembled server invalid: %v", err)
@@ -110,7 +120,7 @@ func TestRunDuplicateDomainReprompts(t *testing.T) {
 			}, // fixed
 		},
 		// site0: advanced? add-another? | site1 retry has no extra confirms until valid | site1: advanced? add-another?
-		confirms: []bool{false /*srv adv*/, false /*s0 adv*/, true /*add*/, false /*s1 adv*/, false /*add*/},
+		confirms: []bool{false /*srv adv*/, false /*apt*/, false /*s0 adv*/, true /*add*/, false /*s1 adv*/, false /*add*/},
 	}
 	a, err := run(f)
 	if err != nil {
@@ -133,8 +143,8 @@ func TestRunHTTP3DeclineDropsHTTP3(t *testing.T) {
 				sa.SSL, sa.SSLMode, sa.SSLEmail, sa.HTTP3 = true, "letsencrypt", "x@y.com", true
 			},
 		},
-		// srv-adv? | http3-switch? (decline) | site-adv? | add-another?
-		confirms: []bool{false, false, false, false},
+		// srv-adv? | apt-repo? | http3-switch? (decline) | site-adv? | add-another?
+		confirms: []bool{false, false, false, false, false},
 	}
 	a, err := run(f)
 	if err != nil {
@@ -157,8 +167,8 @@ func TestRunHTTP3AcceptSwitchesNginx(t *testing.T) {
 				sa.SSL, sa.SSLMode, sa.SSLEmail, sa.HTTP3 = true, "selfsigned", "", true
 			},
 		},
-		// srv-adv? | http3-switch? (accept) | site-adv? | add-another?
-		confirms: []bool{false, true, false, false},
+		// srv-adv? | apt-repo? | http3-switch? (accept) | site-adv? | add-another?
+		confirms: []bool{false, false, true, false, false},
 	}
 	a, err := run(f)
 	if err != nil {
@@ -182,8 +192,8 @@ func TestRunDaemonSubLoop(t *testing.T) {
 			func(d *DaemonAnswers) { d.Name, d.Command, d.Processes = "reverb", "php artisan reverb:start", 1 },
 			func(d *DaemonAnswers) { d.Name, d.Command, d.Processes = "horizon", "php artisan horizon", 1 },
 		},
-		// srv-adv? | s0 adv?(yes) | dedicated-queue?(no) | add-daemon?(yes) | another-daemon?(yes) | another-daemon?(no) | add-site?(no)
-		confirms: []bool{false, true, false, true, true, false, false},
+		// srv-adv? | apt-repo? | s0 adv?(yes) | dedicated-queue?(no) | add-daemon?(yes) | another-daemon?(yes) | another-daemon?(no) | add-site?(no)
+		confirms: []bool{false, false, true, false, true, true, false, false},
 	}
 	a, err := run(f)
 	if err != nil {
@@ -217,6 +227,7 @@ func TestRunRepromptsSiteWhenOverrideBreaksValidation(t *testing.T) {
 		siteOverrides: func(sa *SiteAnswers) { sa.CloudflareOverride = "on" },
 		confirms: []bool{
 			false, // server advanced gate
+			false, // add an apt repository?
 			true,  // site advanced (attempt 1)
 			false, // dedicated queue worker? (attempt 1)
 			false, // add a daemon? (attempt 1)
@@ -256,9 +267,9 @@ func TestRunServerOpsAndSiteOverrides(t *testing.T) {
 			},
 		},
 		siteOverrides: func(sa *SiteAnswers) { sa.BackupsOverride = "off" },
-		// confirms: server advanced gate=true, site advanced gate=true,
-		// dedicated-queue=false, add-daemon=false, add another=false
-		confirms: []bool{true, true, false, false, false},
+		// confirms: server advanced gate=true, apt-repo=false, site advanced
+		// gate=true, dedicated-queue=false, add-daemon=false, add another=false
+		confirms: []bool{true, false, true, false, false, false},
 	}
 	a, err := run(f)
 	if err != nil {
@@ -293,8 +304,8 @@ func TestRunOffsiteS3CollectsAnswersAndRecipe(t *testing.T) {
 				sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "a.example.com", "/srv/a", "adb", "ausr"
 			},
 		},
-		// confirms: server-advanced? site-advanced? add-another?
-		confirms: []bool{true, false, false},
+		// confirms: server-advanced? apt-repo? site-advanced? add-another?
+		confirms: []bool{true, false, false, false},
 	}
 	a, err := run(f)
 	if err != nil {
@@ -333,8 +344,8 @@ func TestRunOffsiteSFTPPrintsNoRecipe(t *testing.T) {
 				sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "a.example.com", "/srv/a", "adb", "ausr"
 			},
 		},
-		// confirms: server-advanced? site-advanced? add-another?
-		confirms: []bool{true, false, false},
+		// confirms: server-advanced? apt-repo? site-advanced? add-another?
+		confirms: []bool{true, false, false, false},
 	}
 	a, err := run(f)
 	if err != nil {
@@ -345,6 +356,78 @@ func TestRunOffsiteSFTPPrintsNoRecipe(t *testing.T) {
 	}
 	if r := a.SecretRecipe(); r != "" {
 		t.Errorf("sftp offsite must print no recipe (the provision run hands out the public key), got:\n%s", r)
+	}
+}
+
+func TestRunAptRepoSubLoop(t *testing.T) {
+	entries := []AptRepoAnswers{
+		{Name: "signal-cli", URI: "https://packaging.gitlab.io/signal-cli", Suite: "signalcli",
+			Components: "main", KeyURL: "https://packaging.gitlab.io/signal-cli/gpg.key",
+			Fingerprint: "02BD5FB7BA4650D50ED69002797DFE3F4F80269B"},
+		{Name: "grafana", URI: "https://apt.grafana.com", Suite: "stable",
+			Components: "", KeyURL: "https://apt.grafana.com/gpg.key",
+			Fingerprint: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
+	}
+	n := 0
+	f := &fakePrompter{
+		serverCore: baseServer,
+		aptRepo:    func(ar *AptRepoAnswers) { *ar = entries[n]; n++ },
+		siteCore: []func(int, *SiteAnswers){
+			func(_ int, sa *SiteAnswers) {
+				sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "a.example.com", "/srv/a", "adb", "ausr"
+			},
+		},
+		// srv-adv? | apt-repo?(yes) | another-repo?(yes) | another-repo?(no) | site-adv? | add-site?
+		confirms: []bool{false, true, true, false, false, false},
+	}
+	a, err := run(f)
+	if err != nil {
+		t.Fatalf("run error = %v", err)
+	}
+	if len(a.AptRepos) != 2 || a.AptRepos[0].Name != "signal-cli" || a.AptRepos[1].Name != "grafana" {
+		t.Fatalf("apt repos = %+v", a.AptRepos)
+	}
+	if len(f.errors) != 0 {
+		t.Errorf("unexpected errors: %v", f.errors)
+	}
+	if err := a.ToServer().Validate(); err != nil {
+		t.Fatalf("assembled server invalid: %v", err)
+	}
+}
+
+func TestRunAptRepoDuplicateNameDropped(t *testing.T) {
+	entries := []AptRepoAnswers{
+		{Name: "alpha", URI: "https://alpha.example.com/apt", Suite: "stable", Components: "main",
+			KeyURL: "https://alpha.example.com/gpg.key", Fingerprint: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
+		{Name: "alpha", URI: "https://alpha.example.com/apt", Suite: "stable", Components: "main",
+			KeyURL: "https://alpha.example.com/gpg.key", Fingerprint: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}, // dup name
+		{Name: "beta", URI: "https://beta.example.com/apt", Suite: "stable", Components: "main",
+			KeyURL: "https://beta.example.com/gpg.key", Fingerprint: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"},
+	}
+	n := 0
+	f := &fakePrompter{
+		serverCore: baseServer,
+		aptRepo:    func(ar *AptRepoAnswers) { *ar = entries[n]; n++ },
+		siteCore: []func(int, *SiteAnswers){
+			func(_ int, sa *SiteAnswers) {
+				sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "a.example.com", "/srv/a", "adb", "ausr"
+			},
+		},
+		// srv-adv? | apt-repo?(yes) | another?(yes, dup attempt) | another?(yes) | another?(no) | site-adv? | add-site?
+		confirms: []bool{false, true, true, true, false, false, false},
+	}
+	a, err := run(f)
+	if err != nil {
+		t.Fatalf("run error = %v", err)
+	}
+	if len(a.AptRepos) != 2 || a.AptRepos[0].Name != "alpha" || a.AptRepos[1].Name != "beta" {
+		t.Fatalf("apt repos = %+v, want exactly [alpha beta] (dup dropped)", a.AptRepos)
+	}
+	if len(f.errors) != 1 || !strings.Contains(f.errors[0].Error(), "duplicate repo name") {
+		t.Fatalf("errors = %v, want exactly one duplicate-name rejection", f.errors)
+	}
+	if err := a.ToServer().Validate(); err != nil {
+		t.Fatalf("assembled server invalid: %v", err)
 	}
 }
 
@@ -368,8 +451,8 @@ func TestRunServerAdvancedSlowLogPairingReprompts(t *testing.T) {
 				sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "a.example.com", "/srv/a", "adb", "ausr"
 			},
 		},
-		// confirms: server-advanced? site-advanced? add-another?
-		confirms: []bool{true, false, false},
+		// confirms: server-advanced? apt-repo? site-advanced? add-another?
+		confirms: []bool{true, false, false, false},
 	}
 	a, err := run(f)
 	if err != nil {

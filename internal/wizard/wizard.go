@@ -2,8 +2,9 @@
 //
 // The wizard collects every supported feature combination (multi-site,
 // postgres+pgdg, nginx.org upstream, self-signed/HTTP3 TLS, per-site
-// queue/daemons/scheduler, fail2ban + tuning, optional ssh.fingerprint pinning)
-// with progressive disclosure and incremental validation.
+// queue/daemons/scheduler, fail2ban + tuning, extra apt repos + packages,
+// optional ssh.fingerprint pinning) with progressive disclosure and
+// incremental validation.
 //
 // All TTY I/O (huh forms) lives behind the prompter interface (prompter.go) so
 // the orchestration in run.go is exercised with a scripted fake. Normalization
@@ -56,7 +57,23 @@ type Answers struct {
 	Backups        BackupsAnswers
 	CloudflareOnly bool // server-wide origin-lockdown default
 
+	// server-level extras
+	AptRepos    []AptRepoAnswers
+	AptPackages string // space-separated; "" = none
+
 	Sites []SiteAnswers
+}
+
+// AptRepoAnswers collects one user-declared apt repository (config apt.repos
+// entry). Components is a space-separated string ("" = main) because huh
+// inputs are strings; ToServer splits it.
+type AptRepoAnswers struct {
+	Name        string
+	URI         string
+	Suite       string
+	Components  string
+	KeyURL      string
+	Fingerprint string
 }
 
 type Fail2banAnswers struct {

@@ -17,11 +17,12 @@ import (
 type prompter interface {
 	ServerCore(a *Answers) error     // host, ssh, php, db (combined), nginx, valkey, queue, scheduler
 	ServerAdvanced(a *Answers) error // fail2ban + tuning
-	ServerOps(a *Answers) error      // swap/sysctl, cloudflare-only, backups
+	ServerOps(a *Answers) error      // swap/sysctl, cloudflare-only, apt packages, backups
 	SiteCore(index int, sa *SiteAnswers) error
 	SiteOverrides(sa *SiteAnswers) error // scheduler + cloudflare + backups overrides (inherit/on/off)
 	Queue(q *QueueAnswers) error
 	Daemon(d *DaemonAnswers) error
+	AptRepo(ar *AptRepoAnswers) error
 	Confirm(prompt string) (bool, error)
 	ShowError(err error)
 }
@@ -138,6 +139,7 @@ func (h *huhPrompter) ServerOps(a *Answers) error {
 			huh.NewConfirm().Title("Break-glass console password for the berth account? (saved to ~/.berth/<name>.secrets.json)").Value(&a.System.BreakGlass),
 			huh.NewConfirm().Title("Apply conservative kernel sysctl tuning?").Value(&a.System.Sysctl),
 			huh.NewConfirm().Title("Cloudflare-only origin lockdown (server default)?").Value(&a.CloudflareOnly),
+			huh.NewInput().Title("Extra apt packages (space-separated; blank = none)").Value(&a.AptPackages).Validate(validAptPackages),
 		),
 		huh.NewGroup(
 			huh.NewConfirm().Title("Enable nightly local backups (server default)?").Value(&a.Backups.Enabled),
@@ -323,6 +325,17 @@ func (h *huhPrompter) Queue(q *QueueAnswers) error {
 	q.Sleep, _ = strconv.Atoi(sleep)
 	q.MaxMemory, _ = strconv.Atoi(maxmem)
 	return nil
+}
+
+func (h *huhPrompter) AptRepo(ar *AptRepoAnswers) error {
+	return huh.NewForm(huh.NewGroup(
+		huh.NewInput().Title("Repo name (short slug, e.g. signal-cli)").Value(&ar.Name).Validate(config.ValidateAptRepoName),
+		huh.NewInput().Title("Repository URL (https://…)").Value(&ar.URI).Validate(validAptURL("uri")),
+		huh.NewInput().Title("Suite (e.g. trixie, signalcli)").Value(&ar.Suite).Validate(config.ValidateAptSuite),
+		huh.NewInput().Title("Components (space-separated; blank = main)").Value(&ar.Components).Validate(validAptComponents),
+		huh.NewInput().Title("Signing key URL (https://…)").Value(&ar.KeyURL).Validate(validAptURL("key_url")),
+		huh.NewInput().Title("Signing key fingerprint (40 hex chars — berth pins every repo key)").Value(&ar.Fingerprint).Validate(config.ValidateAptFingerprint),
+	)).Run()
 }
 
 func (h *huhPrompter) Daemon(d *DaemonAnswers) error {
