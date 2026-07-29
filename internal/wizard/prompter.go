@@ -195,7 +195,7 @@ func (h *huhPrompter) ServerOps(a *Answers) error {
 		target := huh.NewForm(huh.NewGroup(
 			huh.NewInput().Title("SFTP host").Value(&o.Host).Validate(validOffsiteHost),
 			huh.NewInput().Title("SFTP port (blank/0 = 22)").Value(&port).Validate(optionalInt("backups.offsite.port", 1, 65535)),
-			huh.NewInput().Title("SFTP user").Value(&o.User).Validate(offsiteWord("backups.offsite.user", true)),
+			huh.NewInput().Title("SFTP user").Value(&o.User).Validate(validOffsiteUser),
 			huh.NewInput().Title("Repository path (absolute directory for the restic repo)").Value(&o.Path).Validate(validOffsitePath),
 		))
 		if err := target.Run(); err != nil {

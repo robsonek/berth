@@ -766,6 +766,8 @@ func TestOffsiteValidate(t *testing.T) {
 		{name: "bad-keep", offsite: mutS3(func(o *Offsite) { o.Keep = OffsiteKeep{Daily: -1} }), wantErr: "backups.offsite.keep"},
 		{name: "hostkey-wrong-host", offsite: mutSFTP(func(o *Offsite) { o.HostKey = "other.example.net ssh-ed25519 AAAA" }), wantErr: "host_key must pin"},
 		{name: "hostile-host", offsite: mutSFTP(func(o *Offsite) { o.Host = "h|e" }), wantErr: "must be a lowercase hostname"},
+		{name: "sftp-user-leading-dash", offsite: mutSFTP(func(o *Offsite) { o.User = "-oProxyCommand=x" }), wantErr: "must be a plain login name"},
+		{name: "sftp-user-dollar-brace", offsite: mutSFTP(func(o *Offsite) { o.User = "a${IFS}b" }), wantErr: "must be a plain login name"},
 		{name: "custom-port-needs-bracket-token", offsite: mutSFTP(func(o *Offsite) { o.Port = 2222 }), wantErr: "host_key must pin"},
 		{name: "custom-port-bracket-token-valid", offsite: mutSFTP(func(o *Offsite) {
 			o.Port = 2222

@@ -322,6 +322,18 @@ func validOffsiteHost(s string) error {
 	return nil
 }
 
+// reOffsiteUser mirrors config.reOffsiteUser (unexported there): the login
+// lands as the "<user>@<host>" token in a root-executed ssh command, so a
+// leading '-' would be parsed as an ssh option (a ProxyCommand injection).
+var reOffsiteUser = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$`)
+
+func validOffsiteUser(s string) error {
+	if !reOffsiteUser.MatchString(s) {
+		return fmt.Errorf("backups.offsite.user %q must be a plain login name (letters, digits, dot, underscore, hyphen; no leading or trailing punctuation)", s)
+	}
+	return nil
+}
+
 func validOffsitePath(s string) error {
 	if err := offsiteWord("backups.offsite.path", true)(s); err != nil {
 		return err

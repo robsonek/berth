@@ -584,6 +584,12 @@ var allowedOffsiteBackends = map[string]bool{"s3": true, "sftp": true}
 // are deliberately out: they would need [] quoting in three syntaxes).
 var reOffsiteHost = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`)
 
+// reOffsiteUser bounds the sftp login to a safe account name: it lands as the
+// "<user>@<host>" token in a root-executed ssh command, so it must never start
+// with '-' (OpenSSH would parse it as an option — a ProxyCommand injection).
+// No leading/trailing punctuation guarantees that.
+var reOffsiteUser = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$`)
+
 // validate checks the offsite target fields. Every value lands single-quoted
 // inside root-executed files (offsite.env, the offsite script), so quotes,
 // whitespace and control characters are rejected as injection, and the
@@ -631,6 +637,11 @@ func (o *Offsite) validate() error {
 		// with a value that could carry sed/shell metacharacters.
 		if !reOffsiteHost.MatchString(o.Host) {
 			return fmt.Errorf("backups.offsite.host %q must be a lowercase hostname or IPv4 literal", o.Host)
+		}
+		// The user lands as the "<user>@<host>" token on the same root-executed
+		// ssh command line — a leading '-' would be parsed as an ssh option.
+		if !reOffsiteUser.MatchString(o.User) {
+			return fmt.Errorf("backups.offsite.user %q must be a plain login name (letters, digits, dot, underscore, hyphen; no leading or trailing punctuation) — it lands in a root-executed ssh command", o.User)
 		}
 		if !strings.HasPrefix(o.Path, "/") {
 			return fmt.Errorf("backups.offsite.path %q must be absolute", o.Path)

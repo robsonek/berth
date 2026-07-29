@@ -193,6 +193,19 @@ func TestValidOffsiteHost(t *testing.T) {
 	}
 }
 
+func TestValidOffsiteUser(t *testing.T) {
+	for _, ok := range []string{"backup", "off-site_1", "u", "r.estic"} {
+		if err := validOffsiteUser(ok); err != nil {
+			t.Errorf("validOffsiteUser(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "-x", "-oProxyCommand=x", "a b", "a${IFS}b", ".x", "x-", "u'ser"} {
+		if err := validOffsiteUser(bad); err == nil {
+			t.Errorf("validOffsiteUser(%q) = nil, want error", bad)
+		}
+	}
+}
+
 func TestValidOffsitePath(t *testing.T) {
 	for _, ok := range []string{"/srv/restic", "/x"} {
 		if err := validOffsitePath(ok); err != nil {
@@ -296,6 +309,11 @@ func TestOffsiteMirrorsMatchConfigRules(t *testing.T) {
 		o := sftpBase("backup.example.com", 0)
 		o.Path = v
 		agree(t, "path", v, offsiteConfigVerdict(t, o), validOffsitePath(v))
+	}
+	for _, v := range []string{"backup", "off-site_1", "u", "", "-x", "-oProxyCommand=x", "a b", "a${IFS}b", ".x", "x-", "u'ser"} {
+		o := sftpBase("backup.example.com", 0)
+		o.User = v
+		agree(t, "user", v, offsiteConfigVerdict(t, o), validOffsiteUser(v))
 	}
 
 	// host_key against both canonical token forms (bare host for port 22/0,
