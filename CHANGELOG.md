@@ -16,7 +16,10 @@ Notable changes to berth. Older releases are documented on the
   repository password is auto-generated into the same cache (keep a copy
   outside both machines: it IS the backup). The step is always registered:
   removing `backups.offsite` sweeps the host artifacts it left behind and
-  never touches the remote repository.
+  never touches the remote repository. On already-provisioned hosts the
+  next run re-renders every local backup script once (they now take a
+  shared artifacts lock, so an offsite snapshot never catches a
+  half-written archive) — a one-time, reload-free re-apply.
 
 ## [0.26.0] — 2026-07-29
 

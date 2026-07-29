@@ -488,7 +488,7 @@ it with the other worker knobs is rejected). Each site
 user gets **narrow sudoers** to control only its own programs, and Supervisor is
 installed whenever any site declares a worker or a daemon.
 
-## Backups (opt-in, local)
+## Backups (opt-in)
 
 ```yaml
 backups:
@@ -548,7 +548,10 @@ before restoring.
    `RESTIC_PASSWORD` (and `AWS_*` for s3) from your local
    `~/.berth/<id>.secrets.json` and the config, then
    `restic restore latest --target /` — snapshots store absolute paths,
-   recreating `/var/backups/berth` verbatim.
+   recreating `/var/backups/berth` verbatim. For an `sftp` repository, use
+   your **own** ssh access to the target (a plain `sftp:user@host:path`
+   repository string with your default ssh setup) — berth's dedicated key
+   and pinned command died with the host.
 
 (1) run `berth provision servers/<name>.yml` — it rebuilds the stack and, with
 no local cache, seeds `shared/.env` with FRESH secrets; (2) restore the files
@@ -592,7 +595,9 @@ password is generated automatically into the same cache.
 machines (password manager): losing it means losing every offsite
 snapshot, by encryption design. Changing the offsite target later
 initializes a NEW repository; snapshots on the old target remain yours
-to keep or delete.
+to keep or delete. Removing `backups.offsite` sweeps the script, cron,
+env file and host-key pin from the host, but the dedicated sftp keypair
+is kept — remove `/root/.ssh/berth_offsite*` manually if unwanted.
 
 ## Multiple sites (isolated per domain)
 
