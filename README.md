@@ -488,7 +488,7 @@ it with the other worker knobs is rejected). Each site
 user gets **narrow sudoers** to control only its own programs, and Supervisor is
 installed whenever any site declares a worker or a daemon.
 
-## Backups (opt-in, local)
+## Backups (opt-in)
 
 ```yaml
 backups:
@@ -542,6 +542,17 @@ reestablished. For disaster recovery, re-run berth (it recreates the role/databa
 before restoring.
 
 **Full-restore order (disaster recovery — host AND workstation lost):**
+
+0. Recover the backup artifacts from offsite (skip if `/var/backups/berth`
+   survived): on any machine with restic, export `RESTIC_REPOSITORY`,
+   `RESTIC_PASSWORD` (and `AWS_*` for s3) from your local
+   `~/.berth/<id>.secrets.json` and the config, then
+   `restic restore latest --target /` — snapshots store absolute paths,
+   recreating `/var/backups/berth` verbatim. For an `sftp` repository, use
+   your **own** ssh access to the target (a plain `sftp:user@host:path`
+   repository string with your default ssh setup) — berth's dedicated key
+   and pinned command died with the host.
+
 (1) run `berth provision servers/<name>.yml` — it rebuilds the stack and, with
 no local cache, seeds `shared/.env` with FRESH secrets; (2) restore the files
 tar (`tar -xzf <pool>-files-<ts>.tar.gz -C <deploy_path>` as root) — this
@@ -560,10 +571,33 @@ was made under; match the pair by its UTC timestamp and, for archives
 predating a config change, trust the pair's own `<pool>-meta-<ts>.manifest`
 sidecar over the directory manifest.
 
-**Limitations:** local only (no offsite copy) — backups are root-owned so they survive a
-compromised *site*, but a lost *host* loses them; the DB dump and files tar are independent,
-so a failed run may leave one without the other (match artifacts by UTC timestamp); the first
-dump runs at the next scheduled time (provisioning never runs a backup itself).
+**Limitations:** local by default (offsite is the opt-in below) — backups are root-owned
+so they survive a compromised *site*, but without `backups.offsite` a lost *host* loses
+them; the DB dump and files tar are independent, so a failed run may leave one without the
+other (match artifacts by UTC timestamp); the first dump runs at the next scheduled time
+(provisioning never runs a backup itself).
+
+### Offsite backups (restic)
+
+`backups.offsite` ships the local artifacts to an encrypted restic
+repository nightly (one snapshot of the whole `/var/backups/berth`,
+04:15 by default — after the local backups), pruned by the `keep`
+policy. Two backends: `s3` (any S3-compatible endpoint) and `sftp`
+(a dedicated root ed25519 key; pin the target with `host_key` from
+`ssh-keyscan`). The YAML stays secret-free: S3 credentials enter the
+local cache once via `berth secret set <server.yml>
+offsite_s3_access_key` / `offsite_s3_secret_key`, and the repository
+password is generated automatically into the same cache.
+
+**The restic password is the backup.** It lives in
+`~/.berth/<id>.secrets.json` on the operator machine and in root-owned
+`/etc/berth/offsite.env` on the host. Keep a third copy outside both
+machines (password manager): losing it means losing every offsite
+snapshot, by encryption design. Changing the offsite target later
+initializes a NEW repository; snapshots on the old target remain yours
+to keep or delete. Removing `backups.offsite` sweeps the script, cron,
+env file and host-key pin from the host, but the dedicated sftp keypair
+is kept — remove `/root/.ssh/berth_offsite*` manually if unwanted.
 
 ## Multiple sites (isolated per domain)
 

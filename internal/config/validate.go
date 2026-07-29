@@ -319,6 +319,9 @@ func (s *Server) Validate() error {
 	if err := s.Backups.validate(); err != nil {
 		return err
 	}
+	if s.Backups.Offsite != nil && !s.AnyBackupsEnabled() {
+		return fmt.Errorf("backups.offsite requires backups to be enabled (there would be nothing to ship)")
+	}
 	upstream, engineOK := dbEngineUpstreamSource[s.Database.Engine]
 	if !engineOK {
 		return fmt.Errorf("database.engine %q unsupported (supported: %s)", s.Database.Engine, supportedEngines())
@@ -565,6 +568,108 @@ func (b Backups) validate() error {
 	}
 	if b.Retention != 0 && (b.Retention < 1 || b.Retention > 3650) {
 		return fmt.Errorf("backups.retention_days %d out of range (1-3650)", b.Retention)
+	}
+	if b.Offsite != nil {
+		if err := b.Offsite.validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+var allowedOffsiteBackends = map[string]bool{"s3": true, "sftp": true}
+
+// reOffsiteHost accepts a lowercase DNS hostname or IPv4 literal — the only
+// shapes that may reach the root-executed ssh command line (IPv6 literals
+// are deliberately out: they would need [] quoting in three syntaxes).
+var reOffsiteHost = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`)
+
+// reOffsiteUser bounds the sftp login to a safe account name: it lands as the
+// "<user>@<host>" token in a root-executed ssh command, so it must never start
+// with '-' (OpenSSH would parse it as an option — a ProxyCommand injection).
+// No leading/trailing punctuation guarantees that.
+var reOffsiteUser = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$`)
+
+// validate checks the offsite target fields. Every value lands single-quoted
+// inside root-executed files (offsite.env, the offsite script), so quotes,
+// whitespace and control characters are rejected as injection, and the
+// composed repository string must stay one shell-safe word. Lenient zero
+// handling follows the Fail2ban pattern: unset optional values fall back to
+// the *Eff accessors.
+func (o *Offsite) validate() error {
+	if !allowedOffsiteBackends[o.Backend] {
+		return fmt.Errorf("backups.offsite.backend %q unsupported (supported: s3, sftp)", o.Backend)
+	}
+	plain := func(name, v string) error {
+		if v != "" && (hasControlChars(v) || strings.ContainsAny(v, "'\"\\ \t")) {
+			return fmt.Errorf("backups.offsite.%s %q must not contain whitespace, quotes, backslashes or control characters", name, v)
+		}
+		return nil
+	}
+	for _, f := range []struct{ name, v string }{
+		{"endpoint", o.Endpoint}, {"bucket", o.Bucket}, {"prefix", o.Prefix},
+		{"user", o.User}, {"path", o.Path},
+	} {
+		if err := plain(f.name, f.v); err != nil {
+			return err
+		}
+	}
+	// Range-check the port BEFORE the per-backend switch: the sftp host_key
+	// pin is compared against a canonical token derived from the port, and a
+	// nonsense port must be reported as a port error, not a pin mismatch.
+	if o.Port != 0 && (o.Port < 1 || o.Port > 65535) {
+		return fmt.Errorf("backups.offsite.port %d out of range (1-65535)", o.Port)
+	}
+	switch o.Backend {
+	case "s3":
+		if o.Endpoint == "" || o.Bucket == "" {
+			return fmt.Errorf("backups.offsite with backend s3 requires endpoint and bucket")
+		}
+		if o.Host != "" || o.User != "" || o.Path != "" || o.HostKey != "" || o.Port != 0 {
+			return fmt.Errorf("backups.offsite: host/port/user/path/host_key are only valid for backend sftp")
+		}
+	case "sftp":
+		if o.Host == "" || o.User == "" || o.Path == "" || o.HostKey == "" {
+			return fmt.Errorf("backups.offsite with backend sftp requires host, user, path and host_key")
+		}
+		// The host reaches a root-executed ssh command line: only a strict
+		// hostname/IPv4 literal is acceptable — never trust plain() alone
+		// with a value that could carry sed/shell metacharacters.
+		if !reOffsiteHost.MatchString(o.Host) {
+			return fmt.Errorf("backups.offsite.host %q must be a lowercase hostname or IPv4 literal", o.Host)
+		}
+		// The user lands as the "<user>@<host>" token on the same root-executed
+		// ssh command line — a leading '-' would be parsed as an ssh option.
+		if !reOffsiteUser.MatchString(o.User) {
+			return fmt.Errorf("backups.offsite.user %q must be a plain login name (letters, digits, dot, underscore, hyphen; no leading or trailing punctuation) — it lands in a root-executed ssh command", o.User)
+		}
+		if !strings.HasPrefix(o.Path, "/") {
+			return fmt.Errorf("backups.offsite.path %q must be absolute", o.Path)
+		}
+		if o.Endpoint != "" || o.Bucket != "" || o.Prefix != "" {
+			return fmt.Errorf("backups.offsite: endpoint/bucket/prefix are only valid for backend s3")
+		}
+		if hasControlChars(o.HostKey) || strings.ContainsAny(o.HostKey, "'\"") {
+			return fmt.Errorf("backups.offsite.host_key must not contain quotes or control characters")
+		}
+		fields := strings.Fields(o.HostKey)
+		if len(fields) < 3 {
+			return fmt.Errorf("backups.offsite.host_key %q must be one ssh-keyscan line (host keytype key)", o.HostKey)
+		}
+		if fields[0] != o.KnownHostsToken() {
+			return fmt.Errorf("backups.offsite.host_key must pin %q — the canonical token OpenSSH looks up (bare host on port 22, [host]:port otherwise); its first field is %q", o.KnownHostsToken(), fields[0])
+		}
+	}
+	if o.Schedule != "" && (hasControlChars(o.Schedule) || !reCronSchedule.MatchString(o.Schedule)) {
+		return fmt.Errorf("backups.offsite.schedule %q must be 5 cron fields over [0-9*,/-] (e.g. \"15 4 * * *\")", o.Schedule)
+	}
+	for _, k := range []struct {
+		name string
+		v    int
+	}{{"daily", o.Keep.Daily}, {"weekly", o.Keep.Weekly}, {"monthly", o.Keep.Monthly}} {
+		if k.v != 0 && (k.v < 1 || k.v > 3650) {
+			return fmt.Errorf("backups.offsite.keep.%s %d out of range (1-3650)", k.name, k.v)
+		}
 	}
 	return nil
 }

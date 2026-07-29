@@ -1560,6 +1560,53 @@ func TestConfigMatrix(t *testing.T) {
 		mustContain(t, err, "schedule")
 	})
 
+	t.Run("ops/backups offsite s3 roundtrip", func(t *testing.T) {
+		a := validSingleSite(t)
+		a.Backups = BackupsAnswers{Enabled: true, Offsite: OffsiteAnswers{
+			Enabled: true, Backend: "s3", Endpoint: "s3.example.com", Bucket: "bkt",
+			Prefix: "berth/custom", Schedule: "45 4 * * *",
+			KeepDaily: 10, KeepWeekly: 5, KeepMonthly: 12,
+		}}
+		srv, raw := writeValid(t, a)
+		off := srv.Backups.Offsite
+		if off == nil || off.Backend != "s3" || off.Endpoint != "s3.example.com" || off.Bucket != "bkt" ||
+			off.Prefix != "berth/custom" || off.Schedule != "45 4 * * *" ||
+			off.Keep != (config.OffsiteKeep{Daily: 10, Weekly: 5, Monthly: 12}) {
+			t.Fatalf("offsite = %+v", off)
+		}
+		if !strings.Contains(raw, "offsite:") {
+			t.Fatalf("yaml missing offsite block:\n%s", raw)
+		}
+	})
+
+	t.Run("ops/backups offsite sftp roundtrip", func(t *testing.T) {
+		a := validSingleSite(t)
+		a.Backups = BackupsAnswers{Enabled: true, Offsite: OffsiteAnswers{
+			Enabled: true, Backend: "sftp", Host: "backup.example.com", Port: 2222,
+			User: "restic", Path: "/srv/restic/ops",
+			HostKey: "[backup.example.com]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleExampleExampleExample",
+		}}
+		srv, _ := writeValid(t, a)
+		off := srv.Backups.Offsite
+		if off == nil || off.Backend != "sftp" || off.Host != "backup.example.com" || off.Port != 2222 ||
+			off.User != "restic" || off.Path != "/srv/restic/ops" ||
+			!strings.HasPrefix(off.HostKey, "[backup.example.com]:2222 ") {
+			t.Fatalf("offsite = %+v", off)
+		}
+	})
+
+	t.Run("ops/backups offsite without backups invalid", func(t *testing.T) {
+		// The prompter never collects this combination (the offsite gate is
+		// only reachable with backups enabled), but ToServer is a total
+		// mapping — validation must still refuse it.
+		a := validSingleSite(t)
+		a.Backups = BackupsAnswers{Enabled: false, Offsite: OffsiteAnswers{
+			Enabled: true, Backend: "s3", Endpoint: "s3.example.com", Bucket: "bkt",
+		}}
+		err := writeInvalid(t, a)
+		mustContain(t, err, "requires backups to be enabled")
+	})
+
 	// ===================== Gap closure: coverage the adversarial review flagged =====================
 	addGapScenarios(t, writeValid, writeInvalid, mustContain, base)
 }

@@ -1,6 +1,11 @@
 package wizard
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+
+	"github.com/robsonek/berth/internal/config"
+)
 
 func TestToServerOpsBlocks(t *testing.T) {
 	a := defaults()
@@ -72,6 +77,31 @@ func TestToServerCarriesMariaDBSlowLog(t *testing.T) {
 	s := a.ToServer()
 	if !s.Tuning.MariaDBSlowQueryLog || s.Tuning.MariaDBLongQueryTime != 5 {
 		t.Errorf("ToServer() dropped the MariaDB slow-log knobs: %+v", s.Tuning)
+	}
+}
+
+func TestToServerMapsOffsite(t *testing.T) {
+	a := defaults()
+	a.Name, a.Host = "t", "203.0.113.10"
+	a.Backups = BackupsAnswers{Enabled: true, Offsite: OffsiteAnswers{
+		Enabled: true, Backend: "s3", Endpoint: "s3.example.com", Bucket: "bkt",
+		Prefix: "berth/custom", Schedule: "45 4 * * *",
+		KeepDaily: 10, KeepWeekly: 5, KeepMonthly: 12,
+	}}
+	srv := a.ToServer()
+	off := srv.Backups.Offsite
+	if off == nil {
+		t.Fatal("offsite answers must map to a non-nil config.Offsite")
+	}
+	want := &config.Offsite{Backend: "s3", Endpoint: "s3.example.com", Bucket: "bkt",
+		Prefix: "berth/custom", Schedule: "45 4 * * *",
+		Keep: config.OffsiteKeep{Daily: 10, Weekly: 5, Monthly: 12}}
+	if !reflect.DeepEqual(off, want) {
+		t.Errorf("offsite = %+v, want %+v", off, want)
+	}
+	a.Backups.Offsite.Enabled = false
+	if a.ToServer().Backups.Offsite != nil {
+		t.Error("disabled offsite must map to nil")
 	}
 }
 

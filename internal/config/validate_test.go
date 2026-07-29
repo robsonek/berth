@@ -732,3 +732,64 @@ func TestParseSwapBytesBoundaries(t *testing.T) {
 		t.Error("Validate must reject an overflowing system.swap")
 	}
 }
+
+func TestOffsiteValidate(t *testing.T) {
+	s3Valid := func() *Offsite {
+		return &Offsite{Backend: "s3", Endpoint: "s3.example.com", Bucket: "b"}
+	}
+	sftpValid := func() *Offsite {
+		return &Offsite{
+			Backend: "sftp", Host: "h.example.net", User: "u", Path: "/srv/b",
+			HostKey: "h.example.net ssh-ed25519 AAAA",
+		}
+	}
+	mutS3 := func(f func(*Offsite)) *Offsite { o := s3Valid(); f(o); return o }
+	mutSFTP := func(f func(*Offsite)) *Offsite { o := sftpValid(); f(o); return o }
+	cases := []struct {
+		name       string
+		offsite    *Offsite
+		backupsOff bool   // leave server-wide backups.enabled false (default: on)
+		wantErr    string // "" = the config must validate
+	}{
+		{name: "s3-valid", offsite: s3Valid()},
+		{name: "sftp-valid", offsite: sftpValid()},
+		{name: "unknown-backend", offsite: &Offsite{Backend: "rsync"}, wantErr: "backups.offsite.backend"},
+		{name: "s3-missing-bucket", offsite: &Offsite{Backend: "s3", Endpoint: "e.example.com"}, wantErr: "requires endpoint and bucket"},
+		{name: "sftp-missing-hostkey", offsite: &Offsite{Backend: "sftp", Host: "h.example.net", User: "u", Path: "/srv/b"}, wantErr: "requires host, user, path and host_key"},
+		{name: "sftp-relative-path", offsite: mutSFTP(func(o *Offsite) { o.Path = "srv/b" }), wantErr: "must be absolute"},
+		{name: "s3-field-on-sftp", offsite: mutSFTP(func(o *Offsite) { o.Bucket = "b" }), wantErr: "only valid for backend s3"},
+		{name: "sftp-field-on-s3", offsite: mutS3(func(o *Offsite) { o.Host = "h.example.net" }), wantErr: "only valid for backend sftp"},
+		{name: "quote-injection", offsite: mutS3(func(o *Offsite) { o.Bucket = "b'x" }), wantErr: "must not contain"},
+		{name: "whitespace-endpoint", offsite: mutS3(func(o *Offsite) { o.Endpoint = "e x.example.com" }), wantErr: "must not contain"},
+		{name: "bad-schedule", offsite: mutS3(func(o *Offsite) { o.Schedule = "often" }), wantErr: "backups.offsite.schedule"},
+		{name: "bad-port", offsite: mutSFTP(func(o *Offsite) { o.Port = 70000 }), wantErr: "backups.offsite.port"},
+		{name: "bad-keep", offsite: mutS3(func(o *Offsite) { o.Keep = OffsiteKeep{Daily: -1} }), wantErr: "backups.offsite.keep"},
+		{name: "hostkey-wrong-host", offsite: mutSFTP(func(o *Offsite) { o.HostKey = "other.example.net ssh-ed25519 AAAA" }), wantErr: "host_key must pin"},
+		{name: "hostile-host", offsite: mutSFTP(func(o *Offsite) { o.Host = "h|e" }), wantErr: "must be a lowercase hostname"},
+		{name: "sftp-user-leading-dash", offsite: mutSFTP(func(o *Offsite) { o.User = "-oProxyCommand=x" }), wantErr: "must be a plain login name"},
+		{name: "sftp-user-dollar-brace", offsite: mutSFTP(func(o *Offsite) { o.User = "a${IFS}b" }), wantErr: "must be a plain login name"},
+		{name: "custom-port-needs-bracket-token", offsite: mutSFTP(func(o *Offsite) { o.Port = 2222 }), wantErr: "host_key must pin"},
+		{name: "custom-port-bracket-token-valid", offsite: mutSFTP(func(o *Offsite) {
+			o.Port = 2222
+			o.HostKey = "[h.example.net]:2222 ssh-ed25519 AAAA"
+		})},
+		{name: "offsite-without-backups", offsite: s3Valid(), backupsOff: true, wantErr: "requires backups to be enabled"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := base()
+			s.Backups.Enabled = !tc.backupsOff
+			s.Backups.Offsite = tc.offsite
+			err := s.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Validate() = %v, want error containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}

@@ -275,6 +275,7 @@ func TestRenderSysctlBerthGolden(t *testing.T) {
 func TestRenderBackupScriptGolden(t *testing.T) {
 	checkGolden(t, "backup.sh.tmpl", "backup_sh.golden", struct {
 		Pool, DumpCommand, DBName, DeployPath, BackupDir, LogFile, LockFile string
+		ArtifactsLock                                                       string
 		BerthVersion, Domain, Engine, DBUser, SiteUser                      string
 		RetentionDays                                                       int
 	}{
@@ -285,12 +286,75 @@ func TestRenderBackupScriptGolden(t *testing.T) {
 		BackupDir:     "/var/backups/berth/app_example_com",
 		LogFile:       "/var/log/berth/backup-app_example_com.log",
 		LockFile:      "/var/backups/berth/app_example_com/.lock",
+		ArtifactsLock: "/var/backups/berth/.artifacts.lock",
 		BerthVersion:  "v9.9.9",
 		Domain:        "app.example.com",
 		Engine:        "mariadb",
 		DBUser:        "myapp",
 		SiteUser:      "b_appexamplecom_dd46c94b",
 		RetentionDays: 7,
+	})
+}
+
+// offsiteScriptGoldenData mirrors the offsite step's render struct for
+// offsite.sh.tmpl (test-local copy — keep the fields in sync).
+type offsiteScriptGoldenData struct {
+	LogFile, LockFile, ArtifactsLock, EnvFile, ResticOpts, BackupBaseDir, HostID string
+	KeepDaily, KeepWeekly, KeepMonthly                                           int
+}
+
+func offsiteScriptGoldenBase() offsiteScriptGoldenData {
+	return offsiteScriptGoldenData{
+		LogFile:       "/var/log/berth/backup-offsite.log",
+		LockFile:      "/var/backups/berth/.offsite.lock",
+		ArtifactsLock: "/var/backups/berth/.artifacts.lock",
+		EnvFile:       "/etc/berth/offsite.env",
+		BackupBaseDir: "/var/backups/berth",
+		HostID:        "box-1",
+		KeepDaily:     7, KeepWeekly: 4, KeepMonthly: 6,
+	}
+}
+
+func TestRenderOffsiteScriptGolden(t *testing.T) {
+	// S3 flavor: no extra restic options — ResticOpts stays empty so the
+	// invocation composes as a bare "restic".
+	checkGolden(t, "offsite.sh.tmpl", "offsite_sh.golden", offsiteScriptGoldenBase())
+}
+
+func TestRenderOffsiteScriptSFTPGolden(t *testing.T) {
+	// SFTP flavor: ResticOpts is non-empty and MUST begin with a space —
+	// "restic{{ .ResticOpts }}" composes without a separator of its own.
+	// The sample string is the real offsiteResticOpts shape (keep in sync).
+	d := offsiteScriptGoldenBase()
+	d.ResticOpts = " -o sftp.command='ssh -F /dev/null -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/dev/null -o UserKnownHostsFile=/root/.ssh/berth_offsite_known_hosts -i /root/.ssh/berth_offsite -p 22 backup@sftp.example.com -s sftp'"
+	checkGolden(t, "offsite.sh.tmpl", "offsite_sh_sftp.golden", d)
+}
+
+func TestRenderOffsiteEnvGolden(t *testing.T) {
+	checkGolden(t, "offsite_env.tmpl", "offsite_env.golden", struct {
+		Repository, Password string
+		S3                   bool
+		AccessKey, SecretKey string
+	}{
+		Repository: "s3:https://s3.example.com/bkt/berth/box-1",
+		Password:   "fake-password-123",
+		S3:         true,
+		AccessKey:  "AKIAEXAMPLE",
+		SecretKey:  "fake/secret+KEY",
+	})
+}
+
+func TestRenderOffsiteEnvSFTPGolden(t *testing.T) {
+	// S3=false must render a password-only file: no AWS block and no stray
+	// blank line where the trimmed conditional was.
+	checkGolden(t, "offsite_env.tmpl", "offsite_env_sftp.golden", struct {
+		Repository, Password string
+		S3                   bool
+		AccessKey, SecretKey string
+	}{
+		Repository: "sftp:off@backup.example.net:/srv/berth/box-1",
+		Password:   "fake-password-123",
+		S3:         false,
 	})
 }
 

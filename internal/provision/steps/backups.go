@@ -20,6 +20,12 @@ const (
 	backupScriptGlob    = "/usr/local/sbin/berth-backup-*"
 	backupCronGlob      = "/etc/cron.d/berth-backup-*"
 	backupManifestGlob  = backupBaseDir + "/*/manifest"
+
+	// backupArtifactsLockPath is the box-wide snapshot-consistency lock: every
+	// per-site backup script holds it SHARED while producing/pruning artifacts,
+	// the offsite script takes it EXCLUSIVELY, so a restic snapshot never
+	// captures a half-written artifact set.
+	backupArtifactsLockPath = backupBaseDir + "/.artifacts.lock"
 )
 
 func backupScriptPath(domain string) string {
@@ -66,6 +72,7 @@ func dumpClientBinary(engine string) string {
 func renderBackupScript(s *config.Server, site config.Site, eng dbpkg.Engine) ([]byte, error) {
 	return templates.Render("backup.sh.tmpl", struct {
 		Pool, DumpCommand, DBName, DeployPath, BackupDir, LogFile, LockFile string
+		ArtifactsLock                                                       string
 		BerthVersion, Domain, Engine, DBUser, SiteUser                      string
 		RetentionDays                                                       int
 	}{
@@ -76,6 +83,7 @@ func renderBackupScript(s *config.Server, site config.Site, eng dbpkg.Engine) ([
 		BackupDir:     backupDir(site.Domain),
 		LogFile:       backupLogPath(site.Domain),
 		LockFile:      backupLockPath(site.Domain),
+		ArtifactsLock: backupArtifactsLockPath,
 		BerthVersion:  version.Version,
 		Domain:        site.Domain,
 		Engine:        s.Database.Engine,

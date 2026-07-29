@@ -417,3 +417,36 @@ func TestDerivationsAreFrozen(t *testing.T) {
 		t.Fatalf("DeployKeyPath derivation changed: %s", got)
 	}
 }
+
+func TestOffsiteRepositoryAndDefaults(t *testing.T) {
+	s3 := &Offsite{Backend: "s3", Endpoint: "s3.example.com", Bucket: "bkt"}
+	if got, want := s3.Repository("box-1"), "s3:https://s3.example.com/bkt/berth/box-1"; got != want {
+		t.Errorf("s3 Repository = %q, want %q", got, want)
+	}
+	s3.Prefix = "custom/prefix"
+	if got, want := s3.Repository("box-1"), "s3:https://s3.example.com/bkt/custom/prefix"; got != want {
+		t.Errorf("s3 Repository with prefix = %q, want %q", got, want)
+	}
+	sftp := &Offsite{Backend: "sftp", Host: "backup.example.net", User: "off", Path: "/srv/berth/box-1"}
+	if got, want := sftp.Repository("box-1"), "sftp:off@backup.example.net:/srv/berth/box-1"; got != want {
+		t.Errorf("sftp Repository = %q, want %q", got, want)
+	}
+	var o Offsite
+	if o.ScheduleEff() != "15 4 * * *" {
+		t.Errorf("ScheduleEff default = %q", o.ScheduleEff())
+	}
+	if o.PortEff() != 22 {
+		t.Errorf("PortEff default = %d", o.PortEff())
+	}
+	if d, w, m := o.Keep.DailyEff(), o.Keep.WeeklyEff(), o.Keep.MonthlyEff(); d != 7 || w != 4 || m != 6 {
+		t.Errorf("Keep defaults = %d/%d/%d, want 7/4/6", d, w, m)
+	}
+	srv := &Server{}
+	if srv.OffsiteEnabled() {
+		t.Error("nil offsite must read as disabled")
+	}
+	srv.Backups.Offsite = s3
+	if !srv.OffsiteEnabled() {
+		t.Error("non-nil offsite must read as enabled")
+	}
+}

@@ -4,6 +4,8 @@ umask 077
 exec >>/var/log/berth/backup-app_example_com.log 2>&1
 exec 9>/var/backups/berth/app_example_com/.lock
 flock -n 9 || { echo "[$(date -u +%FT%TZ)] berth backup app_example_com: skipped (another run holds the lock)"; exit 0; }
+exec 8>/var/backups/berth/.artifacts.lock
+flock -w 3600 -s 8 || { echo "[$(date -u +%FT%TZ)] berth backup app_example_com: giving up (offsite still holds the artifacts lock)"; exit 1; }
 ts="$(date -u +%Y%m%dT%H%M%SZ)"
 db_tmp=""
 files_tmp=""

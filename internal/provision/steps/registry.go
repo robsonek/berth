@@ -27,7 +27,11 @@ func Pipeline(s *config.Server, red *secret.Redactor, skipSSL bool) []provision.
 	if s.Database.Engine == "mariadb" {
 		steps = append(steps, Tuning())
 	}
-	steps = append(steps, Site(), Backups())
+	// offsite is ALWAYS registered (the valkey/P14 pattern): its disabled
+	// mode owns the drift-removal of the script/cron/env a previous
+	// offsite-enabled provision left behind — the remote repository itself
+	// is never touched.
+	steps = append(steps, Site(), Backups(), Offsite(red))
 	// tls is ALWAYS registered outside --skip-ssl (the valkey/P14 pattern):
 	// with no SSL site left in the config it still owns the orphan sweep
 	// (lineages, webroots, self-signed dirs) and the deploy-hook
