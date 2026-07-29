@@ -3,6 +3,21 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Changed
+
+- **Offsite S3 default prefix is now `<id>`** (was `berth/<id>`). When
+  `backups.offsite.prefix` is unset, the repository lands at
+  `s3://<bucket>/<id>` instead of `s3://<bucket>/berth/<id>` — the leading
+  `berth/` was redundant when the operator already dedicates a bucket (a
+  common `bucket: berth` produced a doubled `berth/berth/<id>`). Behavioral
+  change only for configs relying on the default prefix: the composed
+  repository string moves, so the next run initializes a fresh repo at the
+  new path and leaves earlier snapshots at the old path untouched — pin
+  `prefix: berth/<id>` to keep the previous location. Configs with an
+  explicit `prefix` are unaffected.
+
 ## [0.27.0] — 2026-07-29
 
 ### Added
