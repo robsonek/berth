@@ -15,7 +15,7 @@ func run(p prompter) (Answers, error) {
 		}
 		a.ID = id
 	}
-	adv, err := p.Confirm("Configure advanced server options (fail2ban, tuning, swap/sysctl/timezone, Cloudflare, backups)?")
+	adv, err := p.Confirm("Configure advanced server options (fail2ban, tuning, swap/sysctl/timezone, Cloudflare, extra apt packages, backups)?")
 	if err != nil {
 		return Answers{}, err
 	}
