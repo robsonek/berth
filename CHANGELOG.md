@@ -39,6 +39,10 @@ Notable changes to berth. Older releases are documented on the
   Cleanup byproducts: `slices.Equal` replaces a hand-rolled comparison,
   the ssh-agent dial gained a bounded timeout, and a dead test-only
   production method was deleted.
+- **Fuzzing** — native Go fuzz targets for the untrusted-input parsers
+  (config YAML loading, fingerprint validation, `.env` rendering, secret
+  envelope decoding); seed corpora run as regular tests in every CI run,
+  and a weekly `Fuzz` workflow gives each target five minutes on `main`.
 
 ### Changed
 
