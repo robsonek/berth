@@ -769,8 +769,18 @@ func TestValidateAptBlock(t *testing.T) {
 		{"exact-path suite rejected", repo(func(r *AptRepo) { r.Suite = "stable/" }), "exact-path"},
 		{"bad component rejected", repo(func(r *AptRepo) { r.Components = []string{"Main"} }), "component"},
 		{"short fingerprint rejected", repo(func(r *AptRepo) { r.Fingerprint = "ABCD" }), "fingerprint"},
+		// A lowercase-https prefix is required on the RAW string: url.Parse
+		// lowercases Scheme, but the raw value is what lands in the .list file.
+		{"uppercase scheme uri rejected", repo(func(r *AptRepo) { r.URI = "HTTPS://a.example/x" }), "https"},
 		{"bad package name", Apt{Packages: []string{"Htop"}}, "apt.packages"},
 		{"single-char package rejected", Apt{Packages: []string{"a"}}, "apt.packages"},
+		// On an apt-get install line a trailing '-' means REMOVE the package —
+		// a config typo must never silently uninstall (install-only contract).
+		{"trailing dash package rejected", Apt{Packages: []string{"htop-"}}, "must not end"},
+		// Trailing '+' stays legal: real package names end with it (g++), and
+		// on an install line 'pkg+' just means install.
+		{"trailing plus package accepted", Apt{Packages: []string{"g++"}}, ""},
+		{"dotted package accepted", Apt{Packages: []string{"python3.11"}}, ""},
 		{"duplicate package", Apt{Packages: []string{"htop", "htop"}}, "duplicate"},
 		{"valid packages", Apt{Packages: []string{"htop", "signal-cli-native", "libfoo2.1+git"}}, ""},
 	}

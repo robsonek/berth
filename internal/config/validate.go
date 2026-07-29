@@ -723,6 +723,12 @@ func ValidateAptURL(field, raw string) error {
 	if strings.Contains(raw, "#") {
 		return fmt.Errorf("%s %q must not contain '#' (apt parses it as a comment in one-line source entries)", field, raw)
 	}
+	// Checked on the RAW string, not the parsed URL: url.Parse lowercases
+	// Scheme (so "HTTPS://…" would pass the scheme test below), but the raw
+	// value is what berth writes into the .list file and the curl command.
+	if !strings.HasPrefix(raw, "https://") {
+		return fmt.Errorf("%s %q must be a valid https:// URL (lowercase scheme; the raw string is used verbatim)", field, raw)
+	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "https" || u.Host == "" {
 		return fmt.Errorf("%s %q must be a valid https:// URL", field, raw)
@@ -763,6 +769,14 @@ func ValidateAptFingerprint(fp string) error {
 func ValidateAptPackage(p string) error {
 	if !reAptPackage.MatchString(p) {
 		return fmt.Errorf("apt.packages entry %q is not a valid Debian package name", p)
+	}
+	// apt-get's `pkgname-` removal syntax: on an install command line a
+	// trailing '-' means REMOVE the package, so a config typo would silently
+	// uninstall — the opposite of the block's install-only contract. Trailing
+	// '+' stays legal (real names like g++; 'pkg+' on an install line just
+	// means install).
+	if strings.HasSuffix(p, "-") {
+		return fmt.Errorf("apt.packages entry %q must not end with '-' (apt-get treats a trailing '-' on the install line as a request to remove the package)", p)
 	}
 	return nil
 }
