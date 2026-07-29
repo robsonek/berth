@@ -31,6 +31,22 @@ const (
 	offsiteResticPasswordLen = 32
 )
 
+const (
+	offsiteSSHKeyPath = "/root/.ssh/berth_offsite"
+	// offsiteKnownHostsPath is a DEDICATED, fully berth-managed pin file —
+	// the shared /root/.ssh/known_hosts is never touched, no config value is
+	// ever composed into a sed/grep program (root-injection surface), and
+	// key rotation is ordinary managed-file drift.
+	offsiteKnownHostsPath = "/root/.ssh/berth_offsite_known_hosts"
+)
+
+// offsiteKnownHostsContent renders the pin file: the managed marker (a
+// comment line to ssh) followed by the operator-declared ssh-keyscan line,
+// whose first field validation has pinned to KnownHostsToken().
+func offsiteKnownHostsContent(o *config.Offsite) []byte {
+	return []byte(templates.ManagedMarker + "\n" + o.HostKey + "\n")
+}
+
 func offsiteStampPath(repo string) string {
 	sum := sha256.Sum256([]byte(repo))
 	return offsiteStampPrefix + hex.EncodeToString(sum[:4])
@@ -40,12 +56,35 @@ func offsiteStampContent(repo string) []byte {
 	return []byte(templates.ManagedMarker + "\n" + repo + "\n")
 }
 
-// offsiteResticOpts renders the extra restic CLI flags for the backend.
-// Empty for s3 (credentials ride the env); the sftp branch lands with the
-// sftp backend task. Always either empty or leading-space so
-// "restic"+opts composes.
-func offsiteResticOpts(_ *config.Offsite) string {
-	return ""
+// offsiteResticOpts renders the extra restic CLI flags for the backend:
+// empty for s3 (credentials ride the env file); for sftp one fully-pinned
+// sftp.command — -F /dev/null + IdentitiesOnly + StrictHostKeyChecking +
+// the dedicated UserKnownHostsFile mean root's personal ssh config, agent
+// identities and TOFU can neither widen nor bypass the pin, and BatchMode
+// keeps cron from ever prompting. Values are config-validated to be quote-
+// and whitespace-free, so the single-quoted composition is sound. Always
+// empty or leading-space so "restic"+opts composes.
+func offsiteResticOpts(o *config.Offsite) string {
+	if o.Backend != "sftp" {
+		return ""
+	}
+	return fmt.Sprintf(" -o sftp.command='ssh -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=%s -i %s -p %d %s@%s -s sftp'",
+		offsiteKnownHostsPath, offsiteSSHKeyPath, o.PortEff(), o.User, o.Host)
+}
+
+// assertNotSymlink hard-errors when path is a symlink: key material and its
+// directory are a security boundary — a symlink would let key generation and
+// pin writes land outside a root-controlled tree, so it is never converged
+// over, with or without --force.
+func assertNotSymlink(ctx context.Context, r bssh.Runner, path string) error {
+	res, err := r.Run(ctx, "test -L "+shQuote(path), nil)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode == 0 {
+		return fmt.Errorf("%s is a symlink; refusing to manage offsite key material through it — remove the symlink and re-run", path)
+	}
+	return nil
 }
 
 func renderOffsiteEnv(s *config.Server, secrets map[string]string) ([]byte, error) {
@@ -228,6 +267,40 @@ func (o offsite) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 		changes = append(changes, "fix owner/mode of "+offsiteCronPath)
 	}
 
+	if off.Backend == "sftp" {
+		for _, p := range []string{"/root/.ssh", offsiteSSHKeyPath} {
+			if err := assertNotSymlink(ctx, r, p); err != nil {
+				return provision.CheckResult{}, err
+			}
+		}
+		if meta, present, err := statOwnerMode(ctx, r, "/root/.ssh"); err != nil {
+			return provision.CheckResult{}, err
+		} else if !present || meta != "root:root 700" {
+			changes = append(changes, "create /root/.ssh (root:root 700)")
+		}
+		if meta, present, err := statOwnerMode(ctx, r, offsiteSSHKeyPath); err != nil {
+			return provision.CheckResult{}, err
+		} else if !present {
+			changes = append(changes, "generate offsite ssh keypair "+offsiteSSHKeyPath)
+		} else {
+			if meta != "root:root 600" {
+				changes = append(changes, "fix owner/mode of "+offsiteSSHKeyPath)
+			}
+			if res, err := r.Run(ctx, "test -f "+shQuote(offsiteSSHKeyPath+".pub"), nil); err != nil {
+				return provision.CheckResult{}, err
+			} else if res.ExitCode != 0 {
+				changes = append(changes, "regenerate "+offsiteSSHKeyPath+".pub from the private key")
+			}
+		}
+		khOK, err := managedFileOK(ctx, r, offsiteKnownHostsPath, offsiteKnownHostsContent(off), rc.Force)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if !khOK {
+			changes = append(changes, "write "+offsiteKnownHostsPath+" (pin the sftp host key)")
+		}
+	}
+
 	if meta, present, err := statOwnerMode(ctx, r, "/var/lib/berth"); err != nil {
 		return provision.CheckResult{}, err
 	} else if !present || meta != "root:root 755" {
@@ -329,6 +402,42 @@ func (o offsite) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serve
 	if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{Path: offsiteCronPath, Content: cron, Owner: "root", Group: "root", Mode: 0o644, Sudo: true}); err != nil {
 		return fmt.Errorf("write %s: %w", offsiteCronPath, err)
 	}
+	if off.Backend == "sftp" {
+		for _, p := range []string{"/root/.ssh", offsiteSSHKeyPath} {
+			if err := assertNotSymlink(ctx, r, p); err != nil {
+				return err
+			}
+		}
+		if err := runOK(ctx, r, "install -d -o root -g root -m 0700 '/root/.ssh'"); err != nil {
+			return err
+		}
+		meta, present, err := statOwnerMode(ctx, r, offsiteSSHKeyPath)
+		if err != nil {
+			return err
+		}
+		switch {
+		case !present:
+			if err := runOK(ctx, r, "ssh-keygen -t ed25519 -N '' -C berth-offsite -f "+shQuote(offsiteSSHKeyPath)); err != nil {
+				return err
+			}
+		case meta != "root:root 600":
+			if err := runOK(ctx, r, "chown root:root "+shQuote(offsiteSSHKeyPath)+" && chmod 600 "+shQuote(offsiteSSHKeyPath)); err != nil {
+				return err
+			}
+		}
+		if present {
+			if res, err := r.Run(ctx, "test -f "+shQuote(offsiteSSHKeyPath+".pub"), nil); err != nil {
+				return err
+			} else if res.ExitCode != 0 {
+				if err := runOK(ctx, r, "ssh-keygen -y -f "+shQuote(offsiteSSHKeyPath)+" > "+shQuote(offsiteSSHKeyPath+".pub")); err != nil {
+					return err
+				}
+			}
+		}
+		if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{Path: offsiteKnownHostsPath, Content: offsiteKnownHostsContent(off), Owner: "root", Group: "root", Mode: 0o600, Sudo: true}); err != nil {
+			return fmt.Errorf("write %s: %w", offsiteKnownHostsPath, err)
+		}
+	}
 	if err := runOK(ctx, r, "install -d -o root -g root -m 0755 '/var/lib/berth'"); err != nil {
 		return err
 	}
@@ -409,7 +518,13 @@ func (o offsite) ensureRepo(ctx context.Context, rc provision.RunCtx, r bssh.Run
 			return fmt.Errorf("restic init on %s: %s", repo, strings.TrimSpace(ires.Stderr))
 		}
 	default:
-		rc.Warnf("cannot verify the restic repository %s yet: %s — it will be verified or initialized on the next run", repo, strings.TrimSpace(res.Stderr))
+		msg := strings.TrimSpace(res.Stderr)
+		if off.Backend == "sftp" {
+			if pub, perr := r.Run(ctx, "cat "+shQuote(offsiteSSHKeyPath+".pub"), nil); perr == nil && pub.ExitCode == 0 {
+				msg += " — if the key is not authorized on the target yet, authorize: " + strings.TrimSpace(pub.Stdout)
+			}
+		}
+		rc.Warnf("cannot verify the restic repository %s yet: %s — it will be verified or initialized on the next run", repo, msg)
 		rc.MarkUnconverged("offsite repository " + repo + " not verified")
 		return nil
 	}

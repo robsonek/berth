@@ -480,3 +480,184 @@ func TestOffsiteApplyDisabledSweepsMarkerGuarded(t *testing.T) {
 		}
 	}
 }
+
+func offsiteSFTPServer(t *testing.T) *config.Server {
+	t.Helper()
+	s := offsiteS3Server(t)
+	s.Backups.Offsite = &config.Offsite{
+		Backend: "sftp", Host: "backup.example.net", User: "off",
+		Path:    "/srv/berth/offsite-test-1",
+		HostKey: "backup.example.net ssh-ed25519 AAAAC3NzaEXAMPLE",
+	}
+	return s
+}
+
+func TestOffsiteResticOptsSFTP(t *testing.T) {
+	o := offsiteSFTPServer(t).Backups.Offsite
+	want := " -o sftp.command='ssh -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/root/.ssh/berth_offsite_known_hosts -i /root/.ssh/berth_offsite -p 22 off@backup.example.net -s sftp'"
+	if got := offsiteResticOpts(o); got != want {
+		t.Errorf("opts = %q, want %q", got, want)
+	}
+	if got := offsiteResticOpts(offsiteS3Server(t).Backups.Offsite); got != "" {
+		t.Errorf("s3 opts must be empty, got %q", got)
+	}
+}
+
+// stubSFTPBoundaryOK stubs the sftp security-boundary probes for a healthy
+// host: no symlinks, real 0700 dir, real 0600 key, pub present.
+func stubSFTPBoundaryOK(f *bssh.FakeRunner) {
+	f.On("test -L '/root/.ssh'", bssh.Result{ExitCode: 1})
+	f.On("test -L "+shQuote(offsiteSSHKeyPath), bssh.Result{ExitCode: 1})
+	f.On("stat -c '%U:%G %a' '/root/.ssh'", bssh.Result{Stdout: "root:root 700\n"})
+	f.On("stat -c '%U:%G %a' "+shQuote(offsiteSSHKeyPath), bssh.Result{Stdout: "root:root 600\n"})
+	f.On("test -f "+shQuote(offsiteSSHKeyPath+".pub"), bssh.Result{})
+}
+
+func TestOffsiteCheckSFTPSatisfied(t *testing.T) {
+	s := offsiteSFTPServer(t)
+	secrets := map[string]string{secret.OffsiteResticPassword: "fake-restic-pw"}
+	seedOffsiteSecrets(t, s, secrets)
+	f := bssh.NewFakeRunner()
+	f.On("dpkg -s restic", bssh.Result{Stdout: "Status: install ok installed\n"})
+	f.On("stat -c '%U:%G %a' "+shQuote(offsiteEnvDir), bssh.Result{Stdout: "root:root 755\n"})
+	env, _ := renderOffsiteEnv(s, secrets)
+	stubFileState(f, offsiteEnvPath, env, "root:root 600", true)
+	script, _ := renderOffsiteScript(s)
+	stubFileState(f, offsiteScriptPath, script, "root:root 755", true)
+	cron, _ := renderOffsiteCron(s)
+	stubFileState(f, offsiteCronPath, cron, "root:root 644", true)
+	stubSFTPBoundaryOK(f)
+	stubFileState(f, offsiteKnownHostsPath, offsiteKnownHostsContent(s.Backups.Offsite), "root:root 600", true)
+	f.On("stat -c '%U:%G %a' '/var/lib/berth'", bssh.Result{Stdout: "root:root 755\n"})
+	repo := s.Backups.Offsite.Repository(s.ID)
+	stubFileState(f, offsiteStampPath(repo), offsiteStampContent(repo), "root:root 600", true)
+
+	res, err := Offsite(nil).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Satisfied {
+		t.Fatalf("a fully converged sftp host must be satisfied; changes: %v", res.Changes)
+	}
+}
+
+func TestOffsiteCheckSFTPFlagsMissingKeyAndPin(t *testing.T) {
+	s := offsiteSFTPServer(t)
+	f := bssh.NewFakeRunner()
+	f.On("dpkg -s restic", bssh.Result{Stdout: "Status: install ok installed\n"})
+	f.On("stat -c '%U:%G %a' "+shQuote(offsiteEnvDir), bssh.Result{Stdout: "root:root 755\n"})
+	secrets := map[string]string{secret.OffsiteResticPassword: "fake-restic-pw"}
+	seedOffsiteSecrets(t, s, secrets)
+	env, _ := renderOffsiteEnv(s, secrets)
+	stubFileState(f, offsiteEnvPath, env, "root:root 600", true)
+	script, _ := renderOffsiteScript(s)
+	stubFileState(f, offsiteScriptPath, script, "root:root 755", true)
+	cron, _ := renderOffsiteCron(s)
+	stubFileState(f, offsiteCronPath, cron, "root:root 644", true)
+	f.On("test -L '/root/.ssh'", bssh.Result{ExitCode: 1})
+	f.On("test -L "+shQuote(offsiteSSHKeyPath), bssh.Result{ExitCode: 1})
+	f.On("stat -c '%U:%G %a' '/root/.ssh'", bssh.Result{Stdout: "root:root 700\n"})
+	f.On("stat -c '%U:%G %a' "+shQuote(offsiteSSHKeyPath), bssh.Result{ExitCode: 1})                // key absent
+	stubFileState(f, offsiteKnownHostsPath, offsiteKnownHostsContent(s.Backups.Offsite), "", false) // pin absent
+	f.On("stat -c '%U:%G %a' '/var/lib/berth'", bssh.Result{Stdout: "root:root 755\n"})
+	repo := s.Backups.Offsite.Repository(s.ID)
+	stubFileState(f, offsiteStampPath(repo), offsiteStampContent(repo), "", false)
+
+	res, err := Offsite(nil).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Satisfied {
+		t.Fatal("missing keypair + pin must be drift")
+	}
+	joined := strings.Join(res.Changes, "\n")
+	for _, want := range []string{"generate offsite ssh keypair", "write " + offsiteKnownHostsPath} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("Changes missing %q: %v", want, res.Changes)
+		}
+	}
+}
+
+func TestOffsiteCheckSFTPSymlinkedKeyIsFatal(t *testing.T) {
+	s := offsiteSFTPServer(t)
+	seedOffsiteSecrets(t, s, map[string]string{secret.OffsiteResticPassword: "fake-restic-pw"})
+	f := bssh.NewFakeRunner()
+	f.On("dpkg -s restic", bssh.Result{Stdout: "Status: install ok installed\n"})
+	f.On("stat -c '%U:%G %a' "+shQuote(offsiteEnvDir), bssh.Result{Stdout: "root:root 755\n"})
+	secrets := map[string]string{secret.OffsiteResticPassword: "fake-restic-pw"}
+	env, _ := renderOffsiteEnv(s, secrets)
+	stubFileState(f, offsiteEnvPath, env, "root:root 600", true)
+	script, _ := renderOffsiteScript(s)
+	stubFileState(f, offsiteScriptPath, script, "root:root 755", true)
+	cron, _ := renderOffsiteCron(s)
+	stubFileState(f, offsiteCronPath, cron, "root:root 644", true)
+	f.On("test -L '/root/.ssh'", bssh.Result{ExitCode: 1})
+	f.On("test -L "+shQuote(offsiteSSHKeyPath), bssh.Result{ExitCode: 0}) // SYMLINK
+
+	_, err := Offsite(nil).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("a symlinked key path must be a hard error, never converged over; got %v", err)
+	}
+}
+
+func TestOffsiteApplySFTPGeneratesKeyPinsHostAndWarnsPubkey(t *testing.T) {
+	s := offsiteSFTPServer(t)
+	seedOffsiteSecrets(t, s, map[string]string{secret.OffsiteResticPassword: "fake-restic-pw"})
+	f := bssh.NewFakeRunner()
+	f.On("dpkg -s restic", bssh.Result{Stdout: "Status: install ok installed\n"})
+	f.On("install -d -o root -g root -m 0755 "+shQuote(offsiteEnvDir), bssh.Result{})
+	secrets := map[string]string{secret.OffsiteResticPassword: "fake-restic-pw"}
+	env, _ := renderOffsiteEnv(s, secrets)
+	stubFileState(f, offsiteEnvPath, env, "", false)
+	script, _ := renderOffsiteScript(s)
+	stubFileState(f, offsiteScriptPath, script, "", false)
+	f.On("bash -n "+shQuote(offsiteScriptPath), bssh.Result{})
+	cron, _ := renderOffsiteCron(s)
+	stubFileState(f, offsiteCronPath, cron, "", false)
+	// Security boundary: no symlinks, dir created, key absent -> keygen.
+	f.On("test -L '/root/.ssh'", bssh.Result{ExitCode: 1})
+	f.On("test -L "+shQuote(offsiteSSHKeyPath), bssh.Result{ExitCode: 1})
+	f.On("install -d -o root -g root -m 0700 '/root/.ssh'", bssh.Result{})
+	f.On("stat -c '%U:%G %a' "+shQuote(offsiteSSHKeyPath), bssh.Result{ExitCode: 1}) // absent
+	f.On("ssh-keygen -t ed25519 -N '' -C berth-offsite -f "+shQuote(offsiteSSHKeyPath), bssh.Result{})
+	// Dedicated known_hosts file is an ordinary managed file: absent -> write.
+	stubFileState(f, offsiteKnownHostsPath, offsiteKnownHostsContent(s.Backups.Offsite), "", false)
+	f.On("install -d -o root -g root -m 0755 '/var/lib/berth'", bssh.Result{})
+	probe := "set -a && . " + shQuote(offsiteEnvPath) + " && restic" + offsiteResticOpts(s.Backups.Offsite) + " cat config >/dev/null"
+	f.On(probe, bssh.Result{ExitCode: 1, Stderr: "Fatal: unable to open config file\nPermission denied (publickey)\n"})
+	// The transient-failure warning fetches the pubkey to repeat the
+	// authorize hint on EVERY failing run (not only the generation run).
+	f.On("cat "+shQuote(offsiteSSHKeyPath+".pub"), bssh.Result{Stdout: "ssh-ed25519 AAAAC3GENERATED berth-offsite\n"})
+
+	var warned, unconverged []string
+	rc := provision.RunCtx{
+		Warn:            func(msg string) { warned = append(warned, msg) },
+		NoteUnconverged: func(reason string) { unconverged = append(unconverged, reason) },
+	}
+	if err := Offsite(nil).Apply(context.Background(), rc, s, f); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(warned, "\n")
+	if !strings.Contains(joined, "ssh-ed25519 AAAAC3GENERATED berth-offsite") {
+		t.Errorf("the public key to authorize must ride the failing-probe warning; got %v", warned)
+	}
+	if len(unconverged) != 1 {
+		t.Errorf("unverified repo must mark unconverged; got %v", unconverged)
+	}
+	// The pin must have been WRITTEN as a managed file (never sed/grep).
+	pinned := false
+	for _, w := range f.Writes() {
+		if w.Path == offsiteKnownHostsPath && string(w.Content) == string(offsiteKnownHostsContent(s.Backups.Offsite)) {
+			pinned = true
+		}
+	}
+	if !pinned {
+		t.Fatal("the dedicated known_hosts file must be written via WriteFile")
+	}
+	repo := s.Backups.Offsite.Repository(s.ID)
+	for _, w := range f.Writes() {
+		if w.Path == offsiteStampPath(repo) {
+			t.Fatal("no stamp while the probe fails")
+		}
+	}
+}
