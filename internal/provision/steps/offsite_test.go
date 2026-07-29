@@ -83,7 +83,7 @@ func seedOffsiteSecrets(t *testing.T, s *config.Server, kv map[string]string) {
 
 func TestOffsiteCheckDisabledCleanHost(t *testing.T) {
 	f := bssh.NewFakeRunner()
-	for _, p := range []string{offsiteScriptPath, offsiteCronPath, offsiteEnvPath} {
+	for _, p := range []string{offsiteScriptPath, offsiteCronPath, offsiteEnvPath, offsiteKnownHostsPath} {
 		stubManagedAbsent(f, p) // same read-probe shape as stubFileState, absent variant
 	}
 	s := offsiteS3Server(t)
@@ -105,6 +105,7 @@ func TestOffsiteCheckDisabledSweepsLingeringArtifacts(t *testing.T) {
 	stubManagedPresent(f, offsiteScriptPath) // berth-marked content at the path
 	stubManagedAbsent(f, offsiteCronPath)
 	stubManagedAbsent(f, offsiteEnvPath)
+	stubManagedPresent(f, offsiteKnownHostsPath) // the host-key pin is berth-marked too
 	s := offsiteS3Server(t)
 	s.Backups.Offsite = nil
 	res, err := Offsite(nil).Check(context.Background(), provision.RunCtx{}, s, f)
@@ -114,7 +115,10 @@ func TestOffsiteCheckDisabledSweepsLingeringArtifacts(t *testing.T) {
 	if res.Satisfied {
 		t.Fatal("lingering offsite script must be drift")
 	}
-	want := []string{"remove " + offsiteScriptPath + " (offsite disabled)"}
+	want := []string{
+		"remove " + offsiteScriptPath + " (offsite disabled)",
+		"remove " + offsiteKnownHostsPath + " (offsite disabled)",
+	}
 	if !reflect.DeepEqual(res.Changes, want) {
 		t.Errorf("Changes = %v, want %v", res.Changes, want)
 	}
@@ -470,14 +474,23 @@ func TestOffsiteApplyDisabledSweepsMarkerGuarded(t *testing.T) {
 	stubManagedPresent(f, offsiteScriptPath)
 	f.On("rm -f "+shQuote(offsiteScriptPath), bssh.Result{})
 	stubManagedAbsent(f, offsiteCronPath)
-	stubManagedForeign(f, offsiteEnvPath) // exists WITHOUT the marker
+	stubManagedForeign(f, offsiteEnvPath)        // exists WITHOUT the marker
+	stubManagedPresent(f, offsiteKnownHostsPath) // berth-marked pin sweeps too
+	f.On("rm -f "+shQuote(offsiteKnownHostsPath), bssh.Result{})
 	if err := Offsite(nil).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatal(err)
 	}
+	pinRemoved := false
 	for _, c := range f.Calls() {
 		if c.Cmd == "rm -f "+shQuote(offsiteEnvPath) {
 			t.Fatal("a foreign (unmarked) file must never be removed")
 		}
+		if c.Cmd == "rm -f "+shQuote(offsiteKnownHostsPath) {
+			pinRemoved = true
+		}
+	}
+	if !pinRemoved {
+		t.Fatal("the berth-marked host-key pin must be swept on disable")
 	}
 }
 

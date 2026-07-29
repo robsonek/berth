@@ -40,6 +40,13 @@ const (
 	offsiteKnownHostsPath = "/root/.ssh/berth_offsite_known_hosts"
 )
 
+// offsiteSweepPaths are the berth-managed host artifacts the disabled mode
+// drift-removes, marker-guarded (single source for the disabled Check and
+// sweepDisabled). The sftp keypair deliberately stays: it may still be
+// authorized on the operator's remote target — remove
+// /root/.ssh/berth_offsite* manually if unwanted.
+var offsiteSweepPaths = []string{offsiteScriptPath, offsiteCronPath, offsiteEnvPath, offsiteKnownHostsPath}
+
 // offsiteKnownHostsContent renders the pin file: the managed marker (a
 // comment line to ssh) followed by the operator-declared ssh-keyscan line,
 // whose first field validation has pinned to KnownHostsToken().
@@ -165,7 +172,7 @@ func (o offsite) registerSecrets(secrets map[string]string) {
 func (o offsite) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
 	if !s.OffsiteEnabled() {
 		var changes []string
-		for _, p := range []string{offsiteScriptPath, offsiteCronPath, offsiteEnvPath} {
+		for _, p := range offsiteSweepPaths {
 			present, err := managedFilePresent(ctx, r, p)
 			if err != nil {
 				return provision.CheckResult{}, err
@@ -536,11 +543,13 @@ func (o offsite) ensureRepo(ctx context.Context, rc provision.RunCtx, r bssh.Run
 	return writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{Path: offsiteStampPath(repo), Content: offsiteStampContent(repo), Owner: "root", Group: "root", Mode: 0o600, Sudo: true})
 }
 
-// sweepDisabled removes lingering berth-managed offsite host artifacts.
-// The remote repository is never touched (operator's data retention), and a
-// foreign (unmarked) file at any of the paths is never removed.
+// sweepDisabled removes lingering berth-managed offsite host artifacts
+// (offsiteSweepPaths — script, cron, env file, host-key pin). The remote
+// repository is never touched (operator's data retention), a foreign
+// (unmarked) file at any of the paths is never removed, and the sftp keypair
+// stays (see offsiteSweepPaths).
 func (o offsite) sweepDisabled(ctx context.Context, r bssh.Runner) error {
-	for _, p := range []string{offsiteScriptPath, offsiteCronPath, offsiteEnvPath} {
+	for _, p := range offsiteSweepPaths {
 		present, err := managedFilePresent(ctx, r, p)
 		if err != nil {
 			return err

@@ -38,9 +38,11 @@ func (e *Endpoint) valid() bool {
 //
 // The secrets-map key grammar is FROZEN as of the first real deployment:
 // bare "<dbUser>" (DB password), "appkey:<dbUser>" (APP_KEY backup),
-// "console:berth" (break-glass ownership marker). New secret kinds get NEW
-// "<kind>:" prefixes; the three existing spellings never change (renaming
-// them would orphan every live cache).
+// "console:berth" (break-glass ownership marker), plus three RESERVED flat
+// names — "offsite_s3_access_key", "offsite_s3_secret_key" and
+// "offsite_restic_password" — which double as the `berth secret set` CLI
+// names. Other new secret kinds get NEW "<kind>:" prefixes; the existing
+// spellings never change (renaming them would orphan every live cache).
 type Envelope struct {
 	Version    int               `json:"version"`
 	Endpoint   *Endpoint         `json:"endpoint"`
