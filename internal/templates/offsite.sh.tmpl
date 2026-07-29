@@ -10,5 +10,5 @@ set -a
 . {{ .EnvFile }}
 set +a
 restic{{ .ResticOpts }} backup {{ .BackupBaseDir }} --host {{ .HostID }} --exclude '.tmp-*' --exclude '.lock' --exclude '.artifacts.lock' --exclude '.offsite.lock'
-restic{{ .ResticOpts }} forget --prune --keep-daily {{ .KeepDaily }} --keep-weekly {{ .KeepWeekly }} --keep-monthly {{ .KeepMonthly }}
+restic{{ .ResticOpts }} forget --prune{{ if .KeepLast }} --keep-last {{ .KeepLast }}{{ end }}{{ if .KeepHourly }} --keep-hourly {{ .KeepHourly }}{{ end }} --keep-daily {{ .KeepDaily }} --keep-weekly {{ .KeepWeekly }} --keep-monthly {{ .KeepMonthly }}
 echo "[$(date -u +%FT%TZ)] berth offsite: done"

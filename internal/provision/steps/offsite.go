@@ -118,7 +118,7 @@ func renderOffsiteScript(s *config.Server) ([]byte, error) {
 	off := s.Backups.Offsite
 	return templates.Render("offsite.sh.tmpl", struct {
 		LogFile, LockFile, ArtifactsLock, EnvFile, ResticOpts, BackupBaseDir, HostID string
-		KeepDaily, KeepWeekly, KeepMonthly                                           int
+		KeepLast, KeepHourly, KeepDaily, KeepWeekly, KeepMonthly                     int
 	}{
 		LogFile:       offsiteLogPath,
 		LockFile:      offsiteLockPath,
@@ -127,6 +127,8 @@ func renderOffsiteScript(s *config.Server) ([]byte, error) {
 		ResticOpts:    offsiteResticOpts(off),
 		BackupBaseDir: backupBaseDir,
 		HostID:        s.ID,
+		KeepLast:      off.Keep.Last,
+		KeepHourly:    off.Keep.Hourly,
 		KeepDaily:     off.Keep.DailyEff(),
 		KeepWeekly:    off.Keep.WeeklyEff(),
 		KeepMonthly:   off.Keep.MonthlyEff(),

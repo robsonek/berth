@@ -20,6 +20,11 @@ Notable changes to berth. Older releases are documented on the
   next run re-renders every local backup script once (they now take a
   shared artifacts lock, so an offsite snapshot never catches a
   half-written archive) — a one-time, reload-free re-apply.
+- **Sub-daily offsite retention** — `backups.offsite.keep` gains `last` and
+  `hourly` (restic `--keep-last` / `--keep-hourly`), so running offsite more
+  than once a day can retain several copies per day instead of collapsing to
+  one. Opt-in (default off) and additive to the existing daily/weekly/monthly
+  policy.
 
 ## [0.26.0] — 2026-07-29
 

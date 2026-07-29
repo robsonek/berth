@@ -666,7 +666,7 @@ func (o *Offsite) validate() error {
 	for _, k := range []struct {
 		name string
 		v    int
-	}{{"daily", o.Keep.Daily}, {"weekly", o.Keep.Weekly}, {"monthly", o.Keep.Monthly}} {
+	}{{"last", o.Keep.Last}, {"hourly", o.Keep.Hourly}, {"daily", o.Keep.Daily}, {"weekly", o.Keep.Weekly}, {"monthly", o.Keep.Monthly}} {
 		if k.v != 0 && (k.v < 1 || k.v > 3650) {
 			return fmt.Errorf("backups.offsite.keep.%s %d out of range (1-3650)", k.name, k.v)
 		}

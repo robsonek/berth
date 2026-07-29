@@ -1565,13 +1565,13 @@ func TestConfigMatrix(t *testing.T) {
 		a.Backups = BackupsAnswers{Enabled: true, Offsite: OffsiteAnswers{
 			Enabled: true, Backend: "s3", Endpoint: "s3.example.com", Bucket: "bkt",
 			Prefix: "berth/custom", Schedule: "45 4 * * *",
-			KeepDaily: 10, KeepWeekly: 5, KeepMonthly: 12,
+			KeepLast: 12, KeepHourly: 24, KeepDaily: 10, KeepWeekly: 5, KeepMonthly: 12,
 		}}
 		srv, raw := writeValid(t, a)
 		off := srv.Backups.Offsite
 		if off == nil || off.Backend != "s3" || off.Endpoint != "s3.example.com" || off.Bucket != "bkt" ||
 			off.Prefix != "berth/custom" || off.Schedule != "45 4 * * *" ||
-			off.Keep != (config.OffsiteKeep{Daily: 10, Weekly: 5, Monthly: 12}) {
+			off.Keep != (config.OffsiteKeep{Last: 12, Hourly: 24, Daily: 10, Weekly: 5, Monthly: 12}) {
 			t.Fatalf("offsite = %+v", off)
 		}
 		if !strings.Contains(raw, "offsite:") {

@@ -589,6 +589,22 @@ local cache once via `berth secret set <server.yml>
 offsite_s3_access_key` / `offsite_s3_secret_key`, and the repository
 password is generated automatically into the same cache.
 
+To keep several copies **per day** offsite, set a sub-daily
+`offsite.schedule` and a matching intra-day retention knob — `keep.daily`
+alone collapses each day to its last snapshot:
+
+    backups:
+      offsite:
+        schedule: "0 */6 * * *"   # push every 6 hours
+        keep:
+          last: 12                # keep the 12 most recent snapshots
+          hourly: 48              # and one per hour for the last 48 hours that have a backup
+
+`keep.last` and `keep.hourly` are additive to `daily`/`weekly`/`monthly`
+(restic keeps a snapshot if any policy wants it) and default to off.
+`hourly: N` counts the last N hours that contain a snapshot — not a fixed
+N-hour window — so gaps in the schedule stretch the retained span.
+
 **The restic password is the backup.** It lives in
 `~/.berth/<id>.secrets.json` on the operator machine and in root-owned
 `/etc/berth/offsite.env` on the host. Keep a third copy outside both

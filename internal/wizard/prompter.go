@@ -213,11 +213,15 @@ func (h *huhPrompter) ServerOps(a *Answers) error {
 			return err
 		}
 	}
+	last := strconv.Itoa(o.KeepLast)
+	hourly := strconv.Itoa(o.KeepHourly)
 	daily := strconv.Itoa(o.KeepDaily)
 	weekly := strconv.Itoa(o.KeepWeekly)
 	monthly := strconv.Itoa(o.KeepMonthly)
 	shared := huh.NewForm(huh.NewGroup(
 		huh.NewInput().Title("Offsite schedule (5-field cron, blank=default 15 4 * * *)").Value(&o.Schedule).Validate(optionalCronSchedule),
+		huh.NewInput().Title("Keep last N snapshots (1-3650, blank/0=off)").Value(&last).Validate(optionalInt("backups.offsite.keep.last", 1, 3650)),
+		huh.NewInput().Title("Keep one per hour for the last N hours with snapshots (1-3650, blank/0=off)").Value(&hourly).Validate(optionalInt("backups.offsite.keep.hourly", 1, 3650)),
 		huh.NewInput().Title("Keep daily snapshots (1-3650, blank/0=default 7)").Value(&daily).Validate(optionalInt("backups.offsite.keep.daily", 1, 3650)),
 		huh.NewInput().Title("Keep weekly snapshots (1-3650, blank/0=default 4)").Value(&weekly).Validate(optionalInt("backups.offsite.keep.weekly", 1, 3650)),
 		huh.NewInput().Title("Keep monthly snapshots (1-3650, blank/0=default 6)").Value(&monthly).Validate(optionalInt("backups.offsite.keep.monthly", 1, 3650)),
@@ -225,6 +229,8 @@ func (h *huhPrompter) ServerOps(a *Answers) error {
 	if err := shared.Run(); err != nil {
 		return err
 	}
+	o.KeepLast, _ = parseIntInRange("backups.offsite.keep.last", last, 1, 3650)
+	o.KeepHourly, _ = parseIntInRange("backups.offsite.keep.hourly", hourly, 1, 3650)
 	o.KeepDaily, _ = parseIntInRange("backups.offsite.keep.daily", daily, 1, 3650)
 	o.KeepWeekly, _ = parseIntInRange("backups.offsite.keep.weekly", weekly, 1, 3650)
 	o.KeepMonthly, _ = parseIntInRange("backups.offsite.keep.monthly", monthly, 1, 3650)

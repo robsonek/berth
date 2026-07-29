@@ -81,6 +81,48 @@ func seedOffsiteSecrets(t *testing.T, s *config.Server, kv map[string]string) {
 	}
 }
 
+// offsiteForgetLine extracts the rendered script's restic forget invocation.
+func offsiteForgetLine(t *testing.T, script []byte) string {
+	t.Helper()
+	for _, line := range strings.Split(string(script), "\n") {
+		if strings.HasPrefix(line, "restic ") && strings.Contains(line, "forget") {
+			return line
+		}
+	}
+	t.Fatalf("rendered script has no restic forget line:\n%s", script)
+	return ""
+}
+
+func TestRenderOffsiteScriptForgetLineCombos(t *testing.T) {
+	// keep.last and keep.hourly are independent conditional flags (0 = off);
+	// the goldens cover only both-off and both-on, so this table pins the
+	// exact forget line for every combination — a dropped, swapped, coupled
+	// or Eff-defaulted conditional would slip past the goldens.
+	cases := []struct {
+		name         string
+		last, hourly int
+		want         string
+	}{
+		{"both off", 0, 0, "restic forget --prune --keep-daily 7 --keep-weekly 4 --keep-monthly 6"},
+		{"last only", 12, 0, "restic forget --prune --keep-last 12 --keep-daily 7 --keep-weekly 4 --keep-monthly 6"},
+		{"hourly only", 0, 24, "restic forget --prune --keep-hourly 24 --keep-daily 7 --keep-weekly 4 --keep-monthly 6"},
+		{"both on", 12, 24, "restic forget --prune --keep-last 12 --keep-hourly 24 --keep-daily 7 --keep-weekly 4 --keep-monthly 6"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := offsiteS3Server(t)
+			s.Backups.Offsite.Keep = config.OffsiteKeep{Last: tc.last, Hourly: tc.hourly}
+			script, err := renderOffsiteScript(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := offsiteForgetLine(t, script); got != tc.want {
+				t.Errorf("forget line = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestOffsiteCheckDisabledCleanHost(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	for _, p := range []string{offsiteScriptPath, offsiteCronPath, offsiteEnvPath, offsiteKnownHostsPath} {
