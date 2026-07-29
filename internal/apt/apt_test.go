@@ -1,7 +1,11 @@
 package apt
 
 import (
+	"bytes"
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -32,7 +36,7 @@ func TestSourceContentCarriesMarker(t *testing.T) {
 
 func TestKeyringHoldsExactly(t *testing.T) {
 	repo := NginxOrg()
-	gpgCmd := "gpg --show-keys --with-colons " + repo.KeyringPath()
+	gpgCmd := "gpg --no-options --no-keyring --trust-model always --show-keys --with-colons " + repo.KeyringPath()
 	colons := func(fps ...string) string {
 		var b strings.Builder
 		for _, fp := range fps {
@@ -63,6 +67,104 @@ func TestKeyringHoldsExactly(t *testing.T) {
 				t.Fatalf("got %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// captureRunner records the one command KeyringHoldsExactly issues, so
+// TestKeyringProbeWritesNothing executes the EXACT production string rather
+// than a test-local copy that could drift from apt.go.
+type captureRunner struct{ cmd string }
+
+func (c *captureRunner) Run(_ context.Context, cmd string, _ []byte) (bssh.Result, error) {
+	c.cmd = cmd
+	return bssh.Result{}, nil
+}
+
+func (c *captureRunner) WriteFile(context.Context, bssh.FileSpec) error { return nil }
+
+// mkShortTempDir returns a 0700 temp dir with a SHORT path: gpg's agent
+// socket lives inside the homedir and must fit sun_path (~104 bytes on
+// macOS/BSD), which t.TempDir()'s test-name-embedding paths overflow —
+// key generation then dies with "can't connect to the gpg-agent".
+func mkShortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "berth-gpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+// TestKeyringProbeWritesNothing pins KeyringHoldsExactly's flag set against
+// real gpg: run the exact command the production code emits, against a real
+// keyring, with a fresh empty GNUPGHOME — and require that home to STILL be
+// empty afterwards. Bare gpg initialises pubring.kbx and trustdb.gpg, so the
+// old command made every read-only repo Check write under root's ~/.gnupg;
+// --trust-model always is the load-bearing trustdb suppressor (--no-keyring
+// alone still creates it). Anyone trimming the flags fails here.
+func TestKeyringProbeWritesNothing(t *testing.T) {
+	gpgBin, err := exec.LookPath("gpg")
+	if err != nil {
+		t.Skip("gpg not installed")
+	}
+	// Build a real throwaway keyring offline: generate a scratch key in an
+	// isolated home and export it in binary form. Listing a parseable key is
+	// what makes gpg consult (and, mis-flagged, create) the trust database, so
+	// an empty or bogus keyring would make the no-write assertion vacuous.
+	genHome := mkShortTempDir(t)
+	t.Cleanup(func() {
+		if gpgconf, err := exec.LookPath("gpgconf"); err == nil {
+			_ = exec.Command(gpgconf, "--homedir", genHome, "--kill", "gpg-agent").Run()
+		}
+	})
+	gen := exec.Command(gpgBin, "--homedir", genHome,
+		"--batch", "--pinentry-mode", "loopback", "--passphrase", "",
+		"--quick-generate-key", "berth-keyring-probe-test", "ed25519", "sign", "never")
+	if out, err := gen.CombinedOutput(); err != nil {
+		t.Skipf("cannot generate a scratch key (gpg environment problem, not a code one): %v\n%s", err, out)
+	}
+	keyring := filepath.Join(mkShortTempDir(t), "probe-test.gpg")
+	if out, err := exec.Command(gpgBin, "--homedir", genHome, "--output", keyring, "--export").CombinedOutput(); err != nil {
+		t.Fatalf("export scratch key: %v\n%s", err, out)
+	}
+
+	// Capture the exact command the probe issues, then retarget its trailing
+	// keyring path from /usr/share/keyrings to the local throwaway file.
+	cr := &captureRunner{}
+	if _, err := New(cr).KeyringHoldsExactly(context.Background(), NginxOrg()); err != nil {
+		t.Fatal(err)
+	}
+	remote := " " + NginxOrg().KeyringPath()
+	if !strings.HasSuffix(cr.cmd, remote) {
+		t.Fatalf("captured command %q does not end with the keyring path", cr.cmd)
+	}
+	argv := strings.Fields(strings.TrimSuffix(cr.cmd, remote))
+	if len(argv) == 0 || argv[0] != "gpg" {
+		t.Fatalf("captured command %q is not a gpg invocation", cr.cmd)
+	}
+
+	probeHome := mkShortTempDir(t)
+	probe := exec.Command(gpgBin, append(argv[1:], keyring)...)
+	probe.Env = append(os.Environ(), "GNUPGHOME="+probeHome)
+	var stdout, stderr bytes.Buffer
+	probe.Stdout, probe.Stderr = &stdout, &stderr
+	if err := probe.Run(); err != nil {
+		t.Fatalf("probe command failed — the flag set must still READ the keyring, not merely avoid writes: %v\n%s", err, stderr.String())
+	}
+	if prims := primaryFingerprints(stdout.String()); len(prims) != 1 {
+		t.Fatalf("probe output did not list exactly the scratch primary key (got %v):\n%s", prims, stdout.String())
+	}
+	entries, err := os.ReadDir(probeHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if len(names) != 0 {
+		t.Fatalf("the keyring probe wrote %v into a fresh GNUPGHOME — the read-only Check must not initialise gpg state; do not trim KeyringHoldsExactly's flags", names)
 	}
 }
 

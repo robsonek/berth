@@ -29,7 +29,7 @@ func TestOwnRepoUpToDate(t *testing.T) {
 	repo := apt.NginxOrg()
 	managed := string(mustRepoContent(t, repo))
 	catCmd := "cat '" + repo.SourceListPath() + "'"
-	keyCmd := "gpg --show-keys --with-colons " + repo.KeyringPath()
+	keyCmd := "gpg --no-options --no-keyring --trust-model always --show-keys --with-colons " + repo.KeyringPath()
 	cases := []struct {
 		name    string
 		stub    func(f *bssh.FakeRunner)
@@ -141,7 +141,7 @@ func TestEnsureOwnRepoSkipsWhenConverged(t *testing.T) {
 	repo := apt.NginxOrg()
 	f := bssh.NewFakeRunner().
 		On("cat '"+repo.SourceListPath()+"'", bssh.Result{ExitCode: 0, Stdout: string(mustRepoContent(t, repo))}).
-		On("gpg --show-keys --with-colons "+repo.KeyringPath(), bssh.Result{ExitCode: 0, Stdout: gpgColonsFor(repo.Fingerprint)})
+		On("gpg --no-options --no-keyring --trust-model always --show-keys --with-colons "+repo.KeyringPath(), bssh.Result{ExitCode: 0, Stdout: gpgColonsFor(repo.Fingerprint)})
 	if err := ensureOwnRepo(context.Background(), provision.RunCtx{}, f, repo); err != nil {
 		t.Fatal(err)
 	}

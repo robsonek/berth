@@ -148,7 +148,7 @@ func TestAptCheckLowercaseFingerprintConverges(t *testing.T) {
 	f := bssh.NewFakeRunner().
 		On(aptFindCmd, noLists).
 		On("cat '"+repo.SourceListPath()+"'", bssh.Result{ExitCode: 0, Stdout: string(mustRepoContent(t, repo))}).
-		On("gpg --show-keys --with-colons "+repo.KeyringPath(), bssh.Result{ExitCode: 0, Stdout: gpgColonsFor(upper)})
+		On("gpg --no-options --no-keyring --trust-model always --show-keys --with-colons "+repo.KeyringPath(), bssh.Result{ExitCode: 0, Stdout: gpgColonsFor(upper)})
 	res, err := Apt().Check(context.Background(), provision.RunCtx{}, aptTestServer(config.Apt{Repos: []config.AptRepo{cfg}}), f)
 	if err != nil {
 		t.Fatal(err)
@@ -167,7 +167,7 @@ func TestAptCheckKeyringDivergedFlagsRestore(t *testing.T) {
 	f := bssh.NewFakeRunner().
 		On(aptFindCmd, noLists).
 		On("cat '"+repo.SourceListPath()+"'", bssh.Result{ExitCode: 0, Stdout: string(mustRepoContent(t, repo))}).
-		On("gpg --show-keys --with-colons "+repo.KeyringPath(), bssh.Result{ExitCode: 0, Stdout: gpgColonsFor(strings.Repeat("A", 40))})
+		On("gpg --no-options --no-keyring --trust-model always --show-keys --with-colons "+repo.KeyringPath(), bssh.Result{ExitCode: 0, Stdout: gpgColonsFor(strings.Repeat("A", 40))})
 	res, err := Apt().Check(context.Background(), provision.RunCtx{}, aptTestServer(config.Apt{Repos: []config.AptRepo{cfg}}), f)
 	if err != nil {
 		t.Fatal(err)

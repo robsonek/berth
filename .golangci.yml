@@ -28,6 +28,14 @@ linters:
       - path: test/integration/envoverwrite_test\.go
         linters: [gosec]
         text: "G204"
+      # TestKeyringProbeWritesNothing deliberately executes the EXACT gpg
+      # command string captured from KeyringHoldsExactly against a throwaway
+      # GNUPGHOME — running the real binary is the point (it pins the
+      # no-write flag set). The "tainted" argv is the production-authored
+      # command and test-owned temp paths, never user input.
+      - path: internal/apt/apt_test\.go
+        linters: [gosec]
+        text: "G204"
       # gosec pattern-matches the offsite secret NAME constants
       # (OffsiteS3SecretKey, OffsiteResticPassword) as hardcoded
       # credentials; they are secret-cache map KEYS (names), never values.
