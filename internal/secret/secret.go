@@ -4,6 +4,7 @@ package secret
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
 	"math/big"
 	"sort"
 	"strings"
@@ -25,6 +26,50 @@ func Generate(n int) (string, error) {
 		b[i] = alphabet[idx.Int64()]
 	}
 	return string(b), nil
+}
+
+// Settable secret names — the `berth secret set` allowlist. The offsite cloud
+// credentials are operator-owned (berth cannot generate them); the restic
+// repository password is auto-generated on first use but may be set ahead of
+// time (or corrected after a cache restore).
+//
+//nolint:gosec // G101 false positive: these are secret NAMES (envelope map keys), never credential values.
+const (
+	OffsiteS3AccessKey    = "offsite_s3_access_key"
+	OffsiteS3SecretKey    = "offsite_s3_secret_key"
+	OffsiteResticPassword = "offsite_restic_password"
+)
+
+// SettableNames lists the names `berth secret set` accepts, in display order.
+func SettableNames() []string {
+	return []string{OffsiteS3AccessKey, OffsiteS3SecretKey, OffsiteResticPassword}
+}
+
+// ValidateSecretValue enforces the quoting contract for values that land
+// single-quoted inside a root-sourced env file on the host: single line,
+// non-empty, bounded, no quotes and no control characters. It runs at
+// ingestion (berth secret set) AND after every cache load in the offsite
+// step — the cache file is operator-editable and restorable, so a loaded
+// value is untrusted input until revalidated.
+func ValidateSecretValue(v string) error {
+	if v == "" {
+		return fmt.Errorf("secret value is empty")
+	}
+	if len(v) > 4096 {
+		return fmt.Errorf("secret value exceeds 4096 bytes")
+	}
+	if strings.ContainsAny(v, "\n\r") {
+		return fmt.Errorf("secret value must be a single line")
+	}
+	if strings.Contains(v, "'") {
+		return fmt.Errorf("secret value must not contain single quotes (it is stored single-quoted in /etc/berth/offsite.env)")
+	}
+	for _, r := range v {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("secret value must not contain control characters")
+		}
+	}
+	return nil
 }
 
 // AppKey returns a Laravel APP_KEY: "base64:" followed by 32 cryptographically
