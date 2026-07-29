@@ -3,6 +3,21 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Added
+
+- **Offsite backups (restic)** — `backups.offsite` ships the nightly local
+  backup artifacts to an encrypted restic repository (any S3-compatible
+  endpoint, or SFTP with a dedicated pinned key): one box-level snapshot
+  per night plus `forget --prune` with a configurable keep policy
+  (7d/4w/6m default). The YAML stays secret-free — S3 credentials enter
+  the local secret cache via the new `berth secret set` command, and the
+  repository password is auto-generated into the same cache (keep a copy
+  outside both machines: it IS the backup). The step is always registered:
+  removing `backups.offsite` sweeps the host artifacts it left behind and
+  never touches the remote repository.
+
 ## [0.26.0] — 2026-07-29
 
 ### Added
