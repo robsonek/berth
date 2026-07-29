@@ -8,11 +8,23 @@ permissions:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.26"
+      # An unmatched -fuzz regex is a silent no-op ("no fuzz tests to fuzz",
+      # exit 0), so a renamed target would disable its weekly fuzzing without
+      # failing anything. Fail loudly here instead.
+      - name: Verify fuzz targets exist
+        run: |
+          for t in FuzzValidFingerprint FuzzConfigLoad; do
+            go test -list "^${t}$" ./internal/config/ | grep -qx "$t" || { echo "missing fuzz target: $t"; exit 1; }
+          done
+          for t in FuzzEnvFile FuzzLoadEnvelope; do
+            go test -list "^${t}$" ./internal/secret/ | grep -qx "$t" || { echo "missing fuzz target: $t"; exit 1; }
+          done
       - name: Fuzz config parsers
         run: |
           go test -run='^$' -fuzz='^FuzzValidFingerprint$' -fuzztime=5m ./internal/config/
