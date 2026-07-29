@@ -1,0 +1,5 @@
+# managed by berth
+RESTIC_REPOSITORY='s3:https://s3.example.com/bkt/berth/box-1'
+RESTIC_PASSWORD='fake-password-123'
+AWS_ACCESS_KEY_ID='AKIAEXAMPLE'
+AWS_SECRET_ACCESS_KEY='fake/secret+KEY'

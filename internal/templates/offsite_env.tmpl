@@ -1,0 +1,6 @@
+RESTIC_REPOSITORY='{{ .Repository }}'
+RESTIC_PASSWORD='{{ .Password }}'
+{{- if .S3 }}
+AWS_ACCESS_KEY_ID='{{ .AccessKey }}'
+AWS_SECRET_ACCESS_KEY='{{ .SecretKey }}'
+{{- end }}
