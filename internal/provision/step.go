@@ -120,3 +120,25 @@ func isAlwaysRun(s Step) bool {
 	ar, ok := s.(AlwaysRun)
 	return ok && ar.AlwaysRun()
 }
+
+// DeliberatelyUnsatisfied is an optional Step trait marking a step whose Check
+// reports Satisfied:false BY DESIGN on every run, so its Apply can re-run
+// unconditional work (preflight's `apt-get update`). It is orthogonal to
+// AlwaysRun: AlwaysRun means "always selected for execution", this means
+// "never counts as drift". A read-only inspection (berth status --drift) must
+// subtract marked steps from its drift count — otherwise every healthy host
+// reports permanent drift and the count stops meaning anything.
+//
+// identity is AlwaysRun but deliberately NOT marked: its Check is honest
+// (Satisfied once the local secret cache is converged), so an unsatisfied
+// identity is genuine drift.
+type DeliberatelyUnsatisfied interface {
+	DeliberatelyUnsatisfied() bool
+}
+
+// IsDeliberatelyUnsatisfied reports whether s opts into the
+// DeliberatelyUnsatisfied trait.
+func IsDeliberatelyUnsatisfied(s Step) bool {
+	d, ok := s.(DeliberatelyUnsatisfied)
+	return ok && d.DeliberatelyUnsatisfied()
+}

@@ -22,6 +22,12 @@ func (preflight) Requires() []string { return nil }
 // dependency gate does not treat that as a missing prerequisite.
 func (preflight) AlwaysRun() bool { return true }
 
+// DeliberatelyUnsatisfied marks preflight's always-false Check as by-design,
+// so a read-only inspection does not count it as drift (see the Check comment
+// below: it always "acts" but reports satisfied=false so Apply runs once per
+// run).
+func (preflight) DeliberatelyUnsatisfied() bool { return true }
+
 func (preflight) Check(ctx context.Context, rc provision.RunCtx, _ *config.Server, r bssh.Runner) (provision.CheckResult, error) {
 	res, err := r.Run(ctx, ". /etc/os-release && echo $VERSION_CODENAME", nil)
 	if err != nil {
