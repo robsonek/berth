@@ -300,7 +300,7 @@ func TestRenderBackupScriptGolden(t *testing.T) {
 // offsite.sh.tmpl (test-local copy — keep the fields in sync).
 type offsiteScriptGoldenData struct {
 	LogFile, LockFile, ArtifactsLock, EnvFile, ResticOpts, BackupBaseDir, HostID string
-	KeepDaily, KeepWeekly, KeepMonthly                                           int
+	KeepLast, KeepHourly, KeepDaily, KeepWeekly, KeepMonthly                     int
 }
 
 func offsiteScriptGoldenBase() offsiteScriptGoldenData {
@@ -328,6 +328,16 @@ func TestRenderOffsiteScriptSFTPGolden(t *testing.T) {
 	d := offsiteScriptGoldenBase()
 	d.ResticOpts = " -o sftp.command='ssh -F /dev/null -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/dev/null -o UserKnownHostsFile=/root/.ssh/berth_offsite_known_hosts -i /root/.ssh/berth_offsite -p 22 backup@sftp.example.com -s sftp'"
 	checkGolden(t, "offsite.sh.tmpl", "offsite_sh_sftp.golden", d)
+}
+
+func TestRenderOffsiteScriptSubdailyGolden(t *testing.T) {
+	// Sub-daily retention: keep.last / keep.hourly are opt-in (0 = off), so
+	// only this fixture sets them — the s3/sftp cases above leave both at 0
+	// and their goldens must stay byte-identical.
+	d := offsiteScriptGoldenBase()
+	d.KeepLast = 12
+	d.KeepHourly = 24
+	checkGolden(t, "offsite.sh.tmpl", "offsite_sh_subdaily.golden", d)
 }
 
 func TestRenderOffsiteEnvGolden(t *testing.T) {
