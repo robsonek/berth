@@ -17,6 +17,69 @@ func TestEnsurePackagesFromDebianStock(t *testing.T) {
 	}
 }
 
+func TestSourceContentCarriesMarker(t *testing.T) {
+	b, err := NginxOrg().SourceContent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// LegacySourceContents()[0] is by definition the CURRENT marker-less
+	// bytes, so managed content = marker line + that.
+	want := "# managed by berth\n" + NginxOrg().LegacySourceContents()[0]
+	if string(b) != want {
+		t.Fatalf("SourceContent:\n got %q\nwant %q", b, want)
+	}
+}
+
+func TestKeyringHoldsExactly(t *testing.T) {
+	repo := NginxOrg()
+	gpgCmd := "gpg --show-keys --with-colons " + repo.KeyringPath()
+	colons := func(fps ...string) string {
+		var b strings.Builder
+		for _, fp := range fps {
+			b.WriteString("pub:u:4096:1:0000000000000000:1::::::scESC::::::23::0:\n")
+			b.WriteString("fpr:::::::::" + fp + ":\n")
+		}
+		return b.String()
+	}
+	cases := []struct {
+		name string
+		stub bssh.Result
+		want bool
+	}{
+		{"absent keyring", bssh.Result{ExitCode: 2}, false},
+		{"exact pinned key", bssh.Result{ExitCode: 0, Stdout: colons(repo.Fingerprint)}, true},
+		{"wrong key", bssh.Result{ExitCode: 0, Stdout: colons(strings.Repeat("A", 40))}, false},
+		{"pinned plus smuggled key", bssh.Result{ExitCode: 0, Stdout: colons(repo.Fingerprint, strings.Repeat("B", 40))}, false},
+		{"empty keyring", bssh.Result{ExitCode: 0, Stdout: ""}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := bssh.NewFakeRunner().On(gpgCmd, tc.stub)
+			got, err := New(f).KeyringHoldsExactly(context.Background(), repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRemoveRepoSweepsListKeyringAndUpdates(t *testing.T) {
+	repo := NginxOrg()
+	f := bssh.NewFakeRunner().
+		On("rm -f "+repo.SourceListPath()+" "+repo.KeyringPath(), bssh.Result{ExitCode: 0}).
+		On("apt-get update", bssh.Result{ExitCode: 0})
+	if err := New(f).RemoveRepo(context.Background(), repo); err != nil {
+		t.Fatal(err)
+	}
+	calls := f.Calls()
+	if len(calls) != 2 || !strings.HasPrefix(calls[0].Cmd, "rm -f ") || calls[1].Cmd != "apt-get update" {
+		t.Fatalf("unexpected call sequence: %+v", calls)
+	}
+}
+
 func TestEnsureRepoVerifiesFingerprint(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	// The key download succeeds; the fingerprint check is what must fail: gpg
@@ -31,17 +94,19 @@ func TestEnsureRepoVerifiesFingerprint(t *testing.T) {
 
 // keyTrustCmds returns the exact remote commands of EnsureRepo's key-trust
 // sequence for a repo, in execution order. Temp files live under root-owned
-// /run/berth, never world-writable /tmp.
-func keyTrustCmds(repo Repo) (workdir, dl, dearmor, export, show, cleanup string) {
-	keyring := "/usr/share/keyrings/" + repo.Name + ".gpg"
+// /run/berth, never world-writable /tmp; the pinned key is extracted and
+// verified on a STAGING keyring and only then installed at the trusted path.
+func keyTrustCmds(repo Repo) (workdir, dl, dearmor, export, show, install, cleanup string) {
 	tmpKey := "/run/berth/key-" + repo.Name
 	tmpRing := "/run/berth/keyring-" + repo.Name + ".gpg"
+	tmpOut := "/run/berth/pinned-" + repo.Name + ".gpg"
 	workdir = "install -d -m 700 /run/berth"
-	dl = "curl -fsSL " + repo.KeyURL + " -o " + tmpKey
+	dl = "curl -fsSL -o " + tmpKey + " -- '" + repo.KeyURL + "'"
 	dearmor = "gpg --yes -o " + tmpRing + " --dearmor " + tmpKey
-	export = "gpg --no-default-keyring --keyring " + tmpRing + " --yes -o " + keyring + " --export " + repo.Fingerprint
-	show = "gpg --show-keys --with-colons " + keyring
-	cleanup = "rm -f " + tmpKey + " " + tmpRing
+	export = "gpg --no-default-keyring --keyring " + tmpRing + " --yes -o " + tmpOut + " --export " + repo.Fingerprint
+	show = "gpg --show-keys --with-colons " + tmpOut
+	install = "install -m 0644 " + tmpOut + " " + repo.KeyringPath()
+	cleanup = "rm -f " + tmpKey + " " + tmpRing + " " + tmpOut
 	return
 }
 
@@ -58,13 +123,24 @@ func colonsPrimary(fpr string) string {
 
 // stubKeyTrust stubs the whole key-trust sequence; show-keys returns colons.
 func stubKeyTrust(f *bssh.FakeRunner, repo Repo, colons string) {
-	workdir, dl, dearmor, export, show, cleanup := keyTrustCmds(repo)
+	workdir, dl, dearmor, export, show, install, cleanup := keyTrustCmds(repo)
 	f.On(workdir, bssh.Result{})
 	f.On(dl, bssh.Result{})
 	f.On(dearmor, bssh.Result{})
 	f.On(export, bssh.Result{})
 	f.On(show, bssh.Result{Stdout: colons})
+	f.On(install, bssh.Result{})
 	f.On(cleanup, bssh.Result{})
+}
+
+// mustSourceContent renders the repo's managed source bytes or fails the test.
+func mustSourceContent(t *testing.T, r Repo) []byte {
+	t.Helper()
+	b, err := r.SourceContent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 func TestPrimaryFingerprints(t *testing.T) {
@@ -91,7 +167,7 @@ func TestEnsureRepoExtractsOnlyPinnedKey(t *testing.T) {
 	if err := New(f).EnsureRepo(context.Background(), Sury()); err != nil {
 		t.Fatalf("EnsureRepo() error = %v", err)
 	}
-	_, _, _, export, _, cleanup := keyTrustCmds(Sury())
+	_, _, _, export, _, _, cleanup := keyTrustCmds(Sury())
 	var sawExport, sawCleanup bool
 	for _, c := range f.Calls() {
 		if c.Cmd == export {
@@ -111,7 +187,7 @@ func TestEnsureRepoExtractsOnlyPinnedKey(t *testing.T) {
 
 func TestEnsureRepoFailsWhenBundleLacksPinnedKey(t *testing.T) {
 	f := bssh.NewFakeRunner()
-	workdir, dl, dearmor, export, show, _ := keyTrustCmds(Sury())
+	workdir, dl, dearmor, export, show, _, _ := keyTrustCmds(Sury())
 	f.On(workdir, bssh.Result{})
 	f.On(dl, bssh.Result{})
 	f.On(dearmor, bssh.Result{})
@@ -146,7 +222,7 @@ func TestEnsureRepoSurfacesDownloadFailure(t *testing.T) {
 	// A failed key download must be reported as a download error, not surface
 	// later as a misleading fingerprint mismatch.
 	f := bssh.NewFakeRunner()
-	workdir, dl, _, _, _, _ := keyTrustCmds(Sury())
+	workdir, dl, _, _, _, _, _ := keyTrustCmds(Sury())
 	f.On(workdir, bssh.Result{})
 	f.On(dl, bssh.Result{ExitCode: 22, Stderr: "curl: (22) The requested URL returned error: 404"})
 
@@ -247,7 +323,7 @@ func TestEnsureRepoUsesKeyURLNotURISuffix(t *testing.T) {
 		t.Fatalf("expected fingerprint mismatch, got %v", err)
 	}
 	var sawDL bool
-	_, dl, _, _, _, _ := keyTrustCmds(NginxOrg())
+	_, dl, _, _, _, _, _ := keyTrustCmds(NginxOrg())
 	for _, c := range f.Calls() {
 		if c.Cmd == dl {
 			sawDL = true
@@ -282,6 +358,58 @@ func TestEnsureRepoFailsWhenUpstreamNeverIndexes(t *testing.T) {
 	}
 	if verifies != repoIndexRetries {
 		t.Errorf("expected the verify to be retried %d times, got %d", repoIndexRetries, verifies)
+	}
+}
+
+func TestEnsureRepoRollsBackSourceOnIndexFailure(t *testing.T) {
+	prevLock, prevIdx := aptLockSleep, repoIndexSleep
+	aptLockSleep, repoIndexSleep = func() {}, func() {}
+	defer func() { aptLockSleep, repoIndexSleep = prevLock, prevIdx }()
+
+	f := bssh.NewFakeRunner()
+	stubKeyTrust(f, Sury(), colonsPrimary(Sury().Fingerprint))
+	f.On("apt-get update", bssh.Result{ExitCode: 0})
+	verify := "apt-get update -o Dir::Etc::sourcelist=sources.list.d/sury-php.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o APT::Update::Error-Mode=any"
+	f.On(verify, bssh.Result{ExitCode: 100, Stderr: "Err:1 ... Could not connect"})
+	rollback := "rm -f " + Sury().SourceListPath() + " " + Sury().KeyringPath()
+	f.On(rollback, bssh.Result{ExitCode: 0})
+
+	err := New(f).EnsureRepo(context.Background(), Sury())
+	if err == nil || !strings.Contains(err.Error(), "failed to index") {
+		t.Fatalf("expected the loud index-failure error, got %v", err)
+	}
+	// An unindexable repo must not linger as a trusted source across runs:
+	// after exhausting the retries the just-written list AND keyring go away.
+	var sawRollback bool
+	for _, c := range f.Calls() {
+		if c.Cmd == rollback {
+			sawRollback = true
+		}
+	}
+	if !sawRollback {
+		t.Fatal("expected the rollback rm -f of the source list and keyring after index verification failed")
+	}
+}
+
+func TestEnsureRepoWritesManagedSource(t *testing.T) {
+	// The .list bytes must be the marker-prefixed managed content (the same
+	// bytes step Checks compare against), single-sourced in SourceContent.
+	f := bssh.NewFakeRunner()
+	stubKeyTrust(f, Sury(), colonsPrimary(Sury().Fingerprint))
+	f.On("apt-get update", bssh.Result{ExitCode: 0})
+	f.On("apt-get update -o Dir::Etc::sourcelist=sources.list.d/sury-php.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o APT::Update::Error-Mode=any", bssh.Result{ExitCode: 0})
+
+	if err := New(f).EnsureRepo(context.Background(), Sury()); err != nil {
+		t.Fatalf("EnsureRepo() error = %v", err)
+	}
+	var got string
+	for _, w := range f.Writes() {
+		if w.Path == Sury().SourceListPath() {
+			got = string(w.Content)
+		}
+	}
+	if want := string(mustSourceContent(t, Sury())); got != want {
+		t.Fatalf("written source list:\n got %q\nwant %q", got, want)
 	}
 }
 

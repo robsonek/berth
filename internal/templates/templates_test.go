@@ -209,6 +209,15 @@ func TestRenderAptAutoUpgradesGolden(t *testing.T) {
 	checkGolden(t, "apt_auto_upgrades.conf.tmpl", "apt_auto_upgrades.golden", nil)
 }
 
+func TestAptSourceTemplate(t *testing.T) {
+	checkGolden(t, "apt_source.list.tmpl", "apt_source.golden", map[string]string{
+		"Keyring":    "/usr/share/keyrings/nginx-org.gpg",
+		"URI":        "https://nginx.org/packages/mainline/debian/",
+		"Suite":      "trixie",
+		"Components": "nginx",
+	})
+}
+
 func TestRenderFail2banJailGolden(t *testing.T) {
 	checkGolden(t, "fail2ban_jail.tmpl", "fail2ban_jail.golden", struct {
 		Bantime, Findtime string

@@ -8,7 +8,14 @@ import (
 	"time"
 
 	bssh "github.com/robsonek/berth/internal/ssh"
+	"github.com/robsonek/berth/internal/templates"
 )
+
+// UserRepoPrefix namespaces the source lists and keyrings of user-declared
+// repos (config block `apt.repos`): /etc/apt/sources.list.d/berth-<name>.list.
+// It is the sweep-discovery namespace of the `apt` step and is FROZEN by
+// contract test — changing it would orphan every deployed user-repo file.
+const UserRepoPrefix = "berth-"
 
 // aptLockSleep is the pause between apt-lock retries; a package var so tests can
 // stub it to return immediately.
@@ -72,6 +79,52 @@ type Repo struct {
 // SourceListPath is the apt source file EnsureRepo writes this repo to; steps
 // probe its presence to know the configured upstream source is in effect.
 func (r Repo) SourceListPath() string { return "/etc/apt/sources.list.d/" + r.Name + ".list" }
+
+// KeyringPath is the dearmored, pinned keyring EnsureRepo installs for this
+// repo — the signed-by anchor of its source line.
+func (r Repo) KeyringPath() string { return "/usr/share/keyrings/" + r.Name + ".gpg" }
+
+// SourceContent returns the managed bytes of this repo's .list file (marker +
+// one-line deb entry): the single source for EnsureRepo's write and for every
+// step Check's drift comparison.
+func (r Repo) SourceContent() ([]byte, error) {
+	return templates.Render("apt_source.list.tmpl", map[string]string{
+		"Keyring":    r.KeyringPath(),
+		"URI":        r.URI,
+		"Suite":      r.Suite,
+		"Components": strings.Join(r.Components, " "),
+	})
+}
+
+// LegacySourceContents returns every EXACT marker-less byte variant berth has
+// ever shipped for this repo (index 0 = the current constructor values) — the
+// adoption allowlist that lets ANY pre-E1 host upgrade its source list
+// without --force, including hosts provisioned by older releases. APPEND-ONLY
+// and FROZEN by contract test: entries are a compatibility promise, not an
+// implementation detail.
+func (r Repo) LegacySourceContents() []string {
+	line := func(uri string) string {
+		return fmt.Sprintf("deb [signed-by=%s] %s %s %s\n",
+			r.KeyringPath(), uri, r.Suite, strings.Join(r.Components, " "))
+	}
+	out := []string{line(r.URI)}
+	for _, uri := range legacyRepoURIs[r.Name] {
+		out = append(out, line(uri))
+	}
+	return out
+}
+
+// legacyRepoURIs holds the URIs of PAST releases per repo name (the current
+// URI is derived from the constructor and deliberately not repeated here).
+// APPEND-ONLY: MariaDB shipped deb.mariadb.org 11.8, then deb.mariadb.org
+// 12.3, then the current dlm.mariadb.com endpoint; suites/components never
+// changed. The other repos never changed at all.
+var legacyRepoURIs = map[string][]string{
+	"mariadb-org": {
+		"https://deb.mariadb.org/12.3/debian/",
+		"https://deb.mariadb.org/11.8/debian/",
+	},
+}
 
 // Sury returns the Ondřej Surý PHP repository definition for Debian 13 (used by
 // the php step when php.source selects it, e.g. for PHP versions Debian does not
@@ -157,6 +210,59 @@ func primaryFingerprints(colons string) []string {
 	return out
 }
 
+// KeyringHoldsExactly reports whether the repo's installed keyring exists and
+// holds EXACTLY the pinned primary key. Part of every Check's repo
+// convergence: a config fingerprint change, a truncated/extra-key keyring, or
+// a crash between the keyring and list writes must re-trigger EnsureRepo —
+// never read as satisfied.
+func (m *Manager) KeyringHoldsExactly(ctx context.Context, repo Repo) (bool, error) {
+	res, err := m.r.Run(ctx, "gpg --show-keys --with-colons "+repo.KeyringPath(), nil)
+	if err != nil {
+		return false, err
+	}
+	if res.ExitCode != 0 {
+		return false, nil // absent or unreadable keyring: not converged
+	}
+	prims := primaryFingerprints(res.Stdout)
+	if len(prims) == 0 {
+		return false, nil
+	}
+	for _, fp := range prims {
+		if fp != repo.Fingerprint {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// shQuote single-quotes s for safe interpolation into a root shell command
+// (mirrors the ssh/steps helpers). Constructor values are constants, but
+// user-declared repos put config-derived URLs on the curl command line —
+// quoting at the SINK is the shell-safety boundary; config validation is
+// only a UX layer and must never be relied on for that.
+func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// UpdateIndexes refreshes the apt package indexes, waiting out lock
+// contention. Callers that removed sources use it to prune their lists.
+func (m *Manager) UpdateIndexes(ctx context.Context) error {
+	return m.runAptWaitingForLock(ctx, "apt-get update", "apt-get update")
+}
+
+// RemoveRepo deletes the repo's source list and keyring, then refreshes the
+// indexes so the removed source's downloaded lists are pruned. Callers decide
+// WHETHER removal is due (marker/ownership classification lives in the
+// steps); this helper only executes it. If the update fails AFTER the rm the
+// step fails loudly and the next run's preflight (AlwaysRun, re-runs apt-get
+// update every run) prunes the stale lists — no retry journal needed.
+func (m *Manager) RemoveRepo(ctx context.Context, repo Repo) error {
+	if res, err := m.r.Run(ctx, "rm -f "+repo.SourceListPath()+" "+repo.KeyringPath(), nil); err != nil {
+		return err
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("remove repo %s: %s", repo.Name, res.Stderr)
+	}
+	return m.runAptWaitingForLock(ctx, "apt-get update", "apt-get update after removing "+repo.Name)
+}
+
 // EnsureRepo installs the signing key, verifies it against the pinned
 // fingerprint, and writes the source with signed-by. The trusted keyring ends
 // up holding EXACTLY the pinned key: signed-by trusts every key in the file,
@@ -165,12 +271,13 @@ func primaryFingerprints(colons string) []string {
 // published bundle would otherwise sign Release files unnoticed. A future key
 // rotation therefore fails loud until the pin is updated, by design.
 func (m *Manager) EnsureRepo(ctx context.Context, repo Repo) error {
-	keyring := "/usr/share/keyrings/" + repo.Name + ".gpg"
+	keyring := repo.KeyringPath()
 	// Temp files live in a root-owned 0700 workdir under /run: predictable names
 	// in world-writable /tmp would let a local user pre-create or symlink them
 	// before root writes through the path.
 	tmpKey := "/run/berth/key-" + repo.Name
 	tmpRing := "/run/berth/keyring-" + repo.Name + ".gpg"
+	tmpOut := "/run/berth/pinned-" + repo.Name + ".gpg"
 	if res, err := m.r.Run(ctx, "install -d -m 700 /run/berth", nil); err != nil {
 		return fmt.Errorf("create key workdir for %s: %w", repo.Name, err)
 	} else if res.ExitCode != 0 {
@@ -179,7 +286,10 @@ func (m *Manager) EnsureRepo(ctx context.Context, repo Repo) error {
 	// Download to a file so curl's exit code surfaces a failed fetch directly.
 	// (Piping into gpg would take gpg's exit code — 0 even on empty stdin — and
 	// the failure would only show up later as a misleading fingerprint error.)
-	if res, err := m.r.Run(ctx, "curl -fsSL "+repo.KeyURL+" -o "+tmpKey, nil); err != nil {
+	// The URL is quoted at the sink and placed after `--` (option-parsing stop):
+	// E1 makes KeyURL config-derived, so it must never splice into the root
+	// shell or masquerade as a curl option.
+	if res, err := m.r.Run(ctx, "curl -fsSL -o "+tmpKey+" -- "+shQuote(repo.KeyURL), nil); err != nil {
 		return fmt.Errorf("download key for %s: %w", repo.Name, err)
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("download key for %s: %s", repo.Name, res.Stderr)
@@ -190,16 +300,18 @@ func (m *Manager) EnsureRepo(ctx context.Context, repo Repo) error {
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("dearmor key for %s: %s", repo.Name, res.Stderr)
 	}
-	// Extract only the pinned key into the trusted keyring.
-	if res, err := m.r.Run(ctx, "gpg --no-default-keyring --keyring "+tmpRing+" --yes -o "+keyring+" --export "+repo.Fingerprint, nil); err != nil {
+	// Extract only the pinned key into a STAGING keyring.
+	if res, err := m.r.Run(ctx, "gpg --no-default-keyring --keyring "+tmpRing+" --yes -o "+tmpOut+" --export "+repo.Fingerprint, nil); err != nil {
 		return fmt.Errorf("extract pinned key for %s: %w", repo.Name, err)
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("extract pinned key for %s: %s", repo.Name, res.Stderr)
 	}
-	// Verify the keyring holds exactly the pinned primary key. `--export` of an
-	// absent fingerprint writes nothing, so show-keys failing (or listing no
-	// primary key) means the bundle did not contain the pinned key at all.
-	res, err := m.r.Run(ctx, "gpg --show-keys --with-colons "+keyring, nil)
+	// Verify the STAGING keyring holds exactly the pinned primary key; only
+	// then install it at the trusted path. An aborted run never leaves an
+	// unverified file under /usr/share/keyrings. `--export` of an absent
+	// fingerprint writes nothing, so show-keys failing (or listing no primary
+	// key) means the bundle did not contain the pinned key at all.
+	res, err := m.r.Run(ctx, "gpg --show-keys --with-colons "+tmpOut, nil)
 	if err != nil {
 		return fmt.Errorf("read key for %s: %w", repo.Name, err)
 	}
@@ -212,15 +324,22 @@ func (m *Manager) EnsureRepo(ctx context.Context, repo Repo) error {
 			return fmt.Errorf("repo %s: keyring contains unpinned key fingerprint %s (pinned %s)", repo.Name, fp, repo.Fingerprint)
 		}
 	}
+	if res, err := m.r.Run(ctx, "install -m 0644 "+tmpOut+" "+keyring, nil); err != nil {
+		return fmt.Errorf("install keyring for %s: %w", repo.Name, err)
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("install keyring for %s: %s", repo.Name, res.Stderr)
+	}
 	// Temp cleanup; only a transport error matters (leftover tmp files are inert).
-	if _, err := m.r.Run(ctx, "rm -f "+tmpKey+" "+tmpRing, nil); err != nil {
+	if _, err := m.r.Run(ctx, "rm -f "+tmpKey+" "+tmpRing+" "+tmpOut, nil); err != nil {
 		return err
 	}
-	src := fmt.Sprintf("deb [signed-by=%s] %s %s %s\n",
-		keyring, repo.URI, repo.Suite, strings.Join(repo.Components, " "))
+	src, err := repo.SourceContent()
+	if err != nil {
+		return fmt.Errorf("render source for %s: %w", repo.Name, err)
+	}
 	if err := m.r.WriteFile(ctx, bssh.FileSpec{
 		Path:    repo.SourceListPath(),
-		Content: []byte(src), Mode: 0o644, Sudo: true,
+		Content: src, Mode: 0o644, Sudo: true,
 	}); err != nil {
 		return fmt.Errorf("write source: %w", err)
 	}
@@ -271,6 +390,11 @@ func (m *Manager) EnsureRepo(ctx context.Context, repo Repo) error {
 		}
 		repoIndexSleep()
 	}
+	// Roll back the just-written source: an unindexable repo must not linger
+	// as a trusted source (Check would otherwise read list+keyring as
+	// converged while the index verification never succeeded). Best-effort —
+	// the error below is the primary signal either way.
+	_, _ = m.r.Run(ctx, "rm -f "+repo.SourceListPath()+" "+repo.KeyringPath(), nil)
 	return fmt.Errorf("upstream repo %s (%s) failed to index after %d attempts; refusing to install the Debian fallback (last: %s)",
 		repo.Name, repo.URI, repoIndexRetries, last)
 }
