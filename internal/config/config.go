@@ -300,9 +300,10 @@ type System struct {
 // wizard ToServer() / literal-Server callers that bypass Load() still render
 // valid values — an empty schedule would otherwise produce a broken cron line.
 type Backups struct {
-	Enabled   bool   `mapstructure:"enabled"        yaml:"enabled,omitempty"`
-	Retention int    `mapstructure:"retention_days" yaml:"retention_days,omitempty"` // age cutoff for pruning; default 7
-	Schedule  string `mapstructure:"schedule"       yaml:"schedule,omitempty"`       // 5-field cron; default "30 3 * * *"
+	Enabled   bool     `mapstructure:"enabled"        yaml:"enabled,omitempty"`
+	Retention int      `mapstructure:"retention_days" yaml:"retention_days,omitempty"` // age cutoff for pruning; default 7
+	Schedule  string   `mapstructure:"schedule"       yaml:"schedule,omitempty"`       // 5-field cron; default "30 3 * * *"
+	Offsite   *Offsite `mapstructure:"offsite"        yaml:"offsite,omitempty"`        // nil = no offsite target
 }
 
 const (
@@ -324,6 +325,109 @@ func (b Backups) ScheduleEff() string {
 		return defaultBackupSchedule
 	}
 	return b.Schedule
+}
+
+// Offsite holds the opt-in offsite-backup target (restic). Nil = offsite off.
+// The typed per-backend fields keep the YAML secret-free: cloud credentials
+// live in the local secret cache (`berth secret set`) and, on the host, in
+// root-owned /etc/berth/offsite.env — never in this struct.
+type Offsite struct {
+	Backend  string      `mapstructure:"backend"  yaml:"backend"`            // s3 | sftp
+	Endpoint string      `mapstructure:"endpoint" yaml:"endpoint,omitempty"` // s3: endpoint host
+	Bucket   string      `mapstructure:"bucket"   yaml:"bucket,omitempty"`   // s3
+	Prefix   string      `mapstructure:"prefix"   yaml:"prefix,omitempty"`   // s3: default "berth/<id>"
+	Host     string      `mapstructure:"host"     yaml:"host,omitempty"`     // sftp
+	Port     int         `mapstructure:"port"     yaml:"port,omitempty"`     // sftp: default 22
+	User     string      `mapstructure:"user"     yaml:"user,omitempty"`     // sftp
+	Path     string      `mapstructure:"path"     yaml:"path,omitempty"`     // sftp: absolute repo dir
+	HostKey  string      `mapstructure:"host_key" yaml:"host_key,omitempty"` // sftp: one ssh-keyscan line
+	Schedule string      `mapstructure:"schedule" yaml:"schedule,omitempty"` // default "15 4 * * *" — after the local 03:30 backups
+	Keep     OffsiteKeep `mapstructure:"keep"     yaml:"keep,omitempty"`
+}
+
+// OffsiteKeep is the remote retention policy (restic forget --keep-*).
+type OffsiteKeep struct {
+	Daily   int `mapstructure:"daily"   yaml:"daily,omitempty"`
+	Weekly  int `mapstructure:"weekly"  yaml:"weekly,omitempty"`
+	Monthly int `mapstructure:"monthly" yaml:"monthly,omitempty"`
+}
+
+const (
+	defaultOffsiteSchedule    = "15 4 * * *"
+	defaultOffsitePort        = 22
+	defaultOffsiteKeepDaily   = 7
+	defaultOffsiteKeepWeekly  = 4
+	defaultOffsiteKeepMonthly = 6
+)
+
+// OffsiteEnabled reports whether an offsite target is configured. Validation
+// guarantees an enabled offsite always rides on enabled backups.
+func (s *Server) OffsiteEnabled() bool { return s.Backups.Offsite != nil }
+
+// PrefixEff returns the configured repo prefix or the id-derived default.
+func (o *Offsite) PrefixEff(id string) string {
+	if o.Prefix != "" {
+		return o.Prefix
+	}
+	return "berth/" + id
+}
+
+// Repository composes the restic repository string from the typed fields.
+func (o *Offsite) Repository(id string) string {
+	if o.Backend == "sftp" {
+		return "sftp:" + o.User + "@" + o.Host + ":" + o.Path
+	}
+	return "s3:https://" + o.Endpoint + "/" + o.Bucket + "/" + o.PrefixEff(id)
+}
+
+// PortEff returns the configured sftp port or 22.
+func (o *Offsite) PortEff() int {
+	if o.Port == 0 {
+		return defaultOffsitePort
+	}
+	return o.Port
+}
+
+// KnownHostsToken is the canonical first field OpenSSH looks up in a
+// known_hosts file for this target: the bare host on port 22,
+// "[host]:port" otherwise. host_key must pin exactly this token, or the
+// pin would not match the actual connection.
+func (o *Offsite) KnownHostsToken() string {
+	if o.PortEff() == defaultOffsitePort {
+		return o.Host
+	}
+	return fmt.Sprintf("[%s]:%d", o.Host, o.PortEff())
+}
+
+// ScheduleEff returns the configured cron schedule or the default (04:15
+// daily — deliberately after the local backups' 03:30 default).
+func (o *Offsite) ScheduleEff() string {
+	if o.Schedule == "" {
+		return defaultOffsiteSchedule
+	}
+	return o.Schedule
+}
+
+// DailyEff / WeeklyEff / MonthlyEff return the keep policy or its defaults.
+func (k OffsiteKeep) DailyEff() int {
+	if k.Daily <= 0 {
+		return defaultOffsiteKeepDaily
+	}
+	return k.Daily
+}
+
+func (k OffsiteKeep) WeeklyEff() int {
+	if k.Weekly <= 0 {
+		return defaultOffsiteKeepWeekly
+	}
+	return k.Weekly
+}
+
+func (k OffsiteKeep) MonthlyEff() int {
+	if k.Monthly <= 0 {
+		return defaultOffsiteKeepMonthly
+	}
+	return k.Monthly
 }
 
 type Database struct {
