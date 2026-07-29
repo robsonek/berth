@@ -199,11 +199,15 @@ func swapfileSize(ctx context.Context, r bssh.Runner) (exists bool, size int64, 
 	if res.ExitCode != 0 {
 		return false, 0, nil
 	}
+	// Existence is derived from the size parse: real stat prints a decimal
+	// size, so unparsable stdout (a stubbed or tampered host) reads as "no
+	// swapfile" rather than an error. n is zeroed so ParseInt's range-error
+	// remnant never leaks as a size.
 	n, perr := strconv.ParseInt(strings.TrimSpace(res.Stdout), 10, 64)
 	if perr != nil {
-		return false, 0, nil
+		n = 0
 	}
-	return true, n, nil
+	return perr == nil, n, nil
 }
 
 // swapActive reports whether /swapfile is an active swap area (swapon --show).

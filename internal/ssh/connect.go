@@ -61,7 +61,9 @@ func AuthMethods(keyPath string) ([]xssh.AuthMethod, error) { return authMethods
 func authMethods(keyPath string) ([]xssh.AuthMethod, error) {
 	var methods []xssh.AuthMethod
 	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
-		if conn, err := net.Dial("unix", sock); err == nil {
+		// Bounded dial: a wedged agent socket must not stall connection setup.
+		d := net.Dialer{Timeout: 5 * time.Second}
+		if conn, err := d.Dial("unix", sock); err == nil {
 			methods = append(methods, xssh.PublicKeysCallback(agent.NewClient(conn).Signers))
 		}
 	}
@@ -89,8 +91,8 @@ func keyFileAuth(keyPath string, haveOther bool) (xssh.AuthMethod, error) {
 	if keyPath == "" {
 		return nil, nil
 	}
-	b, err := os.ReadFile(expandHome(keyPath))
-	if err != nil {
+	b, readable := readKeyFile(expandHome(keyPath))
+	if !readable {
 		return nil, nil
 	}
 	signer, perr := xssh.ParsePrivateKey(b)
@@ -101,4 +103,13 @@ func keyFileAuth(keyPath string, haveOther bool) (xssh.AuthMethod, error) {
 		return nil, fmt.Errorf("parse ssh key %s: %w (for passphrase-protected keys, use ssh-agent)", keyPath, perr)
 	}
 	return xssh.PublicKeys(signer), nil
+}
+
+// readKeyFile reads the key file, reporting readability as a boolean rather
+// than an error: per keyFileAuth's contract a missing or unreadable file is
+// non-fatal, and authMethods raises the aggregate "no SSH auth available"
+// error when nothing else covers auth.
+func readKeyFile(path string) ([]byte, bool) {
+	b, err := os.ReadFile(path)
+	return b, err == nil
 }

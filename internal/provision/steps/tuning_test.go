@@ -16,12 +16,12 @@ func TestTuningRequiresDatabaseOnly(t *testing.T) {
 	}
 }
 
-// stubServiceActive stubs the single command serviceActive issues so the unit
-// reads as active (running). Check requires the service to be active before
-// consulting liveness; enablement is the service's own step's responsibility, so
-// tuning never consults systemctl is-enabled.
-func stubServiceActive(f *bssh.FakeRunner, unit string) {
-	f.On("systemctl is-active "+unit, bssh.Result{ExitCode: 0})
+// stubMariaDBActive stubs the single command serviceActive issues so mariadb —
+// the only unit tuning manages — reads as active (running). Check requires the
+// service to be active before consulting liveness; enablement is the service's
+// own step's responsibility, so tuning never consults systemctl is-enabled.
+func stubMariaDBActive(f *bssh.FakeRunner) {
+	f.On("systemctl is-active "+mariadbUnit, bssh.Result{ExitCode: 0})
 }
 
 // cmdIndex returns the index of the first call whose Cmd equals want, or -1.
@@ -46,7 +46,7 @@ func TestTuningCheckMariaDBSatisfiedWhenLoaded(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"})
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
-	stubServiceActive(f, mariadbUnit)
+	stubMariaDBActive(f)
 	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
 	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
 	if err != nil {
@@ -179,7 +179,7 @@ func TestTuningCheckMariaDBUnsatisfiedWhenNotLoaded(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"})
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
-	stubServiceActive(f, mariadbUnit)
+	stubMariaDBActive(f)
 	f.On(mariadbLiveness, bssh.Result{ExitCode: 1}) // file newer than last restart
 	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
 	if err != nil {
@@ -392,7 +392,7 @@ func TestTuningCheckSlowLogFileMissingUnsatisfied(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"})
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
-	stubServiceActive(f, mariadbUnit)
+	stubMariaDBActive(f)
 	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
 	f.On("test -f /var/log/mysql/mariadb-slow.log", bssh.Result{ExitCode: 1}) // logging silently off
 	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
@@ -410,7 +410,7 @@ func TestTuningCheckSlowLogFilePresentSatisfied(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"})
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
-	stubServiceActive(f, mariadbUnit)
+	stubMariaDBActive(f)
 	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
 	f.On("test -f /var/log/mysql/mariadb-slow.log", bssh.Result{ExitCode: 0})
 	cr, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f)
@@ -432,7 +432,7 @@ func TestTuningApplySlowLogEnsuresDirBeforeRestart(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"})
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
-	stubServiceActive(f, mariadbUnit)
+	stubMariaDBActive(f)
 	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
 	f.On("test -f /var/log/mysql/mariadb-slow.log", bssh.Result{ExitCode: 1})
 	f.On("install -d -m 02750 -o mysql -g adm /var/log/mysql", bssh.Result{})
@@ -467,7 +467,7 @@ func TestTuningApplySlowLogNoopWhenConverged(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"})
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
-	stubServiceActive(f, mariadbUnit)
+	stubMariaDBActive(f)
 	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
 	f.On("test -f /var/log/mysql/mariadb-slow.log", bssh.Result{ExitCode: 0})
 	if err := Tuning().Apply(context.Background(), provision.RunCtx{}, srv, f); err != nil {
@@ -489,7 +489,7 @@ func TestTuningSlowLogOffNeverProbesFile(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On(memTotalCmd, bssh.Result{ExitCode: 0, Stdout: "1048576\n"})
 	f.On("cat '/etc/mysql/mariadb.conf.d/99-berth.cnf'", bssh.Result{ExitCode: 0, Stdout: string(want)})
-	stubServiceActive(f, mariadbUnit)
+	stubMariaDBActive(f)
 	f.On(mariadbLiveness, bssh.Result{ExitCode: 0})
 	if _, err := Tuning().Check(context.Background(), provision.RunCtx{}, srv, f); err != nil {
 		t.Fatal(err)

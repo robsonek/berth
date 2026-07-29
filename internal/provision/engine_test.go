@@ -364,7 +364,7 @@ func TestEngineWarningsDoNotBlockWithoutReader(t *testing.T) {
 	// still finish with no reader attached.
 	done := make(chan struct{})
 	warn := func(rc RunCtx) {
-		for i := 0; i < 5; i++ {
+		for i := range 5 {
 			rc.Warnf("w%d", i)
 		}
 	}
@@ -482,14 +482,14 @@ func TestEngineUnconvergedIsRunScoped(t *testing.T) {
 			reasons = append(reasons, rc.UnconvergedReasons())
 		}},
 	)
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		events, err := eng.Run(context.Background(), &config.Server{}, bssh.NewFakeRunner(), Options{})
 		if err != nil {
 			t.Fatalf("run %d: Run() error = %v", i, err)
 		}
 		collect(events)
 	}
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if before[i] {
 			t.Errorf("run %d: RunUnconverged() must be false before any step marked (run-scoped flag)", i)
 		}
@@ -616,8 +616,10 @@ func TestEngineRedactsPreflightError(t *testing.T) {
 	if RedactError(red, nil) != nil {
 		t.Error("RedactError(nil) must be nil")
 	}
-	if e := RedactError(nil, errSentinel); e != errSentinel {
-		t.Error("nil redactor must return the original error object")
+	noop := RedactError(nil, errSentinel)
+	var noopWrap *redactedError
+	if !errors.Is(noop, errSentinel) || errors.As(noop, &noopWrap) {
+		t.Error("nil redactor must return the original error object, unwrapped")
 	}
 	var re *redactedError
 	if !errors.As(RedactError(red, fmt.Errorf("x hunter2")), &re) {

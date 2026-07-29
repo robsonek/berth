@@ -3,6 +3,7 @@ package wizard
 import (
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -571,7 +572,7 @@ func TestConfigMatrix(t *testing.T) {
 	t.Run("valkey-16-sites-distinct-users", func(t *testing.T) {
 		a := base("valkey16", "203.0.113.14")
 		a.Valkey = true
-		for k := 0; k < 16; k++ {
+		for k := range 16 {
 			n := strconv.Itoa(k)
 			a.Sites = append(a.Sites, SiteAnswers{
 				Domain: "s" + n + ".example.com", DeployPath: "/srv/s" + n,
@@ -595,7 +596,7 @@ func TestConfigMatrix(t *testing.T) {
 	t.Run("valkey-17-sites-allowed", func(t *testing.T) {
 		a := base("valkey17", "203.0.113.15")
 		a.Valkey = true
-		for k := 0; k < 17; k++ {
+		for k := range 17 {
 			n := strconv.Itoa(k)
 			a.Sites = append(a.Sites, SiteAnswers{
 				Domain: "s" + n + ".example.com", DeployPath: "/srv/s" + n,
@@ -611,7 +612,7 @@ func TestConfigMatrix(t *testing.T) {
 	t.Run("no-valkey-17-sites-allowed", func(t *testing.T) {
 		a := base("novalkey17", "203.0.113.16")
 		a.Valkey = false
-		for k := 0; k < 17; k++ {
+		for k := range 17 {
 			n := strconv.Itoa(k)
 			a.Sites = append(a.Sites, SiteAnswers{
 				Domain: "s" + n + ".example.com", DeployPath: "/srv/s" + n,
@@ -808,7 +809,7 @@ func TestConfigMatrix(t *testing.T) {
 		}
 		progs := srv.SiteProgramNames(srv.Sites[0])
 		want := []string{"berth-a_example_com", "berth-a_example_com-reverb", "berth-a_example_com-horizon"}
-		if !eqStrings(progs, want) {
+		if !slices.Equal(progs, want) {
 			t.Fatalf("programs = %v, want %v", progs, want)
 		}
 	})
@@ -830,7 +831,7 @@ func TestConfigMatrix(t *testing.T) {
 			t.Fatalf("QueueEnabled should be true (inherited)")
 		}
 		progs := srv.SiteProgramNames(srv.Sites[0])
-		if !eqStrings(progs, []string{"berth-a_example_com"}) {
+		if !slices.Equal(progs, []string{"berth-a_example_com"}) {
 			t.Fatalf("programs = %v", progs)
 		}
 	})
@@ -852,10 +853,10 @@ func TestConfigMatrix(t *testing.T) {
 		}
 		p0 := srv.SiteProgramNames(srv.Sites[0])
 		p1 := srv.SiteProgramNames(srv.Sites[1])
-		if !eqStrings(p0, []string{"berth-a_example_com", "berth-a_example_com-reverb"}) {
+		if !slices.Equal(p0, []string{"berth-a_example_com", "berth-a_example_com-reverb"}) {
 			t.Fatalf("site0 programs = %v", p0)
 		}
-		if !eqStrings(p1, []string{"berth-b_example_com", "berth-b_example_com-reverb"}) {
+		if !slices.Equal(p1, []string{"berth-b_example_com", "berth-b_example_com-reverb"}) {
 			t.Fatalf("site1 programs = %v", p1)
 		}
 	})
@@ -967,7 +968,7 @@ func TestConfigMatrix(t *testing.T) {
 		if !srv.QueueEnabled(srv.Sites[0]) {
 			t.Fatalf("QueueEnabled should be true (inherited)")
 		}
-		if !eqStrings(srv.SiteProgramNames(srv.Sites[0]), []string{"berth-a_example_com"}) {
+		if !slices.Equal(srv.SiteProgramNames(srv.Sites[0]), []string{"berth-a_example_com"}) {
 			t.Fatalf("programs = %v", srv.SiteProgramNames(srv.Sites[0]))
 		}
 	})
@@ -1601,7 +1602,6 @@ func addGapScenarios(
 	// ---- Gap 2: non-default PHP version/source ----
 
 	for _, ver := range []string{"8.2", "8.3", "8.4"} {
-		ver := ver
 		t.Run("gap-php-version-"+ver+"-roundtrips", func(t *testing.T) {
 			a := base("gap-php-"+strings.ReplaceAll(ver, ".", ""), "203.0.113.10")
 			a.PHPVersion = ver
@@ -1616,7 +1616,6 @@ func addGapScenarios(
 	}
 
 	for _, src := range []string{"sury", "debian"} {
-		src := src
 		t.Run("gap-php-source-"+src+"-roundtrips", func(t *testing.T) {
 			a := base("gap-phpsrc-"+src, "203.0.113.10")
 			a.PHPSource = src
@@ -1669,7 +1668,6 @@ func addGapScenarios(
 	})
 
 	for _, port := range []int{0, 70000} {
-		port := port
 		t.Run("gap-ssh-port-out-of-range-"+strconv.Itoa(port)+"-rejected", func(t *testing.T) {
 			a := base("gap-port-"+strconv.Itoa(port), "203.0.113.10")
 			a.Port = port
@@ -1798,7 +1796,6 @@ func addGapScenarios(
 		{"timeout", func(q *QueueAnswers) { q.Timeout = -1 }, "queue.timeout must not be negative"},
 		{"max_memory", func(q *QueueAnswers) { q.MaxMemory = -1 }, "queue.max_memory must not be negative"},
 	} {
-		knob := knob
 		t.Run("gap-queue-work-negative-"+knob.name+"-rejected", func(t *testing.T) {
 			a := base("gap-q-neg-"+strings.ReplaceAll(knob.name, "_", ""), "203.0.113.10")
 			q := &QueueAnswers{Driver: "work", Processes: 2}
@@ -1896,16 +1893,4 @@ func addGapScenarios(
 			t.Fatalf("derived users for distinct domains collided: %q", u0)
 		}
 	})
-}
-
-func eqStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

@@ -74,7 +74,7 @@ func stubClientAuthAbsent(f *bssh.FakeRunner, s *config.Server, name string) {
 // the site user) for every site of s.
 func stubEnvSeed(f *bssh.FakeRunner, s *config.Server) {
 	for _, site := range s.Sites {
-		f.On(writeAsUserCmd(s.SiteUser(site), sharedEnvPath(site), 0o600), bssh.Result{})
+		f.On(writeAsUserCmd(s.SiteUser(site), sharedEnvPath(site)), bssh.Result{})
 	}
 }
 
@@ -82,7 +82,7 @@ func stubEnvSeed(f *bssh.FakeRunner, s *config.Server) {
 // client-credentials file (executed as the site user) for every site of s.
 func stubClientAuthSeed(f *bssh.FakeRunner, s *config.Server, name string) {
 	for _, site := range s.Sites {
-		f.On(writeAsUserCmd(s.SiteUser(site), clientAuthPath(s, site, name), 0o600), bssh.Result{})
+		f.On(writeAsUserCmd(s.SiteUser(site), clientAuthPath(s, site, name)), bssh.Result{})
 	}
 }
 
@@ -181,8 +181,8 @@ func TestDatabaseApplyOnlyTenantMutatesSharedEnv(t *testing.T) {
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
 	stubClientAuthAbsent(f, s, ".my.cnf")
 	f.On("mysql --protocol=socket", bssh.Result{})
-	f.On(writeAsUserCmd("deploy", envPath(s), 0o600), bssh.Result{})
-	f.On(writeAsUserCmd("deploy", clientAuthPath(s, s.Sites[0], ".my.cnf"), 0o600), bssh.Result{})
+	f.On(writeAsUserCmd("deploy", envPath(s)), bssh.Result{})
+	f.On(writeAsUserCmd("deploy", clientAuthPath(s, s.Sites[0], ".my.cnf")), bssh.Result{})
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
@@ -1303,16 +1303,20 @@ func TestDatabaseApplyClientAuthFileNeverRewritten(t *testing.T) {
 	}
 }
 
+// divergedAppKey is the berth-shaped APP_KEY stubDivergedEnv plants in the
+// restored .env — the "new" key Apply must reconcile the cache toward.
+const divergedAppKey = "base64:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="
+
 // stubDivergedEnv stubs an Apply fixture where the restored .env disagrees
 // with the seeded cache: install done, .env present with NEW password and NEW
-// berth APP_KEY, client-auth file already seeded (holding whatever the cache
-// held), SQL stubbed.
-func stubDivergedEnv(f *bssh.FakeRunner, s *config.Server, newPW, newKey string) {
+// berth APP_KEY (divergedAppKey), client-auth file already seeded (holding
+// whatever the cache held), SQL stubbed.
+func stubDivergedEnv(f *bssh.FakeRunner, s *config.Server, newPW string) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=" + newPW + "\n"})
-	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "APP_KEY=" + newKey + "\n"})
+	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "APP_KEY=" + divergedAppKey + "\n"})
 	f.On("test -e "+shQuote("/home/deploy/.my.cnf"), bssh.Result{ExitCode: 0})
 	f.On("mysql --protocol=socket", bssh.Result{})
 }
@@ -1325,12 +1329,11 @@ func TestDatabaseApplyReconcilesRoleAndCacheTowardEnv(t *testing.T) {
 	s := databaseServer()
 	dbUser := s.SiteDBUser(s.Sites[0])
 	const oldKey = "base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-	const newKey = "base64:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="
 	seedCache(t, s, map[string]string{dbUser: "OldPass1", "appkey:" + dbUser: oldKey})
 	f := bssh.NewFakeRunner()
-	stubDivergedEnv(f, s, "NewPass2", newKey)
+	stubDivergedEnv(f, s, "NewPass2")
 	f.On(clientAuthContainsScript("/home/deploy/.my.cnf"), bssh.Result{ExitCode: 0}) // file holds the OLD berth credential
-	f.On(writeAsUserCmd("deploy", "/home/deploy/.my.cnf", 0o600), bssh.Result{})
+	f.On(writeAsUserCmd("deploy", "/home/deploy/.my.cnf"), bssh.Result{})
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
@@ -1365,7 +1368,7 @@ func TestDatabaseApplyReconcilesRoleAndCacheTowardEnv(t *testing.T) {
 	if cache[dbUser] != "NewPass2" {
 		t.Errorf("cache password = %q, want the .env value", cache[dbUser])
 	}
-	if cache["appkey:"+dbUser] != newKey {
+	if cache["appkey:"+dbUser] != divergedAppKey {
 		t.Errorf("cache APP_KEY = %q, want the .env value", cache["appkey:"+dbUser])
 	}
 }
@@ -1379,7 +1382,7 @@ func TestDatabaseApplyLeavesOperatorClientAuthAlone(t *testing.T) {
 	dbUser := s.SiteDBUser(s.Sites[0])
 	seedCache(t, s, map[string]string{dbUser: "OldPass1"})
 	f := bssh.NewFakeRunner()
-	stubDivergedEnv(f, s, "NewPass2", "base64:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=")
+	stubDivergedEnv(f, s, "NewPass2")
 	f.On(clientAuthContainsScript("/home/deploy/.my.cnf"), bssh.Result{ExitCode: 1}) // old credential NOT inside
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -1400,7 +1403,7 @@ func TestDatabaseApplyRefusesCorruptCachedPasswordBeforeContainmentProbe(t *test
 	dbUser := s.SiteDBUser(s.Sites[0])
 	seedCache(t, s, map[string]string{dbUser: "\nsneaky"})
 	f := bssh.NewFakeRunner()
-	stubDivergedEnv(f, s, "ValidPW123", "base64:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=")
+	stubDivergedEnv(f, s, "ValidPW123")
 	err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
 	if err == nil || !strings.Contains(err.Error(), "outside the allowed charset") {
 		t.Fatalf("Apply() = %v, want the charset refusal for a corrupt cached password", err)
@@ -1442,7 +1445,7 @@ func TestDatabaseApplyFailsWhenClientAuthProbeErrors(t *testing.T) {
 	dbUser := s.SiteDBUser(s.Sites[0])
 	seedCache(t, s, map[string]string{dbUser: "OldPass1"})
 	f := bssh.NewFakeRunner()
-	stubDivergedEnv(f, s, "NewPass2", "base64:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=")
+	stubDivergedEnv(f, s, "NewPass2")
 	f.On(clientAuthContainsScript("/home/deploy/.my.cnf"), bssh.Result{ExitCode: 2, Stderr: "grep: /home/deploy/.my.cnf: I/O error"})
 	err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
 	if err == nil || !strings.Contains(err.Error(), "I/O error") {
@@ -1459,7 +1462,7 @@ func TestDatabaseApplySkipsContainmentProbeWhenCacheAgrees(t *testing.T) {
 	dbUser := s.SiteDBUser(s.Sites[0])
 	seedCache(t, s, map[string]string{dbUser: "SamePass1"})
 	f := bssh.NewFakeRunner()
-	stubDivergedEnv(f, s, "SamePass1", "base64:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=")
+	stubDivergedEnv(f, s, "SamePass1")
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}

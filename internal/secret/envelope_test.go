@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-func writeRawCache(t *testing.T, berthDir, key, content string) string {
+func writeRawCache(t *testing.T, berthDir, key, content string) {
 	t.Helper()
 	if err := os.MkdirAll(berthDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -19,7 +19,6 @@ func writeRawCache(t *testing.T, berthDir, key, content string) string {
 	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return p
 }
 
 func TestEnvelopeRoundTrip(t *testing.T) {

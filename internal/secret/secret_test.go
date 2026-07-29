@@ -88,12 +88,12 @@ func TestRedactorConcurrentAddApply(_ *testing.T) {
 	r := NewRedactor()
 	done := make(chan struct{})
 	go func() {
-		for i := 0; i < 200; i++ {
+		for i := range 200 {
 			r.Add(strings.Repeat("s", i%17+1))
 		}
 		close(done)
 	}()
-	for i := 0; i < 200; i++ {
+	for range 200 {
 		_ = r.Apply("sssssss payload")
 	}
 	<-done

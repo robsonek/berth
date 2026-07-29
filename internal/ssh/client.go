@@ -3,6 +3,7 @@ package ssh
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -244,7 +245,8 @@ func (c *Client) exec(ctx context.Context, cmd string, stdin []byte) (Result, er
 	case runErr := <-done:
 		_ = sess.Close()
 		res := Result{Stdout: out.String(), Stderr: errb.String()}
-		if ee, ok := runErr.(*xssh.ExitError); ok {
+		var ee *xssh.ExitError
+		if errors.As(runErr, &ee) {
 			res.ExitCode = ee.ExitStatus()
 			return res, nil // non-zero exit is a signal, not a transport error
 		}

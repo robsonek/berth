@@ -438,7 +438,7 @@ func validatePHPSize(field, v string) error {
 	}
 	b, err := phpSizeBytes(v)
 	if err != nil {
-		return fmt.Errorf("%s %q: %v", field, v, err)
+		return fmt.Errorf("%s %q: %w", field, v, err)
 	}
 	if b > phpSizeMaxBytes {
 		return fmt.Errorf("%s %q exceeds the 64G bound", field, v)
@@ -465,7 +465,7 @@ func (t Tuning) validate() error {
 		}
 		b, err := phpSizeBytes(t.MariaDBLogFileSize)
 		if err != nil {
-			return fmt.Errorf("tuning.mariadb_log_file_size %q: %v", t.MariaDBLogFileSize, err)
+			return fmt.Errorf("tuning.mariadb_log_file_size %q: %w", t.MariaDBLogFileSize, err)
 		}
 		if b < mariadbLogFileSizeMin {
 			return fmt.Errorf("tuning.mariadb_log_file_size %q is below MariaDB's 4M minimum", t.MariaDBLogFileSize)
@@ -486,7 +486,7 @@ func (t Tuning) validate() error {
 		}
 		b, err := phpSizeBytes(t.MariaDBMaxAllowedPacket)
 		if err != nil {
-			return fmt.Errorf("tuning.mariadb_max_allowed_packet %q: %v", t.MariaDBMaxAllowedPacket, err)
+			return fmt.Errorf("tuning.mariadb_max_allowed_packet %q: %w", t.MariaDBMaxAllowedPacket, err)
 		}
 		if b > mariadbMaxAllowedPacketCeiling {
 			return fmt.Errorf("tuning.mariadb_max_allowed_packet %q exceeds MariaDB's 1G ceiling (the server silently truncates larger values)", t.MariaDBMaxAllowedPacket)

@@ -52,8 +52,7 @@ func (m stepModel) apply(e provision.Event) stepModel {
 	return m
 }
 
-func (m stepModel) status(step string) string { return m.statuses[step] }
-func (m stepModel) failed() bool              { return m.err != nil }
+func (m stepModel) failed() bool { return m.err != nil }
 
 var (
 	okStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))

@@ -107,9 +107,10 @@ func TestSysctlKeysMatchTemplate(t *testing.T) {
 	}
 }
 
-// swapServer builds a Server with swap enabled at the given size and sysctl off.
-func swapServer(size string) *config.Server {
-	return &config.Server{System: config.System{Swap: size}}
+// swapServer builds a Server with a 2G swap enabled (the size every swap test
+// pins) and sysctl off.
+func swapServer() *config.Server {
+	return &config.Server{System: config.System{Swap: "2G"}}
 }
 
 // stubSwapSatisfied stubs every command checkSwap issues for a converged 2G swap.
@@ -134,7 +135,7 @@ func TestSystemCheckSwapSatisfied(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	stubSwapSatisfied(t, f, "2G")
-	cr, err := System().Check(context.Background(), provision.RunCtx{}, swapServer("2G"), f)
+	cr, err := System().Check(context.Background(), provision.RunCtx{}, swapServer(), f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +153,7 @@ func TestSystemCheckSwapAbsentUnsatisfied(t *testing.T) {
 	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
 	f.On("cat '/proc/sys/vm/swappiness'", bssh.Result{ExitCode: 0, Stdout: "60\n"})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1}) // sysctl-removal read (sysctl off)
-	cr, err := System().Check(context.Background(), provision.RunCtx{}, swapServer("2G"), f)
+	cr, err := System().Check(context.Background(), provision.RunCtx{}, swapServer(), f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +168,7 @@ func TestSystemCheckSwapSizeMismatchUnsatisfied(t *testing.T) {
 	stubSwapSatisfied(t, f, "2G")
 	// Re-stub stat to report a 1G file while config wants 2G.
 	f.On("stat -c %s '/swapfile' 2>/dev/null", bssh.Result{ExitCode: 0, Stdout: strconv.FormatInt(1024*1024*1024, 10) + "\n"})
-	cr, err := System().Check(context.Background(), provision.RunCtx{}, swapServer("2G"), f)
+	cr, err := System().Check(context.Background(), provision.RunCtx{}, swapServer(), f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +184,7 @@ func TestSystemCheckForeignSwapAbortsWithoutForce(t *testing.T) {
 	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n/swapfile none swap sw 0 0\n"})
 	f.On("stat -c %s '/swapfile' 2>/dev/null", bssh.Result{ExitCode: 0, Stdout: strconv.FormatInt(1024*1024*1024, 10) + "\n"})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1}) // reached only on the --force pass (sysctl off)
-	cr, err := System().Check(context.Background(), provision.RunCtx{}, swapServer("2G"), f)
+	cr, err := System().Check(context.Background(), provision.RunCtx{}, swapServer(), f)
 	if err == nil {
 		t.Error("expected abort error on foreign /swapfile without --force")
 	}
@@ -191,7 +192,7 @@ func TestSystemCheckForeignSwapAbortsWithoutForce(t *testing.T) {
 		t.Error("expected unsatisfied on foreign /swapfile")
 	}
 	// With --force: unsatisfied (overwrite pending) but no error.
-	cr, err = System().Check(context.Background(), provision.RunCtx{Force: true}, swapServer("2G"), f)
+	cr, err = System().Check(context.Background(), provision.RunCtx{Force: true}, swapServer(), f)
 	if err != nil {
 		t.Errorf("unexpected error with --force: %v", err)
 	}
@@ -293,7 +294,7 @@ func TestSystemApplySwapCreates(t *testing.T) {
 	f.On("sysctl -p /etc/sysctl.d/99-berth-swap.conf", bssh.Result{})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1}) // sysctl-removal read (sysctl off)
 
-	if err := System().Apply(context.Background(), provision.RunCtx{}, swapServer("2G"), f); err != nil {
+	if err := System().Apply(context.Background(), provision.RunCtx{}, swapServer(), f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 	for _, want := range []string{"fallocate -l 2G /swapfile", "mkswap /swapfile", "swapon /swapfile",
@@ -317,7 +318,7 @@ func TestSystemApplySwapNoopWhenSatisfied(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
 	stubSwapSatisfied(t, f, "2G")
-	if err := System().Apply(context.Background(), provision.RunCtx{}, swapServer("2G"), f); err != nil {
+	if err := System().Apply(context.Background(), provision.RunCtx{}, swapServer(), f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 	if calledCmd(f, "fallocate -l 2G /swapfile") || len(f.Writes()) != 0 {
@@ -350,7 +351,7 @@ func TestSystemApplySwapResizeRecreates(t *testing.T) {
 	f.On("sysctl -p /etc/sysctl.d/99-berth-swap.conf", bssh.Result{})   // applySwap always rewrites the swappiness drop-in
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1}) // sysctl-removal read (sysctl off)
 
-	if err := System().Apply(context.Background(), provision.RunCtx{}, swapServer("2G"), f); err != nil {
+	if err := System().Apply(context.Background(), provision.RunCtx{}, swapServer(), f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 	if !(cmdIndex(f, "swapoff /swapfile") < cmdIndex(f, "rm -f /swapfile") &&
@@ -959,7 +960,7 @@ func TestSystemApplySwapCaptureSkippedWhenDropInAlreadyManaged(t *testing.T) {
 	f.On("sysctl -p /etc/sysctl.d/99-berth-swap.conf", bssh.Result{})
 	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
 
-	if err := System().Apply(context.Background(), provision.RunCtx{}, swapServer("2G"), f); err != nil {
+	if err := System().Apply(context.Background(), provision.RunCtx{}, swapServer(), f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 	for _, c := range f.Calls() {
