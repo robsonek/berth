@@ -28,6 +28,12 @@ linters:
       - path: test/integration/envoverwrite_test\.go
         linters: [gosec]
         text: "G204"
+      # gosec pattern-matches the offsite secret NAME constants
+      # (OffsiteS3SecretKey, OffsiteResticPassword) as hardcoded
+      # credentials; they are secret-cache map KEYS (names), never values.
+      - path: internal/secret/secret\.go
+        linters: [gosec]
+        text: "G101"
       # The integration harness probes a disposable test box over HTTPS whose
       # certs are self-signed or LE-staging by design: skipping chain
       # verification is the run's explicit shared trust decision

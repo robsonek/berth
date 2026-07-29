@@ -32,8 +32,6 @@ func Generate(n int) (string, error) {
 // credentials are operator-owned (berth cannot generate them); the restic
 // repository password is auto-generated on first use but may be set ahead of
 // time (or corrected after a cache restore).
-//
-//nolint:gosec // G101 false positive: these are secret NAMES (envelope map keys), never credential values.
 const (
 	OffsiteS3AccessKey    = "offsite_s3_access_key"
 	OffsiteS3SecretKey    = "offsite_s3_secret_key"
