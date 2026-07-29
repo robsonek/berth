@@ -17,10 +17,6 @@ func Nginx() provision.Step { return nginx{} }
 func (nginx) Name() string       { return "nginx" }
 func (nginx) Requires() []string { return []string{"base"} }
 
-// nginxOrgSourceList is the apt source file the nginx.org repo is written to; its
-// presence is how Check knows the configured upstream source is in effect.
-var nginxOrgSourceList = apt.NginxOrg().SourceListPath()
-
 // nginxConfPath is nginx's main config. The nginx.org package ships it with
 // `user nginx;`, but berth's permission model (deploy_path group www-data, FPM
 // socket owned by www-data) assumes nginx workers run as www-data — as Debian's
@@ -67,12 +63,13 @@ func (n nginx) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	// When nginx.org is the configured source, its repo must be registered (so a
-	// source switch re-triggers Apply) and its worker user must be reconciled to
+	// When nginx.org is the configured source, its repo must be converged
+	// (managed byte-exact list + exact pinned keyring, so a source switch or
+	// repo drift re-triggers Apply) and its worker user must be reconciled to
 	// www-data (so berth's www-data-based permission model holds).
-	sourceOK, userOK, bridgeOK := true, true, true
+	sourceOK, userOK, bridgeOK, sweepOK := true, true, true, true
 	if s.Nginx.Source == "nginx" {
-		sourceOK, err = fileExists(ctx, r, nginxOrgSourceList)
+		sourceOK, err = ownRepoUpToDate(ctx, r, apt.NginxOrg(), rc.Force)
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
@@ -91,16 +88,24 @@ func (n nginx) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
+	} else {
+		// Stock source: a berth-owned nginx.org list lingering from an earlier
+		// upstream provision is drift; Apply removes it (E1).
+		lingers, err := ownRepoLingers(ctx, r, apt.NginxOrg())
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		sweepOK = !lingers
 	}
 	// The stock catch-all sites must be disabled.
 	defaultsDisabled, err := stockDefaultsDisabled(ctx, r)
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	if !(installed && up && sourceOK && userOK && bridgeOK && defaultsDisabled) {
+	if !(installed && up && sourceOK && userOK && bridgeOK && defaultsDisabled && sweepOK) {
 		return provision.CheckResult{
 			Satisfied: false,
-			Reason:    "nginx not installed, not running, not from the configured source, worker user not www-data, or stock default site still enabled",
+			Reason:    "nginx not installed, not running, not from the configured source, worker user not www-data, stock default site still enabled, or a lingering nginx.org repo awaits removal",
 			Changes:   n.changes(s),
 		}, nil
 	}
@@ -125,7 +130,11 @@ func (n nginx) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 }
 
 func (nginx) changes(s *config.Server) []string {
-	return []string{"install nginx (" + s.Nginx.Source + ")", "run workers as www-data", "disable stock default site(s)", "systemctl enable nginx, then start or reload once nginx -t passes"}
+	out := []string{"install nginx (" + s.Nginx.Source + ")", "run workers as www-data", "disable stock default site(s)", "systemctl enable nginx, then start or reload once nginx -t passes"}
+	if s.Nginx.Source != "nginx" {
+		out = append(out, "remove lingering nginx.org repo if berth-owned")
+	}
+	return out
 }
 
 // nginxRunsAsWWWData reports whether nginx.conf sets the worker user to www-data.
@@ -154,10 +163,15 @@ func stockDefaultsDisabled(ctx context.Context, r bssh.Runner) (bool, error) {
 
 func (nginx) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
 	m := apt.New(r)
+	// The write path re-classifies via ensureOwnRepo (never a bare EnsureRepo:
+	// Apply often runs for unrelated drift, and the raw call would overwrite a
+	// foreign list without --force).
 	if s.Nginx.Source == "nginx" {
-		if err := m.EnsureRepo(ctx, apt.NginxOrg()); err != nil {
+		if err := ensureOwnRepo(ctx, rc, r, apt.NginxOrg()); err != nil {
 			return fmt.Errorf("add nginx.org repo: %w", err)
 		}
+	} else if err := removeOwnRepo(ctx, rc, r, apt.NginxOrg()); err != nil {
+		return fmt.Errorf("remove lingering nginx.org repo: %w", err)
 	}
 	// Invalidate nginx's reload stamp before the package transaction, not just
 	// before the config mutations this step performs itself (bridge write /
