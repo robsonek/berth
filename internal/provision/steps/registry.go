@@ -13,7 +13,14 @@ func Pipeline(s *config.Server, red *secret.Redactor, skipSSL bool) []provision.
 		// (bind/migrate/endpoint check) and must settle before
 		// preflight performs the run's first remote mutation.
 		Identity(),
-		Preflight(), SystemBase(), System(), Accounts(red), Hardening(),
+		Preflight(), SystemBase(), System(),
+		// apt (user repos + extra packages) is ALWAYS registered (the
+		// valkey/P14 pattern): with no apt: block its disabled mode still
+		// sweeps previously-declared berth-*.list leftovers — one find probe
+		// on a clean host. Registered early so later steps run against the
+		// declared package set.
+		Apt(),
+		Accounts(red), Hardening(),
 		PHP(), Nginx(), Composer(),
 	}
 	// valkey is ALWAYS registered: its disabled mode sweeps instances a

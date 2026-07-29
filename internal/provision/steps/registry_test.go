@@ -184,6 +184,27 @@ func TestPipelineTuningAfterDatabase(t *testing.T) {
 	}
 }
 
+// TestPipelineIncludesAptAlwaysAfterSystem asserts apt is ALWAYS registered
+// (the valkey/P14 pattern): with no apt: block its disabled mode still sweeps
+// previously-declared berth-*.list leftovers. It sits directly after system
+// so later steps run against the declared repo/package set.
+func TestPipelineIncludesAptAlwaysAfterSystem(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		a    config.Apt
+	}{
+		{"apt-configured", config.Apt{Packages: []string{"htop"}}},
+		{"apt-less", config.Apt{}},
+	} {
+		s := &config.Server{Apt: tc.a, Sites: []config.Site{{Domain: "a.example.com"}}}
+		names := stepNames(steps.Pipeline(s, secret.NewRedactor(), true))
+		si, ai := indexOf(names, "system"), indexOf(names, "apt")
+		if si < 0 || ai < 0 || ai != si+1 {
+			t.Errorf("%s: apt must immediately follow system; got %v", tc.name, names)
+		}
+	}
+}
+
 func TestPipelineIncludesSystemAfterBase(t *testing.T) {
 	s := &config.Server{Database: config.Database{Engine: "postgres"}, Sites: []config.Site{{Domain: "a.example.com"}}}
 	names := stepNames(steps.Pipeline(s, secret.NewRedactor(), true))
