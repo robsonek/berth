@@ -280,6 +280,79 @@ func validDaemonName(s string) error {
 	return nil
 }
 
+// hasControlChars mirrors config's hasControlChars (unexported there) for
+// inline feedback on the offsite fields; config.Server.Validate stays
+// authoritative.
+func hasControlChars(s string) bool {
+	for _, r := range s {
+		if r == 0 || r == '\n' || r == '\r' || r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+// offsiteWord mirrors config's offsite plain() guard: every offsite value
+// lands single-quoted inside root-executed files, so whitespace, quotes,
+// backslashes and control characters are rejected as injection.
+func offsiteWord(field string, req bool) func(string) error {
+	return func(s string) error {
+		if s == "" {
+			if req {
+				return fmt.Errorf("%s is required", field)
+			}
+			return nil
+		}
+		if hasControlChars(s) || strings.ContainsAny(s, "'\"\\ \t") {
+			return fmt.Errorf("%s %q must not contain whitespace, quotes, backslashes or control characters", field, s)
+		}
+		return nil
+	}
+}
+
+// reOffsiteHost mirrors config.reOffsiteHost (unexported there): the host
+// reaches a root-executed ssh command line, so only a strict lowercase
+// hostname or IPv4 literal is acceptable.
+var reOffsiteHost = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`)
+
+func validOffsiteHost(s string) error {
+	if !reOffsiteHost.MatchString(s) {
+		return fmt.Errorf("backups.offsite.host %q must be a lowercase hostname or IPv4 literal", s)
+	}
+	return nil
+}
+
+func validOffsitePath(s string) error {
+	if err := offsiteWord("backups.offsite.path", true)(s); err != nil {
+		return err
+	}
+	if !strings.HasPrefix(s, "/") {
+		return fmt.Errorf("backups.offsite.path %q must be absolute", s)
+	}
+	return nil
+}
+
+// validOffsiteHostKey validates one ssh-keyscan line whose first field must
+// be the canonical known_hosts token. The prompter builds the closure AFTER
+// host/port are final, so the token is exactly what config.Validate demands —
+// ServerOps has no re-prompt loop, and an escape here would trap the operator
+// in the site loop (which cannot edit server-level fields).
+func validOffsiteHostKey(token string) func(string) error {
+	return func(s string) error {
+		if hasControlChars(s) || strings.ContainsAny(s, "'\"") {
+			return fmt.Errorf("backups.offsite.host_key must not contain quotes or control characters")
+		}
+		fields := strings.Fields(s)
+		if len(fields) < 3 {
+			return fmt.Errorf("backups.offsite.host_key must be one ssh-keyscan line (host keytype key)")
+		}
+		if fields[0] != token {
+			return fmt.Errorf("backups.offsite.host_key must pin %q; its first field is %q", token, fields[0])
+		}
+		return nil
+	}
+}
+
 // reOSUser mirrors config.reLinuxUser for inline feedback (the reserved-name
 // check stays authoritative in config.Validate).
 var reOSUser = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)

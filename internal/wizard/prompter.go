@@ -151,6 +151,83 @@ func (h *huhPrompter) ServerOps(a *Answers) error {
 	// parseIntInRange trims like the validator did, so an accepted " 14 " is kept (not
 	// silently dropped by a raw Atoi); blank/"0"/out-of-range return (0, err) => 0 = default.
 	a.Backups.RetentionDays, _ = parseIntInRange("backups.retention_days", retention, 1, 3650)
+	// Offsite rides on enabled backups (config rejects it otherwise), so the
+	// gate is only reachable here. Credentials are deliberately not prompted:
+	// the YAML stays secret-free and `berth init` prints the `berth secret set`
+	// recipe instead (Answers.SecretRecipe).
+	if !a.Backups.Enabled {
+		return nil
+	}
+	o := &a.Backups.Offsite
+	gate := huh.NewForm(huh.NewGroup(
+		huh.NewConfirm().Title("Ship backups offsite (restic)?").Value(&o.Enabled),
+	))
+	if err := gate.Run(); err != nil {
+		return err
+	}
+	if !o.Enabled {
+		return nil
+	}
+	if o.Backend == "" {
+		o.Backend = "s3"
+	}
+	backend := huh.NewForm(huh.NewGroup(
+		huh.NewSelect[string]().Title("Offsite backend").Options(huh.NewOptions("s3", "sftp")...).Value(&o.Backend),
+	))
+	if err := backend.Run(); err != nil {
+		return err
+	}
+	// ServerOps has no re-prompt loop (run.go's site loop re-prompts only the
+	// site), so every input below must be inline-valid on its own — the
+	// validators mirror config's offsite rules field for field.
+	switch o.Backend {
+	case "s3":
+		s3 := huh.NewForm(huh.NewGroup(
+			huh.NewInput().Title("S3 endpoint host (e.g. s3.eu-central-1.amazonaws.com)").Value(&o.Endpoint).Validate(offsiteWord("backups.offsite.endpoint", true)),
+			huh.NewInput().Title("S3 bucket").Value(&o.Bucket).Validate(offsiteWord("backups.offsite.bucket", true)),
+			huh.NewInput().Title("Repository prefix (blank = default berth/<id>)").Value(&o.Prefix).Validate(offsiteWord("backups.offsite.prefix", false)),
+		))
+		if err := s3.Run(); err != nil {
+			return err
+		}
+	case "sftp":
+		port := strconv.Itoa(o.Port)
+		target := huh.NewForm(huh.NewGroup(
+			huh.NewInput().Title("SFTP host").Value(&o.Host).Validate(validOffsiteHost),
+			huh.NewInput().Title("SFTP port (blank/0 = 22)").Value(&port).Validate(optionalInt("backups.offsite.port", 1, 65535)),
+			huh.NewInput().Title("SFTP user").Value(&o.User).Validate(offsiteWord("backups.offsite.user", true)),
+			huh.NewInput().Title("Repository path (absolute directory for the restic repo)").Value(&o.Path).Validate(validOffsitePath),
+		))
+		if err := target.Run(); err != nil {
+			return err
+		}
+		o.Port, _ = parseIntInRange("backups.offsite.port", port, 1, 65535)
+		// The host-key form runs AFTER host/port are final so its validator
+		// pins the exact known_hosts token config.Validate will demand.
+		token := (&config.Offsite{Host: o.Host, Port: o.Port}).KnownHostsToken()
+		hostKey := huh.NewForm(huh.NewGroup(
+			huh.NewInput().Title(fmt.Sprintf("SFTP host key (one ssh-keyscan line starting with %q)", token)).
+				Value(&o.HostKey).Validate(validOffsiteHostKey(token)),
+		))
+		if err := hostKey.Run(); err != nil {
+			return err
+		}
+	}
+	daily := strconv.Itoa(o.KeepDaily)
+	weekly := strconv.Itoa(o.KeepWeekly)
+	monthly := strconv.Itoa(o.KeepMonthly)
+	shared := huh.NewForm(huh.NewGroup(
+		huh.NewInput().Title("Offsite schedule (5-field cron, blank=default 15 4 * * *)").Value(&o.Schedule).Validate(optionalCronSchedule),
+		huh.NewInput().Title("Keep daily snapshots (1-3650, blank/0=default 7)").Value(&daily).Validate(optionalInt("backups.offsite.keep.daily", 1, 3650)),
+		huh.NewInput().Title("Keep weekly snapshots (1-3650, blank/0=default 4)").Value(&weekly).Validate(optionalInt("backups.offsite.keep.weekly", 1, 3650)),
+		huh.NewInput().Title("Keep monthly snapshots (1-3650, blank/0=default 6)").Value(&monthly).Validate(optionalInt("backups.offsite.keep.monthly", 1, 3650)),
+	))
+	if err := shared.Run(); err != nil {
+		return err
+	}
+	o.KeepDaily, _ = parseIntInRange("backups.offsite.keep.daily", daily, 1, 3650)
+	o.KeepWeekly, _ = parseIntInRange("backups.offsite.keep.weekly", weekly, 1, 3650)
+	o.KeepMonthly, _ = parseIntInRange("backups.offsite.keep.monthly", monthly, 1, 3650)
 	return nil
 }
 

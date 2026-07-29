@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/robsonek/berth/internal/secret"
 	"gopkg.in/yaml.v3"
 )
 
@@ -93,6 +94,26 @@ type BackupsAnswers struct {
 	Enabled       bool
 	RetentionDays int    // 0 = default (7)
 	Schedule      string // blank = default ("30 3 * * *")
+	Offsite       OffsiteAnswers
+}
+
+// OffsiteAnswers mirrors config.Offsite for the wizard: WHERE the restic
+// repository lives. Credentials are deliberately NOT asked here — the wizard
+// prints the `berth secret set` recipe instead (secret-free YAML contract).
+type OffsiteAnswers struct {
+	Enabled  bool
+	Backend  string // s3 | sftp
+	Endpoint string // s3
+	Bucket   string // s3
+	Prefix   string // s3; blank = default berth/<id>
+	Host     string // sftp
+	Port     int    // sftp; 0 = 22
+	User     string // sftp
+	Path     string // sftp
+	HostKey  string // sftp: one ssh-keyscan line
+	Schedule string // blank = default "15 4 * * *"
+
+	KeepDaily, KeepWeekly, KeepMonthly int // 0 = defaults 7/4/6
 }
 
 type SiteAnswers struct {
@@ -146,6 +167,23 @@ func defaults() Answers {
 
 // Run presents the interactive wizard and returns the collected answers.
 func Run() (Answers, error) { return run(newHuhPrompter()) }
+
+// SecretRecipe returns the operator instructions `berth init` prints after
+// writing the config — the secrets that must be seeded into the local cache
+// before the first provision run — or "" when none are needed. Only the s3
+// backend needs pre-seeded credentials; sftp needs none (the provision run
+// itself prints the generated public key to authorize on the target).
+func (a Answers) SecretRecipe() string {
+	o := a.Backups.Offsite
+	if !o.Enabled || o.Backend != "s3" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\nOffsite credentials are never stored in the YAML. Before the first provision run:\n")
+	fmt.Fprintf(&b, "  berth secret set servers/%s.yml %s\n", a.Name, secret.OffsiteS3AccessKey)
+	fmt.Fprintf(&b, "  berth secret set servers/%s.yml %s\n", a.Name, secret.OffsiteS3SecretKey)
+	return b.String()
+}
 
 // validConfigName guards the RAW config name shared by the prompt validator
 // and the authoritative Write below: the name becomes servers/<name>.yml, so

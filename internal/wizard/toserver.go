@@ -37,6 +37,15 @@ func (a Answers) ToServer() *config.Server {
 		CloudflareOnly: a.CloudflareOnly,
 		Backups:        config.Backups{Enabled: a.Backups.Enabled, Retention: a.Backups.RetentionDays, Schedule: a.Backups.Schedule},
 	}
+	if a.Backups.Offsite.Enabled {
+		o := a.Backups.Offsite
+		srv.Backups.Offsite = &config.Offsite{
+			Backend: o.Backend, Endpoint: o.Endpoint, Bucket: o.Bucket, Prefix: o.Prefix,
+			Host: o.Host, Port: o.Port, User: o.User, Path: o.Path, HostKey: o.HostKey,
+			Schedule: o.Schedule,
+			Keep:     config.OffsiteKeep{Daily: o.KeepDaily, Weekly: o.KeepWeekly, Monthly: o.KeepMonthly},
+		}
+	}
 	for _, sa := range a.Sites {
 		user := sa.User
 		if user == "" {

@@ -3,6 +3,8 @@ package wizard
 import (
 	"strings"
 	"testing"
+
+	"github.com/robsonek/berth/internal/secret"
 )
 
 // fakePrompter scripts orchestration without a TTY. Each *func slice is consumed
@@ -271,6 +273,78 @@ func TestRunServerOpsAndSiteOverrides(t *testing.T) {
 	srv := a.ToServer()
 	if srv.Sites[0].Backups == nil || *srv.Sites[0].Backups {
 		t.Error("site backups should map to *false")
+	}
+	if r := a.SecretRecipe(); r != "" {
+		t.Errorf("a run without offsite must print no secret recipe, got:\n%s", r)
+	}
+}
+
+func TestRunOffsiteS3CollectsAnswersAndRecipe(t *testing.T) {
+	f := &fakePrompter{
+		serverCore:     baseServer,
+		serverAdvanced: func(*Answers) {},
+		serverOps: func(a *Answers) {
+			a.Backups = BackupsAnswers{Enabled: true, Offsite: OffsiteAnswers{
+				Enabled: true, Backend: "s3", Endpoint: "s3.example.com", Bucket: "bkt",
+			}}
+		},
+		siteCore: []func(int, *SiteAnswers){
+			func(_ int, sa *SiteAnswers) {
+				sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "a.example.com", "/srv/a", "adb", "ausr"
+			},
+		},
+		// confirms: server-advanced? site-advanced? add-another?
+		confirms: []bool{true, false, false},
+	}
+	a, err := run(f)
+	if err != nil {
+		t.Fatalf("run error = %v", err)
+	}
+	if err := a.ToServer().Validate(); err != nil {
+		t.Fatalf("s3 offsite config should validate: %v", err)
+	}
+	recipe := a.SecretRecipe()
+	for _, want := range []string{
+		"berth secret set servers/t.yml " + secret.OffsiteS3AccessKey,
+		"berth secret set servers/t.yml " + secret.OffsiteS3SecretKey,
+	} {
+		if !strings.Contains(recipe, want) {
+			t.Errorf("recipe missing %q:\n%s", want, recipe)
+		}
+	}
+	if len(f.errors) != 0 {
+		t.Errorf("unexpected errors: %v", f.errors)
+	}
+}
+
+func TestRunOffsiteSFTPPrintsNoRecipe(t *testing.T) {
+	f := &fakePrompter{
+		serverCore:     baseServer,
+		serverAdvanced: func(*Answers) {},
+		serverOps: func(a *Answers) {
+			a.Backups = BackupsAnswers{Enabled: true, Offsite: OffsiteAnswers{
+				Enabled: true, Backend: "sftp", Host: "backup.example.com", User: "restic",
+				Path:    "/srv/restic/t",
+				HostKey: "backup.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleExampleExampleExample",
+			}}
+		},
+		siteCore: []func(int, *SiteAnswers){
+			func(_ int, sa *SiteAnswers) {
+				sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "a.example.com", "/srv/a", "adb", "ausr"
+			},
+		},
+		// confirms: server-advanced? site-advanced? add-another?
+		confirms: []bool{true, false, false},
+	}
+	a, err := run(f)
+	if err != nil {
+		t.Fatalf("run error = %v", err)
+	}
+	if err := a.ToServer().Validate(); err != nil {
+		t.Fatalf("sftp offsite config should validate: %v", err)
+	}
+	if r := a.SecretRecipe(); r != "" {
+		t.Errorf("sftp offsite must print no recipe (the provision run hands out the public key), got:\n%s", r)
 	}
 }
 
