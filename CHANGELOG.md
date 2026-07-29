@@ -3,6 +3,25 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Added
+
+- **`apt:` config block** — declare extra third-party apt repositories
+  (https-only, 40-hex fingerprint pinned, written to the `berth-*` namespace
+  and swept when undeclared) and extra packages (install-only). New
+  always-registered `apt` step; `berth init` collects both.
+
+### Changed
+
+- **berth's own upstream source lists (sury/nginx.org/MariaDB/PGDG) are now
+  managed files**: they carry the managed marker (existing marker-less lists
+  are adopted automatically — no `--force` needed; expect a one-time rewrite
+  per host), content drift re-applies them (a future URI/suite change in a
+  berth release now propagates to provisioned hosts), and switching a source
+  back to `debian` removes the upstream repo — installed packages keep their
+  upstream versions until manually downgraded (see README).
+
 ## [0.27.1] — 2026-07-29
 
 ### Changed
