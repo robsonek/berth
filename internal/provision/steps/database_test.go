@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/robsonek/berth/internal/apt"
 	"github.com/robsonek/berth/internal/config"
 	dbpkg "github.com/robsonek/berth/internal/database"
 	"github.com/robsonek/berth/internal/provision"
@@ -86,18 +87,12 @@ func stubClientAuthSeed(f *bssh.FakeRunner, s *config.Server, name string) {
 	}
 }
 
-// stubRepoKeyTrust stubs apt.EnsureRepo's key-trust command sequence for an
-// upstream repo, ending in a keyring holding exactly the pinned primary key.
-func stubRepoKeyTrust(f *bssh.FakeRunner, name, keyURL, fpr string) {
-	tmpKey, tmpRing := "/run/berth/key-"+name, "/run/berth/keyring-"+name+".gpg"
-	keyring := "/usr/share/keyrings/" + name + ".gpg"
-	f.On("install -d -m 700 /run/berth", bssh.Result{})
-	f.On("curl -fsSL "+keyURL+" -o "+tmpKey, bssh.Result{})
-	f.On("gpg --yes -o "+tmpRing+" --dearmor "+tmpKey, bssh.Result{})
-	f.On("gpg --no-default-keyring --keyring "+tmpRing+" --yes -o "+keyring+" --export "+fpr, bssh.Result{})
-	f.On("gpg --show-keys --with-colons "+keyring,
-		bssh.Result{Stdout: "pub:-:4096:1:0000000000000000:0::-:::scSC::::::23::0:\nfpr:::::::::" + fpr + ":\n"})
-	f.On("rm -f "+tmpKey+" "+tmpRing, bssh.Result{})
+// stubEngineRepoAbsent makes the engine's upstream source-list probe read
+// back as absent: the debian-source paths (ownRepoLingers/removeOwnRepo) see
+// nothing to sweep, and the upstream-source Apply path (ensureOwnRepo)
+// proceeds to the full EnsureRepo chain.
+func stubEngineRepoAbsent(f *bssh.FakeRunner, repo apt.Repo) {
+	f.On("cat "+shQuote(repo.SourceListPath()), bssh.Result{ExitCode: 1})
 }
 
 func TestDatabaseApplyGeneratesPersistsAndEnsures(t *testing.T) {
@@ -105,6 +100,7 @@ func TestDatabaseApplyGeneratesPersistsAndEnsures(t *testing.T) {
 	s := databaseServer()
 	red := secret.NewRedactor()
 	f := bssh.NewFakeRunner()
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
 	stubClientAuthAbsent(f, s, ".my.cnf")
@@ -177,6 +173,7 @@ func TestDatabaseApplyOnlyTenantMutatesSharedEnv(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
 	stubClientAuthAbsent(f, s, ".my.cnf")
@@ -200,6 +197,7 @@ func TestDatabaseApplySeedsRedisWhenValkey(t *testing.T) {
 	s := databaseServer()
 	s.Valkey = true
 	f := bssh.NewFakeRunner()
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
 	f.On("mysql --protocol=socket", bssh.Result{})
@@ -233,6 +231,7 @@ func TestDatabaseApplyKeepsDatabaseDriverWithoutValkey(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer() // Valkey defaults to false
 	f := bssh.NewFakeRunner()
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
 	f.On("mysql --protocol=socket", bssh.Result{})
@@ -257,6 +256,7 @@ func TestDatabaseApplyHealsFromExistingEnvWithoutRewriting(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env already present
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
@@ -287,6 +287,7 @@ func TestDatabaseApplyFailsWhenExistingEnvLacksPassword(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"}) // guard passes; the missing password fails later
@@ -314,6 +315,7 @@ func TestDatabaseCheckSatisfiedDoesNotReseedExistingEnv(t *testing.T) {
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present, driver matches
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("LC_ALL=C; export LC_ALL; grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0})
 	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
 	f.On(mariadbGrantProbe, bssh.Result{Stdout: "1\n"})
@@ -342,6 +344,7 @@ func stubGreenRemote(f *bssh.FakeRunner, s *config.Server) {
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("LC_ALL=C; export LC_ALL; grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0})
 	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
 	f.On(mariadbGrantProbe, bssh.Result{Stdout: "1\n"})
@@ -849,6 +852,7 @@ func TestDatabaseApplyCachesSecretsBeforeSeedingEnv(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
 	stubClientAuthAbsent(f, s, ".my.cnf")
@@ -873,6 +877,7 @@ func TestDatabaseApplyFailsWhenAppKeyGrepErrors(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
@@ -892,7 +897,8 @@ func TestDatabaseCheckUnsatisfiedWhenDatabaseMissing(t *testing.T) {
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("LC_ALL=C; export LC_ALL; grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0}) // credential present
-	f.On(mariadbDBProbe, bssh.Result{Stdout: ""})                                                                                                                   // database absent
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
+	f.On(mariadbDBProbe, bssh.Result{Stdout: ""}) // database absent
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -914,6 +920,7 @@ func TestDatabaseCheckUnsatisfiedWhenUserOrGrantMissing(t *testing.T) {
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("LC_ALL=C; export LC_ALL; grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0})
 	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On(mariadbGrantProbe, bssh.Result{Stdout: ""}) // role or its grant absent
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
@@ -935,6 +942,7 @@ func TestDatabaseCheckUnsatisfiedWhenEnvLacksValidPassword(t *testing.T) {
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("LC_ALL=C; export LC_ALL; grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 1}) // no valid DB_PASSWORD on the first line (or key absent — same outcome)
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -958,6 +966,7 @@ func TestDatabaseCheckSkipsProbesWhenNotInstalled(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env, guard passes
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 1})       // not installed
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -980,7 +989,7 @@ func TestDatabaseCheckSourceMariaDBRequiresRepo(t *testing.T) {
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env, guard passes
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	// mariadb.org repo not yet registered -> not satisfied (before any per-site probe).
-	f.On("test -e "+shQuote("/etc/apt/sources.list.d/mariadb-org.list"), bssh.Result{ExitCode: 1})
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -990,14 +999,89 @@ func TestDatabaseCheckSourceMariaDBRequiresRepo(t *testing.T) {
 	}
 }
 
+func TestDatabaseCheckUpstreamDriftedListUnsatisfied(t *testing.T) {
+	chdirTemp(t) // Check preflight-reads the local secret cache
+	s := databaseServer()
+	s.Database.Source = "mariadb"
+	repo := apt.MariaDBOrg()
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env, guard passes
+	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
+	// A HISTORICAL deb.mariadb.org variant — adoption must catch old fleets too.
+	f.On("cat "+shQuote(repo.SourceListPath()),
+		bssh.Result{ExitCode: 0, Stdout: repo.LegacySourceContents()[1]})
+	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("a legacy marker-less mariadb-org list must adopt (unsatisfied, Apply re-runs), not read as converged")
+	}
+}
+
+func TestDatabaseCheckDebianSourceFlagsLingeringRepo(t *testing.T) {
+	chdirTemp(t)          // Check preflight-reads the local secret cache
+	s := databaseServer() // source: debian
+	repo := apt.MariaDBOrg()
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env, guard passes
+	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
+	f.On("cat "+shQuote(repo.SourceListPath()),
+		bssh.Result{ExitCode: 0, Stdout: string(mustRepoContent(t, repo))})
+	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("a lingering berth-owned mariadb-org list must be unsatisfied under source=debian")
+	}
+}
+
+func TestDatabaseApplyDebianSourceRemovesLingeringRepo(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer() // source: debian
+	repo := apt.MariaDBOrg()
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
+	f.On("cat "+shQuote(repo.SourceListPath()),
+		bssh.Result{ExitCode: 0, Stdout: string(mustRepoContent(t, repo))})
+	f.On("rm -f "+repo.SourceListPath()+" "+repo.KeyringPath(), bssh.Result{ExitCode: 0})
+	f.On("apt-get update", bssh.Result{ExitCode: 0})
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
+	f.On("mysql --protocol=socket", bssh.Result{})
+	stubClientAuthAbsent(f, s, ".my.cnf")
+	stubEnvSeed(f, s)
+	stubClientAuthSeed(f, s, ".my.cnf")
+	var warns []string
+	rc := provision.RunCtx{Warn: func(msg string) { warns = append(warns, msg) }}
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), rc, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var sawRM, sawUpdate bool
+	for _, c := range f.Calls() {
+		if c.Cmd == "rm -f "+repo.SourceListPath()+" "+repo.KeyringPath() {
+			sawRM = true
+		}
+		if c.Cmd == "apt-get update" {
+			sawUpdate = true
+		}
+	}
+	if !sawRM || !sawUpdate {
+		t.Errorf("the lingering repo must be swept and the indexes refreshed; rm ran: %v, update ran: %v", sawRM, sawUpdate)
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0], "upstream versions") {
+		t.Fatalf("want one upstream-versions warning, got %v", warns)
+	}
+}
+
 func TestDatabaseApplySourceMariaDBAddsRepo(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
 	s.Database.Source = "mariadb"
+	repo := apt.MariaDBOrg()
 	f := bssh.NewFakeRunner()
-	stubRepoKeyTrust(f, "mariadb-org", "https://mariadb.org/mariadb_release_signing_key.asc", "177F4010FE56CA3336300305F1656F24C74CD1D8")
-	f.On("apt-get update", bssh.Result{})
-	f.On("apt-get update -o Dir::Etc::sourcelist=sources.list.d/mariadb-org.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o APT::Update::Error-Mode=any", bssh.Result{ExitCode: 0})
+	stubEngineRepoAbsent(f, repo) // list absent -> ensureOwnRepo runs the full EnsureRepo chain
+	stubEnsureRepoChain(f, repo)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
 	f.On("mysql --protocol=socket", bssh.Result{})
@@ -1032,10 +1116,10 @@ func TestDatabaseApplyPostgresFromPGDG(t *testing.T) {
 	s := databaseServer()
 	s.Database.Engine = "postgres"
 	s.Database.Source = "pgdg"
+	repo := apt.PostgresPGDG()
 	f := bssh.NewFakeRunner()
-	stubRepoKeyTrust(f, "pgdg", "https://www.postgresql.org/media/keys/ACCC4CF8.asc", "B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8")
-	f.On("apt-get update", bssh.Result{})
-	f.On("apt-get update -o Dir::Etc::sourcelist=sources.list.d/pgdg.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o APT::Update::Error-Mode=any", bssh.Result{ExitCode: 0})
+	stubEngineRepoAbsent(f, repo) // list absent -> ensureOwnRepo runs the full EnsureRepo chain
+	stubEnsureRepoChain(f, repo)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
 	f.On("sudo -u postgres psql -v ON_ERROR_STOP=1", bssh.Result{})
@@ -1074,6 +1158,7 @@ func TestDatabaseApplyRejectsTamperedPassword(t *testing.T) {
 	s := databaseServer()
 	red := secret.NewRedactor()
 	f := bssh.NewFakeRunner()
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env already present
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
@@ -1090,6 +1175,7 @@ func TestDatabaseApplyRejectsLeadingSpacePassword(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env already present
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
@@ -1112,6 +1198,7 @@ func TestDatabaseApplyRejectsTrailingUnicodeSpacePassword(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env already present
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
@@ -1134,6 +1221,7 @@ func TestDatabaseApplyAcceptsTrailingASCIIWhitespacePassword(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env already present
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
@@ -1242,6 +1330,7 @@ func TestDatabaseApplySeedsClientAuthFile(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})   // fresh box: no .env yet
 	f.On("test -e '/home/deploy/.my.cnf'", bssh.Result{ExitCode: 1}) // fresh box: no client creds yet
@@ -1287,6 +1376,7 @@ func TestDatabaseApplyClientAuthFileNeverRewritten(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env already present
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
@@ -1312,6 +1402,7 @@ const divergedAppKey = "base64:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="
 // berth APP_KEY (divergedAppKey), client-auth file already seeded (holding
 // whatever the cache held), SQL stubbed.
 func stubDivergedEnv(f *bssh.FakeRunner, s *config.Server, newPW string) {
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
@@ -1509,6 +1600,7 @@ func TestDatabaseCheckUnsatisfiedWhenClientAuthMissing(t *testing.T) {
 	f.On("LC_ALL=C; export LC_ALL; grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0})
 	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
 	f.On(mariadbGrantProbe, bssh.Result{Stdout: "1\n"})
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("test -e '/home/deploy/.my.cnf'", bssh.Result{ExitCode: 1}) // creds file missing
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
@@ -1662,6 +1754,7 @@ func TestDatabaseCheckPassesWhenDBConnectionMatchesOrFileAbsent(t *testing.T) {
 				f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), *tc.grep)
 			}
 			f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 1}) // not installed -> early unsatisfied
+			stubEngineRepoAbsent(f, apt.MariaDBOrg())
 			cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 			if err != nil {
 				t.Fatalf("Check() error = %v", err)
@@ -1680,6 +1773,7 @@ func TestDatabaseApplyRecoversAppKeyFromCache(t *testing.T) {
 	dbUser := s.SiteDBUser(s.Sites[0])
 	seedCache(t, s, map[string]string{dbUser: "cachedpw", "appkey:" + dbUser: wantKey})
 	f := bssh.NewFakeRunner()
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // no .env -> re-seed path
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
@@ -1700,6 +1794,7 @@ func TestDatabaseApplyCachesGeneratedAppKey(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
@@ -1724,6 +1819,7 @@ func TestDatabaseApplyBackfillsAppKeyFromExistingEnv(t *testing.T) {
 	s := databaseServer()
 	const envKey = "base64:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="
 	f := bssh.NewFakeRunner()
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
@@ -1753,6 +1849,7 @@ func TestDatabaseApplySkipsNonBerthEnvAppKey(t *testing.T) {
 	chdirTemp(t)
 	s := databaseServer()
 	f := bssh.NewFakeRunner()
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
@@ -1778,6 +1875,7 @@ func TestDatabaseApplyRejectsMalformedCachedAppKey(t *testing.T) {
 	dbUser := s.SiteDBUser(s.Sites[0])
 	seedCache(t, s, map[string]string{"appkey:" + dbUser: "base64:tampered"})
 	f := bssh.NewFakeRunner()
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
@@ -1792,6 +1890,7 @@ func TestDatabaseApplyPostgresSeedsPgpass(t *testing.T) {
 	s := databaseServer()
 	s.Database.Engine = "postgres"
 	f := bssh.NewFakeRunner()
+	stubEngineRepoAbsent(f, apt.PostgresPGDG())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})   // fresh box: no .env yet
 	f.On("test -e '/home/deploy/.pgpass'", bssh.Result{ExitCode: 1}) // fresh box: no client creds yet
@@ -1830,6 +1929,7 @@ func TestDatabaseApplyRegistersPasswordBeforeAppKeyAcquisitionFails(t *testing.T
 	s := databaseServer()
 	red := secret.NewRedactor()
 	f := bssh.NewFakeRunner()
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
@@ -1859,6 +1959,7 @@ func TestDatabaseApplyRegistersCachedPasswordBeforeCachedAppKeyValidationFails(t
 	})
 	red := secret.NewRedactor()
 	f := bssh.NewFakeRunner()
+	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh: no .env
 

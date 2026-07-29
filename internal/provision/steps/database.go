@@ -6,7 +6,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/robsonek/berth/internal/apt"
 	"github.com/robsonek/berth/internal/config"
 	dbpkg "github.com/robsonek/berth/internal/database"
 	"github.com/robsonek/berth/internal/provision"
@@ -293,7 +292,7 @@ func assertEnvEngineMatch(ctx context.Context, r bssh.Runner, s *config.Server, 
 	return nil
 }
 
-func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
+func (d database) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
 	eng, err := dbpkg.Get(s.Database.Engine)
 	if err != nil {
 		return provision.CheckResult{}, err
@@ -325,20 +324,29 @@ func (d database) Check(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	// When an upstream source is configured, the engine's producer repo must be
-	// registered; this makes a source switch (debian -> upstream) re-trigger Apply.
-	sourceOK := true
+	// Repo state must match the CONFIGURED source in both directions: an
+	// upstream source needs its managed list byte-exact + keyring present
+	// (drift re-triggers Apply — a URI change now propagates); the debian
+	// source must not leave a berth-owned upstream list lingering (E1).
+	sourceOK, sweepOK := true, true
 	if s.Database.Source != "debian" {
 		if repo, ok := eng.UpstreamRepo(); ok {
-			sourceOK, err = fileExists(ctx, r, repo.SourceListPath())
+			sourceOK, err = ownRepoUpToDate(ctx, r, repo, rc.Force)
 			if err != nil {
 				return provision.CheckResult{}, err
 			}
 		}
+	} else if repo, ok := eng.UpstreamRepo(); ok {
+		lingers, err := ownRepoLingers(ctx, r, repo)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		sweepOK = !lingers
 	}
-	if !installed || !sourceOK {
-		// No server to probe yet (or the wrong source): Apply reconciles.
-		return d.unsatisfied(eng, "database server or configured source not yet provisioned"), nil
+	if !installed || !sourceOK || !sweepOK {
+		// No server to probe yet, the wrong source, or a lingering upstream
+		// repo: Apply reconciles.
+		return d.unsatisfied(eng, "database server or configured source not yet provisioned (or a lingering upstream repo awaits removal)"), nil
 	}
 	// The server is installed: every site needs its credential persisted AND
 	// its database + user actually present. Probing real state (not just the
@@ -497,7 +505,7 @@ func (database) changes(eng dbpkg.Engine) []string {
 	}
 }
 
-func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) error {
+func (d database) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
 	eng, err := dbpkg.Get(s.Database.Engine)
 	if err != nil {
 		return err
@@ -531,9 +539,13 @@ func (d database) Apply(ctx context.Context, _ provision.RunCtx, s *config.Serve
 	// Install the server once (optionally from its producer repo).
 	if s.Database.Source != "debian" {
 		if repo, ok := eng.UpstreamRepo(); ok {
-			if err := apt.New(r).EnsureRepo(ctx, repo); err != nil {
+			if err := ensureOwnRepo(ctx, rc, r, repo); err != nil {
 				return fmt.Errorf("add %s repo: %w", repo.Name, err)
 			}
+		}
+	} else if repo, ok := eng.UpstreamRepo(); ok {
+		if err := removeOwnRepo(ctx, rc, r, repo); err != nil {
+			return fmt.Errorf("remove lingering %s repo: %w", repo.Name, err)
 		}
 	}
 	if err := aptInstall(ctx, r, eng.ServerPackage()); err != nil {
