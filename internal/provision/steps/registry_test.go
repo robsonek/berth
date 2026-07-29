@@ -216,6 +216,32 @@ func TestPipelineIncludesBackupsAfterSite(t *testing.T) {
 	}
 }
 
+// TestPipelineIncludesOffsiteAlwaysAfterBackups asserts offsite is ALWAYS
+// registered (the valkey/P14 pattern): the disabled mode owns the
+// drift-removal of artifacts a previous offsite-enabled provision left
+// behind. For both an offsite-configured and an offsite-less fixture
+// "offsite" must be present and sit DIRECTLY after "backups".
+func TestPipelineIncludesOffsiteAlwaysAfterBackups(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		offsite *config.Offsite
+	}{
+		{"offsite-configured", &config.Offsite{Backend: "s3", Endpoint: "s3.example.com", Bucket: "bkt"}},
+		{"offsite-less", nil},
+	} {
+		s := &config.Server{
+			PHP: config.PHP{Version: "8.5"}, Database: config.Database{Engine: "mariadb"},
+			Backups: config.Backups{Enabled: true, Offsite: tc.offsite},
+			Sites:   []config.Site{{Domain: "a.example.com", DeployPath: "/srv/a"}},
+		}
+		names := stepNames(steps.Pipeline(s, nil, true))
+		bi, oi := indexOf(names, "backups"), indexOf(names, "offsite")
+		if bi < 0 || oi < 0 || oi != bi+1 {
+			t.Errorf("%s: offsite must immediately follow backups; got %v", tc.name, names)
+		}
+	}
+}
+
 func stepNames(ss []provision.Step) []string {
 	names := make([]string, len(ss))
 	for i, s := range ss {

@@ -37,6 +37,12 @@ func stubManagedPresent(f *bssh.FakeRunner, path string) {
 	f.On("cat "+shQuote(path), bssh.Result{Stdout: "# managed by berth\nsome content\n"})
 }
 
+// stubManagedForeign stubs the managedFilePresent read probe for a file that
+// exists WITHOUT the berth marker (foreign/operator-owned content).
+func stubManagedForeign(f *bssh.FakeRunner, path string) {
+	f.On("cat "+shQuote(path), bssh.Result{Stdout: "some foreign content\n"})
+}
+
 // offsiteS3Server returns a server with one backups-enabled site and an s3
 // offsite target; the secret cache is pre-seeded via a temp HOME.
 func offsiteS3Server(t *testing.T) *config.Server {
@@ -254,5 +260,223 @@ func TestOffsiteCheckMissingS3SecretsIsLoudError(t *testing.T) {
 	_, err := Offsite(nil).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err == nil || !strings.Contains(err.Error(), "berth secret set") {
 		t.Fatalf("missing s3 credentials must hard-error with the recipe; got %v", err)
+	}
+}
+
+// stubOffsiteApplyBase stubs everything Apply converges BEFORE the repo
+// probe on an s3 host whose files are all absent: package present, dirs,
+// env/script/cron write probes, plus the bash -n validation.
+func stubOffsiteApplyBase(t *testing.T, f *bssh.FakeRunner, s *config.Server, secrets map[string]string) {
+	t.Helper()
+	f.On("dpkg -s restic", bssh.Result{Stdout: "Status: install ok installed\n"})
+	f.On("install -d -o root -g root -m 0755 "+shQuote(offsiteEnvDir), bssh.Result{})
+	env, err := renderOffsiteEnv(s, secrets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubFileState(f, offsiteEnvPath, env, "", false) // absent -> write
+	script, err := renderOffsiteScript(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubFileState(f, offsiteScriptPath, script, "", false)
+	f.On("bash -n "+shQuote(offsiteScriptPath), bssh.Result{})
+	cron, err := renderOffsiteCron(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubFileState(f, offsiteCronPath, cron, "", false)
+	f.On("install -d -o root -g root -m 0755 '/var/lib/berth'", bssh.Result{})
+	// writeManagedFile probes the stamp path before writing it (exact-match
+	// FakeRunner: the success paths would otherwise die on an unstubbed cat).
+	repo := s.Backups.Offsite.Repository(s.ID)
+	stubFileState(f, offsiteStampPath(repo), offsiteStampContent(repo), "", false)
+}
+
+func TestOffsiteApplyInitializesRepoAndStamps(t *testing.T) {
+	s := offsiteS3Server(t)
+	secrets := map[string]string{
+		secret.OffsiteS3AccessKey:    "AKIAEXAMPLE",
+		secret.OffsiteS3SecretKey:    "fake-secret",
+		secret.OffsiteResticPassword: "fake-restic-pw",
+	}
+	f := bssh.NewFakeRunner()
+	stubOffsiteApplyBase(t, f, s, secrets)
+	// restic 0.18 (Debian 13): exit code 10 = repository does not exist.
+	probe := "set -a && . " + shQuote(offsiteEnvPath) + " && restic cat config >/dev/null"
+	f.On(probe, bssh.Result{ExitCode: 10, Stderr: "Fatal: repository does not exist: unable to open config file\n"})
+	f.On("set -a && . "+shQuote(offsiteEnvPath)+" && restic init", bssh.Result{ExitCode: 0, Stdout: "created restic repository\n"})
+
+	if err := Offsite(nil).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatal(err)
+	}
+	repo := s.Backups.Offsite.Repository(s.ID)
+	stamped := false
+	for _, w := range f.Writes() {
+		if w.Path == offsiteStampPath(repo) && string(w.Content) == string(offsiteStampContent(repo)) {
+			stamped = true
+		}
+	}
+	if !stamped {
+		t.Fatal("successful init must write the per-repository stamp")
+	}
+}
+
+func TestOffsiteApplyExistingRepoSkipsInit(t *testing.T) {
+	s := offsiteS3Server(t)
+	secrets := map[string]string{
+		secret.OffsiteS3AccessKey:    "AKIAEXAMPLE",
+		secret.OffsiteS3SecretKey:    "fake-secret",
+		secret.OffsiteResticPassword: "fake-restic-pw",
+	}
+	f := bssh.NewFakeRunner()
+	stubOffsiteApplyBase(t, f, s, secrets)
+	f.On("set -a && . "+shQuote(offsiteEnvPath)+" && restic cat config >/dev/null", bssh.Result{ExitCode: 0})
+
+	if err := Offsite(nil).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "restic init") {
+			t.Fatal("existing repository must never be re-initialized")
+		}
+	}
+}
+
+func TestOffsiteApplyNetworkFailureWarnsAndMarksUnconverged(t *testing.T) {
+	s := offsiteS3Server(t)
+	secrets := map[string]string{
+		secret.OffsiteS3AccessKey:    "AKIAEXAMPLE",
+		secret.OffsiteS3SecretKey:    "fake-secret",
+		secret.OffsiteResticPassword: "fake-restic-pw",
+	}
+	f := bssh.NewFakeRunner()
+	stubOffsiteApplyBase(t, f, s, secrets)
+	f.On("set -a && . "+shQuote(offsiteEnvPath)+" && restic cat config >/dev/null",
+		bssh.Result{ExitCode: 1, Stderr: "Fatal: unable to open config file\ndial tcp: connection refused\n"})
+
+	var warned, unconverged []string
+	rc := provision.RunCtx{
+		Warn:            func(msg string) { warned = append(warned, msg) },
+		NoteUnconverged: func(reason string) { unconverged = append(unconverged, reason) },
+	}
+	if err := Offsite(nil).Apply(context.Background(), rc, s, f); err != nil {
+		t.Fatal(err)
+	}
+	if len(warned) != 1 || !strings.Contains(warned[0], "next run") {
+		t.Errorf("expected one retry-promising warning; got %v", warned)
+	}
+	if len(unconverged) != 1 {
+		t.Errorf("a knowingly unverified repository must mark the run unconverged; got %v", unconverged)
+	}
+	repo := s.Backups.Offsite.Repository(s.ID)
+	for _, w := range f.Writes() {
+		if w.Path == offsiteStampPath(repo) {
+			t.Fatal("no stamp may be written when the repository was not verified")
+		}
+	}
+}
+
+func TestOffsiteApplyWrongPasswordIsFatal(t *testing.T) {
+	s := offsiteS3Server(t)
+	secrets := map[string]string{
+		secret.OffsiteS3AccessKey:    "AKIAEXAMPLE",
+		secret.OffsiteS3SecretKey:    "fake-secret",
+		secret.OffsiteResticPassword: "fake-restic-pw",
+	}
+	f := bssh.NewFakeRunner()
+	stubOffsiteApplyBase(t, f, s, secrets)
+	// restic 0.18 (Debian 13): exit code 12 = wrong password.
+	f.On("set -a && . "+shQuote(offsiteEnvPath)+" && restic cat config >/dev/null",
+		bssh.Result{ExitCode: 12, Stderr: "Fatal: wrong password or no key found\n"})
+
+	err := Offsite(nil).Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "berth secret set") {
+		t.Fatalf("wrong password must be a hard error with the recovery recipe; got %v", err)
+	}
+}
+
+func TestOffsiteApplyLegacyMessageClassification(t *testing.T) {
+	// Message fallback for restic versions without the 10/12 exit codes:
+	// the classic "Is there a repository at" phrasing must still classify
+	// as missing-repo (init), not as a transient warning.
+	s := offsiteS3Server(t)
+	secrets := map[string]string{
+		secret.OffsiteS3AccessKey:    "AKIAEXAMPLE",
+		secret.OffsiteS3SecretKey:    "fake-secret",
+		secret.OffsiteResticPassword: "fake-restic-pw",
+	}
+	f := bssh.NewFakeRunner()
+	stubOffsiteApplyBase(t, f, s, secrets)
+	f.On("set -a && . "+shQuote(offsiteEnvPath)+" && restic cat config >/dev/null",
+		bssh.Result{ExitCode: 1, Stderr: "Fatal: unable to open config file\nIs there a repository at the following location?\n"})
+	f.On("set -a && . "+shQuote(offsiteEnvPath)+" && restic init", bssh.Result{ExitCode: 0})
+
+	if err := Offsite(nil).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatal(err)
+	}
+	initRan := false
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "restic init") {
+			initRan = true
+		}
+	}
+	if !initRan {
+		t.Fatal("legacy missing-repo message must classify as init, not transient")
+	}
+}
+
+func TestOffsiteApplyGeneratesPasswordOnce(t *testing.T) {
+	s := offsiteS3Server(t)
+	seedOffsiteSecrets(t, s, map[string]string{
+		secret.OffsiteS3AccessKey: "AKIAEXAMPLE",
+		secret.OffsiteS3SecretKey: "fake-secret",
+	}) // no password yet
+	f := bssh.NewFakeRunner()
+	// The env content depends on the GENERATED password, so stub the env
+	// write probe as absent WITHOUT pinning content, then assert afterwards.
+	stubOffsiteApplyBase(t, f, s, map[string]string{
+		secret.OffsiteS3AccessKey: "AKIAEXAMPLE",
+		secret.OffsiteS3SecretKey: "fake-secret",
+	})
+	f.On("set -a && . "+shQuote(offsiteEnvPath)+" && restic cat config >/dev/null", bssh.Result{ExitCode: 0})
+
+	if err := Offsite(nil).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatal(err)
+	}
+	env, err := secret.LoadEnvelope(s.CacheKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pw := env.Secrets[secret.OffsiteResticPassword]
+	if pw == "" {
+		t.Fatal("Apply must generate and persist the restic password")
+	}
+	found := false
+	for _, w := range f.Writes() {
+		if w.Path == offsiteEnvPath && strings.Contains(string(w.Content), "RESTIC_PASSWORD='"+pw+"'") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the generated password must land in the written env file")
+	}
+}
+
+func TestOffsiteApplyDisabledSweepsMarkerGuarded(t *testing.T) {
+	s := offsiteS3Server(t)
+	s.Backups.Offsite = nil
+	f := bssh.NewFakeRunner()
+	stubManagedPresent(f, offsiteScriptPath)
+	f.On("rm -f "+shQuote(offsiteScriptPath), bssh.Result{})
+	stubManagedAbsent(f, offsiteCronPath)
+	stubManagedForeign(f, offsiteEnvPath) // exists WITHOUT the marker
+	if err := Offsite(nil).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range f.Calls() {
+		if c.Cmd == "rm -f "+shQuote(offsiteEnvPath) {
+			t.Fatal("a foreign (unmarked) file must never be removed")
+		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
@@ -267,11 +268,152 @@ func validateOffsiteSecrets(secrets map[string]string) error {
 	return nil
 }
 
-func (o offsite) Apply(ctx context.Context, _ provision.RunCtx, s *config.Server, r bssh.Runner) error {
+func (o offsite) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
 	if !s.OffsiteEnabled() {
 		return o.sweepDisabled(ctx, r)
 	}
-	return fmt.Errorf("offsite enabled-mode Apply lands in the next commit")
+
+	off := s.Backups.Offsite
+	repo := off.Repository(s.ID)
+
+	installed, err := pkgInstalled(ctx, r, "restic")
+	if err != nil {
+		return err
+	}
+	if !installed {
+		if err := aptInstall(ctx, r, "restic"); err != nil {
+			return err
+		}
+	}
+
+	// No ensureCron here: offsite validates as enabled only on top of
+	// enabled backups, and the backups step (earlier in the pipeline)
+	// already installs + enables the cron daemon.
+
+	secrets, err := o.loadOrSeedSecrets(s)
+	if err != nil {
+		return err
+	}
+	if off.Backend == "s3" && (secrets[secret.OffsiteS3AccessKey] == "" || secrets[secret.OffsiteS3SecretKey] == "") {
+		return fmt.Errorf(
+			"offsite s3 credentials are missing from the local secret cache; run:\n"+
+				"  berth secret set <server.yml> %s\n  berth secret set <server.yml> %s",
+			secret.OffsiteS3AccessKey, secret.OffsiteS3SecretKey)
+	}
+	o.registerSecrets(secrets)
+
+	if err := runOK(ctx, r, "install -d -o root -g root -m 0755 "+shQuote(offsiteEnvDir)); err != nil {
+		return err
+	}
+	env, err := renderOffsiteEnv(s, secrets)
+	if err != nil {
+		return err
+	}
+	if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{Path: offsiteEnvPath, Content: env, Owner: "root", Group: "root", Mode: 0o600, Sudo: true}); err != nil {
+		return fmt.Errorf("write %s: %w", offsiteEnvPath, err)
+	}
+	script, err := renderOffsiteScript(s)
+	if err != nil {
+		return err
+	}
+	if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{Path: offsiteScriptPath, Content: script, Owner: "root", Group: "root", Mode: 0o755, Sudo: true}); err != nil {
+		return fmt.Errorf("write %s: %w", offsiteScriptPath, err)
+	}
+	if err := runOK(ctx, r, "bash -n "+shQuote(offsiteScriptPath)); err != nil {
+		return fmt.Errorf("offsite script failed bash -n: %w", err)
+	}
+	cron, err := renderOffsiteCron(s)
+	if err != nil {
+		return err
+	}
+	if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{Path: offsiteCronPath, Content: cron, Owner: "root", Group: "root", Mode: 0o644, Sudo: true}); err != nil {
+		return fmt.Errorf("write %s: %w", offsiteCronPath, err)
+	}
+	if err := runOK(ctx, r, "install -d -o root -g root -m 0755 '/var/lib/berth'"); err != nil {
+		return err
+	}
+	return o.ensureRepo(ctx, rc, r, repo, off)
+}
+
+// loadOrSeedSecrets loads the offsite secrets, generating and persisting the
+// repository password on first use (the DB-password pattern). The cache lock
+// is held ONLY across load→generate→save — never across remote I/O: a slow
+// target must not block a concurrent `berth secret set` (a value updated
+// after this snapshot simply surfaces as env drift on the next run). Loaded
+// values are revalidated: the cache file is operator-editable.
+func (o offsite) loadOrSeedSecrets(s *config.Server) (map[string]string, error) {
+	release, err := secret.LockCache(s.CacheKey())
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	secrets, err := loadVerifiedSecrets(s)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateOffsiteSecrets(secrets); err != nil {
+		return nil, err
+	}
+	if secrets[secret.OffsiteResticPassword] == "" {
+		pw, err := secret.Generate(offsiteResticPasswordLen)
+		if err != nil {
+			return nil, err
+		}
+		secrets[secret.OffsiteResticPassword] = pw
+		if err := saveSecrets(s, secrets); err != nil {
+			return nil, err
+		}
+	}
+	return secrets, nil
+}
+
+// resticExit codes of restic 0.18 (Debian 13); message fallbacks cover
+// older/newer versions.
+const (
+	resticExitNoRepository  = 10
+	resticExitWrongPassword = 12
+)
+
+// ensureRepo probes the repository once per target (stamped): exit 0 =
+// exists; exit 10 / missing-repo stderr = init; exit 12 / wrong-password
+// stderr = hard error (the repo exists, data is at stake, re-init is
+// impossible — only the correct password helps); anything else = warning +
+// unconverged mark, retried next run because the stamp stays missing.
+// Permanent backend-auth failures deliberately share the transient branch
+// (spec amendment 10): telling them apart by stderr is fragile, and a run
+// that warns loudly and withholds the manifest every time is the honest
+// state. The stamp is only written after a VERIFIED repository.
+func (o offsite) ensureRepo(ctx context.Context, rc provision.RunCtx, r bssh.Runner, repo string, off *config.Offsite) error {
+	opts := offsiteResticOpts(off)
+	res, err := r.Run(ctx, "set -a && . "+shQuote(offsiteEnvPath)+" && restic"+opts+" cat config >/dev/null", nil)
+	if err != nil {
+		return err
+	}
+	noRepo := res.ExitCode == resticExitNoRepository ||
+		strings.Contains(res.Stderr, "Is there a repository at") ||
+		strings.Contains(res.Stderr, "repository does not exist")
+	wrongPassword := res.ExitCode == resticExitWrongPassword ||
+		strings.Contains(res.Stderr, "wrong password")
+	switch {
+	case res.ExitCode == 0:
+		// repository exists and opens with our password
+	case wrongPassword:
+		return fmt.Errorf("the restic repository %s exists but the cached password does not open it; restore the correct password with: berth secret set <server.yml> %s (%s)",
+			repo, secret.OffsiteResticPassword, strings.TrimSpace(res.Stderr))
+	case noRepo:
+		ires, err := r.Run(ctx, "set -a && . "+shQuote(offsiteEnvPath)+" && restic"+opts+" init", nil)
+		if err != nil {
+			return err
+		}
+		if ires.ExitCode != 0 {
+			return fmt.Errorf("restic init on %s: %s", repo, strings.TrimSpace(ires.Stderr))
+		}
+	default:
+		rc.Warnf("cannot verify the restic repository %s yet: %s — it will be verified or initialized on the next run", repo, strings.TrimSpace(res.Stderr))
+		rc.MarkUnconverged("offsite repository " + repo + " not verified")
+		return nil
+	}
+	return writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{Path: offsiteStampPath(repo), Content: offsiteStampContent(repo), Owner: "root", Group: "root", Mode: 0o600, Sudo: true})
 }
 
 // sweepDisabled removes lingering berth-managed offsite host artifacts.
