@@ -280,6 +280,36 @@ func validDaemonName(s string) error {
 	return nil
 }
 
+// validAptURL adapts config.ValidateAptURL to huh's func(string) error shape.
+func validAptURL(field string) func(string) error {
+	return func(raw string) error { return config.ValidateAptURL(field, raw) }
+}
+
+// validAptComponents validates a space-separated component list ("" = main).
+func validAptComponents(raw string) error {
+	for _, c := range strings.Fields(raw) {
+		if err := config.ValidateAptComponent(c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validAptPackages validates a space-separated package list ("" = none).
+func validAptPackages(raw string) error {
+	seen := map[string]bool{}
+	for _, p := range strings.Fields(raw) {
+		if err := config.ValidateAptPackage(p); err != nil {
+			return err
+		}
+		if seen[p] {
+			return fmt.Errorf("duplicate package %q", p)
+		}
+		seen[p] = true
+	}
+	return nil
+}
+
 // hasControlChars mirrors config's hasControlChars (unexported there) for
 // inline feedback on the offsite fields; config.Server.Validate stays
 // authoritative.

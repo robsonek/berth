@@ -62,8 +62,9 @@ the service reload heals on the next run.
 
 A server is one YAML file in `servers/<name>.yml`. `berth init` can generate
 **any** of the configs in this README interactively — the advanced sections
-(fail2ban, tuning, swap/sysctl/timezone, Cloudflare-only lockdown, and backups, plus
-per-site queue/daemons and scheduler/Cloudflare/backups overrides) sit behind
+(fail2ban, tuning, swap/sysctl/timezone, Cloudflare-only lockdown, extra apt
+repos/packages, and backups, plus per-site queue/daemons and
+scheduler/Cloudflare/backups overrides) sit behind
 optional prompts, so the common path stays short — or you can write the file by
 hand. Ready-to-copy
 starting points live in [`examples/`](examples/) — e.g.
@@ -146,6 +147,19 @@ backups:                       # optional opt-in local backups — off by defaul
   enabled: true                # server-wide default (off unless set)
   retention_days: 7            # prune dumps older than N days (default 7; 1–3650)
   schedule: "30 3 * * *"       # 5-field cron, run as root (default 03:30 daily)
+
+apt:                           # optional extra third-party apt repos & packages
+  repos:                       # (see "Extra apt repositories & packages" below)
+    - name: signal-cli         # ^[a-z0-9][a-z0-9-]{0,31}$ — lands on the host as
+                               # /etc/apt/sources.list.d/berth-<name>.list + keyring
+      uri: https://packaging.gitlab.io/signal-cli    # https:// only
+      suite: signalcli
+      components: [main]       # optional, defaults to [main]
+      key_url: https://packaging.gitlab.io/signal-cli/gpg.key   # https:// only
+      fingerprint: 02BD5FB7BA4650D50ED69002797DFE3F4F80269B     # required — full
+                               # 40-hex signing-key fingerprint, verified on fetch
+  packages: [signal-cli-native, htop]   # extra packages — install-only, berth
+                               # never uninstalls a name you remove from the list
 
 sites:                         # one or more
   - domain: app.example.com            # required
@@ -257,6 +271,49 @@ Each defaults to `debian`. `database.source` accepts `debian` or the chosen
 engine's producer repo (`mariadb` for MariaDB, `pgdg` for PostgreSQL). An
 upstream source aborts the run if the fetched key does not match the pinned
 fingerprint.
+
+### Extra apt repositories & packages
+
+Beyond the built-in upstreams (sury/nginx.org/MariaDB/PGDG), a server config
+may declare extra third-party repositories and packages:
+
+```yaml
+apt:
+  repos:
+    - name: signal-cli
+      uri: https://packaging.gitlab.io/signal-cli
+      suite: signalcli
+      components: [main]        # optional, defaults to [main]
+      key_url: https://packaging.gitlab.io/signal-cli/gpg.key
+      fingerprint: 02BD5FB7BA4650D50ED69002797DFE3F4F80269B
+  packages: [signal-cli-native, htop]
+```
+
+Semantics:
+
+- `fingerprint` (the full 40-hex signing-key fingerprint) is required — berth
+  pins every repository key and refuses a bundle that does not contain
+  exactly that key. `uri` and `key_url` must be `https://`.
+- Repos are fully declarative: the source list lands at
+  `/etc/apt/sources.list.d/berth-<name>.list` with a pinned keyring, and a
+  repo REMOVED from the config is swept from the host (list + keyring) on the
+  next run. A foreign file in the `berth-*` namespace is never touched.
+- Packages are **install-only**: berth installs missing ones (after the
+  declared repos are registered) but never uninstalls a package you remove
+  from the list — uninstall manually with `apt-get remove`.
+- Declare **concrete** package names, not virtual ones: convergence is probed
+  with `dpkg -s <name>`, which never reports a virtual package as installed,
+  so a virtual name would re-trigger installation on every run and the host
+  would never report fully converged.
+- Double-check names containing a dot: when no package matches the literal
+  name, `apt-get install` falls back to treating it as a POSIX regex, so a
+  typo'd dotted name (e.g. `python3.99`) can match — and install —
+  unintended packages.
+- Switching a built-in source back to stock (e.g. `nginx.source: nginx` →
+  `debian`) now also removes the corresponding upstream repo. Installed
+  packages KEEP their upstream versions — apt never auto-downgrades. To return
+  to the Debian build: check `apt policy <pkg>`, then
+  `apt-get install <pkg>=<debian-version>` (or remove and reinstall).
 
 ## Performance
 

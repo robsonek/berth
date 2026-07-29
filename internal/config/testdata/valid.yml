@@ -12,6 +12,15 @@ database:
 valkey: true
 queue: true
 scheduler: true
+apt:
+  repos:
+    - name: signal-cli
+      uri: https://packaging.gitlab.io/signal-cli
+      suite: signalcli
+      components: [main]
+      key_url: https://packaging.gitlab.io/signal-cli/gpg.key
+      fingerprint: 02BD5FB7BA4650D50ED69002797DFE3F4F80269B
+  packages: [signal-cli-native, htop]
 sites:
   - domain: app.example.com
     deploy_path: /var/www/app

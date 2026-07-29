@@ -28,6 +28,31 @@ func TestLoadValid(t *testing.T) {
 	}
 }
 
+func TestLoadAptDecodes(t *testing.T) {
+	// Value-level decode check for the apt block in valid.yml: proves the
+	// mapstructure tags bind (key_url would NOT bind by field-name convention,
+	// so a missing tag surfaces here, not just as an unknown-key error).
+	s, err := Load("testdata/valid.yml")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(s.Apt.Repos) != 1 {
+		t.Fatalf("Apt.Repos = %+v, want one repo", s.Apt.Repos)
+	}
+	r := s.Apt.Repos[0]
+	if r.Name != "signal-cli" || r.URI != "https://packaging.gitlab.io/signal-cli" ||
+		r.Suite != "signalcli" || r.KeyURL != "https://packaging.gitlab.io/signal-cli/gpg.key" ||
+		r.Fingerprint != "02BD5FB7BA4650D50ED69002797DFE3F4F80269B" {
+		t.Errorf("Apt.Repos[0] decoded wrong: %+v", r)
+	}
+	if len(r.Components) != 1 || r.Components[0] != "main" {
+		t.Errorf("Apt.Repos[0].Components = %v, want [main]", r.Components)
+	}
+	if len(s.Apt.Packages) != 2 || s.Apt.Packages[0] != "signal-cli-native" || s.Apt.Packages[1] != "htop" {
+		t.Errorf("Apt.Packages = %v, want [signal-cli-native htop]", s.Apt.Packages)
+	}
+}
+
 func TestLoadDefaultsPort(t *testing.T) {
 	// minimal.yml omits ssh.port → default 22 applies (created inline below).
 	s, err := Load("testdata/valid.yml")

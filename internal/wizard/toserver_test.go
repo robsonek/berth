@@ -105,6 +105,36 @@ func TestToServerMapsOffsite(t *testing.T) {
 	}
 }
 
+func TestToServerCarriesAptBlock(t *testing.T) {
+	a := defaults()
+	a.Name, a.Host = "t", "203.0.113.10"
+	a.ID = "test-machine-0001"
+	a.Sites = []SiteAnswers{{
+		Domain: "a.example.com", DeployPath: "/srv/a", DBName: "adb", DBUser: "ausr",
+		SchedulerOverride: "inherit",
+	}}
+	a.AptRepos = []AptRepoAnswers{{
+		Name: "signal-cli", URI: "https://packaging.gitlab.io/signal-cli",
+		Suite: "signalcli", Components: "main",
+		KeyURL:      "https://packaging.gitlab.io/signal-cli/gpg.key",
+		Fingerprint: "02BD5FB7BA4650D50ED69002797DFE3F4F80269B",
+	}}
+	a.AptPackages = "signal-cli-native htop"
+	srv := a.ToServer()
+	if len(srv.Apt.Repos) != 1 || srv.Apt.Repos[0].Name != "signal-cli" {
+		t.Fatalf("apt repo not carried: %+v", srv.Apt)
+	}
+	if len(srv.Apt.Repos[0].Components) != 1 || srv.Apt.Repos[0].Components[0] != "main" {
+		t.Fatalf("components not split: %+v", srv.Apt.Repos[0])
+	}
+	if len(srv.Apt.Packages) != 2 {
+		t.Fatalf("packages not split: %+v", srv.Apt.Packages)
+	}
+	if err := srv.Validate(); err != nil {
+		t.Fatalf("wizard output must validate: %v", err)
+	}
+}
+
 func TestToServerCarriesBreakGlass(t *testing.T) {
 	a := Answers{System: SystemAnswers{BreakGlass: true}}
 	if s := a.ToServer(); !s.System.BreakGlass {

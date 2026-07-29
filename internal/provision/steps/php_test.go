@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/robsonek/berth/internal/apt"
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
 	bssh "github.com/robsonek/berth/internal/ssh"
@@ -43,12 +44,214 @@ func phpExtPkgs() []string {
 	return pkgs
 }
 
+// stubSuryRepoAbsent makes the sury source-list probe read back as absent:
+// stock-source paths (ownRepoLingers) see nothing to sweep, and sury-source
+// paths proceed to the full EnsureRepo chain (mirrors stubNginxRepoAbsent).
+func stubSuryRepoAbsent(f *bssh.FakeRunner) {
+	f.On("cat "+shQuote(apt.Sury().SourceListPath()), bssh.Result{ExitCode: 1})
+}
+
+func TestPHPCheckSuryDriftedListUnsatisfied(t *testing.T) {
+	// A pre-E1 marker-less sury list with EXACT legacy bytes is adoptable
+	// drift: Check reports unsatisfied (no error, no --force needed) so Apply
+	// reconciles it via EnsureRepo.
+	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "sury"}}
+	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	f.On("cat "+shQuote(apt.Sury().SourceListPath()), bssh.Result{ExitCode: 0, Stdout: apt.Sury().LegacySourceContents()[0]})
+	cr, err := PHP().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied when the sury list is pre-E1 legacy bytes")
+	}
+	if !strings.Contains(cr.Reason, "sury") {
+		t.Errorf("Reason = %q, want it to mention the sury repo", cr.Reason)
+	}
+}
+
+func TestPHPCheckStockSourceFlagsLingeringSuryRepo(t *testing.T) {
+	// php.source resolves to stock (8.4 via auto), yet a berth-owned sury list
+	// still sits on disk: with everything else converged, the lingering repo
+	// alone must flag drift so Apply removes it.
+	s := &config.Server{PHP: config.PHP{Version: "8.4"}}
+	want, err := renderOpcache()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTuning, err := renderPHPTuning(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	f.On("cat "+shQuote(apt.Sury().SourceListPath()), bssh.Result{ExitCode: 0, Stdout: string(mustRepoContent(t, apt.Sury()))})
+	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
+	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(want), ExitCode: 0})
+	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{Stdout: string(wantTuning), ExitCode: 0})
+	f.On("systemctl is-active php8.4-fpm", bssh.Result{})
+	f.On(reloadedSinceCmd("php8.4-fpm", opcacheDropInPath("8.4"), phpTuningDropInPath("8.4")), bssh.Result{})
+	f.On("test -d "+shQuote(phpLogDir), bssh.Result{ExitCode: 0})
+	f.On("dpkg -s php8.4-mysql", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
+	cr, err := PHP().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("expected unsatisfied while a berth-owned sury list lingers")
+	}
+	if !strings.Contains(cr.Reason, "lingering") {
+		t.Errorf("Reason = %q, want it to mention the lingering repo", cr.Reason)
+	}
+}
+
+func TestPHPApplyStockSourceRemovesLingeringSuryRepo(t *testing.T) {
+	// The config returned to Debian stock while a berth-owned sury list (and
+	// keyring) linger from an earlier upstream provision: Apply sweeps them,
+	// refreshes the indexes and warns that installed packages keep their
+	// upstream versions (apt never auto-downgrades).
+	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
+	repo := apt.Sury()
+	rmCmd := "rm -f " + repo.SourceListPath() + " " + repo.KeyringPath()
+	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	f.On("cat "+shQuote(repo.SourceListPath()), bssh.Result{ExitCode: 0, Stdout: string(mustRepoContent(t, repo))})
+	f.On(rmCmd, bssh.Result{})
+	f.On("apt-get update", bssh.Result{})
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs(), " "), bssh.Result{})
+	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
+	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{})
+	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{ExitCode: 1})
+	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{ExitCode: 1})
+	f.On("php-fpm8.4 -t", bssh.Result{})
+	f.On("systemctl is-active php8.4-fpm", bssh.Result{}) // alive
+	f.On("systemctl reload php8.4-fpm", bssh.Result{})
+	f.On(markReloadedCmd("php8.4-fpm"), bssh.Result{})
+
+	var warned []string
+	rc := provision.RunCtx{Warn: func(msg string) { warned = append(warned, msg) }}
+	if err := PHP().Apply(context.Background(), rc, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if callIdx(f, rmCmd, 0) < 0 {
+		t.Error("Apply must remove the lingering sury list and keyring")
+	}
+	if callIdx(f, "apt-get update", 0) < 0 {
+		t.Error("Apply must refresh the apt indexes after removing the sury repo")
+	}
+	if len(warned) != 1 || !strings.Contains(warned[0], "upstream versions") {
+		t.Fatalf("want one upstream-versions warning, got %q", warned)
+	}
+}
+
+func TestPHPCheckForeignSuryListAbortsEvenWhenFPMMissing(t *testing.T) {
+	// Codex #3 regression guard: on a FRESH host (php-fpm not installed) the
+	// sury classification must run BEFORE the installed early-return —
+	// otherwise Check would report plain unsatisfied and Apply would overwrite
+	// the operator's foreign list without --force.
+	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "sury"}}
+	foreign := bssh.Result{ExitCode: 0, Stdout: "deb https://operator.example/ x main\n"}
+
+	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	f.On("cat "+shQuote(apt.Sury().SourceListPath()), foreign)
+	_, err := PHP().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("err = %v, want the abort-unless---force refusal", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.HasPrefix(c.Cmd, "dpkg -s") {
+			t.Errorf("the foreign-list refusal must precede any dpkg probe; ran %q", c.Cmd)
+		}
+	}
+
+	// With --force the foreign file becomes an overwrite candidate: plain
+	// unsatisfied (no error), reconciled by Apply.
+	ff := bssh.NewFakeRunner()
+	ff.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	ff.On("cat "+shQuote(apt.Sury().SourceListPath()), foreign)
+	cr, err := PHP().Check(context.Background(), provision.RunCtx{Force: true}, s, ff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("a foreign sury list under --force must read unsatisfied, not satisfied")
+	}
+}
+
+func TestPHPApplySuryForeignListRefusesWithoutForce(t *testing.T) {
+	// Apply-side twin of the Check ordering test above: Apply often runs for
+	// UNRELATED drift, so its write path (ensureOwnRepo) must re-classify the
+	// live sury list itself — a regression to a bare EnsureRepo would clobber
+	// the operator's foreign file without --force and fetch the key first.
+	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "sury"}}
+	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	f.On("cat "+shQuote(apt.Sury().SourceListPath()), bssh.Result{ExitCode: 0, Stdout: "deb https://operator.example/ x main\n"})
+
+	err := PHP().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("err = %v, want the abort-unless---force refusal from the write path", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "curl") {
+			t.Fatalf("EnsureRepo must not run for a foreign sury list: %v", f.Calls())
+		}
+	}
+	for _, w := range f.Writes() {
+		if w.Path == apt.Sury().SourceListPath() {
+			t.Error("a foreign sury list must not be overwritten without --force")
+		}
+	}
+}
+
+func TestPHPApplySourceSuryAddsRepo(t *testing.T) {
+	// The sury list reads back absent, so ensureOwnRepo runs the full
+	// EnsureRepo chain (mirrors TestNginxApplySourceNginxAddsRepoAndBridge).
+	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "sury"}}
+	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	stubSuryRepoAbsent(f)
+	stubEnsureRepoChain(f, apt.Sury())
+	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{}) // stamp invalidation up front
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs(), " "), bssh.Result{})
+	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
+	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{ExitCode: 1})   // write-guard: absent
+	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{ExitCode: 1}) // write-guard: absent
+	f.On("php-fpm8.4 -t", bssh.Result{})
+	f.On("systemctl is-active php8.4-fpm", bssh.Result{}) // alive
+	f.On("systemctl reload php8.4-fpm", bssh.Result{})
+	f.On(markReloadedCmd("php8.4-fpm"), bssh.Result{})
+
+	if err := PHP().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var cmds []string
+	for _, c := range f.Calls() {
+		cmds = append(cmds, c.Cmd)
+	}
+	if !strings.Contains(strings.Join(cmds, "\n"), "packages.sury.org/php/apt.gpg") {
+		t.Errorf("source=sury must fetch the sury signing key; calls:\n%s", strings.Join(cmds, "\n"))
+	}
+	var sourceListWritten bool
+	for _, w := range f.Writes() {
+		if w.Path == apt.Sury().SourceListPath() {
+			sourceListWritten = true
+		}
+	}
+	if !sourceListWritten {
+		t.Error("expected the sury-php apt source list to be written")
+	}
+}
+
 func TestPHPApplyRefusesForeignOpcacheDropIn(t *testing.T) {
 	// An operator's own OPcache drop-in (no berth marker) must not be clobbered
 	// by Apply without --force.
 	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
 	f := bssh.NewFakeRunner()
 	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	stubSuryRepoAbsent(f)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs(), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{})                            // stamp invalidation up front
@@ -69,6 +272,7 @@ func TestPHPApplyWritesOpcacheDropIn(t *testing.T) {
 	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}} // stock -> no Surý repo
 	f := bssh.NewFakeRunner()
 	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	stubSuryRepoAbsent(f)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs(), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{}) // stamp invalidation up front
@@ -143,6 +347,7 @@ func TestPHPCheckUnsatisfiedWhenOpcacheDropInMissing(t *testing.T) {
 	s := &config.Server{PHP: config.PHP{Version: "8.4"}}
 	f := bssh.NewFakeRunner()
 	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	stubSuryRepoAbsent(f)
 	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"}) // installed
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{ExitCode: 1})                       // drop-in absent
 	cr, err := PHP().Check(context.Background(), provision.RunCtx{}, s, f)
@@ -166,6 +371,7 @@ func TestPHPCheckSatisfiedWhenInstalledAndOpcacheManaged(t *testing.T) {
 	}
 	f := bssh.NewFakeRunner()
 	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	stubSuryRepoAbsent(f)
 	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(want), ExitCode: 0})
 	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{Stdout: string(wantTuning), ExitCode: 0})
@@ -204,6 +410,7 @@ func TestPHPCheckUnsatisfiedWhenPDODriverMissing(t *testing.T) {
 	}
 	f := bssh.NewFakeRunner()
 	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	stubSuryRepoAbsent(f)
 	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(want), ExitCode: 0})
 	wantTuning, err := renderPHPTuning(s)
@@ -232,6 +439,7 @@ func TestPHPCheckUnsatisfiedWhenLogDirMissing(t *testing.T) {
 	}
 	f := bssh.NewFakeRunner()
 	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	stubSuryRepoAbsent(f)
 	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(want), ExitCode: 0})
 	wantTuning, err := renderPHPTuning(s)
@@ -304,6 +512,7 @@ func TestPHPCheckUnsatisfiedWhenTuningDropInMissing(t *testing.T) {
 	}
 	f := bssh.NewFakeRunner()
 	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	stubSuryRepoAbsent(f)
 	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(wantOp), ExitCode: 0})
 	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{ExitCode: 1}) // absent
@@ -322,6 +531,7 @@ func TestPHPApplyRefusesForeignTuningDropIn(t *testing.T) {
 	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
 	f := bssh.NewFakeRunner()
 	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	stubSuryRepoAbsent(f)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs(), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{})                                 // stamp invalidation up front
@@ -345,6 +555,7 @@ func TestPHPApplyRefusesForeignTuningDropIn(t *testing.T) {
 func phpDifferentialRunner() *bssh.FakeRunner {
 	f := bssh.NewFakeRunner()
 	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	stubSuryRepoAbsent(f)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs(), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{}) // stamp invalidation up front
@@ -542,6 +753,7 @@ func TestPHPApplyPropagatesRestoreFailure(t *testing.T) {
 	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
 	f := bssh.NewFakeRunner()
 	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	stubSuryRepoAbsent(f)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs(), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{})
@@ -602,6 +814,7 @@ func TestPHPApplyInvalidatesBeforePackageInstall(t *testing.T) {
 	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
 	f := bssh.NewFakeRunner()
 	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	stubSuryRepoAbsent(f)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs(), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{})
@@ -643,6 +856,7 @@ func TestPHPCheckUnsatisfiedWhenFPMDead(t *testing.T) {
 	}
 	f := bssh.NewFakeRunner()
 	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	stubSuryRepoAbsent(f)
 	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(want), ExitCode: 0})
 	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{Stdout: string(wantTuning), ExitCode: 0})
@@ -675,6 +889,7 @@ func TestPHPCheckUnsatisfiedWhenDropInsNewerThanStamp(t *testing.T) {
 	}
 	f := bssh.NewFakeRunner()
 	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	stubSuryRepoAbsent(f)
 	f.On("dpkg -s php8.4-fpm", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{Stdout: string(want), ExitCode: 0})
 	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{Stdout: string(wantTuning), ExitCode: 0})
@@ -697,6 +912,7 @@ func TestPHPApplyStartsDeadFPMAndStamps(t *testing.T) {
 	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
 	f := bssh.NewFakeRunner()
 	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	stubSuryRepoAbsent(f)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs(), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{}) // stamp invalidation up front
@@ -733,6 +949,7 @@ func TestPHPApplyReloadsLiveFPMAndStamps(t *testing.T) {
 	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "debian"}}
 	f := bssh.NewFakeRunner()
 	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	stubSuryRepoAbsent(f)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs(), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{}) // stamp invalidation up front
@@ -772,6 +989,7 @@ func TestPHPApplyNoStampWhenValidationFails(t *testing.T) {
 	rm := "rm -f " + shQuote(opcacheDropInPath("8.4")) + " " + shQuote(phpTuningDropInPath("8.4"))
 	f := bssh.NewFakeRunner()
 	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	stubSuryRepoAbsent(f)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs(), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{}) // stamp invalidation up front
@@ -798,6 +1016,7 @@ func TestPHPApplyRemovesDropInsOnReloadFailure(t *testing.T) {
 	rm := "rm -f " + shQuote(opcacheDropInPath("8.4")) + " " + shQuote(phpTuningDropInPath("8.4"))
 	f := bssh.NewFakeRunner()
 	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	stubSuryRepoAbsent(f)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs(), " "), bssh.Result{})
 	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{}) // stamp invalidation up front
@@ -835,6 +1054,7 @@ func TestPHPDeferralConvergesViaSiteSharedStamp(t *testing.T) {
 	s := siteServer() // PHP 8.4 (stock), one site, scheduler on
 	f := bssh.NewFakeRunner()
 	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	stubSuryRepoAbsent(f)
 
 	// --- Act 1: php.Apply — a pool file is broken, fault outside the drop-ins.
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs(), " "), bssh.Result{})

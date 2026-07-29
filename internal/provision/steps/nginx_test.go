@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/robsonek/berth/internal/apt"
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
 	bssh "github.com/robsonek/berth/internal/ssh"
@@ -24,10 +25,51 @@ func stubDefaultsAbsent(f *bssh.FakeRunner) {
 	f.On("test -e "+shQuote(nginxOrgDefaultConf), bssh.Result{ExitCode: 1})
 }
 
+// stubNginxRepoAbsent makes the nginx.org source-list probe read back as
+// absent: the debian-source paths (ownRepoLingers) see nothing to sweep, and
+// the nginx-source Apply path (ensureOwnRepo) proceeds to the full EnsureRepo
+// chain.
+func stubNginxRepoAbsent(f *bssh.FakeRunner) {
+	f.On("cat "+shQuote(apt.NginxOrg().SourceListPath()), bssh.Result{ExitCode: 1})
+}
+
+// stubNginxRepoConverged makes the nginx.org repo probes read back converged
+// (managed byte-exact list + keyring holding exactly the pinned key), so
+// ownRepoUpToDate is satisfied and ensureOwnRepo skips EnsureRepo.
+func stubNginxRepoConverged(t *testing.T, f *bssh.FakeRunner) {
+	t.Helper()
+	repo := apt.NginxOrg()
+	f.On("cat "+shQuote(repo.SourceListPath()), bssh.Result{ExitCode: 0, Stdout: string(mustRepoContent(t, repo))})
+	f.On("gpg --show-keys --with-colons "+repo.KeyringPath(), bssh.Result{ExitCode: 0, Stdout: gpgColonsFor(repo.Fingerprint)})
+}
+
+// stubEnsureRepoChain stubs apt.EnsureRepo's full command sequence for repo:
+// key trust via the /run/berth staging files (the staging keyring ends up
+// holding exactly the pinned primary key), the keyring install, the index
+// refresh and the single-source index verification.
+func stubEnsureRepoChain(f *bssh.FakeRunner, repo apt.Repo) {
+	tmpKey := "/run/berth/key-" + repo.Name
+	tmpRing := "/run/berth/keyring-" + repo.Name + ".gpg"
+	tmpOut := "/run/berth/pinned-" + repo.Name + ".gpg"
+	f.On("install -d -m 700 /run/berth", bssh.Result{})
+	f.On("curl -fsSL -o "+tmpKey+" -- "+shQuote(repo.KeyURL), bssh.Result{})
+	f.On("gpg --yes -o "+tmpRing+" --dearmor "+tmpKey, bssh.Result{})
+	f.On("gpg --no-default-keyring --keyring "+tmpRing+" --yes -o "+tmpOut+" --export "+repo.Fingerprint, bssh.Result{})
+	f.On("gpg --show-keys --with-colons "+tmpOut, bssh.Result{Stdout: gpgColonsFor(repo.Fingerprint)})
+	f.On("install -m 0644 "+tmpOut+" "+repo.KeyringPath(), bssh.Result{})
+	f.On("rm -f "+tmpKey+" "+tmpRing+" "+tmpOut, bssh.Result{})
+	f.On("apt-get update", bssh.Result{})
+	f.On(fmt.Sprintf("apt-get update -o Dir::Etc::sourcelist=sources.list.d/%s.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o APT::Update::Error-Mode=any", repo.Name), bssh.Result{})
+}
+
 // stubNginxApplyTail stubs the tail of Apply: disabling the stock defaults,
 // the validate+reload that follows, and the reload-stamp bookkeeping around
-// them (invalidate up front, mark after the successful reload).
+// them (invalidate up front, mark after the successful reload). Apply always
+// probes the nginx.org source list first (ensureOwnRepo/removeOwnRepo); the
+// default here is absent — tests exercising a converged or lingering repo
+// override that stub after calling this.
 func stubNginxApplyTail(f *bssh.FakeRunner) {
+	stubNginxRepoAbsent(f)
 	f.On("rm -f "+shQuote("/var/lib/berth/nginx.reloaded"), bssh.Result{})
 	f.On("rm -f "+shQuote(debianDefaultSite), bssh.Result{})
 	f.On(fmt.Sprintf("test -f %[1]s && mv -f %[1]s %[1]s.disabled || true", shQuote(nginxOrgDefaultConf)), bssh.Result{})
@@ -43,6 +85,7 @@ func TestNginxCheckSatisfiedWhenInstalledAndUp(t *testing.T) {
 	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
 	stubDefaultsAbsent(f)
+	stubNginxRepoAbsent(f)
 	f.On(reloadedSinceCmd("nginx", nginxConfPath), bssh.Result{}) // stamp fresh
 	cr, err := Nginx().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
 	if err != nil {
@@ -62,6 +105,7 @@ func TestNginxCheckUnsatisfiedWhenConfNewerThanStamp(t *testing.T) {
 	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
 	stubDefaultsAbsent(f)
+	stubNginxRepoAbsent(f)
 	f.On(reloadedSinceCmd("nginx", nginxConfPath), bssh.Result{ExitCode: 1})
 	cr, err := Nginx().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
 	if err != nil {
@@ -78,6 +122,7 @@ func TestNginxCheckUnsatisfiedWhenNotInstalled(t *testing.T) {
 	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
 	stubDefaultsAbsent(f)
+	stubNginxRepoAbsent(f)
 	cr, err := Nginx().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
 	if err != nil {
 		t.Fatal(err)
@@ -93,6 +138,7 @@ func TestNginxCheckUnsatisfiedWhenNotRunning(t *testing.T) {
 	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 3}) // inactive
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
 	stubDefaultsAbsent(f)
+	stubNginxRepoAbsent(f)
 	cr, err := Nginx().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
 	if err != nil {
 		t.Fatal(err)
@@ -110,6 +156,7 @@ func TestNginxCheckUnsatisfiedWhenDefaultSiteEnabled(t *testing.T) {
 	// The Debian default catch-all is still enabled.
 	f.On("test -e "+shQuote(debianDefaultSite), bssh.Result{ExitCode: 0})
 	f.On("test -e "+shQuote(nginxOrgDefaultConf), bssh.Result{ExitCode: 1})
+	stubNginxRepoAbsent(f)
 	cr, err := Nginx().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
 	if err != nil {
 		t.Fatal(err)
@@ -157,7 +204,7 @@ func TestNginxCheckSourceNginxRequiresRepo(t *testing.T) {
 	f.On("cat "+shQuote(nginxBridgePath), bssh.Result{ExitCode: 0, Stdout: string(nginxBridgeContent())})
 	f.On(reloadedSinceCmd("nginx", nginxConfPath, nginxBridgePath), bssh.Result{})
 	// nginx.org repo not yet registered -> not satisfied even though nginx runs.
-	f.On("test -e "+shQuote(nginxOrgSourceList), bssh.Result{ExitCode: 1})
+	stubNginxRepoAbsent(f)
 	cr, err := Nginx().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -165,8 +212,8 @@ func TestNginxCheckSourceNginxRequiresRepo(t *testing.T) {
 	if cr.Satisfied {
 		t.Error("source=nginx must be unsatisfied until the nginx.org repo is registered")
 	}
-	// Once the repo file exists, it is satisfied.
-	f.On("test -e "+shQuote(nginxOrgSourceList), bssh.Result{ExitCode: 0})
+	// Once the repo is converged (managed list + exact keyring), it is satisfied.
+	stubNginxRepoConverged(t, f)
 	cr, err = Nginx().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -188,7 +235,7 @@ func TestNginxCheckUnsatisfiedWhenBridgeMissingOrForeign(t *testing.T) {
 		f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
 		stubDefaultsAbsent(f)
 		f.On("grep -qE '^[[:space:]]*user[[:space:]]+www-data;' "+nginxConfPath, bssh.Result{ExitCode: 0})
-		f.On("test -e "+shQuote(nginxOrgSourceList), bssh.Result{ExitCode: 0})
+		stubNginxRepoConverged(t, f)
 		f.On("cat "+shQuote(nginxBridgePath), bridge)
 		return f
 	}
@@ -212,9 +259,7 @@ func TestNginxApplyRefusesForeignSitesBridge(t *testing.T) {
 	// clobbered by Apply without --force.
 	s := &config.Server{Nginx: config.Nginx{Source: "nginx"}}
 	f := bssh.NewFakeRunner()
-	stubRepoKeyTrust(f, "nginx-org", "https://nginx.org/keys/nginx_signing.key", "8540A6F18833A80E9C1653A42FD21310B49F6B46")
-	f.On("apt-get update", bssh.Result{})
-	f.On("apt-get update -o Dir::Etc::sourcelist=sources.list.d/nginx-org.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o APT::Update::Error-Mode=any", bssh.Result{ExitCode: 0})
+	stubNginxRepoConverged(t, f) // repo converged: ensureOwnRepo skips EnsureRepo
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx", bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/nginx.reloaded"), bssh.Result{}) // stamp invalidation up front
 	f.On("install -d /etc/nginx/sites-available /etc/nginx/sites-enabled", bssh.Result{})
@@ -234,9 +279,9 @@ func TestNginxApplyRefusesForeignSitesBridge(t *testing.T) {
 func TestNginxApplySourceNginxAddsRepoAndBridge(t *testing.T) {
 	s := &config.Server{Nginx: config.Nginx{Source: "nginx"}}
 	f := bssh.NewFakeRunner()
-	stubRepoKeyTrust(f, "nginx-org", "https://nginx.org/keys/nginx_signing.key", "8540A6F18833A80E9C1653A42FD21310B49F6B46")
-	f.On("apt-get update", bssh.Result{})
-	f.On("apt-get update -o Dir::Etc::sourcelist=sources.list.d/nginx-org.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o APT::Update::Error-Mode=any", bssh.Result{ExitCode: 0})
+	// The source list reads back absent (stubNginxApplyTail), so ensureOwnRepo
+	// runs the full EnsureRepo chain.
+	stubEnsureRepoChain(f, apt.NginxOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx", bssh.Result{})
 	f.On("install -d /etc/nginx/sites-available /etc/nginx/sites-enabled", bssh.Result{})
 	f.On("cat "+shQuote("/etc/nginx/conf.d/berth-sites.conf"), bssh.Result{ExitCode: 1}) // write-guard: absent
@@ -263,7 +308,7 @@ func TestNginxApplySourceNginxAddsRepoAndBridge(t *testing.T) {
 		if w.Path == "/etc/nginx/conf.d/berth-sites.conf" {
 			bridgeWritten = true
 		}
-		if w.Path == nginxOrgSourceList {
+		if w.Path == apt.NginxOrg().SourceListPath() {
 			sourceListWritten = true
 		}
 	}
@@ -311,8 +356,10 @@ func TestNginxApplyInvalidatesBeforeMutationAndStampsAfterReload(t *testing.T) {
 }
 
 // stubNginxApplyUpToValidate stubs Apply's prefix through the stock-default
-// removal, leaving nginx -t (and everything after) to the caller.
+// removal, leaving nginx -t (and everything after) to the caller. The
+// nginx.org source-list probe reads back absent (nothing to sweep).
 func stubNginxApplyUpToValidate(f *bssh.FakeRunner) {
+	stubNginxRepoAbsent(f)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx", bssh.Result{})
 	f.On("systemctl enable nginx", bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/nginx.reloaded"), bssh.Result{})
@@ -430,5 +477,64 @@ func TestNginxApplyInstallsAndEnables(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("Apply did not run %q; calls:\n%s", want, joined)
 		}
+	}
+}
+
+func TestNginxCheckDebianSourceFlagsLingeringRepo(t *testing.T) {
+	// Stock source with a berth-managed nginx.org list left over from an
+	// earlier upstream provision: drift, Apply removes it (E1).
+	repo := apt.NginxOrg()
+	f := bssh.NewFakeRunner()
+	f.On("dpkg -s nginx", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
+	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
+	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
+	stubDefaultsAbsent(f)
+	f.On("cat "+shQuote(repo.SourceListPath()), bssh.Result{ExitCode: 0, Stdout: string(mustRepoContent(t, repo))})
+	cr, err := Nginx().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Error("a lingering berth-owned nginx.org repo under the stock source must be unsatisfied")
+	}
+	if !strings.Contains(cr.Reason, "lingering") {
+		t.Errorf("Reason = %q, want it to mention the lingering repo", cr.Reason)
+	}
+}
+
+func TestNginxApplyDebianSourceRemovesLingeringRepo(t *testing.T) {
+	repo := apt.NginxOrg()
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx", bssh.Result{})
+	f.On("systemctl enable nginx", bssh.Result{})
+	stubNginxApplyTail(f)
+	// Override the tail's absent default: the list is a berth-managed leftover,
+	// so removeOwnRepo sweeps list + keyring and refreshes the indexes.
+	f.On("cat "+shQuote(repo.SourceListPath()), bssh.Result{ExitCode: 0, Stdout: string(mustRepoContent(t, repo))})
+	f.On("rm -f "+repo.SourceListPath()+" "+repo.KeyringPath(), bssh.Result{ExitCode: 0})
+	f.On("apt-get update", bssh.Result{ExitCode: 0})
+
+	var warns []string
+	rc := provision.RunCtx{Warn: func(msg string) { warns = append(warns, msg) }}
+	if err := Nginx().Apply(context.Background(), rc, &config.Server{}, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var sawRm, sawUpdate bool
+	for _, c := range f.Calls() {
+		if c.Cmd == "rm -f "+repo.SourceListPath()+" "+repo.KeyringPath() {
+			sawRm = true
+		}
+		if c.Cmd == "apt-get update" {
+			sawUpdate = true
+		}
+	}
+	if !sawRm {
+		t.Error("Apply must remove the lingering berth-owned source list and keyring")
+	}
+	if !sawUpdate {
+		t.Error("Apply must refresh the apt indexes after removing the repo")
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0], "upstream versions") {
+		t.Fatalf("want one upstream-versions warning, got %v", warns)
 	}
 }
