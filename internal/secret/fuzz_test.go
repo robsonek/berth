@@ -65,8 +65,10 @@ func FuzzEnvFile(f *testing.F) {
 // validates and normalizes both before returning).
 //
 // HOME/USERPROFILE are redirected ONCE before f.Fuzz: per-iteration
-// Setenv/TempDir would waste most fuzz execs, t.Setenv is unavailable inside
-// fuzz workers, and USERPROFILE is what os.UserHomeDir reads on Windows.
+// t.Setenv/t.TempDir would be perfectly legal (this target is not parallel,
+// which is Go's only restriction) but is deliberately avoided — it would
+// spend most of every exec on setup instead of on LoadEnvelope. USERPROFILE
+// is set alongside HOME because it is what os.UserHomeDir reads on Windows.
 // Every fuzz worker process re-runs this prologue with its own TempDir, so
 // workers never share a home and the real ~/.berth is never touched.
 func FuzzLoadEnvelope(f *testing.F) {
