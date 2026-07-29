@@ -322,6 +322,9 @@ func (s *Server) Validate() error {
 	if s.Backups.Offsite != nil && !s.AnyBackupsEnabled() {
 		return fmt.Errorf("backups.offsite requires backups to be enabled (there would be nothing to ship)")
 	}
+	if err := s.Apt.validate(); err != nil {
+		return err
+	}
 	upstream, engineOK := dbEngineUpstreamSource[s.Database.Engine]
 	if !engineOK {
 		return fmt.Errorf("database.engine %q unsupported (supported: %s)", s.Database.Engine, supportedEngines())
@@ -670,6 +673,137 @@ func (o *Offsite) validate() error {
 		if k.v != 0 && (k.v < 1 || k.v > 3650) {
 			return fmt.Errorf("backups.offsite.keep.%s %d out of range (1-3650)", k.name, k.v)
 		}
+	}
+	return nil
+}
+
+var (
+	reAptRepoName    = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
+	reAptSuite       = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
+	reAptComponent   = regexp.MustCompile(`^[a-z0-9-]+$`)
+	reAptFingerprint = regexp.MustCompile(`^[0-9A-Fa-f]{40}$`)
+	// reAptPackage is dpkg naming policy (lowercase alnum + "+.-", min 2 chars).
+	reAptPackage = regexp.MustCompile(`^[a-z0-9][a-z0-9+.-]+$`)
+)
+
+// reservedAptRepoNames are berth's own upstream repo names: a user repo may
+// not claim them even though the berth- filename prefix would prevent an
+// actual path collision — the duplication would only confuse the operator.
+var reservedAptRepoNames = map[string]bool{
+	"sury-php": true, "nginx-org": true, "pgdg": true, "mariadb-org": true,
+}
+
+// ValidateAptRepoName is exported so the wizard's field validator and the
+// authoritative config validation can never diverge (single source).
+func ValidateAptRepoName(name string) error {
+	if !reAptRepoName.MatchString(name) {
+		return fmt.Errorf("apt.repos name %q must match ^[a-z0-9][a-z0-9-]{0,31}$", name)
+	}
+	if strings.HasPrefix(name, "berth-") {
+		return fmt.Errorf("apt.repos name %q must not start with \"berth-\" (berth adds that prefix on the host)", name)
+	}
+	if reservedAptRepoNames[name] {
+		return fmt.Errorf("apt.repos name %q is reserved for berth's own upstream repos", name)
+	}
+	return nil
+}
+
+// ValidateAptURL accepts only absolute https URLs (key download and package
+// transport are trust decisions; pin-everything). Userinfo is rejected — the
+// URI lands in a world-readable 0644 source list and on command lines, so
+// embedded credentials would leak (private repos would need an
+// /etc/apt/auth.conf.d design, not inline secrets). '#' is rejected anywhere:
+// apt treats it as a comment-start in a one-line .list entry, truncating the
+// suite/components silently. NOTE: this validation is UX only — the shell
+// safety boundary is sink-quoting in internal/apt (shQuote around the URL).
+func ValidateAptURL(field, raw string) error {
+	if strings.ContainsAny(raw, " \t\r\n") {
+		return fmt.Errorf("%s %q must not contain whitespace", field, raw)
+	}
+	if strings.Contains(raw, "#") {
+		return fmt.Errorf("%s %q must not contain '#' (apt parses it as a comment in one-line source entries)", field, raw)
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return fmt.Errorf("%s %q must be a valid https:// URL", field, raw)
+	}
+	if u.User != nil {
+		return fmt.Errorf("%s %q must not embed credentials (the URL is written world-readable and appears on command lines)", field, raw)
+	}
+	return nil
+}
+
+func ValidateAptSuite(s string) error {
+	if s == "" || !reAptSuite.MatchString(s) {
+		return fmt.Errorf("apt.repos suite %q must be non-empty and match ^[A-Za-z0-9._/-]+$ (fields in a one-line .list are space-separated)", s)
+	}
+	// An exact-path suite (trailing '/') requires the components field to be
+	// EMPTY in the one-line format, but berth always renders components
+	// (default "main") — reject rather than emit an entry apt cannot parse.
+	if strings.HasSuffix(s, "/") {
+		return fmt.Errorf("apt.repos suite %q: exact-path suites (trailing '/') are not supported — use a named suite plus components", s)
+	}
+	return nil
+}
+
+func ValidateAptComponent(c string) error {
+	if !reAptComponent.MatchString(c) {
+		return fmt.Errorf("apt.repos component %q must match ^[a-z0-9-]+$", c)
+	}
+	return nil
+}
+
+func ValidateAptFingerprint(fp string) error {
+	if !reAptFingerprint.MatchString(fp) {
+		return fmt.Errorf("apt.repos fingerprint %q must be the full 40-hex signing-key fingerprint (berth pins every repo key)", fp)
+	}
+	return nil
+}
+
+func ValidateAptPackage(p string) error {
+	if !reAptPackage.MatchString(p) {
+		return fmt.Errorf("apt.packages entry %q is not a valid Debian package name", p)
+	}
+	return nil
+}
+
+func (a Apt) validate() error {
+	seen := map[string]bool{}
+	for _, repo := range a.Repos {
+		if err := ValidateAptRepoName(repo.Name); err != nil {
+			return err
+		}
+		if seen[repo.Name] {
+			return fmt.Errorf("duplicate apt.repos name %q", repo.Name)
+		}
+		seen[repo.Name] = true
+		if err := ValidateAptURL("apt.repos["+repo.Name+"].uri", repo.URI); err != nil {
+			return err
+		}
+		if err := ValidateAptURL("apt.repos["+repo.Name+"].key_url", repo.KeyURL); err != nil {
+			return err
+		}
+		if err := ValidateAptSuite(repo.Suite); err != nil {
+			return err
+		}
+		for _, c := range repo.Components {
+			if err := ValidateAptComponent(c); err != nil {
+				return err
+			}
+		}
+		if err := ValidateAptFingerprint(repo.Fingerprint); err != nil {
+			return err
+		}
+	}
+	seenPkg := map[string]bool{}
+	for _, p := range a.Packages {
+		if err := ValidateAptPackage(p); err != nil {
+			return err
+		}
+		if seenPkg[p] {
+			return fmt.Errorf("duplicate apt.packages entry %q", p)
+		}
+		seenPkg[p] = true
 	}
 	return nil
 }

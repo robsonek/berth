@@ -435,6 +435,40 @@ func (k OffsiteKeep) MonthlyEff() int {
 	return k.Monthly
 }
 
+// Apt declares extra third-party apt repositories and extra packages beyond
+// what berth's own steps install. Repos are fully declarative (removed from
+// the config -> swept from the host); packages are INSTALL-ONLY by design —
+// removing one stops managing it, berth never uninstalls (no ledger, no
+// apt-get remove cascade risk).
+type Apt struct {
+	Repos    []AptRepo `mapstructure:"repos" yaml:"repos,omitempty"`
+	Packages []string  `mapstructure:"packages" yaml:"packages,omitempty"`
+}
+
+// AptRepo is one pinned third-party repository. The on-host artifacts live in
+// the berth- namespace (/etc/apt/sources.list.d/berth-<name>.list and the
+// matching keyring), so user repos can never collide with berth's own four
+// upstream repos. Fingerprint is REQUIRED — pin-everything, like the built-in
+// upstreams.
+type AptRepo struct {
+	Name        string   `mapstructure:"name" yaml:"name"`
+	URI         string   `mapstructure:"uri" yaml:"uri"`
+	Suite       string   `mapstructure:"suite" yaml:"suite"`
+	Components  []string `mapstructure:"components" yaml:"components,omitempty"`
+	KeyURL      string   `mapstructure:"key_url" yaml:"key_url"`
+	Fingerprint string   `mapstructure:"fingerprint" yaml:"fingerprint"`
+}
+
+// ComponentsEff returns the configured components or the default ("main").
+// Accessor, not SetDefault: per-array-element defaults don't exist in viper,
+// and the accessor also serves wizard ToServer() and literal-Server callers.
+func (r AptRepo) ComponentsEff() []string {
+	if len(r.Components) == 0 {
+		return []string{"main"}
+	}
+	return r.Components
+}
+
 type Database struct {
 	Engine string `mapstructure:"engine" yaml:"engine"` // mariadb | postgres (server-wide)
 	Source string `mapstructure:"source" yaml:"source"` // debian | mariadb | pgdg
@@ -711,6 +745,7 @@ type Server struct {
 	Tuning         Tuning   `mapstructure:"tuning" yaml:"tuning,omitempty"`
 	System         System   `mapstructure:"system" yaml:"system,omitempty"`
 	Backups        Backups  `mapstructure:"backups" yaml:"backups,omitempty"`
+	Apt            Apt      `mapstructure:"apt" yaml:"apt,omitempty"`
 	Sites          []Site   `mapstructure:"sites" yaml:"sites"`
 }
 

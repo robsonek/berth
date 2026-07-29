@@ -733,6 +733,84 @@ func TestParseSwapBytesBoundaries(t *testing.T) {
 	}
 }
 
+func TestValidateAptBlock(t *testing.T) {
+	repo := func(mut func(*AptRepo)) Apt {
+		r := AptRepo{
+			Name: "signal-cli", URI: "https://packaging.gitlab.io/signal-cli",
+			Suite: "signalcli", KeyURL: "https://packaging.gitlab.io/signal-cli/gpg.key",
+			Fingerprint: "02BD5FB7BA4650D50ED69002797DFE3F4F80269B",
+		}
+		if mut != nil {
+			mut(&r)
+		}
+		return Apt{Repos: []AptRepo{r}}
+	}
+	cases := []struct {
+		name    string
+		apt     Apt
+		wantErr string // "" = valid
+	}{
+		{"valid minimal", repo(nil), ""},
+		{"valid with components", repo(func(r *AptRepo) { r.Components = []string{"main", "contrib"} }), ""},
+		{"lowercase fingerprint accepted", repo(func(r *AptRepo) { r.Fingerprint = "dba36b5181d0c816f630e889d980a17457f6fb06" }), ""},
+		{"bad name uppercase", repo(func(r *AptRepo) { r.Name = "Signal" }), "apt.repos name"},
+		{"berth- prefix rejected", repo(func(r *AptRepo) { r.Name = "berth-x" }), "berth-"},
+		{"reserved name rejected", repo(func(r *AptRepo) { r.Name = "nginx-org" }), "reserved"},
+		{"http uri rejected", repo(func(r *AptRepo) { r.URI = "http://packaging.gitlab.io/x" }), "https"},
+		{"http key_url rejected", repo(func(r *AptRepo) { r.KeyURL = "http://packaging.gitlab.io/k.asc" }), "https"},
+		{"userinfo in uri rejected", repo(func(r *AptRepo) { r.URI = "https://user:pw@packaging.gitlab.io/x" }), "credentials"},
+		{"hash in uri rejected", repo(func(r *AptRepo) { r.URI = "https://packaging.gitlab.io/x#frag" }), "#"},
+		// Shell metachars in a URL path are VALID per URL syntax and pass
+		// validation on purpose — the shell-safety boundary is the shQuote
+		// at the curl sink in internal/apt, not this validator.
+		{"shell metachars accepted (sink-quoted later)", repo(func(r *AptRepo) { r.KeyURL = "https://a.example/$(id).asc" }), ""},
+		{"empty suite rejected", repo(func(r *AptRepo) { r.Suite = "" }), "suite"},
+		{"suite with space rejected", repo(func(r *AptRepo) { r.Suite = "a b" }), "suite"},
+		{"exact-path suite rejected", repo(func(r *AptRepo) { r.Suite = "stable/" }), "exact-path"},
+		{"bad component rejected", repo(func(r *AptRepo) { r.Components = []string{"Main"} }), "component"},
+		{"short fingerprint rejected", repo(func(r *AptRepo) { r.Fingerprint = "ABCD" }), "fingerprint"},
+		{"bad package name", Apt{Packages: []string{"Htop"}}, "apt.packages"},
+		{"single-char package rejected", Apt{Packages: []string{"a"}}, "apt.packages"},
+		{"duplicate package", Apt{Packages: []string{"htop", "htop"}}, "duplicate"},
+		{"valid packages", Apt{Packages: []string{"htop", "signal-cli-native", "libfoo2.1+git"}}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := base()
+			s.Apt = tc.apt
+			err := s.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want valid, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestAptRepoDuplicateNameRejected(t *testing.T) {
+	s := base()
+	r := AptRepo{Name: "dup", URI: "https://a.example/repo", Suite: "trixie",
+		KeyURL: "https://a.example/key.asc", Fingerprint: strings.Repeat("A", 40)}
+	s.Apt = Apt{Repos: []AptRepo{r, r}}
+	if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("want duplicate-name error, got %v", err)
+	}
+}
+
+func TestComponentsEffDefaultsToMain(t *testing.T) {
+	if got := (AptRepo{}).ComponentsEff(); len(got) != 1 || got[0] != "main" {
+		t.Fatalf("ComponentsEff() = %v, want [main]", got)
+	}
+	if got := (AptRepo{Components: []string{"nginx"}}).ComponentsEff(); len(got) != 1 || got[0] != "nginx" {
+		t.Fatalf("ComponentsEff() = %v, want [nginx]", got)
+	}
+}
+
 func TestOffsiteValidate(t *testing.T) {
 	s3Valid := func() *Offsite {
 		return &Offsite{Backend: "s3", Endpoint: "s3.example.com", Bucket: "b"}
