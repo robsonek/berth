@@ -999,6 +999,32 @@ func TestDatabaseCheckSourceMariaDBRequiresRepo(t *testing.T) {
 	}
 }
 
+func TestDatabaseCheckSourceMariaDBConvergedRepoSatisfied(t *testing.T) {
+	// The mirror direction of TestDatabaseCheckSourceMariaDBRequiresRepo: with
+	// the upstream repo fully converged (managed byte-exact list + keyring
+	// holding exactly the pinned key) the repo probe must not hold the step
+	// unsatisfied — a green remote with a full cache reads Satisfied.
+	chdirTemp(t)
+	s := databaseServer()
+	s.Database.Source = "mariadb"
+	repo := apt.MariaDBOrg()
+	seedCache(t, s, map[string]string{s.SiteDBUser(s.Sites[0]): "pw123"})
+	f := bssh.NewFakeRunner()
+	stubGreenRemote(f, s)
+	// Override stubGreenRemote's absent-repo default with the converged pair.
+	f.On("cat "+shQuote(repo.SourceListPath()), bssh.Result{ExitCode: 0, Stdout: string(mustRepoContent(t, repo))})
+	f.On("gpg --show-keys --with-colons "+repo.KeyringPath(), bssh.Result{ExitCode: 0, Stdout: gpgColonsFor(repo.Fingerprint)})
+	f.On(appKeyProbe(s), bssh.Result{ExitCode: 1}) // no berth-format APP_KEY -> no backup required
+	f.On(envValueMatchScript(envPath(s), "DB_PASSWORD"), bssh.Result{ExitCode: 0})
+	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("source=mariadb with a converged repo must be satisfied; got %+v", cr)
+	}
+}
+
 func TestDatabaseCheckUpstreamDriftedListUnsatisfied(t *testing.T) {
 	chdirTemp(t) // Check preflight-reads the local secret cache
 	s := databaseServer()

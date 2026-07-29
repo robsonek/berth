@@ -37,10 +37,17 @@ func TestRepoIdentifiersAreFrozen(t *testing.T) {
 	// The legacy allowlists are a compatibility promise to every host any
 	// released berth version ever provisioned: APPEND-ONLY. MariaDB shipped
 	// three URIs (deb.mariadb.org 11.8, deb.mariadb.org 12.3, then the
-	// current dlm.mariadb.com endpoint); the others never changed.
+	// current dlm.mariadb.com endpoint); the others never changed and pin
+	// their single shipped variant.
 	legacy := map[string][]string{
+		"sury-php": {
+			"deb [signed-by=/usr/share/keyrings/sury-php.gpg] https://packages.sury.org/php/ trixie main\n",
+		},
 		"nginx-org": {
 			"deb [signed-by=/usr/share/keyrings/nginx-org.gpg] https://nginx.org/packages/mainline/debian/ trixie nginx\n",
+		},
+		"pgdg": {
+			"deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt/ trixie-pgdg main\n",
 		},
 		"mariadb-org": {
 			"deb [signed-by=/usr/share/keyrings/mariadb-org.gpg] https://dlm.mariadb.com/repo/mariadb-server/12.3/repo/debian/ trixie main\n",

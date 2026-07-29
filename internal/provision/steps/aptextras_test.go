@@ -158,6 +158,28 @@ func TestAptCheckLowercaseFingerprintConverges(t *testing.T) {
 	}
 }
 
+func TestAptCheckKeyringDivergedFlagsRestore(t *testing.T) {
+	// List uptodate but the keyring holds the WRONG key (a fingerprint change
+	// in the config, or a half-written keyring): unsatisfied with a pointed
+	// "restore keyring" change so Apply re-runs EnsureRepo.
+	cfg := signalRepoCfg()
+	repo := userRepo(cfg)
+	f := bssh.NewFakeRunner().
+		On(aptFindCmd, noLists).
+		On("cat '"+repo.SourceListPath()+"'", bssh.Result{ExitCode: 0, Stdout: string(mustRepoContent(t, repo))}).
+		On("gpg --show-keys --with-colons "+repo.KeyringPath(), bssh.Result{ExitCode: 0, Stdout: gpgColonsFor(strings.Repeat("A", 40))})
+	res, err := Apt().Check(context.Background(), provision.RunCtx{}, aptTestServer(config.Apt{Repos: []config.AptRepo{cfg}}), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Satisfied {
+		t.Fatal("a diverged keyring must be unsatisfied even with the list uptodate")
+	}
+	if len(res.Changes) != 1 || !strings.Contains(res.Changes[0], "restore keyring") {
+		t.Fatalf("changes must announce the keyring restore: %v", res.Changes)
+	}
+}
+
 func TestAptApplySweepsUndeclaredThenUpdatesOnce(t *testing.T) {
 	leftover := "/etc/apt/sources.list.d/berth-old.list"
 	managed := string(mustRepoContent(t, apt.Repo{Name: "berth-old", URI: "https://old.example/repo", Suite: "trixie", Components: []string{"main"}}))

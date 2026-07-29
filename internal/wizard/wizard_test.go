@@ -1,6 +1,7 @@
 package wizard
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -144,6 +145,41 @@ func TestRoundTripAdvancedServer(t *testing.T) {
 	}
 	if srv.Sites[0].Scheduler == nil || *srv.Sites[0].Scheduler != false {
 		t.Errorf("scheduler override not applied: %v", srv.Sites[0].Scheduler)
+	}
+}
+
+func TestRoundTripAptReposAndPackages(t *testing.T) {
+	// The serialization leg no other test covers: the wizard-WRITTEN apt block
+	// must survive config.Load field-for-field (a yaml-tag typo would pass
+	// ToServer().Validate() and the decode-side pins yet silently drop the
+	// field from the written file).
+	a := validSingle()
+	a.AptRepos = []AptRepoAnswers{{
+		Name:        "signal-cli",
+		URI:         "https://packaging.gitlab.io/signal-cli",
+		Suite:       "signalcli",
+		Components:  "main extra",
+		KeyURL:      "https://packaging.gitlab.io/signal-cli/gpg.key",
+		Fingerprint: "02BD5FB7BA4650D50ED69002797DFE3F4F80269B",
+	}}
+	a.AptPackages = "signal-cli-native htop"
+	srv := writeAndLoad(t, a)
+	want := config.Apt{
+		Repos: []config.AptRepo{{
+			Name:        "signal-cli",
+			URI:         "https://packaging.gitlab.io/signal-cli",
+			Suite:       "signalcli",
+			Components:  []string{"main", "extra"},
+			KeyURL:      "https://packaging.gitlab.io/signal-cli/gpg.key",
+			Fingerprint: "02BD5FB7BA4650D50ED69002797DFE3F4F80269B",
+		}},
+		Packages: []string{"signal-cli-native", "htop"},
+	}
+	if !reflect.DeepEqual(srv.Apt, want) {
+		t.Errorf("apt block did not survive the Write->Load round trip:\n got %+v\nwant %+v", srv.Apt, want)
+	}
+	if err := srv.Validate(); err != nil {
+		t.Errorf("loaded config must validate: %v", err)
 	}
 }
 

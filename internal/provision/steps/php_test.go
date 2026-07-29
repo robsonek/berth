@@ -180,6 +180,71 @@ func TestPHPCheckForeignSuryListAbortsEvenWhenFPMMissing(t *testing.T) {
 	}
 }
 
+func TestPHPApplySuryForeignListRefusesWithoutForce(t *testing.T) {
+	// Apply-side twin of the Check ordering test above: Apply often runs for
+	// UNRELATED drift, so its write path (ensureOwnRepo) must re-classify the
+	// live sury list itself — a regression to a bare EnsureRepo would clobber
+	// the operator's foreign file without --force and fetch the key first.
+	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "sury"}}
+	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	f.On("cat "+shQuote(apt.Sury().SourceListPath()), bssh.Result{ExitCode: 0, Stdout: "deb https://operator.example/ x main\n"})
+
+	err := PHP().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("err = %v, want the abort-unless---force refusal from the write path", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "curl") {
+			t.Fatalf("EnsureRepo must not run for a foreign sury list: %v", f.Calls())
+		}
+	}
+	for _, w := range f.Writes() {
+		if w.Path == apt.Sury().SourceListPath() {
+			t.Error("a foreign sury list must not be overwritten without --force")
+		}
+	}
+}
+
+func TestPHPApplySourceSuryAddsRepo(t *testing.T) {
+	// The sury list reads back absent, so ensureOwnRepo runs the full
+	// EnsureRepo chain (mirrors TestNginxApplySourceNginxAddsRepoAndBridge).
+	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "sury"}}
+	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	stubSuryRepoAbsent(f)
+	stubEnsureRepoChain(f, apt.Sury())
+	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{}) // stamp invalidation up front
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y "+strings.Join(phpExtPkgs(), " "), bssh.Result{})
+	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
+	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{ExitCode: 1})   // write-guard: absent
+	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{ExitCode: 1}) // write-guard: absent
+	f.On("php-fpm8.4 -t", bssh.Result{})
+	f.On("systemctl is-active php8.4-fpm", bssh.Result{}) // alive
+	f.On("systemctl reload php8.4-fpm", bssh.Result{})
+	f.On(markReloadedCmd("php8.4-fpm"), bssh.Result{})
+
+	if err := PHP().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var cmds []string
+	for _, c := range f.Calls() {
+		cmds = append(cmds, c.Cmd)
+	}
+	if !strings.Contains(strings.Join(cmds, "\n"), "packages.sury.org/php/apt.gpg") {
+		t.Errorf("source=sury must fetch the sury signing key; calls:\n%s", strings.Join(cmds, "\n"))
+	}
+	var sourceListWritten bool
+	for _, w := range f.Writes() {
+		if w.Path == apt.Sury().SourceListPath() {
+			sourceListWritten = true
+		}
+	}
+	if !sourceListWritten {
+		t.Error("expected the sury-php apt source list to be written")
+	}
+}
+
 func TestPHPApplyRefusesForeignOpcacheDropIn(t *testing.T) {
 	// An operator's own OPcache drop-in (no berth marker) must not be clobbered
 	// by Apply without --force.

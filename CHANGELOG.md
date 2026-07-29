@@ -20,7 +20,10 @@ Notable changes to berth. Older releases are documented on the
   per host), content drift re-applies them (a future URI/suite change in a
   berth release now propagates to provisioned hosts), and switching a source
   back to `debian` removes the upstream repo — installed packages keep their
-  upstream versions until manually downgraded (see README).
+  upstream versions until manually downgraded (see README). A foreign
+  (non-berth, non-legacy) file at one of these source-list paths now aborts
+  the run unless `--force` when that source is selected — previously the
+  existence-only probe silently accepted it.
 
 ## [0.27.1] — 2026-07-29
 
