@@ -177,6 +177,32 @@ func (php) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 		"write PHP tuning drop-in (memory_limit, upload, limits)",
 		"ensure " + phpLogDir,
 	}
+	// Sury classification BEFORE the installed early-return below — ordering is
+	// load-bearing: on a fresh host (php-fpm absent) a FOREIGN sury list must
+	// hit the abort-unless---force error here, or Check would report plain
+	// unsatisfied and Apply would overwrite the operator's file.
+	sury, err := useSury(s.PHP)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
+	if sury {
+		changes = append(changes, "register sury repo ("+apt.Sury().URI+")")
+		repoOK, err := ownRepoUpToDate(ctx, r, apt.Sury(), rc.Force)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if !repoOK {
+			return provision.CheckResult{Satisfied: false, Reason: "sury repo not registered, its source list not up to date, or its keyring not the pinned key", Changes: changes}, nil
+		}
+	} else {
+		lingers, err := ownRepoLingers(ctx, r, apt.Sury())
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if lingers {
+			return provision.CheckResult{Satisfied: false, Reason: "lingering sury repo awaits removal (php.source resolves to Debian stock)", Changes: append(changes, "remove lingering sury repo")}, nil
+		}
+	}
 	installed, err := pkgInstalled(ctx, r, "php"+s.PHP.Version+"-fpm")
 	if err != nil {
 		return provision.CheckResult{}, err
@@ -270,10 +296,16 @@ func (php) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 		return err
 	}
 	m := apt.New(r)
+	// The write path re-classifies via ensureOwnRepo (never a bare EnsureRepo:
+	// Apply often runs for unrelated drift, and the raw call would overwrite a
+	// foreign list without --force); the stock path sweeps a lingering
+	// berth-owned sury list (removeOwnRepo re-probes ownership itself).
 	if sury {
-		if err := m.EnsureRepo(ctx, apt.Sury()); err != nil {
+		if err := ensureOwnRepo(ctx, rc, r, apt.Sury()); err != nil {
 			return err
 		}
+	} else if err := removeOwnRepo(ctx, rc, r, apt.Sury()); err != nil {
+		return fmt.Errorf("remove lingering sury repo: %w", err)
 	}
 	v := s.PHP.Version
 	pkgs := phpPackages(v, s.Database.Engine)
