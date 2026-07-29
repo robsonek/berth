@@ -348,7 +348,7 @@ type Offsite struct {
 // OffsiteKeep is the remote retention policy (restic forget --keep-*).
 type OffsiteKeep struct {
 	Last    int `mapstructure:"last"    yaml:"last,omitempty"`   // keep the N most recent snapshots (0 = off)
-	Hourly  int `mapstructure:"hourly"  yaml:"hourly,omitempty"` // keep one per hour for the last N hours (0 = off)
+	Hourly  int `mapstructure:"hourly"  yaml:"hourly,omitempty"` // keep one snapshot for each of the last N hours that contain one (0 = off)
 	Daily   int `mapstructure:"daily"   yaml:"daily,omitempty"`
 	Weekly  int `mapstructure:"weekly"  yaml:"weekly,omitempty"`
 	Monthly int `mapstructure:"monthly" yaml:"monthly,omitempty"`

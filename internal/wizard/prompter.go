@@ -221,7 +221,7 @@ func (h *huhPrompter) ServerOps(a *Answers) error {
 	shared := huh.NewForm(huh.NewGroup(
 		huh.NewInput().Title("Offsite schedule (5-field cron, blank=default 15 4 * * *)").Value(&o.Schedule).Validate(optionalCronSchedule),
 		huh.NewInput().Title("Keep last N snapshots (1-3650, blank/0=off)").Value(&last).Validate(optionalInt("backups.offsite.keep.last", 1, 3650)),
-		huh.NewInput().Title("Keep one per hour for N hours (1-3650, blank/0=off)").Value(&hourly).Validate(optionalInt("backups.offsite.keep.hourly", 1, 3650)),
+		huh.NewInput().Title("Keep one per hour for the last N hours with snapshots (1-3650, blank/0=off)").Value(&hourly).Validate(optionalInt("backups.offsite.keep.hourly", 1, 3650)),
 		huh.NewInput().Title("Keep daily snapshots (1-3650, blank/0=default 7)").Value(&daily).Validate(optionalInt("backups.offsite.keep.daily", 1, 3650)),
 		huh.NewInput().Title("Keep weekly snapshots (1-3650, blank/0=default 4)").Value(&weekly).Validate(optionalInt("backups.offsite.keep.weekly", 1, 3650)),
 		huh.NewInput().Title("Keep monthly snapshots (1-3650, blank/0=default 6)").Value(&monthly).Validate(optionalInt("backups.offsite.keep.monthly", 1, 3650)),
