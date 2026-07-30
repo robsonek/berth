@@ -296,14 +296,7 @@ func renderCertbotDeployHook() ([]byte, error) {
 
 // anyLetsEncrypt reports whether any site wants a Let's Encrypt certificate —
 // the only cert mode that uses certbot and therefore needs the renewal hook.
-func anyLetsEncrypt(s *config.Server) bool {
-	for _, site := range s.Sites {
-		if site.SSL && site.CertMode() == "letsencrypt" {
-			return true
-		}
-	}
-	return false
-}
+func anyLetsEncrypt(s *config.Server) bool { return config.AnyLetsEncrypt(s) }
 
 // resolveA resolves the A/AAAA records for a host. It is a package-level var so
 // tests can stub DNS without a real lookup; production uses the system resolver.

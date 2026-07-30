@@ -613,6 +613,28 @@ func (s *Server) AnyBackupsEnabled() bool {
 // steps package and validation so program names never diverge.
 func PoolName(domain string) string { return strings.ReplaceAll(domain, ".", "_") }
 
+// FPMServiceName is the systemd unit of the shared per-version PHP-FPM master.
+func FPMServiceName(phpVersion string) string { return "php" + phpVersion + "-fpm" }
+
+// ValkeyInstanceUnit is the systemd unit of a site's dedicated valkey instance.
+func ValkeyInstanceUnit(domain string) string {
+	return "berth-valkey-" + PoolName(domain) + ".service"
+}
+
+// AnyLetsEncrypt reports whether any site will hold a Let's Encrypt
+// certificate — the only cert mode that uses certbot, and therefore what
+// decides whether the certbot renewal timer is a required unit. The equality
+// against "letsencrypt" is EXACT rather than `!= "selfsigned"` so a future
+// third cert mode does not silently claim it needs certbot.
+func AnyLetsEncrypt(s *Server) bool {
+	for _, site := range s.Sites {
+		if site.SSL && site.CertMode() == "letsencrypt" {
+			return true
+		}
+	}
+	return false
+}
+
 // FROZEN FOREVER: the on-host name prefixes below root every per-site socket
 // and directory berth derives. They live here — not in the steps that write
 // them — because validation's domain-length cap is computed from their byte

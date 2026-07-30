@@ -72,7 +72,7 @@ const logrotatePath = "/etc/logrotate.d/berth"
 func renderLogrotate() ([]byte, error) { return templates.Render("logrotate.conf.tmpl", nil) }
 
 // fpmService is the systemd unit for the configured PHP-FPM version.
-func fpmService(s *config.Server) string { return "php" + s.PHP.Version + "-fpm" }
+func fpmService(s *config.Server) string { return config.FPMServiceName(s.PHP.Version) }
 
 // defaultFPMPoolPath is the distro's default pool; berth disables it so its own
 // per-site pools own their sockets rather than colliding with the stock www pool.
