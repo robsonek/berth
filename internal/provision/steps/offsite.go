@@ -67,6 +67,16 @@ func offsiteStampContent(repo string) []byte {
 // explaining every ssh option lives on the exported function.
 func offsiteResticOpts(o *config.Offsite) string { return config.OffsiteResticOpts(o) }
 
+// offsiteEnvCmd runs rest with the offsite credentials loaded by the shared
+// parse-don't-source loader (config.OffsiteEnvLoader — single-sourced with
+// the managed backup script and the status probe): the env file is
+// root-written, but a drifted or hand-edited copy must never be able to
+// EXECUTE anything as root. A loader failure (exit 2, message on stderr)
+// short-circuits rest, so restic never runs on a half-loaded environment.
+func offsiteEnvCmd(rest string) string {
+	return config.OffsiteEnvLoader() + "; " + config.OffsiteEnvLoadName + " && " + rest
+}
+
 // assertNotSymlink hard-errors when path is a symlink: key material and its
 // directory are a security boundary — a symlink would let key generation and
 // pin writes land outside a root-controlled tree, so it is never converged
@@ -100,13 +110,17 @@ func renderOffsiteEnv(s *config.Server, secrets map[string]string) ([]byte, erro
 func renderOffsiteScript(s *config.Server) ([]byte, error) {
 	off := s.Backups.Offsite
 	return templates.Render("offsite.sh.tmpl", struct {
-		LogFile, LockFile, ArtifactsLock, EnvFile, ResticOpts, BackupBaseDir, HostID string
-		KeepLast, KeepHourly, KeepDaily, KeepWeekly, KeepMonthly                     int
+		LogFile, LockFile, ArtifactsLock, EnvLoader, EnvLoad, ResticOpts, BackupBaseDir, HostID string
+		KeepLast, KeepHourly, KeepDaily, KeepWeekly, KeepMonthly                                int
 	}{
 		LogFile:       offsiteLogPath,
 		LockFile:      offsiteLockPath,
 		ArtifactsLock: backupArtifactsLockPath,
-		EnvFile:       offsiteEnvPath,
+		// The env file is PARSED, never dot-sourced (config.OffsiteEnvLoader):
+		// under the script's set -e a loader failure aborts the run before any
+		// restic command sees a half-loaded environment.
+		EnvLoader:     config.OffsiteEnvLoader(),
+		EnvLoad:       config.OffsiteEnvLoadName,
 		ResticOpts:    offsiteResticOpts(off),
 		BackupBaseDir: backupBaseDir,
 		HostID:        s.ID,
@@ -491,7 +505,7 @@ const (
 // state. The stamp is only written after a VERIFIED repository.
 func (o offsite) ensureRepo(ctx context.Context, rc provision.RunCtx, r bssh.Runner, repo string, off *config.Offsite) error {
 	opts := offsiteResticOpts(off)
-	res, err := r.Run(ctx, "set -a && . "+shQuote(offsiteEnvPath)+" && restic"+opts+" cat config >/dev/null", nil)
+	res, err := r.Run(ctx, offsiteEnvCmd("restic"+opts+" cat config >/dev/null"), nil)
 	if err != nil {
 		return err
 	}
@@ -507,7 +521,7 @@ func (o offsite) ensureRepo(ctx context.Context, rc provision.RunCtx, r bssh.Run
 		return fmt.Errorf("the restic repository %s exists but the cached password does not open it; restore the correct password with: berth secret set <server.yml> %s (%s)",
 			repo, secret.OffsiteResticPassword, strings.TrimSpace(res.Stderr))
 	case noRepo:
-		ires, err := r.Run(ctx, "set -a && . "+shQuote(offsiteEnvPath)+" && restic"+opts+" init", nil)
+		ires, err := r.Run(ctx, offsiteEnvCmd("restic"+opts+" init"), nil)
 		if err != nil {
 			return err
 		}

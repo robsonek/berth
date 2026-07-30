@@ -475,6 +475,51 @@ func OffsiteResticOpts(o *Offsite) string {
 		OffsiteKnownHostsPath, OffsiteSSHKeyPath, o.PortEff(), o.User, o.Host)
 }
 
+// OffsiteEnvLoadName is the shell function OffsiteEnvLoader defines. Call
+// sites compose "<definition>; <name> && restic …" (or call the name inside
+// an if) — the name is exported so no call site hardcodes it and a rename
+// cannot leave a script calling an undefined function.
+const OffsiteEnvLoadName = "berth_load_offsite_env"
+
+// offsiteEnvKeys are the exact environment keys offsite_env.tmpl renders —
+// the loader's allowlist. Adding a key to the template without adding it here
+// makes every loader call site fail LOUDLY on the new line (cron backup, the
+// provisioning repository probe, the status probe), never silently: keep the
+// two lists in sync.
+var offsiteEnvKeys = []string{"RESTIC_REPOSITORY", "RESTIC_PASSWORD", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}
+
+// OffsiteEnvLoader returns a one-line POSIX-sh function definition that loads
+// /etc/berth/offsite.env by PARSING it, never by dot-sourcing: sourcing the
+// file as shell meant a drifted or hand-edited copy executed arbitrary
+// commands as root (external adversarial review finding). The grammar is
+// exactly what berth writes — offsiteEnvKeys lines in the KEY='value' form,
+// where validation guarantees no value can contain a single quote, a newline
+// or a control character (secret.ValidateSecretValue; Offsite.validate for
+// the repository components) — so for every berth-written file the exported
+// environment is byte-identical to what `set -a; . file; set +a` produced.
+//
+// Anything else fails CLOSED with exit status 2 and a message that names the
+// offending key, never a value: a half-loaded environment could point restic
+// at the wrong repository, which is worse than refusing to run. Every call
+// site gates on the function's status (set -e in the cron script, && in the
+// provisioning probe, if in the status probe), so nothing runs on a partial
+// load. The parser strips the one layer of single quotes and exports the
+// value literally — no eval, no expansion, so `$(…)`, backticks and
+// backslashes in a legal value survive exactly as sourcing kept them.
+func OffsiteEnvLoader() string { return offsiteEnvLoaderFor(OffsiteEnvPath) }
+
+// offsiteEnvLoaderFor exists so tests can point the loader at a temp file;
+// production always goes through OffsiteEnvLoader (the on-host path).
+func offsiteEnvLoaderFor(path string) string {
+	pats := make([]string, len(offsiteEnvKeys))
+	for i, k := range offsiteEnvKeys {
+		pats[i] = k + `=\'*\'`
+	}
+	return OffsiteEnvLoadName + `() { while IFS= read -r line || [ -n "$line" ]; do case $line in ` +
+		strings.Join(pats, "|") +
+		`) key=${line%%=*}; val=${line#*=\'}; val=${val%\'}; case $val in *\'*) echo "berth: $key in ` + path + ` has an embedded quote; refusing to load it" >&2; return 2;; esac; export "$key=$val";; *) echo "berth: unexpected line in ` + path + `; refusing to load it" >&2; return 2;; esac; done < ` + path + `; }`
+}
+
 // Apt declares extra third-party apt repositories and extra packages beyond
 // what berth's own steps install. Repos are fully declarative (removed from
 // the config -> swept from the host); packages are INSTALL-ONLY by design —

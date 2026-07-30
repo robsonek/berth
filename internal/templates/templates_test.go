@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/robsonek/berth/internal/config"
 )
 
 var update = flag.Bool("update", false, "update golden files")
@@ -308,8 +310,8 @@ func TestRenderBackupScriptGolden(t *testing.T) {
 // offsiteScriptGoldenData mirrors the offsite step's render struct for
 // offsite.sh.tmpl (test-local copy — keep the fields in sync).
 type offsiteScriptGoldenData struct {
-	LogFile, LockFile, ArtifactsLock, EnvFile, ResticOpts, BackupBaseDir, HostID string
-	KeepLast, KeepHourly, KeepDaily, KeepWeekly, KeepMonthly                     int
+	LogFile, LockFile, ArtifactsLock, EnvLoader, EnvLoad, ResticOpts, BackupBaseDir, HostID string
+	KeepLast, KeepHourly, KeepDaily, KeepWeekly, KeepMonthly                                int
 }
 
 func offsiteScriptGoldenBase() offsiteScriptGoldenData {
@@ -317,7 +319,11 @@ func offsiteScriptGoldenBase() offsiteScriptGoldenData {
 		LogFile:       "/var/log/berth/backup-offsite.log",
 		LockFile:      "/var/backups/berth/.offsite.lock",
 		ArtifactsLock: "/var/backups/berth/.artifacts.lock",
-		EnvFile:       "/etc/berth/offsite.env",
+		// The real loader definition, not a sample: the golden file freezes
+		// the exact parser bytes every provisioned host will run as root, so
+		// any change to config.OffsiteEnvLoader shows up as a golden diff.
+		EnvLoader:     config.OffsiteEnvLoader(),
+		EnvLoad:       config.OffsiteEnvLoadName,
 		BackupBaseDir: "/var/backups/berth",
 		HostID:        "box-1",
 		KeepDaily:     7, KeepWeekly: 4, KeepMonthly: 6,

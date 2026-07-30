@@ -10,13 +10,18 @@ import (
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
 
-// offsiteCmd asks restic for the latest snapshot, sourcing the credentials
+// offsiteCmd asks restic for the latest snapshot, loading the credentials
 // from the env file the offsite step already wrote on the host
-// (config.OffsiteEnvPath, root:root 0600).
+// (config.OffsiteEnvPath, root:root 0600) via the shared parse-don't-source
+// loader (config.OffsiteEnvLoader — single-sourced with the managed backup
+// script and the provisioning repository probe): a drifted or hand-edited env
+// file must never be able to EXECUTE anything, so it is parsed, never
+// dot-sourced. A file the loader refuses is reported as BADENV — the
+// read-only probe's report-the-discrepancy pattern, mirroring NOENV.
 //
 // No secret enters this command string, this process, or the local cache: the
 // values never leave the host, and restic's JSON output carries none of them.
-// `set -a` exports without echoing.
+// The loader exports without echoing.
 // --no-cache and --no-lock are LOAD-BEARING, not tuning: restic otherwise
 // populates a local cache and takes a repository lock, i.e. writes to the
 // remote backend. --host scopes the query to THIS server, matching the tag the
@@ -45,9 +50,10 @@ import (
 // config with the steps package delegating, exactly as the other on-host
 // derivations are single-sourced. Do not re-derive the option string here.
 func offsiteCmd(hostID, resticOpts string) string {
-	return `if [ -r ` + config.OffsiteEnvPath + ` ]; then set -a; . ` + config.OffsiteEnvPath + `; set +a; ` +
+	return config.OffsiteEnvLoader() + `; if [ -r ` + config.OffsiteEnvPath + ` ]; then ` +
+		`if ` + config.OffsiteEnvLoadName + ` 2>/dev/null; then ` +
 		`restic` + resticOpts + ` --no-cache --no-lock snapshots --latest 1 --host '` + hostID + `' --path '` + backupBaseDir + `' --json 2>/dev/null || echo FAILED; ` +
-		`else echo NOENV; fi`
+		`else echo BADENV; fi; else echo NOENV; fi`
 }
 
 // resticSnapshot is the subset of restic's snapshot JSON this probe reads.
@@ -69,6 +75,11 @@ func probeOffsite(ctx context.Context, r bssh.Runner, hostID, resticOpts string)
 		// "offsite not configured" no-op. Returning a clean status here made
 		// `--offsite` exit 0 without ever answering the question.
 		return &OffsiteStatus{Error: "no " + config.OffsiteEnvPath + " on the host (offsite is declared in the config — has this server been provisioned since?)"}, nil
+	case "BADENV":
+		// The env file exists but the loader refused it: it holds lines berth
+		// never writes. Whatever put them there, the nightly offsite run is
+		// failing on the same gate, so this must surface loudly.
+		return &OffsiteStatus{Configured: true, Error: "malformed " + config.OffsiteEnvPath + " on the host — refusing to load it (re-run provisioning to rewrite the managed file)"}, nil
 	case "FAILED":
 		return &OffsiteStatus{Configured: true, Error: "restic could not read the repository"}, nil
 	}

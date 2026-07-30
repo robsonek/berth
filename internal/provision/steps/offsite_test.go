@@ -339,6 +339,23 @@ func stubOffsiteApplyBase(t *testing.T, f *bssh.FakeRunner, s *config.Server, se
 	stubFileState(f, offsiteStampPath(repo), offsiteStampContent(repo), "", false)
 }
 
+// The repository probe and init must PARSE the env file via the shared
+// loader, never evaluate it: dot-sourcing gave a drifted or hand-edited
+// /etc/berth/offsite.env arbitrary code execution as root (external
+// adversarial review finding). A loader failure short-circuits restic, so
+// nothing runs on a half-loaded environment.
+func TestOffsiteEnvCmdNeverSourcesTheEnv(t *testing.T) {
+	cmd := offsiteEnvCmd("restic cat config >/dev/null")
+	for _, evil := range []string{". " + offsiteEnvPath, "set -a", "eval"} {
+		if strings.Contains(cmd, evil) {
+			t.Errorf("offsiteEnvCmd evaluates the env file (%q):\n%s", evil, cmd)
+		}
+	}
+	if !strings.Contains(cmd, config.OffsiteEnvLoadName+" && restic") {
+		t.Errorf("restic must be gated on the loader succeeding:\n%s", cmd)
+	}
+}
+
 func TestOffsiteApplyInitializesRepoAndStamps(t *testing.T) {
 	s := offsiteS3Server(t)
 	secrets := map[string]string{
@@ -349,9 +366,9 @@ func TestOffsiteApplyInitializesRepoAndStamps(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	stubOffsiteApplyBase(t, f, s, secrets)
 	// restic 0.18 (Debian 13): exit code 10 = repository does not exist.
-	probe := "set -a && . " + shQuote(offsiteEnvPath) + " && restic cat config >/dev/null"
+	probe := offsiteEnvCmd("restic cat config >/dev/null")
 	f.On(probe, bssh.Result{ExitCode: 10, Stderr: "Fatal: repository does not exist: unable to open config file\n"})
-	f.On("set -a && . "+shQuote(offsiteEnvPath)+" && restic init", bssh.Result{ExitCode: 0, Stdout: "created restic repository\n"})
+	f.On(offsiteEnvCmd("restic init"), bssh.Result{ExitCode: 0, Stdout: "created restic repository\n"})
 
 	if err := Offsite(nil).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatal(err)
@@ -377,7 +394,7 @@ func TestOffsiteApplyExistingRepoSkipsInit(t *testing.T) {
 	}
 	f := bssh.NewFakeRunner()
 	stubOffsiteApplyBase(t, f, s, secrets)
-	f.On("set -a && . "+shQuote(offsiteEnvPath)+" && restic cat config >/dev/null", bssh.Result{ExitCode: 0})
+	f.On(offsiteEnvCmd("restic cat config >/dev/null"), bssh.Result{ExitCode: 0})
 
 	if err := Offsite(nil).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatal(err)
@@ -398,7 +415,7 @@ func TestOffsiteApplyNetworkFailureWarnsAndMarksUnconverged(t *testing.T) {
 	}
 	f := bssh.NewFakeRunner()
 	stubOffsiteApplyBase(t, f, s, secrets)
-	f.On("set -a && . "+shQuote(offsiteEnvPath)+" && restic cat config >/dev/null",
+	f.On(offsiteEnvCmd("restic cat config >/dev/null"),
 		bssh.Result{ExitCode: 1, Stderr: "Fatal: unable to open config file\ndial tcp: connection refused\n"})
 
 	var warned, unconverged []string
@@ -433,7 +450,7 @@ func TestOffsiteApplyWrongPasswordIsFatal(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	stubOffsiteApplyBase(t, f, s, secrets)
 	// restic 0.18 (Debian 13): exit code 12 = wrong password.
-	f.On("set -a && . "+shQuote(offsiteEnvPath)+" && restic cat config >/dev/null",
+	f.On(offsiteEnvCmd("restic cat config >/dev/null"),
 		bssh.Result{ExitCode: 12, Stderr: "Fatal: wrong password or no key found\n"})
 
 	err := Offsite(nil).Apply(context.Background(), provision.RunCtx{}, s, f)
@@ -454,9 +471,9 @@ func TestOffsiteApplyLegacyMessageClassification(t *testing.T) {
 	}
 	f := bssh.NewFakeRunner()
 	stubOffsiteApplyBase(t, f, s, secrets)
-	f.On("set -a && . "+shQuote(offsiteEnvPath)+" && restic cat config >/dev/null",
+	f.On(offsiteEnvCmd("restic cat config >/dev/null"),
 		bssh.Result{ExitCode: 1, Stderr: "Fatal: unable to open config file\nIs there a repository at the following location?\n"})
-	f.On("set -a && . "+shQuote(offsiteEnvPath)+" && restic init", bssh.Result{ExitCode: 0})
+	f.On(offsiteEnvCmd("restic init"), bssh.Result{ExitCode: 0})
 
 	if err := Offsite(nil).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatal(err)
@@ -485,7 +502,7 @@ func TestOffsiteApplyGeneratesPasswordOnce(t *testing.T) {
 		secret.OffsiteS3AccessKey: "AKIAEXAMPLE",
 		secret.OffsiteS3SecretKey: "fake-secret",
 	})
-	f.On("set -a && . "+shQuote(offsiteEnvPath)+" && restic cat config >/dev/null", bssh.Result{ExitCode: 0})
+	f.On(offsiteEnvCmd("restic cat config >/dev/null"), bssh.Result{ExitCode: 0})
 
 	if err := Offsite(nil).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatal(err)
@@ -678,7 +695,7 @@ func TestOffsiteApplySFTPGeneratesKeyPinsHostAndWarnsPubkey(t *testing.T) {
 	// Dedicated known_hosts file is an ordinary managed file: absent -> write.
 	stubFileState(f, offsiteKnownHostsPath, offsiteKnownHostsContent(s.Backups.Offsite), "", false)
 	f.On("install -d -o root -g root -m 0755 '/var/lib/berth'", bssh.Result{})
-	probe := "set -a && . " + shQuote(offsiteEnvPath) + " && restic" + offsiteResticOpts(s.Backups.Offsite) + " cat config >/dev/null"
+	probe := offsiteEnvCmd("restic" + offsiteResticOpts(s.Backups.Offsite) + " cat config >/dev/null")
 	f.On(probe, bssh.Result{ExitCode: 1, Stderr: "Fatal: unable to open config file\nPermission denied (publickey)\n"})
 	// The transient-failure warning fetches the pubkey to repeat the
 	// authorize hint on EVERY failing run (not only the generation run).

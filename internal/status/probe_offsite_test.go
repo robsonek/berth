@@ -75,6 +75,38 @@ func TestProbeOffsiteMissingEnvFileIsAFailure(t *testing.T) {
 	}
 }
 
+// BADENV means the env file exists but the parse-don't-source loader refused
+// it: it holds lines berth never writes. The nightly offsite cron is failing
+// on the same gate, so the probe must report it, not render a clean status.
+func TestProbeOffsiteMalformedEnvFileIsAFailure(t *testing.T) {
+	f := bssh.NewFakeRunner().On(offsiteCmd("prod", ""), bssh.Result{Stdout: "BADENV\n"})
+	got, err := probeOffsite(context.Background(), f, "prod", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Configured {
+		t.Errorf("got %+v, want Configured true — the file exists, it is just refused", got)
+	}
+	if !strings.Contains(got.Error, "malformed") {
+		t.Errorf("a refused env file must be reported, got %q", got.Error)
+	}
+}
+
+// The env file must be PARSED, never evaluated: dot-sourcing it gave a
+// drifted or hand-edited file arbitrary code execution as root (external
+// adversarial review finding).
+func TestProbeOffsiteCommandNeverSourcesTheEnv(t *testing.T) {
+	cmd := offsiteCmd("prod", "")
+	for _, evil := range []string{". /etc/berth/offsite.env", "set -a", "eval"} {
+		if strings.Contains(cmd, evil) {
+			t.Errorf("offsiteCmd evaluates the env file (%q):\n%s", evil, cmd)
+		}
+	}
+	if !strings.Contains(cmd, "berth_load_offsite_env") {
+		t.Errorf("offsiteCmd must load the env via the shared loader:\n%s", cmd)
+	}
+}
+
 func TestProbeOffsiteEmptyRepository(t *testing.T) {
 	f := bssh.NewFakeRunner().On(offsiteCmd("prod", ""), bssh.Result{Stdout: "[]\n"})
 	got, err := probeOffsite(context.Background(), f, "prod", "")

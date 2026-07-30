@@ -14,6 +14,19 @@ Notable changes to berth. Older releases are documented on the
   same validators provisioning runs (`nginx -t` can create a missing log file).
   Trust-on-first-use is disabled for the sweep.
 
+### Changed
+
+- **`/etc/berth/offsite.env` is now parsed, never evaluated as shell**
+  (hardening from an external adversarial review): the nightly offsite backup
+  script, the provisioning repository probe/init and the `berth status`
+  offsite query all load the file through one strict allowlist parser instead
+  of `set -a; . file`, so a drifted or hand-edited copy can no longer execute
+  commands as root — it fails loudly instead (the status probe reports it as a
+  malformed-file discrepancy). For every file berth itself writes the loaded
+  environment is identical to what sourcing produced. Expect a **one-time
+  rewrite of the managed `/usr/local/sbin/berth-offsite` script** on each
+  offsite-enabled host's next provision run (ordinary managed-file drift).
+
 ### Fixed
 
 - `apt`: the keyring fingerprint probe no longer initialises root's GnuPG home
