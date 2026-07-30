@@ -62,8 +62,10 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{"sort -o /tmp/out /etc/hosts", cmdRejected},
 
 		// Getopt spellings — glued values (--set=@0, -F/path), short-option
-		// bundles (-bF, -us) and abbreviated long options (--se) — must not
-		// bypass the writing-flag denylists the way exact tokens once did.
+		// bundles (-bF, -us) and abbreviated long options (--se) — are WHY the
+		// predicates are allowlists: a denylist of writing flags lost to every
+		// one of these spellings, so each verb now accepts only the exact
+		// shapes berth issues and every other spelling falls out by default.
 		{"date --set=@0", cmdRejected},
 		{"date --se=@0", cmdRejected},
 		{"date -us @0", cmdRejected},
@@ -85,6 +87,48 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{"sed -n 1p /etc/x", cmdReadOnly},
 		{"sed -i s/a/b/ /etc/x", cmdRejected},
 		{"sed -n w/tmp/x /etc/hosts", cmdRejected},
+
+		// The 2026-07 adversarial review: the denylist predicates failed open
+		// on each of these writing shapes. The predicates are allowlists now
+		// (pinned to the shapes berth issues, named per entry), so every one
+		// must reject — none was ever issued by a Check; they are the "a
+		// future Check could do this and pass" class the contract exists for.
+		{"sort --compress-program=sh -S1K /tmp/payload", cmdRejected},
+		{"openssl x509 -noout -in /etc/ssl/cert.pem -writerand /tmp/rand", cmdRejected},
+		{"gpg --no-options --no-keyring --trust-model always --show-keys --with-colons --status-file /tmp/status /usr/share/keyrings/example.gpg", cmdRejected},
+		{"sshd -T -ddd -E /tmp/sshd.log", cmdRejected},
+		{"logrotate -d --log /tmp/check.log /etc/logrotate.conf", cmdRejected},
+		{"fail2ban-client -t --logtarget=/tmp/f2b.log", cmdRejected},
+		// GNU sed's UPPERCASE W writes too; the lowercase letter-scan missed
+		// it, so the script is now pinned by equality (`1p`), never scanned.
+		{"sed -n W/tmp/x /etc/hosts", cmdRejected},
+
+		// The read shapes the allowlists are pinned to, each named at its
+		// issuing site — plus the nearest spellings that must NOT ride along.
+		{"swapon --show=NAME --noheadings", cmdReadOnly}, // swapActive (system.go)
+		{"swapon --show", cmdRejected},                   // a read, but not the shape production issues
+		{"swapon /swapfile", cmdRejected},
+		{"timedatectl show -p Timezone --value", cmdReadOnly}, // checkTimezone (system.go)
+		{"timedatectl status", cmdRejected},
+		{"timedatectl set-timezone UTC", cmdRejected},
+		{"hostnamectl --static", cmdReadOnly}, // checkHostname (system.go)
+		{"hostnamectl", cmdRejected},
+		{"openssl x509 -checkend 2592000 -noout -in '/etc/ssl/berth/app.example.com/fullchain.pem'", cmdReadOnly}, // selfsigned validity (tls.go)
+		{"grep -m1 '^VERSION_CODENAME=' /etc/os-release", cmdReadOnly},                                            // preflight's codename probe
+		{"grep -m1 '^DB_CONNECTION=' '/var/www/app.example.com/shared/.env'", cmdReadOnly},                        // envDBConnection (database.go)
+		{"grep -r /etc", cmdRejected},        // grep is pinned to the -m1 '^KEY=' probes
+		{"command -v composer", cmdReadOnly}, // composer.Check
+		{"command -v -v", cmdRejected},
+		{"systemctl show -p FragmentPath --value nginx", cmdRejected}, // only the NeedDaemonReload read is issued (valkey.go)
+		{"systemctl status nginx", cmdRejected},
+		{"systemctl cat nginx", cmdRejected},
+		{"systemctl is-active --now nginx", cmdRejected},
+		{"passwd -S -u", cmdRejected}, // getopt would parse the operand as -u (unlock); the user may not be an option
+		{"dpkg --status nginx", cmdRejected},
+		{"visudo -c -f /tmp/x", cmdRejected}, // production spells it -cf (accounts.go)
+		{"date -u", cmdRejected},
+		{"tail -n5 /var/log/x", cmdRejected}, // production shape separates the count
+		{"find /etc/apt/sources.list.d -maxdepth 1 -type f -print0", cmdRejected},
 
 		// The locale pin berth's parsers use (stat %F and id output are
 		// localized). Only the exact LC_ALL=C token is stripped; the rest is
@@ -641,71 +685,35 @@ func hasExact(args []string, tok string) bool {
 	return false
 }
 
-// firstNonFlag returns the first argument that does not start with '-', which
-// is where a subcommand lives for the verbs that take one.
-func firstNonFlag(args []string) string {
-	for _, a := range args {
-		if !strings.HasPrefix(a, "-") {
-			return a
-		}
+// allDigits reports whether s is one or more ASCII digits — the shape of the
+// count/seconds operands in the pinned tail and openssl shapes.
+func allDigits(s string) bool {
+	if s == "" {
+		return false
 	}
-	return ""
-}
-
-// mentionsFlag reports whether args mentions any of the given flags in a
-// spelling getopt accepts. Exact-token matching proved bypassable by ordinary
-// spellings — `--set=@0`, `-F/etc/hostname` and the bundle `-bF` all slipped
-// past an exact-token denylist — so every denylisted WRITING flag must be
-// matched here instead.
-//
-// Matching by flag shape:
-//   - a long flag (--file) matches the exact token, the glued form
-//     (--file=/x), and any >=3-char prefix abbreviation with or without a
-//     glued value (--fil, --fil=/x) — getopt_long accepts unique
-//     abbreviations. Prefix matching can over-reject an ambiguous
-//     abbreviation the tool itself would refuse, which is the safe direction.
-//   - a single-letter short flag (-F) matches any single-dash token whose
-//     letters include it: the exact -F, the glued -F/x and the bundle -bF
-//     are one and the same match.
-//   - a single-dash multi-letter flag (-out, -delete) matches exactly: that
-//     spelling belongs to non-getopt CLIs (openssl, find) which accept
-//     neither glue nor bundles, and letter-matching would falsely hit reads
-//     such as openssl's -noout.
-func mentionsFlag(args []string, flags ...string) bool {
-	for _, a := range args {
-		for _, f := range flags {
-			if flagMatches(a, f) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// flagMatches implements mentionsFlag for one (argument, flag) pair.
-func flagMatches(arg, flag string) bool {
-	switch {
-	case strings.HasPrefix(flag, "--"): // getopt long flag
-		if !strings.HasPrefix(arg, "--") {
+	for _, r := range s {
+		if r < '0' || r > '9' {
 			return false
 		}
-		name, _, _ := strings.Cut(arg, "=")
-		return len(name) > 2 && strings.HasPrefix(flag, name)
-	case len(flag) == 2: // getopt short flag: -X
-		return len(arg) >= 2 && arg[0] == '-' && arg[1] != '-' &&
-			strings.ContainsRune(arg[1:], rune(flag[1]))
-	default: // non-getopt single-dash word: -out, -delete
-		return arg == flag
 	}
+	return true
 }
 
 // simpleShapes is the whole table-judged surface. Every entry is an EXACT
 // predicate rather than a bare verb: a review found that verb-only allowlisting
 // blessed `date -s @0`, `hostname changed.example`, `sort -o /tmp/out`,
 // `logrotate -f`, `fail2ban-client set … banip`, `visudo -f` and a bare `sshd`,
-// all of which mutate.
+// all of which mutate. A second review found that DENYLISTS of writing flags
+// fail open — `sort --compress-program`, `sshd -T -E`, `logrotate --log`,
+// `fail2ban-client --logtarget`, `gpg --status-file`, `openssl -writerand` and
+// GNU sed's uppercase W each slipped past one — so every predicate for a verb
+// with any writing mode is an ALLOWLIST pinned to the exact shapes berth
+// issues (named per entry). Only verbs with no writing mode at all keep a
+// permissive predicate.
 var simpleShapes = []simpleShape{
-	// Intrinsically read-only: no flag of theirs writes.
+	// Intrinsically read-only: no option of theirs writes host state (checked
+	// against the coreutils/glibc set Debian ships — their only output stream
+	// is stdout/stderr, and no flag names a file to create or modify).
 	{verb: "cat", allow: func([]string) bool { return true }, verdict: cmdReadOnly},
 	{verb: "test", allow: func([]string) bool { return true }, verdict: cmdReadOnly},
 	{verb: "stat", allow: func([]string) bool { return true }, verdict: cmdReadOnly},
@@ -714,35 +722,58 @@ var simpleShapes = []simpleShape{
 	{verb: "df", allow: func([]string) bool { return true }, verdict: cmdReadOnly},
 	{verb: "wc", allow: func([]string) bool { return true }, verdict: cmdReadOnly},
 	{verb: "head", allow: func([]string) bool { return true }, verdict: cmdReadOnly},
-	{verb: "tail", allow: func(a []string) bool { return !mentionsFlag(a, "-f", "-F", "--follow") }, verdict: cmdReadOnly,
-		why: "-f/-F would follow forever, which is a hang rather than a write, but still forbidden"},
 	{verb: "readlink", allow: func([]string) bool { return true }, verdict: cmdReadOnly},
 	{verb: "basename", allow: func([]string) bool { return true }, verdict: cmdReadOnly},
 	{verb: "dirname", allow: func([]string) bool { return true }, verdict: cmdReadOnly},
-
-	// Verbs with a writing mode: the predicate must exclude it.
-	{verb: "date", allow: func(a []string) bool { return !mentionsFlag(a, "-s", "--set") }, verdict: cmdReadOnly,
-		why: "date -s/--set sets the system clock"},
-	{verb: "hostname", allow: hostnameIsReadOnly, verdict: cmdReadOnly,
-		why: "hostname <name>, -F/--file, -b/--boot and -y/--yp/--nis all set names"},
-	{verb: "sort", allow: func(a []string) bool { return !mentionsFlag(a, "-o", "--output") }, verdict: cmdReadOnly,
-		why: "sort -o/--output writes a file"},
-	{verb: "grep", allow: func([]string) bool { return true }, verdict: cmdReadOnly},
 	{verb: "printf", allow: func([]string) bool { return true }, verdict: cmdReadOnly},
 	{verb: "echo", allow: func([]string) bool { return true }, verdict: cmdReadOnly},
 
-	// sed and awk embed interpreters, so only the narrowest shapes are allowed:
-	// no -i (in-place), no -f (program from a file or stdin), and no program
-	// text that could contain a write or exec command. A review showed
-	// `sed -n 'w /tmp/x'` writes and GNU sed's `e` executes.
+	// tail writes nothing either, but -f/-F would follow forever — a hang
+	// rather than a write. Pinned to the one blessed shape instead of denying
+	// the follow flags (no Check issues tail today; the policy row keeps the
+	// shape honest).
+	{verb: "tail", allow: func(a []string) bool {
+		return len(a) == 3 && a[0] == "-n" && allDigits(a[1]) && !strings.HasPrefix(a[2], "-")
+	}, verdict: cmdReadOnly,
+		why: "pinned to `tail -n <count> <path>`"},
+
+	// grep has no writing option either (its only output is stdout), but it is
+	// pinned to the anchored first-match probes berth issues — preflight's
+	// VERSION_CODENAME read and the database step's env reads — so `-f -`
+	// (patterns from stdin), -r walks and -D device reads never enter the
+	// blessed set for free.
+	{verb: "grep", allow: grepIsEnvProbe, verdict: cmdReadOnly,
+		why: "only the `grep -m1 '^KEY=' <path>` env probes are issued (preflight.go, database.go)"},
+
+	// Verbs with a writing mode: pinned to the exact read shape berth issues.
+	{verb: "date", allow: func(a []string) bool { return len(a) == 2 && a[0] == "-u" && strings.HasPrefix(a[1], "+") }, verdict: cmdReadOnly,
+		why: "pinned to `date -u +<format>` (manifest.go's timestamp read); -s/--set and every getopt respelling fall out by not matching"},
+	{verb: "hostname", allow: func(a []string) bool { return len(a) == 0 }, verdict: cmdReadOnly,
+		why: "only the bare query reads: any operand sets the name, and -F/--file, -b/--boot, -y/--yp/--nis write too"},
+	{verb: "sort", allow: func(a []string) bool { return len(a) == 1 && !strings.HasPrefix(a[0], "-") }, verdict: cmdReadOnly,
+		why: "pinned to `sort <file>`: -o writes, --compress-program executes a program on spill, and no option is needed to read"},
+
+	// sed embeds an interpreter, so the whole (option, script) pair is pinned:
+	// -i writes in place, -e/-f load more program text, a value-taking option
+	// would displace which token is the script, and the script language itself
+	// writes via `w`, UPPERCASE `W` and s///'s w flag and executes via GNU
+	// `e` — a letter-scan missed the uppercase W, so the script is matched by
+	// equality, never scanned.
 	{verb: "sed", allow: sedIsReadOnly, verdict: cmdReadOnly},
 
-	// Validators. The four measured clean on a live host (spec §4.2.1) are
-	// read-only in their check-only shape ONLY.
-	{verb: "sshd", allow: func(a []string) bool { return hasExact(a, "-T") }, verdict: cmdReadOnly},
-	{verb: "visudo", allow: func(a []string) bool { return hasExact(a, "-cf") || (hasExact(a, "-c") && hasExact(a, "-f")) }, verdict: cmdReadOnly},
-	{verb: "logrotate", allow: func(a []string) bool { return hasExact(a, "-d") && !mentionsFlag(a, "-f", "--force") }, verdict: cmdReadOnly},
-	{verb: "fail2ban-client", allow: func(a []string) bool { return hasExact(a, "-t") && firstNonFlag(a) == "" }, verdict: cmdReadOnly},
+	// Validators, pinned to their check-only argv EXACTLY: their other modes
+	// write (visudo -f edits, logrotate without -d rotates), and even the
+	// check modes take flags that write elsewhere (sshd -E appends a debug
+	// log, logrotate --log writes the named state log, fail2ban-client
+	// --logtarget redirects logging into a file).
+	{verb: "sshd", allow: func(a []string) bool { return len(a) == 1 && a[0] == "-T" }, verdict: cmdReadOnly,
+		why: "pinned to `sshd -T` (sshdEffective, hardening.go)"},
+	{verb: "visudo", allow: func(a []string) bool { return len(a) == 2 && a[0] == "-cf" && !strings.HasPrefix(a[1], "-") }, verdict: cmdReadOnly,
+		why: "pinned to `visudo -cf <file>` (accounts.go)"},
+	{verb: "logrotate", allow: func(a []string) bool { return len(a) == 2 && a[0] == "-d" && !strings.HasPrefix(a[1], "-") }, verdict: cmdReadOnly,
+		why: "pinned to `logrotate -d <config>` (site.go, backups.go)"},
+	{verb: "fail2ban-client", allow: func(a []string) bool { return len(a) == 1 && a[0] == "-t" }, verdict: cmdReadOnly,
+		why: "pinned to the bare `fail2ban-client -t` (hardening.go)"},
 
 	// The named exceptions: allowed, but they WRITE (spec §4.2; php-fpm's
 	// lives in classifySimple because its verb carries the version).
@@ -777,128 +808,121 @@ var simpleShapes = []simpleShape{
 	{verb: "supervisorctl", allow: func(a []string) bool { return len(a) == 2 && a[0] == "status" }, verdict: cmdReadOnly,
 		why: "only `supervisorctl status <program>` reads; every other subcommand drives the process set"},
 
-	// Subcommand verbs, matched POSITIONALLY. `systemctl start cat` must not
-	// pass by containing the token "cat".
-	{verb: "systemctl", allow: systemctlIsReadOnly, verdict: cmdReadOnly},
-	{verb: "dpkg", allow: func(a []string) bool { return len(a) >= 1 && (a[0] == "-s" || a[0] == "--status") }, verdict: cmdReadOnly},
-	{verb: "timedatectl", allow: func(a []string) bool { return firstNonFlag(a) == "show" || firstNonFlag(a) == "status" }, verdict: cmdReadOnly},
-	{verb: "hostnamectl", allow: func(a []string) bool { return firstNonFlag(a) == "status" || firstNonFlag(a) == "" }, verdict: cmdReadOnly},
-	{verb: "swapon", allow: func(a []string) bool { return len(a) == 1 && a[0] == "--show" }, verdict: cmdReadOnly},
+	// Subcommand verbs, matched POSITIONALLY (`systemctl start cat` must not
+	// pass by containing the token "cat") and pinned to the exact query
+	// shapes the steps issue.
+	{verb: "systemctl", allow: systemctlIsReadOnly, verdict: cmdReadOnly,
+		why: "pinned to is-active/is-enabled <unit> (common.go, valkey.go, tls.go) and show -p NeedDaemonReload --value <unit> (valkey.go)"},
+	{verb: "dpkg", allow: func(a []string) bool { return len(a) == 2 && a[0] == "-s" && !strings.HasPrefix(a[1], "-") }, verdict: cmdReadOnly,
+		why: "pinned to `dpkg -s <pkg>` (pkgInstalled, common.go)"},
+	{verb: "timedatectl", allow: func(a []string) bool {
+		return len(a) == 4 && a[0] == "show" && a[1] == "-p" && a[2] == "Timezone" && a[3] == "--value"
+	}, verdict: cmdReadOnly,
+		why: "pinned to `timedatectl show -p Timezone --value` (checkTimezone, system.go)"},
+	{verb: "hostnamectl", allow: func(a []string) bool { return len(a) == 1 && a[0] == "--static" }, verdict: cmdReadOnly,
+		why: "pinned to `hostnamectl --static` (checkHostname, system.go)"},
+	{verb: "swapon", allow: func(a []string) bool { return len(a) == 2 && a[0] == "--show=NAME" && a[1] == "--noheadings" }, verdict: cmdReadOnly,
+		why: "pinned to `swapon --show=NAME --noheadings` (swapActive, system.go); an operand would ENABLE that path as swap"},
 	{verb: "sysctl", allow: sysctlIsReadOnly, verdict: cmdReadOnly},
 	{verb: "ufw", allow: func(a []string) bool { return len(a) == 1 && a[0] == "status" }, verdict: cmdReadOnly,
 		why: "only the bare status query reads; allow/enable/delete rewrite firewall rules"},
-	{verb: "passwd", allow: func(a []string) bool { return len(a) == 2 && a[0] == "-S" }, verdict: cmdReadOnly,
-		why: "passwd -S prints status metadata; every other mode changes credentials"},
-	{verb: "command", allow: func(a []string) bool { return len(a) == 2 && a[0] == "-v" }, verdict: cmdReadOnly},
+	{verb: "passwd", allow: func(a []string) bool { return len(a) == 2 && a[0] == "-S" && !strings.HasPrefix(a[1], "-") }, verdict: cmdReadOnly,
+		why: "pinned to `passwd -S <user>` (consolePasswordUsable, accounts.go); the operand may not be an option — getopt would parse -l/-u there and change credentials"},
+	{verb: "command", allow: func(a []string) bool { return len(a) == 2 && a[0] == "-v" && !strings.HasPrefix(a[1], "-") }, verdict: cmdReadOnly,
+		why: "pinned to `command -v <name>` (composer.go): a PATH lookup, nothing executed"},
 	{verb: "openssl", allow: opensslX509IsReadOnly, verdict: cmdReadOnly,
-		why: "every spelling of -out creates and truncates its file even under -noout (verified on OpenSSL 3.6.3)"},
-	{verb: "find", allow: findIsReadOnly, verdict: cmdReadOnly},
-	{verb: "gpg", allow: gpgIsReadOnly, verdict: cmdReadOnly},
+		why: "pinned to the two x509 reads tls.go issues; -out and -writerand create files even under -noout, and every respelling falls out by not matching"},
+	{verb: "find", allow: findIsUserListDiscovery, verdict: cmdReadOnly,
+		why: "pinned to discoverUserLists' exact namespace listing (aptUserListsCmd, aptextras.go); find's other predicates include ones that act instead of reporting (-delete, -exec, -fprintf)"},
+	{verb: "gpg", allow: gpgIsReadOnly, verdict: cmdReadOnly,
+		why: "pinned to KeyringHoldsExactly's exact argv (apt.go)"},
 	{verb: "mysql", allow: mysqlIsReadOnlyProbe, verdict: cmdReadOnly,
 		why: "only probeSQL's -N -e information_schema SELECT reads; any other statement, a ;-chain, INTO OUTFILE or an extra option mutates"},
 	{verb: "runuser", allow: runuserIsValkeyPing, verdict: cmdReadOnly,
 		why: "only `runuser -u <user> -- valkey-cli -s <berth socket> ping` reads; anything else is an arbitrary program under another uid"},
 }
 
-// sedIsReadOnly allows only `sed -n <script> <file>...` where the ONLY option
-// is -n and the script contains no write (`w`) and no execute (`e`) command.
-//
-// Options are an allowlist of exactly {-n}, not a denylist: -i writes in
-// place, -e and -f load more program text, and a value-taking option (-l N)
-// would displace which token is the script, so a denylist is fail-open.
-// With options pinned to -n, the script is provably the FIRST non-option
-// argument; everything after it is an input file, which sed only reads —
-// and which must not be letter-checked, because real paths contain 'e'
-// (/etc/x) while carrying no program text.
+// sedIsReadOnly pins the one sed shape the policy table blesses:
+// `sed -n 1p <file>` — print the first line of one file. sed embeds an
+// interpreter (-i writes in place, -e/-f load more program text, a
+// value-taking option would displace which token is the script, and the
+// script language writes via `w`, UPPERCASE `W` and s///'s w flag and
+// executes via GNU `e`), and the previous letter-scan for lowercase w/e
+// missed the uppercase W — so the script token is matched by EQUALITY,
+// never scanned. No Check issues sed today; the pin keeps the policy row
+// honest.
 func sedIsReadOnly(args []string) bool {
-	if !hasExact(args, "-n") {
-		return false
-	}
-	for _, a := range args {
-		if strings.HasPrefix(a, "-") && a != "-n" {
-			return false
-		}
-	}
-	// A sed script containing `w` writes and GNU sed's `e` executes. Rejecting
-	// any script with those letters is coarse; it is also the safe direction,
-	// and berth's own sed scripts (`1p`) do not contain them.
-	return !strings.ContainsAny(firstNonFlag(args), "we")
+	return len(args) == 3 && args[0] == "-n" && args[1] == "1p" && !strings.HasPrefix(args[2], "-")
 }
 
-// hostnameIsReadOnly: hostname writes when given ANY non-flag argument (the
-// new name to set), via -F/--file (name read from a file), -b/--boot, or
-// -y/--yp/--nis (sets the NIS domain when given a value). So every argument
-// must be a flag, and none may mention a writing one in any getopt spelling.
-func hostnameIsReadOnly(args []string) bool {
-	for _, a := range args {
-		if !strings.HasPrefix(a, "-") {
-			return false
-		}
-	}
-	return !mentionsFlag(args, "-F", "--file", "-b", "--boot", "-y", "--yp", "--nis")
+// grepIsEnvProbe pins the anchored first-match probes berth issues:
+// `grep -m1 '^<KEY>=' <path>` — preflight's VERSION_CODENAME read
+// (preflight.go) and the database step's env reads (database.go). grep has
+// no writing option, but the pin keeps `-f -`, -r and -D out of the blessed
+// set for free.
+func grepIsEnvProbe(args []string) bool {
+	return len(args) == 3 && args[0] == "-m1" &&
+		strings.HasPrefix(args[1], "'^") && strings.HasSuffix(args[1], "='") &&
+		!strings.HasPrefix(args[2], "-")
 }
 
-// sysctlIsReadOnly allows only `sysctl -n <key>...`. Checking a[0] alone is
-// not enough: -w/--write can follow -n, -p/--load/--system apply a config
-// file (writing kernel parameters), and the bare `key=value` form writes
-// even WITHOUT -w, so any argument containing '=' is rejected as well.
+// sysctlIsReadOnly pins checkSysctl's probe (system.go): `sysctl -n <key>`,
+// exactly one key. The length pin does the denying: -w/--write after -n,
+// -p/--load/--system, and a second key all fail len==2; the bare `key=value`
+// form writes even WITHOUT -w, so the key may not contain '=' either.
 func sysctlIsReadOnly(args []string) bool {
-	if len(args) < 1 || args[0] != "-n" ||
-		mentionsFlag(args, "-w", "--write", "-p", "--load", "--system") {
-		return false
-	}
-	for _, a := range args {
-		if strings.Contains(a, "=") {
-			return false
-		}
-	}
-	return true
+	return len(args) == 2 && args[0] == "-n" &&
+		!strings.HasPrefix(args[1], "-") && !strings.Contains(args[1], "=")
 }
 
-// systemctlIsReadOnly allows only the query subcommands, taken from the FIRST
-// non-flag position so an allowed word cannot appear as a unit name.
+// systemctlIsReadOnly pins the three query shapes the steps issue: the
+// is-active/is-enabled probes (serviceUp/serviceActive, common.go; also
+// valkey.go and tls.go) and valkey's NeedDaemonReload read (unitCacheFresh,
+// valkey.go). The subcommand is matched at position 0, so an allowed word
+// can never pass as a unit name, and the unit operand may not itself be an
+// option.
 func systemctlIsReadOnly(args []string) bool {
-	switch firstNonFlag(args) {
-	case "is-active", "is-enabled", "is-failed", "show", "list-units", "cat", "status":
-		return true
+	switch {
+	case len(args) == 2 && (args[0] == "is-active" || args[0] == "is-enabled"):
+		return !strings.HasPrefix(args[1], "-")
+	case len(args) == 5 && args[0] == "show" && args[1] == "-p" &&
+		args[2] == "NeedDaemonReload" && args[3] == "--value":
+		return !strings.HasPrefix(args[4], "-")
 	}
 	return false
 }
 
-// optName normalizes one argument to the option NAME openssl's parser would
-// see: apps/lib/opt.c strips one or two leading dashes ("Allow -nnn and
-// --nnn") and snips a glued "=value" ("If we have --flag=foo, snip it off").
-// A non-option argument normalizes to "". Matching the normalized name
-// covers every spelling the parser derives, so nothing here depends on
-// enumerating them.
-func optName(arg string) string {
-	if !strings.HasPrefix(arg, "-") {
-		return ""
+// opensslX509IsReadOnly pins the two x509 reads tls.go issues: the
+// selfsigned validity window probe `x509 -checkend <seconds> -noout -in
+// <cert>` and the plain `x509 -noout -in <cert>` parse. Two rounds of
+// enumerating -out's spellings each missed one (--out, then the glued
+// -out=FILE — every one of which creates and truncates its file even under
+// -noout, probed on OpenSSL 3.6.3), and a third review found -writerand
+// (creates a seed file), so the predicate accepts exact shapes instead of
+// denying flag names. The operands may not themselves be options.
+func opensslX509IsReadOnly(args []string) bool {
+	switch {
+	case len(args) == 4 && args[0] == "x509" && args[1] == "-noout" && args[2] == "-in":
+		return !strings.HasPrefix(args[3], "-")
+	case len(args) == 6 && args[0] == "x509" && args[1] == "-checkend" && allDigits(args[2]) &&
+		args[3] == "-noout" && args[4] == "-in":
+		return !strings.HasPrefix(args[5], "-")
 	}
-	name := strings.TrimPrefix(strings.TrimPrefix(arg, "-"), "-")
-	name, _, _ = strings.Cut(name, "=")
-	return name
+	return false
 }
 
-// opensslX509IsReadOnly allows only `openssl x509 -noout …` where no argument
-// normalizes to the option name "out". Two rounds of enumerating -out's exact
-// tokens each missed a spelling (first --out, then the glued -out=FILE and
-// --out=FILE — every one of which creates and truncates its file even under
-// -noout), so the predicate matches by normalized name instead. -noout
-// normalizes to "noout", never "out" — the property that keeps the read
-// alive, and the reason openssl does not route through mentionsFlag, whose
-// short-flag rule would letter-match the 'o' in -noout. "o" is also denied:
-// openssl refuses it as unknown, so that is free over-rejection.
-//
-// Probed on OpenSSL 3.6.3: -out=F and --out=F exit 0 and create F; -o, --o,
-// the abbreviation -ou= and the three-dash ---out= all exit 1 with no file.
-func opensslX509IsReadOnly(args []string) bool {
-	if len(args) < 1 || args[0] != "x509" || !hasExact(args, "-noout") {
+// findIsUserListDiscovery pins discoverUserLists' exact namespace listing
+// (aptUserListsCmd, aptextras.go), the only metacharacter-free find a Check
+// issues. find's predicate language includes ones that act instead of
+// reporting (-delete, -exec/-execdir/-ok/-okdir, -fls/-fprint/-fprint0/
+// -fprintf), so nothing but the exact listing passes.
+func findIsUserListDiscovery(args []string) bool {
+	want := []string{"/etc/apt/sources.list.d", "-maxdepth", "1", "-name", "'berth-*.list'", "-print0"}
+	if len(args) != len(want) {
 		return false
 	}
-	for _, a := range args {
-		switch optName(a) {
-		case "out", "o":
+	for i, w := range want {
+		if args[i] != w {
 			return false
 		}
 	}
@@ -942,31 +966,22 @@ func runuserIsValkeyPing(args []string) bool {
 		strings.HasPrefix(args[5], "'/run/berth-valkey/")
 }
 
-// findMutators are the predicates that act instead of reporting. find's
-// predicates are non-getopt single-dash words, so mentionsFlag degrades to
-// exact matching for every one of them by design — glued and bundled
-// spellings do not exist for find.
-var findMutators = []string{
-	"-delete", "-exec", "-execdir", "-ok", "-okdir",
-	"-fls", "-fprint", "-fprint0", "-fprintf",
-}
-
-func findIsReadOnly(args []string) bool { return !mentionsFlag(args, findMutators...) }
-
-// gpgIsReadOnly requires the EXACT flag set that was measured to write nothing.
-// A review pointed out that accepting any gpg command containing --no-options
-// would bless a regression that drops --trust-model always, which is the
-// load-bearing flag: without it gpg creates trustdb.gpg.
+// gpgIsReadOnly pins KeyringHoldsExactly's EXACT argv (apt.go): six fixed
+// tokens in order, then the keyring path. --trust-model always is
+// load-bearing (without it gpg creates trustdb.gpg), and --status-file,
+// --output and every other writing flag fall out by not matching — nothing
+// here depends on enumerating them, which is how a denylist of them failed.
 func gpgIsReadOnly(args []string) bool {
-	need := []string{"--no-options", "--no-keyring", "--trust-model", "always", "--show-keys"}
-	for _, n := range need {
-		if !hasExact(args, n) {
+	fixed := []string{"--no-options", "--no-keyring", "--trust-model", "always", "--show-keys", "--with-colons"}
+	if len(args) != len(fixed)+1 {
+		return false
+	}
+	for i, w := range fixed {
+		if args[i] != w {
 			return false
 		}
 	}
-	// Nothing that writes may be present alongside them, in any spelling
-	// (gpg also accepts glued values and abbreviated long options).
-	return !mentionsFlag(args, "--export", "--import", "--output", "-o", "--dearmor", "--gen-key", "--batch-key")
+	return !strings.HasPrefix(args[len(fixed)], "-")
 }
 
 // classifySimple judges a metacharacter-free command by the shape tables.
