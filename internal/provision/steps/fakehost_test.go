@@ -255,6 +255,26 @@ func newFakeHost(t *testing.T, profile string, s *config.Server) *fakeHost {
 		// the fpr whose field 10 is the pinned fingerprint.
 		gpgKeys: "pub:u:255:22:0000000000000000:::::::::\nfpr:::::::::" + strings.Repeat("A", 40) + ":\n",
 	}
+	// The base filesystem every Debian host has, fresh included: the ancestry
+	// probes (accounts' /home/x pattern, appdirs' deploy-path chain) PARSE
+	// '%n %u %a %F' lines for every component that exists, so the components a
+	// real host always has must exist here too — an all-absent ancestry would
+	// pass the guard vacuously and never exercise its parser. /var/www is NOT
+	// here: it arrives with nginx, so only the provisioned profiles carry it.
+	for _, d := range []string{"/", "/home", "/var"} {
+		h.files[d] = fakeFile{owner: "root", group: "root", uid: 0, gid: 0,
+			mode: "755", kind: "directory", mtimeUnix: 1400000000}
+	}
+	// /etc/default/ssh ships with openssh-server on every host berth can reach
+	// (it connects over sshd), fresh included. hardening's sshdOptsGuard PARSES
+	// it for the last SSHD_OPTS assignment; this is the stock Debian content,
+	// whose empty assignment is exactly what the guard must prove.
+	h.files["/etc/default/ssh"] = fakeFile{
+		content: "# Default settings for openssh-server. This file is sourced by /bin/sh from\n" +
+			"# /etc/init.d/ssh.\n\n# Options to pass to sshd\nSSHD_OPTS=\n",
+		owner: "root", group: "root", mode: "644", kind: "regular file",
+		mtimeUnix: 1400000000,
+	}
 	// Every profile carries /etc/os-release, fresh included: a Debian host
 	// without it is not a state berth supports, and preflight's codename probe
 	// must read a verdict, not a modelling gap. The content is the file
@@ -316,13 +336,31 @@ func populateInstalled(h *fakeHost, s *config.Server, profile string) {
 	for _, tool := range []string{"nginx", "php-fpm" + s.PHP.Version, "restic", "certbot", "gpg", "logrotate", "supervisorctl"} {
 		h.tools[tool] = true
 	}
-	// Every berth-owned account exists on a once-provisioned host. fresh gets
-	// none: userExists reads only the exit code of `id <user>`, and the absent
-	// account is the branch accounts.Check exists to walk there.
-	for _, u := range managedAccounts(s) {
+	// Every berth-owned account exists on a once-provisioned host, with the
+	// 0700 home ensureUser locks and the ~/.ssh directory berth creates as the
+	// account. fresh gets none: userExists reads only the exit code of
+	// `id <user>`, and the absent account is the branch accounts.Check exists
+	// to walk there — and assertOwnSSHDir's exit-92 "absent" signal is only
+	// reachable while ~/.ssh does not exist. uid 1000+i keeps the site user at
+	// 1001, matching the uid populateManagedFiles pins on the site tree.
+	for i, u := range managedAccounts(s) {
 		h.users[u] = true
+		for _, d := range []string{"/home/" + u, "/home/" + u + "/.ssh"} {
+			h.files[d] = fakeFile{owner: u, group: u, uid: 1000 + i, gid: 1000 + i,
+				mode: "700", kind: "directory", mtimeUnix: 1500000000}
+		}
 	}
 	h.swapRows = "NAME TYPE SIZE USED PRIO\n/swapfile file 2G 0B -2\n"
+}
+
+// setMeta adjusts the probed metadata of an existing modelled file. putManaged
+// pins root:root 644 — right for /etc config drop-ins, wrong for the artifacts
+// whose owner/mode IS part of the step's contract (sudoers 0440, the reload
+// wrapper 0755, a tenant's authorized_keys), which their Checks stat.
+func (h *fakeHost) setMeta(path, owner, group, mode string) {
+	f := h.files[path]
+	f.owner, f.group, f.mode = owner, group, mode
+	h.files[path] = f
 }
 
 // putManaged registers one managed file for the current profile. The three
@@ -362,6 +400,17 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 		mode: "710", kind: "directory", mtimeUnix: 1500000000}
 	h.files[site.DeployPath+"/shared"] = fakeFile{owner: owner, group: owner, uid: uid, gid: uid,
 		mode: "700", kind: "directory", mtimeUnix: 1500000000}
+	// shared/tmp and the ACME webroot complete the four paths appdirs.Check
+	// stats (appdirs.go): shared/tmp mirrors shared's private tenant identity;
+	// the webroot and its base are root:root — certbot writes there as root,
+	// nginx only reads. /var/www itself arrives with nginx on any provisioned
+	// host and is what the appdirs ancestry probe reports.
+	h.files[site.DeployPath+"/shared/tmp"] = fakeFile{owner: owner, group: owner, uid: uid, gid: uid,
+		mode: "700", kind: "directory", mtimeUnix: 1500000000}
+	for _, d := range []string{"/var/www", acmeWebrootBase, acmeWebroot(site.Domain)} {
+		h.files[d] = fakeFile{owner: "root", group: "root", uid: 0, gid: 0,
+			mode: "755", kind: "directory", mtimeUnix: 1500000000}
+	}
 
 	// The enabled-vhost symlink is real state on every once-provisioned host:
 	// site's Check probes its identity with `[ -L … ]` and `[ … -ef … ]`
@@ -408,6 +457,58 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 				mode: "644", kind: "regular file", mtimeUnix: 1500000000}
 		}
 	}
+	// accounts' artifacts. The sudoers bodies come from the same sources the
+	// step compares against: the berth grant is the step's own const, the site
+	// grant the same renderer, and authorized_keys the same composer over the
+	// same fixture pubkey. Owner/mode are part of the sudoers contract (sudo
+	// refuses a drop-in that is not root:root 0440), so accounts.Check stats
+	// them; the reload wrapper's root:root 0755 IS the security boundary its
+	// Check enforces.
+	h.putManaged(sudoersBerthPath, []byte(sudoersBerthBody), profile)
+	h.setMeta(sudoersBerthPath, "root", "root", "440")
+	siteSudoers, err := renderSiteSudoers(s, site)
+	if err != nil {
+		panic("render sudoers_deploy.tmpl: " + err.Error())
+	}
+	h.putManaged(sudoersPath(s.SiteUser(site)), siteSudoers, profile)
+	h.setMeta(sudoersPath(s.SiteUser(site)), "root", "root", "440")
+	operatorKey, err := operatorPublicKey(s.SSH.Key)
+	if err != nil {
+		panic("read the fixture operator key: " + err.Error())
+	}
+	for _, u := range managedAccounts(s) {
+		h.putManaged(authorizedKeysPath(u), authorizedKeys(operatorKey), profile)
+		h.setMeta(authorizedKeysPath(u), u, u, "600")
+	}
+	reloadWrapper, err := renderReloadFPMScript(s)
+	if err != nil {
+		panic("render reload_fpm.sh.tmpl: " + err.Error())
+	}
+	h.putManaged(reloadFPMScriptPath, reloadWrapper, profile)
+	h.setMeta(reloadFPMScriptPath, "root", "root", "755")
+
+	// hardening's two managed files: the sshd drop-in is the step's own const,
+	// the jail the same renderer its Check calls.
+	h.putManaged(sshdDropInPath, []byte(sshdDropInBody), profile)
+	jail, err := renderFail2banJail(s)
+	if err != nil {
+		panic("render fail2ban_jail.tmpl: " + err.Error())
+	}
+	h.putManaged(fail2banJailPath, jail, profile)
+
+	// Reload stamps for the units hardening.Check compares via reloadedSince.
+	// Under runtime-stale the stamps PREDATE the managed files (mtime
+	// 1500000000), which is the crash-between-write-and-reload state that
+	// probe exists to catch; everywhere else they postdate them.
+	stampM := int64(2000000000)
+	if profile == "runtime-stale" {
+		stampM = 1000000000
+	}
+	for _, unit := range []string{"ssh", "fail2ban"} {
+		h.files[stampPath(unit)] = fakeFile{owner: "root", group: "root",
+			mode: "644", kind: "regular file", mtimeUnix: stampM}
+	}
+
 	// The sweep namespace: drifted models an UNDECLARED berth-owned list (the
 	// exact state the apt step's sweep exists to remove — strict marker as the
 	// first line, canonical berth-*.list name); foreign models a marker-less
