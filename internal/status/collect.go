@@ -144,6 +144,11 @@ func CollectHost(ctx context.Context, cfgPath string, s *config.Server, r bssh.R
 		default:
 			h.Offsite = o
 			if o.Error != "" {
+				// Recorded in BOTH places on purpose: ProbeErrors drives the
+				// exit code and --json, while the human views render the
+				// failure once, on the offsite state row — they skip this
+				// entry by matching the exact "offsite: " prefix
+				// (ui.isOffsiteDuplicate; keep the prefix in sync).
 				h.ProbeErrors = append(h.ProbeErrors, "offsite: "+o.Error)
 			}
 		}

@@ -56,6 +56,21 @@ func TestFleetModelDetailShowsDriftErrorAndProbeErrors(t *testing.T) {
 	}
 }
 
+// Same single-render rule as the plain table: the OFFSITE line is the one
+// place a failed query shows in the drill-down.
+func TestFleetModelDetailRendersFailedOffsiteOnce(t *testing.T) {
+	hosts := twoHosts()
+	hosts[0].Offsite = &status.OffsiteStatus{Configured: true, Error: "restic could not read the repository"}
+	hosts[0].ProbeErrors = []string{"offsite: restic could not read the repository"}
+	view := newFleetModel(hosts).toggleDetail().View()
+	if got := strings.Count(view, "could not read the repository"); got != 1 {
+		t.Errorf("offsite failure must render exactly once, got %d:\n%s", got, view)
+	}
+	if !strings.Contains(view, "OFFSITE FAILED: restic could not read the repository") {
+		t.Errorf("the surviving copy must be the OFFSITE line:\n%s", view)
+	}
+}
+
 func TestFleetModelListViewShowsEveryHost(t *testing.T) {
 	view := newFleetModel(twoHosts()).View()
 	for _, want := range []string{"prod", "staging"} {

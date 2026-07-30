@@ -85,8 +85,12 @@ func writeHostDetail(w *bytes.Buffer, h status.HostStatus) {
 		fmt.Fprintf(w, "error: %s\n", SanitizeCell(h.Error))
 	}
 	// Partial probe failures: a reachable host that answered only some probes
-	// must not read as fully healthy in the drill-down either.
+	// must not read as fully healthy in the drill-down either. The offsite
+	// failure is rendered once, on the OFFSITE line (see isOffsiteDuplicate).
 	for _, pe := range h.ProbeErrors {
+		if isOffsiteDuplicate(h, pe) {
+			continue
+		}
 		fmt.Fprintf(w, "probe error: %s\n", SanitizeCell(pe))
 	}
 	fmt.Fprintln(w, "\nSITES")

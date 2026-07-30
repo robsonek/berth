@@ -283,6 +283,40 @@ func TestFleetTableRendersOffsite(t *testing.T) {
 	}
 }
 
+// The collector records an offsite failure both as OffsiteStatus.Error (the
+// state) and as a ProbeErrors entry (exit code, --json). The human views must
+// render it ONCE — on the offsite state row, the dedicated answer slot — not
+// as an extra `!` row repeating the same text. A transport failure (no
+// OffsiteStatus at all) keeps its `!` row: nothing else would show it.
+func TestFleetTableRendersFailedOffsiteOnce(t *testing.T) {
+	h := hostFixture()
+	h.Offsite = &status.OffsiteStatus{Configured: true, Error: "restic could not read the repository"}
+	h.ProbeErrors = []string{"offsite: restic could not read the repository"}
+	var buf bytes.Buffer
+	if err := WriteFleetTable(&buf, []status.HostStatus{h}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if got := strings.Count(out, "could not read the repository"); got != 1 {
+		t.Errorf("offsite failure must render exactly once, got %d:\n%s", got, out)
+	}
+	if !strings.Contains(out, "offsite: FAILED: restic could not read the repository") {
+		t.Errorf("the surviving copy must be the offsite state row:\n%s", out)
+	}
+
+	// Transport failure: probeOffsite returned a Go error, so there is no
+	// state row — the ! row must stay.
+	h.Offsite = nil
+	h.ProbeErrors = []string{"offsite: dial tcp: connection refused"}
+	buf.Reset()
+	if err := WriteFleetTable(&buf, []status.HostStatus{h}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "! offsite: dial tcp") {
+		t.Errorf("a transport failure has no state row and must keep its ! row:\n%s", buf.String())
+	}
+}
+
 // The reassuring number must not win: with one fresh and one ancient site the
 // cell reports the OLDEST.
 func TestFleetTableBackupReportsOldestSite(t *testing.T) {

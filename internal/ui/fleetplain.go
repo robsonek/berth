@@ -49,6 +49,9 @@ func WriteFleetTable(w io.Writer, hosts []status.HostStatus) error {
 		// A reachable host with partial probe failures previously rendered as
 		// fully healthy. Its errors must be visible, not only in --json.
 		for _, pe := range h.ProbeErrors {
+			if isOffsiteDuplicate(h, pe) {
+				continue
+			}
 			if _, err := fmt.Fprintf(tw, "  ! %s\t\t\t\t\t\t\t\n", SanitizeCell(pe)); err != nil {
 				return err
 			}
@@ -74,6 +77,18 @@ func WriteFleetTable(w io.Writer, hosts []status.HostStatus) error {
 		}
 	}
 	return tw.Flush()
+}
+
+// isOffsiteDuplicate reports whether a ProbeErrors entry restates
+// OffsiteStatus.Error. The collector deliberately records the failure twice —
+// ProbeErrors drives the exit code and --json — but the human views render it
+// once, on the offsite state row: that row is the dedicated answer slot for
+// the --offsite question and covers every outcome in one place, so the `!`
+// row would be pure repetition. The match is exact against the "offsite: "
+// prefix collect.go composes; a transport failure (h.Offsite nil) keeps its
+// `!` row — there is no state row to carry it.
+func isOffsiteDuplicate(h status.HostStatus, probeErr string) bool {
+	return h.Offsite != nil && h.Offsite.Error != "" && probeErr == "offsite: "+h.Offsite.Error
 }
 
 // offsiteLine covers all four answers a probe can produce. The degraded ones
