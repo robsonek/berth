@@ -2,6 +2,7 @@ package status
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/robsonek/berth/internal/config"
@@ -103,5 +104,22 @@ func TestProbeServicesParsesActiveAndEnabled(t *testing.T) {
 	// An absent unit produces empty fields; it must read as down, never as up.
 	if sv := byName["berth-valkey-app_example_com.service"]; sv.Active || sv.Enabled {
 		t.Errorf("absent unit = %+v, want inactive+disabled", sv)
+	}
+}
+
+// A non-zero exit is data, not a Go error (Runner contract). If the command
+// itself fails — sudo denied on a half-broken host — the probe must return an
+// error, not an empty slice that renders as a clean-looking blank at exit 0.
+func TestProbeServicesFailsOnNonZeroExit(t *testing.T) {
+	s := srvFixture()
+	f := bssh.NewFakeRunner().On(servicesCmd(unitList(s)),
+		bssh.Result{ExitCode: 1, Stderr: "sudo: a password is required\n"})
+
+	got, err := probeServices(context.Background(), f, s)
+	if err == nil {
+		t.Fatalf("probeServices = %v, want error on exit 1", got)
+	}
+	if !strings.Contains(err.Error(), "sudo: a password is required") {
+		t.Errorf("error %q does not surface the host's stderr", err)
 	}
 }

@@ -2,6 +2,7 @@ package status
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/robsonek/berth/internal/config"
@@ -12,6 +13,15 @@ import (
 // steps package spells the MariaDB unit "mariadb.service" (tuning.go:17);
 // systemd resolves the suffix-less form to the same unit, and the shorter
 // name keeps the rendered table narrow.
+//
+// KNOWN LIMITATION for postgres: Debian's postgresql.service is an umbrella
+// (Type=oneshot, RemainAfterExit=yes) whose real work lives in per-cluster
+// postgresql@<version>-<cluster>.service units, so the Active axis reflects
+// the umbrella, not the cluster — a killed or crashed cluster can still read
+// as active here. Do NOT mistake this column for a cluster health check.
+// Probing the instance unit needs the cluster version and name, which the
+// config does not carry; real cluster liveness is deferred along with
+// database health (spec §11).
 func dbUnit(engine string) string {
 	if engine == "postgres" {
 		return "postgresql"
@@ -24,7 +34,7 @@ func dbUnit(engine string) string {
 func unitList(s *config.Server) []string {
 	// ssh and certbot.timer are included because provisioning REQUIRES them:
 	// hardening asserts ssh active+enabled (hardening.go:270) and tls asserts
-	// the renewal timer active (tls.go:389). Omitting them would let the two
+	// the renewal timer active (tls.go:385). Omitting them would let the two
 	// failures the operator most needs to hear about — locked out on reboot,
 	// certificates silently not renewing — pass unnoticed.
 	units := []string{"nginx", config.FPMServiceName(s.PHP.Version), dbUnit(s.Database.Engine), "fail2ban", "cron", "ssh"}
@@ -32,7 +42,7 @@ func unitList(s *config.Server) []string {
 		units = append(units, "supervisor")
 	}
 	// AnyLetsEncrypt, NOT anySiteSSL: provisioning only requires the renewal
-	// timer when a Let's Encrypt site exists (tls.go:367). On a server whose
+	// timer when a Let's Encrypt site exists (tls.go:360). On a server whose
 	// TLS sites are all selfsigned, certbot is correctly absent — gating on
 	// site.SSL would report that healthy server's missing timer as DOWN.
 	if config.AnyLetsEncrypt(s) {
@@ -50,6 +60,11 @@ func unitList(s *config.Server) []string {
 // trip. is-active/is-enabled exit non-zero for a down or absent unit and
 // print nothing useful on stderr, so both are captured as empty fields and
 // read as "not active" / "not enabled" — never as up.
+//
+// A unit name containing a single quote would break the quoting. Unit names
+// here derive from config.PoolName (domain with "."->"_") and validated PHP
+// versions, so none can — but do not extend this helper to operator-supplied
+// strings without proper quoting.
 func servicesCmd(units []string) string {
 	quoted := make([]string, 0, len(units))
 	for _, u := range units {
@@ -64,6 +79,18 @@ func probeServices(ctx context.Context, r bssh.Runner, s *config.Server) ([]Serv
 	res, err := r.Run(ctx, servicesCmd(units), nil)
 	if err != nil {
 		return nil, err
+	}
+	// A non-zero exit is data, not a Go error (Runner contract) — without
+	// this check a failing command (sudo denied on a half-broken host, the
+	// exact situation a status tool exists to surface) would return an empty,
+	// error-free slice that renders as a clean-looking blank at exit 0
+	// instead of the loud partial-probe failure the spec requires.
+	if res.ExitCode != 0 {
+		msg := strings.TrimSpace(res.Stderr)
+		if msg == "" {
+			msg = "(no stderr)"
+		}
+		return nil, fmt.Errorf("services probe: exit %d: %s", res.ExitCode, msg)
 	}
 	out := make([]Service, 0, len(units))
 	for _, line := range strings.Split(strings.TrimRight(res.Stdout, "\n"), "\n") {
