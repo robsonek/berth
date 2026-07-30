@@ -86,6 +86,14 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{"sysctl -n --load=/etc/sysctl.conf", cmdRejected},
 		{"openssl x509 -noout -in /etc/ssl/cert.pem", cmdReadOnly},
 		{"openssl x509 -noout -out /tmp/x -in /etc/ssl/cert.pem", cmdRejected},
+		// openssl accepts every option with one or two dashes; --out creates
+		// and truncates its file even under -noout (verified on 3.6.3).
+		{"openssl x509 -noout --out /tmp/x -in /etc/ssl/cert.pem", cmdRejected},
+		// The keyring probe's exact read shape, and proof that dropping
+		// --trust-model always — the flag that suppresses trustdb.gpg
+		// creation — breaks the match.
+		{"gpg --no-options --no-keyring --trust-model always --show-keys /usr/share/keyrings/example.gpg", cmdReadOnly},
+		{"gpg --no-options --no-keyring --show-keys /usr/share/keyrings/example.gpg", cmdRejected},
 
 		// An untrusted executable path must never inherit a trusted basename.
 		{"/tmp/cat /etc/hosts", cmdRejected},
@@ -360,14 +368,15 @@ var simpleShapes = []simpleShape{
 	{verb: "swapon", allow: func(a []string) bool { return len(a) == 1 && a[0] == "--show" }, verdict: cmdReadOnly},
 	{verb: "sysctl", allow: sysctlIsReadOnly, verdict: cmdReadOnly},
 	{verb: "command", allow: func(a []string) bool { return len(a) == 2 && a[0] == "-v" }, verdict: cmdReadOnly},
-	// openssl's CLI is not getopt: its flags are single-dash words (-noout,
-	// -in), glue and bundling do not exist as spellings, and mentionsFlag's
-	// bundle rule for "-o" would falsely match the read flag -noout. Exact
-	// tokens are the complete spelling set here, so noneOf stays.
+	// openssl's CLI is not getopt: its option parser accepts every option
+	// with one OR two dashes ("Allow -nnn and --nnn", apps/lib/opt.c) but
+	// does NO abbreviation and NO bundling, so an enumerated exact set is
+	// both necessary and sufficient. mentionsFlag's bundle rule for "-o"
+	// would falsely match the read flag -noout, so noneOf stays.
 	{verb: "openssl", allow: func(a []string) bool {
-		return len(a) >= 1 && a[0] == "x509" && hasExact(a, "-noout") && noneOf(a, "-out", "-o")
+		return len(a) >= 1 && a[0] == "x509" && hasExact(a, "-noout") && noneOf(a, "-out", "--out", "-o", "--o")
 	}, verdict: cmdReadOnly,
-		why: "-out/-o writes a file; berth never passes it, so rejecting is free"},
+		why: "-out/--out creates and truncates its file even under -noout (verified on OpenSSL 3.6.3)"},
 	{verb: "find", allow: findIsReadOnly, verdict: cmdReadOnly},
 	{verb: "gpg", allow: gpgIsReadOnly, verdict: cmdReadOnly},
 }
