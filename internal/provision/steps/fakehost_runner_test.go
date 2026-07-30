@@ -117,6 +117,14 @@ func TestRecordingRunnerGatesGpgOnKeyringPresence(t *testing.T) {
 	if !strings.Contains(res.Stdout, "fpr:") {
 		t.Errorf("present keyring stdout = %q, want the colon output KeyringHoldsExactly parses", res.Stdout)
 	}
+
+	// Only the EXACT production argv is answered. A drifted spelling —
+	// dropping --with-colons changes the output format the probe parses —
+	// must fall to unanswered, not ride the colon-formatted answer.
+	if _, err := r.Run(context.Background(),
+		"gpg --no-options --no-keyring --trust-model always --show-keys /usr/share/keyrings/example.gpg", nil); err == nil {
+		t.Error("a gpg spelling other than KeyringHoldsExactly's exact argv must be unanswered — answering it would mask a production format drift")
+	}
 }
 
 // userExists (accounts.go) reads ONLY the exit code of `id <user>`, and
@@ -500,13 +508,21 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 		return bssh.Result{Stdout: r.h.hostname + "\n"}, true
 
 	case f[0] == "gpg":
+		// Only the EXACT argv KeyringHoldsExactly issues (apt.go) is answered;
+		// any other gpg spelling falls to unanswered. Answering every
+		// gpg-shaped command with the colon output would keep the contract
+		// green while a production drift — dropping --with-colons, say —
+		// changed the real format under the parser.
+		if len(f) != 8 || cmd != "gpg --no-options --no-keyring --trust-model always --show-keys --with-colons "+f[7] {
+			return bssh.Result{}, false
+		}
 		// gpgKeys is populated for ALL profiles including fresh, so answering
 		// unconditionally would make a keyring-less host look converged and
 		// mask KeyringHoldsExactly's absent-keyring branch. The keyring path is
-		// the probe's last argument (apt.go); when it is not in the model,
-		// answer the way real gpg does — a non-zero exit, which the probe reads
-		// as "not converged" data, never a Go error.
-		if _, ok := r.h.files[unq(f[len(f)-1])]; !ok {
+		// the probe's last argument; when it is not in the model, answer the
+		// way real gpg does — a non-zero exit, which the probe reads as "not
+		// converged" data, never a Go error.
+		if _, ok := r.h.files[unq(f[7])]; !ok {
 			return bssh.Result{ExitCode: 2, Stderr: "gpg: can't open: No such file or directory"}, true
 		}
 		return bssh.Result{Stdout: r.h.gpgKeys}, true

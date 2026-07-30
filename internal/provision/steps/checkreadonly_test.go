@@ -367,19 +367,82 @@ func TestConvergedIsGenuinelySatisfied(t *testing.T) {
 // continue PAST the unmanaged-file refusal, reaching commands the plain foreign
 // run never gets to. SSLStaging and FullRun:false change content and messages
 // rather than which commands are issued, so they stay deferred.
+//
+// The main run's invariants apply here IN FULL — classifying the recorded
+// commands alone is not enough. A WriteFile inside an `if rc.Force` branch, a
+// probe only that branch issues (which the model cannot answer), or a step
+// that suddenly records nothing would all be invisible to the five primary
+// runs, because they never take these branches.
 func TestChecksAreReadOnlyUnderForce(t *testing.T) {
 	srv := contractServer(t)
+	// The error policy under Force: the managed-file drift refusals ("not
+	// managed by berth") are exactly what Force bypasses, so the steps that
+	// refuse under plain foreign must reach a verdict here — EXCEPT the two
+	// tree-ownership guards, which are documented as not bypassable with
+	// --force (accounts.go, appdirs.go) and must keep refusing. Both sides
+	// are asserted: an unexpected error and a missing refusal each fail.
+	forceRefusals := map[string]string{
+		"accounts": "owned by",
+		"appdirs":  "owned by",
+	}
 	var violations []string
+	add := func(format string, a ...any) { violations = append(violations, fmt.Sprintf(format, a...)) }
 	for _, st := range Pipeline(srv, secret.NewRedactor(), false) {
 		r := newRecordingRunner(newFakeHost(t, "foreign", srv))
-		_, _ = st.Check(context.Background(), provision.RunCtx{FullRun: true, Force: true}, srv, r)
+		_, checkErr := st.Check(context.Background(), provision.RunCtx{FullRun: true, Force: true}, srv, r)
+
+		// Guard 2, as in the main run: every command must have been
+		// answerable, whatever the Check returned.
+		for _, u := range r.unanswered() {
+			add("%s.Check under foreign+Force asked the fake host a question it cannot answer:\n"+
+				"    %s\n"+
+				"  Teach answer() in fakehost_runner_test.go this shape — the Force branch is\n"+
+				"  the ONLY place it is exercised, so an unanswered command truncates exactly\n"+
+				"  the coverage this pass exists for.", st.Name(), u)
+		}
+
+		// Guard 3, the Force error policy.
+		switch want, mustRefuse := forceRefusals[st.Name()]; {
+		case checkErr != nil && !mustRefuse:
+			add("%s.Check errored under foreign+Force:\n    %v\n"+
+				"  Force bypasses the drift-policy refusals, so only the tree-ownership\n"+
+				"  guards (accounts, appdirs) may refuse here.", st.Name(), checkErr)
+		case checkErr != nil && !strings.Contains(checkErr.Error(), want):
+			add("%s.Check's refusal under foreign+Force changed:\n    got:  %v\n    want substring: %q",
+				st.Name(), checkErr, want)
+		case checkErr == nil && mustRefuse:
+			add("%s.Check did NOT refuse under foreign+Force — its ownership guard is\n"+
+				"  documented as not bypassable with --force, so a pass here means that\n"+
+				"  guard regressed.", st.Name())
+		}
+
+		// A Check must never write, whatever the flags.
+		for _, w := range r.writes() {
+			add("%s.Check called WriteFile(%s) under foreign+Force — a Check must never write.",
+				st.Name(), w.Path)
+		}
+
+		// Non-vacuous, as in Guard 4a: identity issues nothing by signature,
+		// every other step must have probed SOMETHING or this pass proves
+		// nothing about it.
+		if n := len(r.recorded()); st.Name() == "identity" && n != 0 {
+			add("identity.Check issued %d command(s) under foreign+Force; its signature discards the Runner today.", n)
+		} else if st.Name() != "identity" && n == 0 {
+			add("%s.Check issued NO commands under foreign+Force — the pass is vacuous for it.", st.Name())
+		}
+
 		for _, rec := range r.recorded() {
 			if v, detail := classifyCommand(rec.cmd, rec.stdin); v == cmdRejected {
-				violations = append(violations, fmt.Sprintf("%s.Check under foreign+Force: %s (%s)", st.Name(), rec.cmd, detail))
+				add("%s.Check under foreign+Force issued a REJECTED command:\n    %s\n  reason: %s",
+					st.Name(), rec.cmd, detail)
 			}
 		}
 	}
 	if len(violations) > 0 {
-		t.Fatalf("rejected commands under foreign+Force:\n  %s", strings.Join(violations, "\n  "))
+		out := ""
+		for i, v := range violations {
+			out += fmt.Sprintf("[%d] %s\n\n", i+1, v)
+		}
+		t.Fatalf("read-only contract violated under foreign+Force in %d place(s):\n\n%s", len(violations), out)
 	}
 }
