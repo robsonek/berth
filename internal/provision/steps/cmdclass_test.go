@@ -28,9 +28,21 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{"getent passwd appuser", cmdReadOnly},
 		{"id -u appuser", cmdReadOnly},
 
-		// The two exceptions, both evidence-backed (spec §4.2). Exact shapes.
+		// The three exceptions, all evidence-backed (spec §4.2; certbot
+		// measured 2026-07, see its shape entry). Exact shapes.
 		{"nginx -t", cmdException},
 		{"php-fpm8.4 -t", cmdException},
+		{"certbot certificates", cmdException},
+		// Every other certbot subcommand drives issuance/renewal state and
+		// must reject — pinned the way mysql's and runuser's mutating
+		// siblings were. Extra arguments on the listing reject too: only the
+		// bare inventory was measured.
+		{"certbot certonly --webroot -w /var/www/berth-acme/app.example.com -d app.example.com", cmdRejected},
+		{"certbot renew", cmdRejected},
+		{"certbot delete --cert-name app.example.com -n", cmdRejected},
+		{"certbot revoke --cert-name app.example.com", cmdRejected},
+		{"certbot certificates --cert-name app.example.com", cmdRejected},
+		{"certbot", cmdRejected},
 
 		// Mutations, metacharacter-free — the tables must reject each one.
 		{"rm -f '/etc/cron.d/berth-site-x'", cmdRejected},
@@ -265,7 +277,7 @@ type cmdVerdict int
 
 const (
 	cmdReadOnly  cmdVerdict = iota // a pure read, judged by the tables
-	cmdException                   // allowed, but known to write (the nginx -t table entry and the php-fpm branch in classifySimple)
+	cmdException                   // allowed, but known to write (the nginx -t and certbot certificates table entries and the php-fpm branch in classifySimple)
 	cmdAudited                     // a generated script whose exact text a human signed off
 	cmdRejected                    // everything else — mutating, unknown, or unparsed
 )
@@ -732,9 +744,23 @@ var simpleShapes = []simpleShape{
 	{verb: "logrotate", allow: func(a []string) bool { return hasExact(a, "-d") && !mentionsFlag(a, "-f", "--force") }, verdict: cmdReadOnly},
 	{verb: "fail2ban-client", allow: func(a []string) bool { return hasExact(a, "-t") && firstNonFlag(a) == "" }, verdict: cmdReadOnly},
 
-	// The two exceptions: allowed, but they WRITE (spec §4.2).
+	// The named exceptions: allowed, but they WRITE (spec §4.2; php-fpm's
+	// lives in classifySimple because its verb carries the version).
 	{verb: "nginx", allow: func(a []string) bool { return hasExact(a, "-t") && len(a) == 1 }, verdict: cmdException,
 		why: "as root may create a missing log file"},
+
+	// The third exception, measurement-backed like the first two (spec
+	// §4.2.1 method, two passes, on a provisioned Debian 13 host with
+	// certbot 4.0.0): `certbot certificates` appends its full certificate
+	// inventory — serial, key type, domains, expiry, paths — to
+	// /var/log/letsencrypt/letsencrypt.log on EVERY invocation (+1068 bytes
+	// per run, deterministic across both passes) and touches lock files
+	// under /etc/letsencrypt and /var/lib/letsencrypt (mtime changes). That
+	// is over ten times php-fpm -t's 99-byte notice. Pinned to exactly the
+	// bare inventory listing: certonly/renew/delete/revoke change issuance
+	// state, and an argument-carrying listing was never measured.
+	{verb: "certbot", allow: func(a []string) bool { return len(a) == 1 && a[0] == "certificates" }, verdict: cmdException,
+		why: "appends its certificate inventory to /var/log/letsencrypt/letsencrypt.log (~1068 bytes/run) and touches its lock files (measured: certbot 4.0.0, Debian 13)"},
 
 	// The test builtin: ONLY the five-token -ef inode comparison
 	// (`[ <path> -ef <path> ]`, site.Check's enabled-symlink probe) is

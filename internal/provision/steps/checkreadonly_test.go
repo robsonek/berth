@@ -93,6 +93,14 @@ var expectedRefusals = map[string]string{
 
 // TestChecksAreReadOnly is the contract.
 //
+// THE PROMISE IT ENFORCES: every command a Check issues is read-only, except
+// THREE named writers — `nginx -t` (as root may create a missing log file),
+// `php-fpm<ver> -t` (appends a notice to the PHP-FPM log) and `certbot
+// certificates` (appends its certificate inventory to certbot's own log and
+// touches its lock files; measured on certbot 4.0.0, Debian 13). All three
+// are evidence-backed, and Guard 4b below requires each to be OBSERVED, so
+// none can rot into an unexercised allowance.
+//
 // WHAT THIS DOES NOT PROVE — read before trusting it. It does not prove a Check
 // is read-only on a REAL host. It proves that the commands a Check ISSUES under
 // five modelled states fall in a classified set. Three gaps remain: a path none
@@ -256,6 +264,15 @@ func TestChecksAreReadOnly(t *testing.T) {
 		add("%q was never observed — same reason as nginx -t above. (The key derives from\n"+
 			"  the fixture's php.version %q; if the version changed, the exception command\n"+
 			"  changed with it.)", phpFpmT, srv.PHP.Version)
+	}
+	// The third exception — the measured log-append writer, and the biggest
+	// of the three — must be observed too: tls.Check's certStatus reaches it
+	// on every profile with a Let's Encrypt site, so a run that never
+	// records it means the tls model regressed.
+	if !sawException["certbot certificates"] {
+		add("certbot certificates was never observed — same reason as nginx -t above.\n" +
+			"  tls.Check's certStatus issues it for every letsencrypt site; if no profile\n" +
+			"  reaches it, the tls model regressed.")
 	}
 	// Guard 4c, the symmetry of 4b for the OTHER allowance this contract
 	// grants: every expectedRefusals entry must have been observed under
