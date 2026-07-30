@@ -21,6 +21,10 @@ var expectedRefusals = map[string]string{
 	"accounts": "not managed by berth",
 	"appdirs":  "owned by",
 	"site":     "not managed by berth",
+	// preflight: the foreign apt lock-timeout drop-in aborts unless --force —
+	// deliberate (preflight.go: without this gate even `--only identity` would
+	// clobber a foreign file, preflight being always-run).
+	"preflight": "not managed by berth",
 	// Task 5 completes this map from the discovery run. Every entry must be a
 	// refusal the step MEANS to give, never a symptom of an incomplete model.
 }

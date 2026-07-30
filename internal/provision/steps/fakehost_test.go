@@ -255,8 +255,25 @@ func newFakeHost(t *testing.T, profile string, s *config.Server) *fakeHost {
 		// the fpr whose field 10 is the pinned fingerprint.
 		gpgKeys: "pub:u:255:22:0000000000000000:::::::::\nfpr:::::::::" + strings.Repeat("A", 40) + ":\n",
 	}
+	// Every profile carries /etc/os-release, fresh included: a Debian host
+	// without it is not a state berth supports, and preflight's codename probe
+	// must read a verdict, not a modelling gap. The content is the file
+	// debian:trixie ships; preflight parses only the VERSION_CODENAME line.
+	h.files["/etc/os-release"] = fakeFile{
+		content: `PRETTY_NAME="Debian GNU/Linux 13 (trixie)"` + "\n" +
+			`NAME="Debian GNU/Linux"` + "\n" +
+			`VERSION_ID="13"` + "\n" +
+			`VERSION="13 (trixie)"` + "\n" +
+			"VERSION_CODENAME=trixie\n" +
+			"ID=debian\n" +
+			`HOME_URL="https://www.debian.org/"` + "\n" +
+			`SUPPORT_URL="https://www.debian.org/support"` + "\n" +
+			`BUG_REPORT_URL="https://bugs.debian.org/"` + "\n",
+		owner: "root", group: "root", mode: "644", kind: "regular file",
+		mtimeUnix: 1500000000,
+	}
 	if profile == "fresh" {
-		return h // everything absent
+		return h // everything berth-touched absent; only the OS itself exists
 	}
 	populateInstalled(h, s, profile)
 	populateManagedFiles(h, s, profile)
@@ -355,4 +372,9 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 		panic("render logrotate.conf.tmpl: " + err.Error())
 	}
 	h.putManaged("/etc/logrotate.d/berth", body, profile)
+
+	// preflight's apt lock-timeout drop-in. Its body is the step's own const —
+	// there is no template; Apply writes []byte(aptLockTimeoutBody) verbatim,
+	// so the const IS the rendered form.
+	h.putManaged(aptLockTimeoutPath, []byte(aptLockTimeoutBody), profile)
 }

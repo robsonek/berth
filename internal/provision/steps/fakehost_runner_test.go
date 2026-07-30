@@ -232,6 +232,24 @@ func (r *recordingRunner) answer(cmd string) (bssh.Result, bool) {
 		return bssh.Result{}, false
 	}
 	switch {
+	// preflight's codename probe, keyed to the production const so the model
+	// can never drift from the shape the step issues. The Check PARSES the
+	// matching line (TrimPrefix "VERSION_CODENAME=", strip one quote layer),
+	// so the answer must be real grep semantics over the modelled file: the
+	// first matching line at exit 0, exit 1 on no match, exit 2 when the file
+	// itself is missing.
+	case cmd == osReleaseCodenameCmd:
+		file, ok := r.h.files["/etc/os-release"]
+		if !ok {
+			return bssh.Result{ExitCode: 2, Stderr: "grep: /etc/os-release: No such file or directory"}, true
+		}
+		for _, line := range strings.Split(file.content, "\n") {
+			if strings.HasPrefix(line, "VERSION_CODENAME=") {
+				return bssh.Result{Stdout: line + "\n"}, true
+			}
+		}
+		return bssh.Result{ExitCode: 1}, true
+
 	case f[0] == "cat" && len(f) == 2:
 		if file, ok := r.h.files[unq(f[1])]; ok {
 			return bssh.Result{Stdout: file.content}, true
