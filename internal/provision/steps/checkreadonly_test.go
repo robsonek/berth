@@ -44,8 +44,27 @@ var expectedRefusals = map[string]string{
 	// files in the namespace are merely skipped — the refusal is only for the
 	// path berth is about to write.
 	"apt": "not managed by berth",
+	// php: a foreign file at the OPcache drop-in path aborts unless --force —
+	// the FIRST managed file php.Check classifies. Guard order verified: the
+	// version-exclusivity probe and the sury-linger probe run earlier but
+	// both read clean under this profile (no foreign pools, no sury list),
+	// so the drift policy's refusal is the one the step means to give.
+	"php": "not managed by berth",
+	// valkey: a foreign file at the per-site instance-unit path aborts unless
+	// --force. Guard order verified: pkgInstalled and the stock-service
+	// probes are data-only; the per-site checkManagedFile is the first guard
+	// that can refuse.
+	"valkey": "not managed by berth",
+	// tuning: a foreign file at the MariaDB drop-in path aborts unless
+	// --force. Guard order verified: the RAM guard runs first but reads
+	// clean from /proc/meminfo; checkTuned's managedFileSatisfied is the
+	// first refusal.
+	"tuning": "not managed by berth",
 	// Task 5 completes this map from the discovery run. Every entry must be a
 	// refusal the step MEANS to give, never a symptom of an incomplete model.
+	// database deliberately has NO entry: its foreign truth is a tree berth
+	// never provisioned (no shared/.env), where the step honestly reports
+	// "credential not yet persisted" — unsatisfied, not a refusal.
 }
 
 // TestChecksAreReadOnly is the contract.

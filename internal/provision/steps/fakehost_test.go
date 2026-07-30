@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/robsonek/berth/internal/config"
+	dbpkg "github.com/robsonek/berth/internal/database"
 	"github.com/robsonek/berth/internal/secret"
 	"github.com/robsonek/berth/internal/templates"
 )
@@ -164,6 +165,30 @@ type fakeHost struct {
 	swapRows string
 	dfRows   string
 	gpgKeys  string // `gpg --show-keys --with-colons` colon output
+	// memTotalKB backs tuning's /proc/meminfo probe on EVERY profile — the
+	// buffer-pool RAM guard runs before any managed-file classify, fresh
+	// included, and /proc/meminfo exists on any host berth can reach.
+	memTotalKB int64
+	// databases / dbGrants back the database step's information_schema
+	// probes: which tenant databases exist, and which "user:db" grant pairs.
+	databases map[string]bool
+	dbGrants  map[string]bool
+}
+
+// unit resolves a systemd unit name against the model, accepting the
+// ".service"-suffixed spelling of a unit modelled under its bare name —
+// systemd treats "mariadb" and "mariadb.service" identically, and the Checks
+// use both spellings. Only ".service" is trimmed: "x.timer" must never
+// resolve to a service modelled as "x".
+func (h *fakeHost) unit(name string) (fakeUnit, bool) {
+	if u, ok := h.units[name]; ok {
+		return u, true
+	}
+	if base, ok := strings.CutSuffix(name, ".service"); ok {
+		u, found := h.units[base]
+		return u, found
+	}
+	return fakeUnit{}, false
 }
 
 // fakeHostProfiles is the matrix the contract runs. runtime-stale is the fifth,
@@ -195,7 +220,7 @@ func contractServer(t *testing.T) *config.Server {
 	if err := os.WriteFile(keyPath+".pub", []byte("ssh-ed25519 AAAAC3Nza fixture\n"), 0o600); err != nil {
 		t.Fatalf("write fixture pubkey: %v", err)
 	}
-	return &config.Server{
+	srv := &config.Server{
 		ID: "contract", Host: "203.0.113.10",
 		SSH:       config.SSH{User: "berth", Port: 22, Key: keyPath},
 		PHP:       config.PHP{Version: "8.4", Source: "auto"},
@@ -229,6 +254,23 @@ func contractServer(t *testing.T) *config.Server {
 			Queue:      &config.QueueConfig{Processes: 2, Tries: 3},
 		}},
 	}
+	// database.Check compares the LIVE shared/.env against the LOCAL secret
+	// cache (value agreement, DB password always, APP_KEY when berth-shaped);
+	// HOME is redirected above, so the cache is seeded here the way the step
+	// itself leaves it after a successful provision — saveSecrets is the
+	// production writer (v1 envelope bound to the endpoint), and the values
+	// are the same ones the modelled .env carries. Seeded for EVERY profile
+	// alike: the cache is workstation state, not host state, and a fresh box
+	// re-provisioned from the same workstation (the documented reset drill)
+	// keeps yesterday's cache by design. The offsite restic keys are NOT
+	// seeded — that step's missing-credential refusal is its own story.
+	if err := saveSecrets(srv, map[string]string{
+		srv.SiteDBUser(srv.Sites[0]):                 fixtureDBValue,
+		appKeyCacheKey(srv.SiteDBUser(srv.Sites[0])): fixtureAppKey,
+	}); err != nil {
+		t.Fatalf("seed the fixture secret cache: %v", err)
+	}
+	return srv
 }
 
 // newFakeHost builds the named profile. It PANICS on an unknown name so a typo
@@ -241,14 +283,19 @@ func newFakeHost(t *testing.T, profile string, s *config.Server) *fakeHost {
 		panic("unknown fake-host profile: " + profile)
 	}
 	h := &fakeHost{
-		profile:  profile,
-		files:    map[string]fakeFile{},
-		packages: map[string]string{},
-		units:    map[string]fakeUnit{},
-		tools:    map[string]bool{},
-		users:    map[string]bool{},
-		timezone: "Etc/UTC",
-		hostname: "box-1",
+		profile:   profile,
+		files:     map[string]fakeFile{},
+		packages:  map[string]string{},
+		units:     map[string]fakeUnit{},
+		tools:     map[string]bool{},
+		users:     map[string]bool{},
+		databases: map[string]bool{},
+		dbGrants:  map[string]bool{},
+		timezone:  "Etc/UTC",
+		hostname:  "box-1",
+		// ~3.8 GiB, a realistic small VPS; comfortably above the 80% cap for
+		// the default 256M buffer pool, so the RAM guard passes on its data.
+		memTotalKB: 3986812,
 		dfRows: "Filesystem 1B-blocks Used Available Capacity Mounted on\n" +
 			"/dev/vda1 41000000000 16000000000 22000000000 41% /\n",
 		// The colon output KeyringHoldsExactly parses: a pub record followed by
@@ -310,6 +357,8 @@ func populateInstalled(h *fakeHost, s *config.Server, profile string) {
 	}
 	for _, p := range []string{
 		"nginx", "php" + s.PHP.Version + "-fpm", "php" + s.PHP.Version + "-cli",
+		// The engine PDO driver php.Check probes last (mariadb -> pdo_mysql).
+		"php" + s.PHP.Version + "-mysql",
 		"mariadb-server", "valkey-server", "supervisor", "fail2ban", "ufw",
 		"certbot", "restic", "cron", "unattended-upgrades", "curl", "gnupg",
 		// The rest of basePackages (systembase.go): a converged host has them
@@ -333,9 +382,37 @@ func populateInstalled(h *fakeHost, s *config.Server, profile string) {
 			"FragmentPath":         "/lib/systemd/system/" + u,
 		}}
 	}
-	for _, tool := range []string{"nginx", "php-fpm" + s.PHP.Version, "restic", "certbot", "gpg", "logrotate", "supervisorctl"} {
+	// The stock shared valkey-server.service exists on any host with the
+	// package but is disabled AND stopped — the unauthenticated 6379 listener
+	// the valkey step replaces with per-site instances. Its inactivity is
+	// exactly what valkey.Check requires, so it must be modelled as present-
+	// but-down, not absent.
+	h.units["valkey-server.service"] = fakeUnit{active: false, enabled: false, props: map[string]string{}}
+	for _, tool := range []string{"nginx", "php-fpm" + s.PHP.Version, "restic", "certbot", "gpg", "logrotate", "supervisorctl", "composer"} {
 		h.tools[tool] = true
 	}
+	// The valkey exec probe compares the inode behind /usr/bin/valkey-server
+	// with the running process's /proc/<pid>/exe using stat -L on BOTH sides:
+	// the packaged path is a SYMLINK to the multi-call binary valkey-check-rdb
+	// (argv[0]-dispatched), and modelling it as a plain file would hide the
+	// very stat-vs-stat -L confusion that broke idempotency on a live box.
+	h.files["/usr/bin/valkey-server"] = fakeFile{owner: "root", group: "root",
+		mode: "777", kind: "symbolic link", mtimeUnix: 1400000000,
+		linkTarget: "/usr/bin/valkey-check-rdb"}
+	h.files["/usr/bin/valkey-check-rdb"] = fakeFile{owner: "root", group: "root",
+		mode: "755", kind: "regular file", mtimeUnix: 1400000000}
+	// nginx's package-shipped core config. nginx.Check keys its reload stamp
+	// on this file's MTIME (reloadedSince); the content is only ever grepped
+	// under nginx.source=nginx, which the fixture does not select.
+	h.files["/etc/nginx/nginx.conf"] = fakeFile{
+		content: "user www-data;\nworker_processes auto;\n",
+		owner:   "root", group: "root", mode: "644", kind: "regular file",
+		mtimeUnix: 1500000000,
+	}
+	// The fixture site's database and grant exist on any once-provisioned
+	// host; the information_schema probes read them.
+	h.databases[s.SiteDBName(s.Sites[0])] = true
+	h.dbGrants[s.SiteDBUser(s.Sites[0])+":"+s.SiteDBName(s.Sites[0])] = true
 	// Every berth-owned account exists on a once-provisioned host, with the
 	// 0700 home ensureUser locks and the ~/.ssh directory berth creates as the
 	// account. fresh gets none: userExists reads only the exit code of
@@ -496,15 +573,66 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 	}
 	h.putManaged(fail2banJailPath, jail, profile)
 
-	// Reload stamps for the units hardening.Check compares via reloadedSince.
-	// Under runtime-stale the stamps PREDATE the managed files (mtime
-	// 1500000000), which is the crash-between-write-and-reload state that
-	// probe exists to catch; everywhere else they postdate them.
+	// php's two FPM drop-ins (INI marker), from the same renderers its Check
+	// compares against, plus the per-site FPM error-log dir its Apply creates.
+	opcache, err := renderOpcache()
+	if err != nil {
+		panic("render php_opcache.ini.tmpl: " + err.Error())
+	}
+	h.putManaged(opcacheDropInPath(s.PHP.Version), opcache, profile)
+	phpTuning, err := renderPHPTuning(s)
+	if err != nil {
+		panic("render php_tuning.ini.tmpl: " + err.Error())
+	}
+	h.putManaged(phpTuningDropInPath(s.PHP.Version), phpTuning, profile)
+	h.files[phpLogDir] = fakeFile{owner: "root", group: "root", uid: 0, gid: 0,
+		mode: "755", kind: "directory", mtimeUnix: 1500000000}
+
+	// tuning's MariaDB drop-in and valkey's per-site instance unit, same
+	// renderer-fed discipline.
+	mariadbTuning, err := renderMariaDBTuning(s)
+	if err != nil {
+		panic("render mariadb_tuning.cnf.tmpl: " + err.Error())
+	}
+	h.putManaged(mariadbTuningPath, mariadbTuning, profile)
+	for _, st := range s.Sites {
+		unit, err := renderValkeyUnit(s, st)
+		if err != nil {
+			panic("render berth_valkey.service.tmpl: " + err.Error())
+		}
+		h.putManaged(valkeyUnitPath(st.Domain), unit, profile)
+	}
+
+	// The site's shared/.env and ~/.my.cnf are secret-bearing, seed-if-absent
+	// files — NEVER marker-managed, so putManaged's foreign/drifted grammar
+	// does not apply. Provisioned profiles carry them with the values the
+	// seeded local cache also holds (a healthy host agrees with its cache);
+	// foreign carries neither — a tree berth never provisioned has no berth
+	// .env, and database.Check honestly stops at "credential not yet
+	// persisted" instead of refusing. The .env body is built by the same
+	// secret.EnvFile serializer the seed uses, over a kv mirroring
+	// seedSharedEnv's (database.go).
+	if profile != "foreign" {
+		user := s.SiteUser(site)
+		h.files[sharedEnvPath(site)] = fakeFile{content: string(fixtureSharedEnvBody()),
+			owner: user, group: user, uid: 1001, gid: 1001,
+			mode: "600", kind: "regular file", mtimeUnix: 1500000000}
+		h.files["/home/"+user+"/.my.cnf"] = fakeFile{
+			content: string(dbpkg.MariaDB{}.ClientAuthFile(s.SiteDBName(site), s.SiteDBUser(site), fixtureDBValue)),
+			owner:   user, group: user, uid: 1001, gid: 1001,
+			mode: "600", kind: "regular file", mtimeUnix: 1500000000}
+	}
+
+	// Reload stamps for the units whose Checks compare via reloadedSince
+	// (hardening: ssh + fail2ban; nginx: its core config; php: the two FPM
+	// drop-ins). Under runtime-stale the stamps PREDATE the managed files
+	// (mtime 1500000000), which is the crash-between-write-and-reload state
+	// that probe exists to catch; everywhere else they postdate them.
 	stampM := int64(2000000000)
 	if profile == "runtime-stale" {
 		stampM = 1000000000
 	}
-	for _, unit := range []string{"ssh", "fail2ban"} {
+	for _, unit := range []string{"ssh", "fail2ban", "nginx", config.FPMServiceName(s.PHP.Version)} {
 		h.files[stampPath(unit)] = fakeFile{owner: "root", group: "root",
 			mode: "644", kind: "regular file", mtimeUnix: stampM}
 	}
@@ -527,6 +655,44 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 			owner:   "root", group: "root", mode: "644", kind: "regular file",
 			mtimeUnix: 1500000000}
 	}
+}
+
+// fixtureSharedEnvBody is the modelled site's shared/.env as a successful
+// provision leaves it: the kv mirrors seedSharedEnv's map (database.go) for
+// the fixture site over the mariadb engine with Valkey on — a copy on
+// purpose, so a production seed change makes database.Check's probes read
+// honestly different bytes here — and the serialization is the SAME
+// secret.EnvFile the seed calls (sorted keys, one KEY=value per line).
+// database.Check never hashes this file; it greps the DB_CONNECTION,
+// DB_PASSWORD and APP_KEY lines and compares the latter two against the
+// seeded local cache, so the fixture values must be the cache's values.
+func fixtureSharedEnvBody() []byte {
+	body, err := secret.EnvFile(map[string]string{
+		"APP_ENV":          "production",
+		"APP_DEBUG":        "false",
+		"APP_URL":          "https://app.example.com",
+		"APP_KEY":          fixtureAppKey,
+		"DB_CONNECTION":    "mysql",
+		"DB_HOST":          "localhost",
+		"DB_PORT":          "3306",
+		"DB_DATABASE":      "app",
+		"DB_USERNAME":      "app",
+		"DB_PASSWORD":      fixtureDBValue,
+		"DB_SOCKET":        "/run/mysqld/mysqld.sock",
+		"CACHE_DRIVER":     "redis",
+		"CACHE_STORE":      "redis",
+		"SESSION_DRIVER":   "redis",
+		"QUEUE_CONNECTION": "redis",
+		"REDIS_CLIENT":     "phpredis",
+		"REDIS_HOST":       "/run/berth-valkey/app_example_com/valkey.sock",
+		"REDIS_PORT":       "0",
+		"REDIS_DB":         "0",
+		"REDIS_CACHE_DB":   "1",
+	})
+	if err != nil {
+		panic("render the fixture shared/.env: " + err.Error())
+	}
+	return body
 }
 
 // aptUserLists returns the modelled paths the apt step's find discovery

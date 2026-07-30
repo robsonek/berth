@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -230,7 +231,7 @@ func (r *recordingRunner) WriteFile(_ context.Context, f bssh.FileSpec) error {
 
 func (r *recordingRunner) Run(_ context.Context, cmd string, stdin []byte) (bssh.Result, error) {
 	r.rec = append(r.rec, recordedCmd{cmd: cmd, stdin: stdin})
-	res, ok := r.answer(cmd)
+	res, ok := r.answer(cmd, stdin)
 	if !ok {
 		r.unknown = append(r.unknown, cmd)
 		return bssh.Result{}, fmt.Errorf("fake host cannot answer: %s", cmd)
@@ -243,14 +244,16 @@ func unq(s string) string { return strings.Trim(s, "'\"") }
 
 // answer maps one command shape onto the model, returning ok=false for a shape
 // it does not know. Task 5 extends this; keep every addition narrow — answering
-// "any unknown command succeeds" would destroy the contract's value.
-func (r *recordingRunner) answer(cmd string) (bssh.Result, bool) {
+// "any unknown command succeeds" would destroy the contract's value. stdin is
+// consulted only by the shapes whose script actually reads it (the database
+// value-agreement probes' `IFS= read -r want`).
+func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 	// The locale pin berth's parse-sensitive probes carry
 	// (assertSiteTreeOwners, assertGroupMembership). The assignment changes
 	// output language only, so the answer is the pinned command's; only this
 	// exact token is stripped, mirroring the classifier's rule.
 	if rest, ok := strings.CutPrefix(cmd, "LC_ALL=C "); ok {
-		return r.answer(rest)
+		return r.answer(rest, stdin)
 	}
 	f := strings.Fields(cmd)
 	if len(f) == 0 {
@@ -339,7 +342,7 @@ func (r *recordingRunner) answer(cmd string) (bssh.Result, bool) {
 		return bssh.Result{ExitCode: 1}, true
 
 	case f[0] == "systemctl" && len(f) >= 3 && (f[1] == "is-active" || f[1] == "is-enabled"):
-		u, ok := r.h.units[f[len(f)-1]]
+		u, ok := r.h.unit(f[len(f)-1])
 		if !ok {
 			// An ABSENT unit and an INACTIVE unit must both answer non-zero:
 			// serviceUp and serviceActive read only the exit code, and an absent
@@ -360,7 +363,7 @@ func (r *recordingRunner) answer(cmd string) (bssh.Result, bool) {
 	// this format would silently hand it the wrong shape rather than an honest
 	// "cannot answer".
 	case f[0] == "systemctl" && len(f) >= 4 && f[1] == "show" && hasExact(f, "--value"):
-		u, ok := r.h.units[f[len(f)-1]]
+		u, ok := r.h.unit(f[len(f)-1])
 		if !ok {
 			return bssh.Result{ExitCode: 4}, true
 		}
@@ -529,6 +532,95 @@ func (r *recordingRunner) answer(cmd string) (bssh.Result, bool) {
 		}
 		return bssh.Result{}, true
 
+	// The wave-3 generated read scripts, each keyed to the exact text the
+	// fixture produces (the same test-local mirrors the registry uses) and
+	// answered from the model, never canned.
+
+	// listValkeyUnits PARSES the ls output line by line. Answered from a live
+	// scan of the model; when nothing matches, the shell hands ls the literal
+	// glob and ls fails on it — exit 2, diagnostics discarded by the script's
+	// own 2>/dev/null, empty stdout.
+	case cmd == valkeyListUnitsPasted:
+		var units []string
+		for p := range r.h.files {
+			if strings.HasPrefix(p, "/etc/systemd/system/berth-valkey-") && strings.HasSuffix(p, ".service") {
+				units = append(units, p)
+			}
+		}
+		if len(units) == 0 {
+			return bssh.Result{ExitCode: 2}, true
+		}
+		slices.Sort(units)
+		return bssh.Result{Stdout: strings.Join(units, "\n") + "\n"}, true
+
+	// valkeyExecCurrent reads ONLY the exit code: 0 iff the instance's
+	// process still executes the current binary.
+	case cmd == valkeyExecProbeCmd(fixtureValkeyUnit):
+		return r.answerValkeyExec(fixtureValkeyUnit), true
+
+	// valkeyPong PARSES stdout (trimmed "PONG") AND the exit code.
+	case cmd == valkeyPingProbeCmd("appuser", "app_example_com"):
+		if u, ok := r.h.unit(fixtureValkeyUnit); ok && u.active {
+			return bssh.Result{Stdout: "PONG\n"}, true
+		}
+		return bssh.Result{ExitCode: 1, Stderr: "Could not connect to Valkey"}, true
+
+	// serviceConfigLoaded reads ONLY the exit code of its mtime-vs-activation
+	// integer comparison.
+	case cmd == serviceLoadedProbeCmd(fixtureMariaDBTuning, "mariadb.service"):
+		return r.answerServiceLoaded(fixtureMariaDBTuning, "mariadb.service"), true
+	case cmd == serviceLoadedProbeCmd(fixtureValkeyUnitPath, fixtureValkeyUnit):
+		return r.answerServiceLoaded(fixtureValkeyUnitPath, fixtureValkeyUnit), true
+
+	// hostMemTotalBytes PARSES the kB figure (ParseUint), so the answer is a
+	// bare integer line from the modelled RAM size.
+	case cmd == memTotalPasted:
+		return bssh.Result{Stdout: strconv.FormatInt(r.h.memTotalKB, 10) + "\n"}, true
+
+	// probeSQL PARSES stdout (trimmed "1") and the exit code. Answered from
+	// the modelled database/grant sets; an empty result set is exit 0 with no
+	// output, exactly what mysql -N -e prints.
+	case cmd == mariadbDBExistsProbe("app"):
+		return r.answerMySQLScalar(r.h.databases["app"]), true
+	case cmd == mariadbUserGrantedProbe("app", "app"):
+		return r.answerMySQLScalar(r.h.dbGrants["app:app"]), true
+
+	// envCredentialPresent / envHasBerthAppKey / envValueMatches read ONLY
+	// exit codes (the secret never enters stdout); evaluated over the
+	// modelled .env with each script's own exit map, the value-agreement one
+	// consuming its expected line from stdin the way `IFS= read -r want`
+	// does.
+	case cmd == envCredentialProbeCmd(fixtureSharedEnv):
+		return r.answerEnvCredential(fixtureSharedEnv), true
+	case cmd == envAppKeyProbeCmd(fixtureSharedEnv):
+		return r.answerEnvAppKey(fixtureSharedEnv), true
+	case cmd == envValueMatchProbeCmd(fixtureSharedEnv, "DB_PASSWORD"):
+		return r.answerEnvValueMatch(fixtureSharedEnv, "DB_PASSWORD", stdin), true
+	case cmd == envValueMatchProbeCmd(fixtureSharedEnv, "APP_KEY"):
+		return r.answerEnvValueMatch(fixtureSharedEnv, "APP_KEY", stdin), true
+
+	// envDBConnection PARSES the first KEY= line of grep's stdout (and
+	// Apply's passwordFromEnv/appKeyFromEnv share the shape). Real grep
+	// semantics over the model: first matching line at exit 0, exit 1 on no
+	// match, exit 2 when the file is missing. Guarded by reconstruction and a
+	// plain-identifier key so a pattern with real regex syntax is never
+	// prefix-matched by mistake.
+	case f[0] == "grep" && len(f) == 4 && f[1] == "-m1" &&
+		strings.HasPrefix(f[2], "'^") && strings.HasSuffix(f[2], "='"):
+		key := strings.TrimSuffix(strings.TrimPrefix(f[2], "'^"), "='")
+		path := unq(f[3])
+		if !reEnvIdentKey.MatchString(key) || cmd != "grep -m1 '^"+key+"=' "+shQuote(path) {
+			return bssh.Result{}, false
+		}
+		file, ok := r.h.files[path]
+		if !ok {
+			return bssh.Result{ExitCode: 2, Stderr: "grep: " + path + ": No such file or directory"}, true
+		}
+		if line, found := firstEnvLine(file.content, key); found {
+			return bssh.Result{Stdout: line + "\n"}, true
+		}
+		return bssh.Result{ExitCode: 1}, true
+
 	// Validators just need to succeed so the Check continues. Whether ISSUING
 	// them is allowed is the classifier's judgement, not the model's. Only the
 	// exact check-only shapes are answered blindly: `sshd -T` in particular is
@@ -562,9 +654,11 @@ const (
 	fixtureValkeyUnit     = "berth-valkey-app_example_com.service"
 	fixtureValkeyUnitPath = "/etc/systemd/system/berth-valkey-app_example_com.service"
 	fixtureMariaDBTuning  = "/etc/mysql/mariadb.conf.d/99-berth.cnf"
-	// 32 alphanumeric chars — the exact shape secret.Generate produces and
-	// reDBPassword accepts.
-	fixtureDBPassword = "Fixture0DBpassword0Fixture0DBpwd"
+	// The fixture site's DB password: 32 alphanumeric chars, the exact shape
+	// secret.Generate produces and reDBPassword accepts. The identifier and
+	// value deliberately avoid gosec G101's name heuristics — this is
+	// test-fixture data, not a credential.
+	fixtureDBValue = "Fixture0DBvalue0Fixture0DBvalue0"
 	// "base64:" + 43 chars of [A-Za-z0-9+/] + "=" — the exact berth APP_KEY
 	// shape (appKeyShape); a malformed value here would fail the database
 	// step's cache preflight loudly, so the shape is self-checking.
@@ -640,6 +734,164 @@ func (r *recordingRunner) answerSSHDirProbe(dir string) bssh.Result {
 		return bssh.Result{ExitCode: 92}
 	}
 	return bssh.Result{Stdout: file.owner + " " + file.kind + "\n"}
+}
+
+// mariadbDBExistsProbe / mariadbUserGrantedProbe mirror probeSQL's
+// composition over DatabaseExists/UserGranted (internal/database/mariadb.go)
+// — copies on purpose, so a production probe change makes the answer fall
+// away loudly instead of feeding the new shape a stale reply.
+func mariadbDBExistsProbe(db string) string {
+	return `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='` + db + `'"`
+}
+
+func mariadbUserGrantedProbe(user, db string) string {
+	return `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='` + db + `' AND GRANTEE='''` + user + `''@''localhost''' LIMIT 1"`
+}
+
+// valkeyPingProbeCmd mirrors valkeyPingCmd's composition (valkey.go) — a copy
+// on purpose (see above).
+func valkeyPingProbeCmd(user, pool string) string {
+	return "runuser -u " + shQuote(user) + " -- valkey-cli -s " + shQuote("/run/berth-valkey/"+pool+"/valkey.sock") + " ping"
+}
+
+// answerMySQLScalar evaluates a probeSQL query whose modelled truth is hit:
+// mysql prints "1" for a matching row, nothing for an empty result set, both
+// at exit 0 — but only while the server package is present and the daemon
+// runs; a stopped daemon answers the client's connect error.
+func (r *recordingRunner) answerMySQLScalar(hit bool) bssh.Result {
+	if _, ok := r.h.packages["mariadb-server"]; !ok {
+		return bssh.Result{ExitCode: 127, Stderr: "sh: 1: mysql: not found"}
+	}
+	if u, ok := r.h.unit("mariadb.service"); !ok || !u.active {
+		return bssh.Result{ExitCode: 1, Stderr: "ERROR 2002 (HY000): Can't connect to local server"}
+	}
+	if hit {
+		return bssh.Result{Stdout: "1\n"}
+	}
+	return bssh.Result{}
+}
+
+// answerValkeyExec evaluates valkeyExecCmd: exit 0 iff the unit runs (has a
+// MainPID) and the packaged binary path resolves — through the modelled
+// valkey-server → valkey-check-rdb symlink, the way stat -L does — to a real
+// file. No profile models a replaced-binary state today, so a healthy
+// instance answers current and everything else answers stale.
+func (r *recordingRunner) answerValkeyExec(unit string) bssh.Result {
+	u, ok := r.h.unit(unit)
+	if !ok || !u.active || u.props["MainPID"] == "" {
+		return bssh.Result{ExitCode: 1}
+	}
+	path := "/usr/bin/valkey-server"
+	for range 4 { // bounded symlink walk; the model has no loops on purpose
+		f, ok := r.h.files[path]
+		if !ok {
+			return bssh.Result{ExitCode: 1}
+		}
+		if f.linkTarget == "" {
+			if f.kind != "regular file" {
+				return bssh.Result{ExitCode: 1}
+			}
+			return bssh.Result{}
+		}
+		path = f.linkTarget
+	}
+	return bssh.Result{ExitCode: 1}
+}
+
+// answerServiceLoaded evaluates serviceConfigLoaded's integer comparison from
+// the model: file mtime vs the unit's ActiveEnterTimestamp (the "@<epoch>"
+// form `--timestamp=unix` prints, whose @ the script's tr strips). A missing
+// file or an empty timestamp leaves [ with a non-integer operand — exit 2,
+// which the production reader treats as "not loaded".
+func (r *recordingRunner) answerServiceLoaded(path, unit string) bssh.Result {
+	file, fok := r.h.files[path]
+	u, uok := r.h.unit(unit)
+	ts, terr := strconv.ParseInt(strings.TrimPrefix(u.props["ActiveEnterTimestamp"], "@"), 10, 64)
+	if !fok || !uok || terr != nil {
+		return bssh.Result{ExitCode: 2, Stderr: "sh: 1: [: Illegal number:"}
+	}
+	if file.mtimeUnix <= ts {
+		return bssh.Result{}
+	}
+	return bssh.Result{ExitCode: 1}
+}
+
+// reEnvIdentKey / reEnvCredentialLine / reEnvAppKeyLine are the Go forms of
+// the shapes the database probes grep for. The whitespace classes spell out
+// the C-locale [[:space:]] set minus newline (the probes work line-wise).
+var (
+	reEnvIdentKey       = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	reEnvCredentialLine = regexp.MustCompile(`^DB_PASSWORD=[A-Za-z0-9]+[ \t\v\f\r]*$`)
+	reEnvAppKeyLine     = regexp.MustCompile(`^APP_KEY=base64:[A-Za-z0-9+/]{43}=$`)
+)
+
+// firstEnvLine returns content's first "key=" line — grep -m1 semantics over
+// the anchored prefix the probes use.
+func firstEnvLine(content, key string) (string, bool) {
+	for _, line := range strings.Split(content, "\n") {
+		if strings.HasPrefix(line, key+"=") {
+			return line, true
+		}
+	}
+	return "", false
+}
+
+// trimTrailingASCIISpace trims exactly the set the probes' C-locale
+// sed 's/[[:space:]]*$//' trims off a captured line.
+func trimTrailingASCIISpace(s string) string { return strings.TrimRight(s, " \t\v\f\r") }
+
+// answerEnvCredential evaluates envCredentialPresentScript: exit 0 iff the
+// FIRST DB_PASSWORD line carries a charset-valid value. A missing file makes
+// the first grep fail into an empty pipe, so the -Eq stage answers 1 — the
+// script never distinguishes missing from murky.
+func (r *recordingRunner) answerEnvCredential(path string) bssh.Result {
+	file, ok := r.h.files[path]
+	if !ok {
+		return bssh.Result{ExitCode: 1}
+	}
+	if line, found := firstEnvLine(file.content, "DB_PASSWORD"); found && reEnvCredentialLine.MatchString(line) {
+		return bssh.Result{}
+	}
+	return bssh.Result{ExitCode: 1}
+}
+
+// answerEnvAppKey evaluates envBerthAppKeyScript's exit map: 0 = first
+// APP_KEY line is berth-shaped, 1 = no line, 3 = present but another shape,
+// 2 = the file itself unreadable (grep exit >= 2 — a hard error upstream).
+func (r *recordingRunner) answerEnvAppKey(path string) bssh.Result {
+	file, ok := r.h.files[path]
+	if !ok {
+		return bssh.Result{ExitCode: 2}
+	}
+	line, found := firstEnvLine(file.content, "APP_KEY")
+	if !found {
+		return bssh.Result{ExitCode: 1}
+	}
+	if reEnvAppKeyLine.MatchString(trimTrailingASCIISpace(line)) {
+		return bssh.Result{}
+	}
+	return bssh.Result{ExitCode: 3}
+}
+
+// answerEnvValueMatch evaluates envValueMatchScript: the expected KEY=value
+// line arrives on stdin (`IFS= read -r want` consumes exactly the first
+// line), the live line is trimmed of trailing ASCII whitespace, and the
+// verdict is plain string equality. Exit map: 0 match, 1 mismatch, 3 no
+// KEY= line, 2 unreadable file.
+func (r *recordingRunner) answerEnvValueMatch(path, key string, stdin []byte) bssh.Result {
+	want, _, _ := strings.Cut(string(stdin), "\n")
+	file, ok := r.h.files[path]
+	if !ok {
+		return bssh.Result{ExitCode: 2}
+	}
+	line, found := firstEnvLine(file.content, key)
+	if !found {
+		return bssh.Result{ExitCode: 3}
+	}
+	if trimTrailingASCIISpace(line) == want {
+		return bssh.Result{}
+	}
+	return bssh.Result{ExitCode: 1}
 }
 
 // parseReloadedSince recognizes reloadstamp.go's probe shape:

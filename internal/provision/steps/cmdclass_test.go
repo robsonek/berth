@@ -208,7 +208,7 @@ func TestAuditedScriptMustMatchExactly(t *testing.T) {
 // pair — a changed script or a changed payload each force a fresh audit.
 func TestAuditedStdinMustMatchExactly(t *testing.T) {
 	cmd := envValueMatchProbeCmd(fixtureSharedEnv, "DB_PASSWORD")
-	stdin := "DB_PASSWORD=" + fixtureDBPassword + "\n"
+	stdin := "DB_PASSWORD=" + fixtureDBValue + "\n"
 	if got, _ := classifyCommand(cmd, []byte(stdin)); got != cmdAudited {
 		t.Errorf("registered (cmd, stdin) pair = %s, want audited", got)
 	}
@@ -217,6 +217,11 @@ func TestAuditedStdinMustMatchExactly(t *testing.T) {
 	}
 	if got, _ := classifyCommand(cmd+" ", []byte(stdin)); got != cmdRejected {
 		t.Errorf("a one-character command change still passed as %s — the pair must be exact", got)
+	}
+	// The path is part of the audited key: the same script aimed at a file the
+	// audit never covered must reject, not ride the fixture's registration.
+	if got, _ := classifyCommand(envValueMatchProbeCmd("/etc/shadow", "DB_PASSWORD"), []byte(stdin)); got != cmdRejected {
+		t.Errorf("an unregistered path still passed as %s — the pair must be exact", got)
 	}
 }
 
@@ -325,7 +330,7 @@ var auditedScripts = map[string]string{
 	// reloadedSince's stamp comparisons for the two units whose core config
 	// nginx.Check and php.Check own. Audited: `[ -e ]` existence test and
 	// `[ ! … -nt … ]` mtime comparisons — reads only.
-	reloadedSinceCmd("nginx", "/etc/nginx/nginx.conf"):                                                                          "reloadedSince (reloadstamp.go) for nginx vs its core config: [ -e ] + [ -nt ] — reads only",
+	reloadedSinceCmd("nginx", "/etc/nginx/nginx.conf"): "reloadedSince (reloadstamp.go) for nginx vs its core config: [ -e ] + [ -nt ] — reads only",
 	reloadedSinceCmd("php8.4-fpm", "/etc/php/8.4/fpm/conf.d/99-berth-opcache.ini", "/etc/php/8.4/fpm/conf.d/99-berth-tuning.ini"): "reloadedSince (reloadstamp.go) for php8.4-fpm vs the two managed drop-ins: [ -e ] + [ -nt ] — reads only",
 
 	// valkey's instance-unit discovery (valkeyListUnitsCmd, valkey.go), a
@@ -488,8 +493,8 @@ var auditedStdin = map[stdinKey]string{
 	// C-locale pin, read, grep -m1 capture with explicit exit mapping, a
 	// printf|sed trailing-whitespace trim (s///, no w, no e), [ = ]. Reads
 	// only; the verdict is the exit code, the secret never reaches stdout.
-	{cmd: envValueMatchProbeCmd(fixtureSharedEnv, "DB_PASSWORD"), stdin: "DB_PASSWORD=" + fixtureDBPassword + "\n"}: "envValueMatchScript (database.go), DB_PASSWORD agreement: stdin is the expected line, read into a variable and string-compared — data, not a program",
-	{cmd: envValueMatchProbeCmd(fixtureSharedEnv, "APP_KEY"), stdin: "APP_KEY=" + fixtureAppKey + "\n"}:            "envValueMatchScript (database.go), APP_KEY agreement: stdin is the expected line, read into a variable and string-compared — data, not a program",
+	{cmd: envValueMatchProbeCmd(fixtureSharedEnv, "DB_PASSWORD"), stdin: "DB_PASSWORD=" + fixtureDBValue + "\n"}: "envValueMatchScript (database.go), DB_PASSWORD agreement: stdin is the expected line, read into a variable and string-compared — data, not a program",
+	{cmd: envValueMatchProbeCmd(fixtureSharedEnv, "APP_KEY"), stdin: "APP_KEY=" + fixtureAppKey + "\n"}:          "envValueMatchScript (database.go), APP_KEY agreement: stdin is the expected line, read into a variable and string-compared — data, not a program",
 }
 
 // simpleShape is an exact predicate for one metacharacter-free command shape.
