@@ -17,6 +17,7 @@ func sampleFleet() []HostStatus {
 	at := time.Date(2026, 7, 29, 10, 0, 0, 0, time.UTC)
 	notAfter := time.Date(2026, 9, 28, 7, 31, 0, 0, time.UTC)
 	newest := time.Date(2026, 7, 29, 3, 30, 0, 0, time.UTC)
+	snap := time.Date(2026, 7, 29, 4, 15, 11, 0, time.UTC)
 	days := 61
 	return []HostStatus{
 		{
@@ -31,6 +32,7 @@ func sampleFleet() []HostStatus {
 			Services: []Service{{Name: "nginx", Active: true, Enabled: true}},
 			Disk:     []Mount{{Path: "/", UsedPct: 41, FreeBytes: 22000000000}},
 			Drift:    &DriftReport{Steps: []StepState{{Step: "site", Satisfied: true}}, Drifted: 0},
+			Offsite:  &OffsiteStatus{Configured: true, LastSnapshot: &snap, SnapshotID: "a91f2c"},
 			ProbedAt: at, HostTime: at,
 		},
 		{

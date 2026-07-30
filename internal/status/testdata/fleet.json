@@ -51,6 +51,11 @@
         ],
         "drifted": 0
       },
+      "offsite": {
+        "configured": true,
+        "last_snapshot": "2026-07-29T04:15:11Z",
+        "snapshot_id": "a91f2c"
+      },
       "probed_at": "2026-07-29T10:00:00Z",
       "host_time": "2026-07-29T10:00:00Z"
     },

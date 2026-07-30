@@ -59,12 +59,8 @@ func (o Options) timeout() time.Duration {
 // a failure becomes Reachable:false with a reason, because one dead host must
 // not cost the operator the rest of the overview.
 //
-// pipeline nil skips the drift scan; the trailing bool is the offsite flag,
-// declared from the start so no later task has to change this signature and
-// chase every call site, but unnamed (revive rejects an unused named
-// parameter) until Task 15's probe consumes it — false will skip the offsite
-// query.
-func CollectHost(ctx context.Context, cfgPath string, s *config.Server, r bssh.Runner, pipeline []provision.Step, red provision.Redactor, _ bool) HostStatus {
+// pipeline nil skips the drift scan; offsite false skips the offsite query.
+func CollectHost(ctx context.Context, cfgPath string, s *config.Server, r bssh.Runner, pipeline []provision.Step, red provision.Redactor, offsite bool) HostStatus {
 	h := HostStatus{
 		ID:         s.ID,
 		ConfigPath: cfgPath,
@@ -103,6 +99,22 @@ func CollectHost(ctx context.Context, cfgPath string, s *config.Server, r bssh.R
 			Cert:   certs[site.Domain],
 			Backup: backups[site.Domain],
 		})
+	}
+	if offsite && s.OffsiteEnabled() {
+		o, err := probeOffsite(ctx, r, s.ID, config.OffsiteResticOpts(s.Backups.Offsite))
+		switch {
+		case err != nil:
+			// A transport failure is a PROBE failure: it must reach
+			// ProbeErrors so the table shows it and the exit code reflects it.
+			// Stuffing it into OffsiteStatus.Error alone made `--offsite`
+			// exit 0 on a completely failed query.
+			h.ProbeErrors = append(h.ProbeErrors, "offsite: "+err.Error())
+		default:
+			h.Offsite = o
+			if o.Error != "" {
+				h.ProbeErrors = append(h.ProbeErrors, "offsite: "+o.Error)
+			}
+		}
 	}
 	if pipeline != nil {
 		h.Drift = Drift(ctx, s, r, pipeline, red)

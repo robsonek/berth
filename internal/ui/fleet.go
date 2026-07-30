@@ -108,6 +108,20 @@ func writeHostDetail(w *bytes.Buffer, h status.HostStatus) {
 			fmt.Fprintf(w, "  %s: %v\n", st.Step, st.Changes)
 		}
 	}
+	if h.Offsite != nil {
+		// A repository failure is rendered explicitly: showing it as an
+		// innocuous "no snapshot" hid completely failed queries.
+		var when string
+		switch {
+		case h.Offsite.Error != "":
+			when = "FAILED: " + h.Offsite.Error
+		case h.Offsite.LastSnapshot != nil:
+			when = humanAge(h.HostTime.Sub(*h.Offsite.LastSnapshot)) + " ago · " + h.Offsite.SnapshotID
+		default:
+			when = "no snapshot"
+		}
+		fmt.Fprintf(w, "\nOFFSITE %s\n", when)
+	}
 }
 
 // resultsMsg carries a completed sweep back into the event loop, tagged with

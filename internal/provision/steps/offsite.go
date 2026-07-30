@@ -18,7 +18,7 @@ const (
 	offsiteScriptPath = "/usr/local/sbin/berth-offsite"
 	offsiteCronPath   = "/etc/cron.d/berth-offsite"
 	offsiteEnvDir     = "/etc/berth"
-	offsiteEnvPath    = "/etc/berth/offsite.env"
+	offsiteEnvPath    = config.OffsiteEnvPath
 	// offsiteLogPath deliberately matches the backup logrotate fragment's
 	// backup-*.log glob — no logrotate change needed. No collision with a
 	// site pool: pool names always carry '_' for the domain's dots.
@@ -31,13 +31,12 @@ const (
 	offsiteResticPasswordLen = 32
 )
 
+// The offsite key/pin/env paths are single-sourced in config beside
+// OffsiteResticOpts, which composes them into the sftp.command string the
+// status probe reuses; the aliases keep this file's call sites short.
 const (
-	offsiteSSHKeyPath = "/root/.ssh/berth_offsite"
-	// offsiteKnownHostsPath is a DEDICATED, fully berth-managed pin file —
-	// the shared /root/.ssh/known_hosts is never touched, no config value is
-	// ever composed into a sed/grep program (root-injection surface), and
-	// key rotation is ordinary managed-file drift.
-	offsiteKnownHostsPath = "/root/.ssh/berth_offsite_known_hosts"
+	offsiteSSHKeyPath     = config.OffsiteSSHKeyPath
+	offsiteKnownHostsPath = config.OffsiteKnownHostsPath
 )
 
 // offsiteSweepPaths are the berth-managed host artifacts the disabled mode
@@ -63,26 +62,10 @@ func offsiteStampContent(repo string) []byte {
 	return []byte(templates.ManagedMarker + "\n" + repo + "\n")
 }
 
-// offsiteResticOpts renders the extra restic CLI flags for the backend:
-// empty for s3 (credentials ride the env file); for sftp one fully-pinned
-// sftp.command — -F /dev/null + IdentitiesOnly + StrictHostKeyChecking +
-// GlobalKnownHostsFile=/dev/null (-F /dev/null does NOT neutralize the
-// default /etc/ssh/ssh_known_hosts, which could widen or break the pin) +
-// the dedicated UserKnownHostsFile mean root's personal ssh config, agent
-// identities and TOFU can neither widen nor bypass the pin; BatchMode
-// keeps cron from ever prompting, and ServerAliveInterval/CountMax kill
-// the transport when a hung-but-TCP-alive peer stops answering (restic
-// would otherwise wedge forever holding the shared artifacts lock).
-// Values are config-validated to be quote- and whitespace-free, so the
-// single-quoted composition is sound. Always empty or leading-space so
-// "restic"+opts composes.
-func offsiteResticOpts(o *config.Offsite) string {
-	if o.Backend != "sftp" {
-		return ""
-	}
-	return fmt.Sprintf(" -o sftp.command='ssh -F /dev/null -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/dev/null -o UserKnownHostsFile=%s -i %s -p %d %s@%s -s sftp'",
-		offsiteKnownHostsPath, offsiteSSHKeyPath, o.PortEff(), o.User, o.Host)
-}
+// offsiteResticOpts delegates to config.OffsiteResticOpts (moved there so the
+// status probe can build the same fully-pinned sftp.command string); the doc
+// explaining every ssh option lives on the exported function.
+func offsiteResticOpts(o *config.Offsite) string { return config.OffsiteResticOpts(o) }
 
 // assertNotSymlink hard-errors when path is a symlink: key material and its
 // directory are a security boundary — a symlink would let key generation and

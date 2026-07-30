@@ -87,6 +87,16 @@ type DriftReport struct {
 	Error     string      `json:"error,omitempty"`
 }
 
+// OffsiteStatus is the remote restic repository's latest snapshot, collected
+// only under --offsite (it costs network traffic to the remote backend).
+// Configured false means the host carries no offsite env file.
+type OffsiteStatus struct {
+	Configured   bool       `json:"configured"`
+	LastSnapshot *time.Time `json:"last_snapshot,omitempty"`
+	SnapshotID   string     `json:"snapshot_id,omitempty"`
+	Error        string     `json:"error,omitempty"`
+}
+
 // HostStatus is everything known about one host at one moment.
 type HostStatus struct {
 	ID         string `json:"id"`
@@ -101,12 +111,13 @@ type HostStatus struct {
 	// from Error and never overwrite each other: collapsing them into a single
 	// Error field lost all but the last one, and leaving Reachable true made a
 	// half-collected host render as healthy.
-	ProbeErrors []string     `json:"probe_errors,omitempty"`
-	Provisioned *Manifest    `json:"provisioned,omitempty"`
-	Sites       []SiteStatus `json:"sites,omitempty"`
-	Services    []Service    `json:"services,omitempty"`
-	Disk        []Mount      `json:"disk,omitempty"`
-	Drift       *DriftReport `json:"drift,omitempty"`
+	ProbeErrors []string       `json:"probe_errors,omitempty"`
+	Provisioned *Manifest      `json:"provisioned,omitempty"`
+	Sites       []SiteStatus   `json:"sites,omitempty"`
+	Services    []Service      `json:"services,omitempty"`
+	Disk        []Mount        `json:"disk,omitempty"`
+	Drift       *DriftReport   `json:"drift,omitempty"`
+	Offsite     *OffsiteStatus `json:"offsite,omitempty"`
 	// ProbedAt is the local clock at collection; HostTime is the host's own
 	// clock, and every age shown to the operator is computed against the
 	// latter so clock skew cannot make "3h ago" lie.
