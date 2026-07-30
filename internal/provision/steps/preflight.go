@@ -28,12 +28,24 @@ func (preflight) AlwaysRun() bool { return true }
 // run).
 func (preflight) DeliberatelyUnsatisfied() bool { return true }
 
+// osReleaseCodenameCmd reads the codename line as DATA. It must never SOURCE
+// /etc/os-release: sourcing executes the file, so a tampered copy would run
+// arbitrary commands as root from inside a READ-ONLY Check — including under
+// `berth status --drift`. Found by the read-only Check contract, which cannot
+// allowlist a `.` without becoming a bypass.
+const osReleaseCodenameCmd = `grep -m1 '^VERSION_CODENAME=' /etc/os-release`
+
 func (preflight) Check(ctx context.Context, rc provision.RunCtx, _ *config.Server, r bssh.Runner) (provision.CheckResult, error) {
-	res, err := r.Run(ctx, ". /etc/os-release && echo $VERSION_CODENAME", nil)
+	res, err := r.Run(ctx, osReleaseCodenameCmd, nil)
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	codename := strings.TrimSpace(res.Stdout)
+	// No match (grep exit 1, empty stdout) or a missing file yields an empty
+	// codename, which falls into the same "unsupported OS" error the sourcing
+	// form produced when $VERSION_CODENAME came back empty.
+	codename := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(res.Stdout), "VERSION_CODENAME="))
+	// os-release permits quoting; strip one layer if present.
+	codename = strings.Trim(codename, `"'`)
 	if codename != "trixie" {
 		return provision.CheckResult{}, fmt.Errorf("unsupported OS: VERSION_CODENAME=%q, berth requires Debian 13 (trixie)", codename)
 	}
