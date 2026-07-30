@@ -115,6 +115,69 @@ func TestRecordingRunnerGatesGpgOnKeyringPresence(t *testing.T) {
 	}
 }
 
+// userExists (accounts.go) reads ONLY the exit code of `id <user>`, and
+// accounts.Check early-returns "account missing" on it. A blanket exit 0 made
+// that branch unreachable on EVERY profile — fresh exists to walk it — and let
+// fresh record probes a real fresh host never issues. The answer is gated on
+// the modelled account set, exactly like the gpg keyring gate.
+func TestRecordingRunnerGatesIDOnModelledAccounts(t *testing.T) {
+	ctx := context.Background()
+	s := contractServer(t)
+
+	fresh := newRecordingRunner(newFakeHost(t, "fresh", s))
+	res, err := fresh.Run(ctx, "id "+s.SiteUser(s.Sites[0]), nil)
+	if err != nil || res.ExitCode == 0 {
+		t.Errorf("fresh id = (%+v, %v), want exit!=0 and no error — that is how userExists reads absent", res, err)
+	}
+
+	conv := newRecordingRunner(newFakeHost(t, "converged", s))
+	if res, err = conv.Run(ctx, "id "+s.SiteUser(s.Sites[0]), nil); err != nil || res.ExitCode != 0 {
+		t.Errorf("converged id site user = (%+v, %v), want exit 0", res, err)
+	}
+	if res, err = conv.Run(ctx, "id berth", nil); err != nil || res.ExitCode != 0 {
+		t.Errorf("converged id berth = (%+v, %v), want exit 0 — managedAccounts includes it", res, err)
+	}
+	if res, err = conv.Run(ctx, "id nosuchuser", nil); err != nil || res.ExitCode == 0 {
+		t.Errorf("converged id unknown = (%+v, %v), want exit!=0 and no error", res, err)
+	}
+
+	// getent stdout is PARSED (userHome splits the passwd row), so a placeholder
+	// answer would be a format lie. It must fall to unanswered until Task 5
+	// models a real passwd row from evidence.
+	if _, err = conv.Run(ctx, "getent passwd "+s.SiteUser(s.Sites[0]), nil); err == nil {
+		t.Error("getent must be unanswered — its stdout is parsed, a placeholder masks the parse")
+	}
+}
+
+// sshd -T is not a validator: sshdEffective PARSES its stdout, and an empty
+// answer at exit 0 reads as "every directive missing", driving hardening.Check
+// into the misdiagnosis branch and truncating its tail out of classification.
+// Only the exact check-only shapes may be answered blindly.
+func TestRecordingRunnerAnswersOnlyCheckShapedValidators(t *testing.T) {
+	r := newRecordingRunner(newFakeHost(t, "converged", contractServer(t)))
+	ctx := context.Background()
+
+	if res, err := r.Run(ctx, "sshd -t", nil); err != nil || res.ExitCode != 0 {
+		t.Errorf("sshd -t = (%+v, %v), want blind success — it is a pure validator", res, err)
+	}
+	if _, err := r.Run(ctx, "sshd -T", nil); err == nil {
+		t.Error("sshd -T must be unanswered — its stdout is parsed, blank success misdiagnoses")
+	}
+	if _, err := r.Run(ctx, "nginx -s reload", nil); err == nil {
+		t.Error("nginx without -t must be unanswered — only the validator shape is blind-answered")
+	}
+}
+
+// Every standalone show probe today passes --value (valkey.go); answering
+// value-only output to a probe WITHOUT it would silently hand Task 5 the wrong
+// format, so the shape is refused instead.
+func TestRecordingRunnerRejectsValueLessSystemctlShow(t *testing.T) {
+	r := newRecordingRunner(newFakeHost(t, "converged", contractServer(t)))
+	if _, err := r.Run(context.Background(), "systemctl show -p NeedDaemonReload nginx", nil); err == nil {
+		t.Error("show without --value must be unanswered — the answer format is value-only")
+	}
+}
+
 // recordedCmd is one thing a Check asked the host to do. The stdin is part of
 // the record because a program can arrive there rather than in the command
 // (`sed -n -f -`), and the classifier must see the pair.
@@ -236,7 +299,11 @@ func (r *recordingRunner) answer(cmd string) (bssh.Result, bool) {
 		}
 		return bssh.Result{Stdout: word + "\n"}, true
 
-	case f[0] == "systemctl" && len(f) >= 4 && f[1] == "show":
+	// Gated on --value because the answer IS value-only: every standalone show
+	// probe today passes it (valkey.go), and answering a value-less probe in
+	// this format would silently hand it the wrong shape rather than an honest
+	// "cannot answer".
+	case f[0] == "systemctl" && len(f) >= 4 && f[1] == "show" && hasExact(f, "--value"):
 		u, ok := r.h.units[f[len(f)-1]]
 		if !ok {
 			return bssh.Result{ExitCode: 4}, true
@@ -256,8 +323,19 @@ func (r *recordingRunner) answer(cmd string) (bssh.Result, bool) {
 		}
 		return bssh.Result{ExitCode: 1}, true
 
-	case f[0] == "getent", f[0] == "id":
-		return bssh.Result{Stdout: "appuser\n"}, true
+	// userExists reads ONLY the exit code of a bare `id <user>`, so the answer
+	// is gated on the modelled account set: a blanket exit 0 made the
+	// "account missing" early return unreachable on every profile, and fresh
+	// exists to walk it. Absent is exit 1, data — not a Go error. No stdout is
+	// modelled: nobody parses it, and `LC_ALL=C id -nG …` falls to unanswered
+	// via its env prefix. getent is deliberately NOT answered here — userHome
+	// PARSES its passwd row, so Task 5 must model a real row from evidence.
+	case f[0] == "id" && len(f) == 2:
+		if r.h.users[f[1]] {
+			return bssh.Result{}, true
+		}
+		return bssh.Result{ExitCode: 1, Stderr: "id: '" + f[1] + "': no such user"}, true
+
 	case f[0] == "df":
 		return bssh.Result{Stdout: r.h.dfRows}, true
 	case f[0] == "swapon":
@@ -280,9 +358,17 @@ func (r *recordingRunner) answer(cmd string) (bssh.Result, bool) {
 		return bssh.Result{Stdout: r.h.gpgKeys}, true
 
 	// Validators just need to succeed so the Check continues. Whether ISSUING
-	// them is allowed is the classifier's judgement, not the model's.
-	case f[0] == "nginx", strings.HasPrefix(f[0], "php-fpm"), f[0] == "sshd",
-		f[0] == "visudo", f[0] == "logrotate", f[0] == "fail2ban-client":
+	// them is allowed is the classifier's judgement, not the model's. Only the
+	// exact check-only shapes are answered blindly: `sshd -T` in particular is
+	// NOT a validator — sshdEffective parses its stdout, and a blank success
+	// would read as "every directive missing" and misdiagnose hardening.Check.
+	// hasExact is case-sensitive, so -T never matches -t and falls through.
+	case f[0] == "nginx" && hasExact(f, "-t"),
+		strings.HasPrefix(f[0], "php-fpm") && hasExact(f, "-t"),
+		f[0] == "sshd" && hasExact(f, "-t"),
+		f[0] == "visudo" && hasExact(f, "-cf"),
+		f[0] == "logrotate" && hasExact(f, "-d"),
+		f[0] == "fail2ban-client" && hasExact(f, "-t"):
 		return bssh.Result{}, true
 	}
 	return bssh.Result{}, false

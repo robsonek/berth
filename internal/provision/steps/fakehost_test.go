@@ -158,6 +158,7 @@ type fakeHost struct {
 	packages map[string]string // package -> its `Status:` line
 	units    map[string]fakeUnit
 	tools    map[string]bool // command -v
+	users    map[string]bool // accounts that exist (`id <user>` exit code)
 	timezone string
 	hostname string
 	swapRows string
@@ -238,6 +239,7 @@ func newFakeHost(t *testing.T, profile string, s *config.Server) *fakeHost {
 		packages: map[string]string{},
 		units:    map[string]fakeUnit{},
 		tools:    map[string]bool{},
+		users:    map[string]bool{},
 		timezone: "Etc/UTC",
 		hostname: "box-1",
 		dfRows: "Filesystem 1B-blocks Used Available Capacity Mounted on\n" +
@@ -286,6 +288,12 @@ func populateInstalled(h *fakeHost, s *config.Server, profile string) {
 	}
 	for _, tool := range []string{"nginx", "php-fpm" + s.PHP.Version, "restic", "certbot", "gpg", "logrotate", "supervisorctl"} {
 		h.tools[tool] = true
+	}
+	// Every berth-owned account exists on a once-provisioned host. fresh gets
+	// none: userExists reads only the exit code of `id <user>`, and the absent
+	// account is the branch accounts.Check exists to walk there.
+	for _, u := range managedAccounts(s) {
+		h.users[u] = true
 	}
 	h.swapRows = "NAME TYPE SIZE USED PRIO\n/swapfile file 2G 0B -2\n"
 }
