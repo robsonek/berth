@@ -148,6 +148,27 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{`runuser -u 'appuser' -- rm -rf /var/www`, cmdRejected},
 		{`runuser -l root`, cmdRejected},
 
+		// The test builtin's -ef comparison (site.Check probes that the
+		// sites-enabled entry IS berth's symlink to the vhost): an inode
+		// identity read. ONLY that exact five-token shape is allowed — every
+		// other [ expression stays unregistered (the reloadedSince chains
+		// carry && and go through the audited registry instead).
+		{`[ '/etc/nginx/sites-enabled/app.example.com' -ef '/etc/nginx/sites-available/app.example.com' ]`, cmdReadOnly},
+		{`[ -e '/var/lib/berth/nginx.reloaded' ]`, cmdRejected},
+		{`[ '/a' -nt '/b' ]`, cmdRejected},
+		{`[ -w '/etc' ]`, cmdRejected},
+
+		// supervisorctl: only the single-program status query reads (a state
+		// dump over supervisord's RPC socket). start/stop/restart/reread/
+		// update all mutate the process set, and the bare all-programs status
+		// is not a shape berth issues, so it stays rejected (safe direction).
+		{`supervisorctl status 'berth-app_example_com:*'`, cmdReadOnly},
+		{`supervisorctl status`, cmdRejected},
+		{`supervisorctl reread`, cmdRejected},
+		{`supervisorctl update`, cmdRejected},
+		{`supervisorctl restart 'berth-app_example_com:*'`, cmdRejected},
+		{`supervisorctl start status`, cmdRejected},
+
 		// The keyring probe's exact read shape as issued by
 		// apt.KeyringHoldsExactly (internal/apt/apt.go), and proof that
 		// dropping --trust-model always — the flag that suppresses
@@ -372,6 +393,61 @@ var auditedScripts = map[string]string{
 	// secret never reaches stdout. Nothing writes.
 	envCredentialProbeCmd(fixtureSharedEnv): "envCredentialPresentScript (database.go): locale pin + grep -m1 | grep -Eq, exit-code verdict — reads only",
 	envAppKeyProbeCmd(fixtureSharedEnv):     "envBerthAppKeyScript (database.go): locale pin + grep -m1 capture + printf|sed|grep -Eq shape test, exit-code signals — reads only",
+
+	// Wave 4 (site, tls, backups, offsite), same discipline: pasted literals
+	// for production consts and const-composed commands, test-local mirror
+	// generators for the parameterized compositions.
+
+	// site's supervisor-program discovery (listSupervisorPrograms, site.go),
+	// a const-composed command pasted literally. Audited: `ls -1` prints the
+	// paths matching a fixed glob (reads directory entries only);
+	// `2>/dev/null` discards the no-match diagnostic into the null device.
+	// Nothing writes.
+	supervisorListPasted: "listSupervisorPrograms (site.go): ls -1 over the berth-*.conf program glob, stderr discarded — reads only",
+
+	// backups' three orphan-discovery listings (lsGlob over backupScriptGlob /
+	// backupCronGlob / backupManifestGlob, backups.go). Same two commands as
+	// the supervisor listing above: ls -1 over a fixed glob, stderr to the
+	// null device. Reads only.
+	backupScriptListPasted:   "lsGlob(backupScriptGlob) (backups.go): ls -1 over /usr/local/sbin/berth-backup-*, stderr discarded — reads only",
+	backupCronListPasted:     "lsGlob(backupCronGlob) (backups.go): ls -1 over /etc/cron.d/berth-backup-*, stderr discarded — reads only",
+	backupManifestListPasted: "lsGlob(backupManifestGlob) (backups.go): ls -1 over /var/backups/berth/*/manifest, stderr discarded — reads only",
+
+	// commandExists' PATH probe (backups.go), issued for the engine's dump
+	// binary. Audited: `command -v` resolves a name against PATH without
+	// executing anything; both redirections aim at the null device and the
+	// caller reads only the exit code. Nothing writes.
+	commandVProbeCmd("mysqldump"): "commandExists (backups.go) for the mariadb dump client: command -v with output discarded — reads only",
+
+	// findRegularFiles' guarded listings (site.go), issued by orphanSiteFiles
+	// over the three orphan namespaces. Audited: `[ -d ]` existence test
+	// short-circuiting the whole listing; `find -maxdepth 1 -type f` (with an
+	// optional -name filter) has NO action predicate, so it defaults to
+	// -print — it only reads directory entries. Nothing writes.
+	findRegularProbeCmd("/etc/nginx/sites-available", ""):    "findRegularFiles (site.go) over sites-available: [ -d ] + find -type f -print — reads only",
+	findRegularProbeCmd("/etc/php/8.4/fpm/pool.d", "*.conf"): "findRegularFiles (site.go) over the 8.4 pool dir: [ -d ] + find -type f -name — reads only",
+	findRegularProbeCmd("/etc/cron.d", "berth-site-*"):       "findRegularFiles (site.go) over the scheduler-cron namespace: [ -d ] + find -type f -name — reads only",
+
+	// findDirectories' guarded listings (site.go), issued by
+	// discoverTLSOrphans over berth's two TLS directory namespaces. Same
+	// shape as above with -type d. Reads only.
+	findDirsProbeCmd("/var/www/berth-acme"): "findDirectories (site.go) over the ACME webroot namespace: [ -d ] + find -type d -print — reads only",
+	findDirsProbeCmd("/etc/ssl/berth"):      "findDirectories (site.go) over the self-signed namespace: [ -d ] + find -type d -print — reads only",
+
+	// listRenewalConfs' inventory (tls.go), a const-composed command pasted
+	// literally. Audited: `[ -d ]` guard; `find -H` follows a symlinkED
+	// ARGUMENT only (no directory traversal through links) and carries no
+	// action predicate — print only, deliberately no -type filter. Nothing
+	// writes.
+	renewalConfListPasted: "listRenewalConfs (tls.go): [ -d ] + find -H -name '*.conf' -print — reads only",
+
+	// reloadedSince's stamp comparisons for site.Check's two unit windows:
+	// nginx vs the fixture vhost + the sites-enabled DIRECTORY (its mtime
+	// covers link topology drift), php-fpm vs the fixture pool + the pool.d
+	// directory. Audited: `[ -e ]` existence test and `[ ! … -nt … ]` mtime
+	// comparisons — reads only.
+	reloadedSinceCmd("nginx", "/etc/nginx/sites-available/app.example.com", "/etc/nginx/sites-enabled"):       "reloadedSince (reloadstamp.go) for nginx vs the fixture vhost + sites-enabled dir: [ -e ] + [ -nt ] — reads only",
+	reloadedSinceCmd("php8.4-fpm", "/etc/php/8.4/fpm/pool.d/app_example_com.conf", "/etc/php/8.4/fpm/pool.d"): "reloadedSince (reloadstamp.go) for php8.4-fpm vs the fixture pool + pool.d dir: [ -e ] + [ -nt ] — reads only",
 }
 
 // phpPoolConflictProbe84 is the EXACT text phpPoolConflictProbeCmd("8.4")
@@ -444,6 +520,42 @@ func envAppKeyProbeCmd(path string) string {
 	return "LC_ALL=C; export LC_ALL; line=$(grep -m1 '^APP_KEY=' " + shQuote(path) + "); s=$?; " +
 		"if [ $s -eq 1 ]; then exit 1; elif [ $s -ne 0 ]; then exit 2; fi; " +
 		`printf '%s' "$line" | sed 's/[[:space:]]*$//' | grep -Eq '^APP_KEY=base64:[A-Za-z0-9+/]{43}=$' && exit 0; exit 3`
+}
+
+// supervisorListPasted / backupScriptListPasted / backupCronListPasted /
+// backupManifestListPasted / renewalConfListPasted are the EXACT texts of the
+// const-composed listings in listSupervisorPrograms (site.go), lsGlob's three
+// backups.Check call sites (backups.go) and listRenewalConfs (tls.go), pasted
+// as literals — never referencing the production consts, which would let an
+// edit re-bless itself.
+const (
+	supervisorListPasted     = `ls -1 /etc/supervisor/conf.d/berth-*.conf 2>/dev/null`
+	backupScriptListPasted   = `ls -1 /usr/local/sbin/berth-backup-* 2>/dev/null`
+	backupCronListPasted     = `ls -1 /etc/cron.d/berth-backup-* 2>/dev/null`
+	backupManifestListPasted = `ls -1 /var/backups/berth/*/manifest 2>/dev/null`
+	renewalConfListPasted    = `if [ -d '/etc/letsencrypt/renewal' ]; then find -H '/etc/letsencrypt/renewal' -mindepth 1 -maxdepth 1 -name '*.conf'; fi`
+)
+
+// commandVProbeCmd mirrors commandExists' composition (backups.go) — a copy
+// on purpose (see auditedScripts).
+func commandVProbeCmd(bin string) string {
+	return "command -v " + bin + " >/dev/null 2>&1"
+}
+
+// findRegularProbeCmd mirrors findRegularFiles' composition (site.go) — a
+// copy on purpose (see auditedScripts).
+func findRegularProbeCmd(dir, namePattern string) string {
+	cmd := "find " + shQuote(dir) + " -maxdepth 1 -type f"
+	if namePattern != "" {
+		cmd += " -name " + shQuote(namePattern)
+	}
+	return "if [ -d " + shQuote(dir) + " ]; then " + cmd + "; fi"
+}
+
+// findDirsProbeCmd mirrors findDirectories' composition (site.go) — a copy
+// on purpose (see auditedScripts).
+func findDirsProbeCmd(dir string) string {
+	return "if [ -d " + shQuote(dir) + " ]; then find " + shQuote(dir) + " -mindepth 1 -maxdepth 1 -type d; fi"
 }
 
 // envValueMatchProbeCmd mirrors envValueMatchScript's composition
@@ -623,6 +735,21 @@ var simpleShapes = []simpleShape{
 	// The two exceptions: allowed, but they WRITE (spec §4.2).
 	{verb: "nginx", allow: func(a []string) bool { return hasExact(a, "-t") && len(a) == 1 }, verdict: cmdException,
 		why: "as root may create a missing log file"},
+
+	// The test builtin: ONLY the five-token -ef inode comparison
+	// (`[ <path> -ef <path> ]`, site.Check's enabled-symlink probe) is
+	// allowed. test itself is intrinsically read-only, but pinning the shape
+	// keeps the table honest about what berth actually issues.
+	{verb: "[", allow: func(a []string) bool { return len(a) == 4 && a[1] == "-ef" && a[3] == "]" }, verdict: cmdReadOnly,
+		why: "the [ … -ef … ] inode comparison reads; no other [ shape is issued table-side"},
+
+	// supervisorctl: status is a state query over supervisord's RPC socket
+	// and writes nothing; start/stop/restart/reread/update mutate the
+	// process set (the spec's §4.3 names the verb mutating as a class, so
+	// the read shape is pinned to exactly `status <one program>` — the shape
+	// site.Check issues).
+	{verb: "supervisorctl", allow: func(a []string) bool { return len(a) == 2 && a[0] == "status" }, verdict: cmdReadOnly,
+		why: "only `supervisorctl status <program>` reads; every other subcommand drives the process set"},
 
 	// Subcommand verbs, matched POSITIONALLY. `systemctl start cat` must not
 	// pass by containing the token "cat".
