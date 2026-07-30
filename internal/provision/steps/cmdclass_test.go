@@ -206,19 +206,22 @@ func TestClassifyCommandPolicy(t *testing.T) {
 
 		// The test builtin's -ef comparison (site.Check probes that the
 		// sites-enabled entry IS berth's symlink to the vhost): an inode
-		// identity read. ONLY that exact five-token shape is allowed — every
-		// other [ expression stays unregistered (the reloadedSince chains
-		// carry && and go through the audited registry instead).
-		{`[ '/etc/nginx/sites-enabled/app.example.com' -ef '/etc/nginx/sites-available/app.example.com' ]`, cmdReadOnly},
+		// identity read. [ and ] are filename-expansion metacharacters now,
+		// so the probe routes through the audited registry (sameFileProbeCmd
+		// mirrors site.go's composition) instead of a table entry; every
+		// other [ expression stays unregistered and rejects.
+		{`[ '/etc/nginx/sites-enabled/app.example.com' -ef '/etc/nginx/sites-available/app.example.com' ]`, cmdAudited},
 		{`[ -e '/var/lib/berth/nginx.reloaded' ]`, cmdRejected},
 		{`[ '/a' -nt '/b' ]`, cmdRejected},
 		{`[ -w '/etc' ]`, cmdRejected},
 
 		// supervisorctl: only the single-program status query reads (a state
-		// dump over supervisord's RPC socket). start/stop/restart/reread/
-		// update all mutate the process set, and the bare all-programs status
-		// is not a shape berth issues, so it stays rejected (safe direction).
-		{`supervisorctl status 'berth-app_example_com:*'`, cmdReadOnly},
+		// dump over supervisord's RPC socket). Its ':*' program glob routes it
+		// through the audited registry now (supervisorStatusProbeCmd mirrors
+		// site.go's composition). start/stop/restart/reread/update all mutate
+		// the process set, and the bare all-programs status is not a shape
+		// berth issues, so every one of them stays rejected (safe direction).
+		{`supervisorctl status 'berth-app_example_com:*'`, cmdAudited},
 		{`supervisorctl status`, cmdRejected},
 		{`supervisorctl reread`, cmdRejected},
 		{`supervisorctl update`, cmdRejected},
@@ -249,6 +252,16 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{"{ test -e /x; }", cmdRejected},
 		{"echo `rm x`", cmdRejected},
 		{". /etc/os-release && echo $VERSION_CODENAME", cmdRejected},
+
+		// Filename expansion is argv rewriting, so the glob characters are
+		// metacharacters too: unregistered, each of these rejects even though
+		// its verb-and-flags shape would have read cleanly.
+		{"sort *", cmdRejected},
+		{"cat /etc/cron.d/berth-?", cmdRejected},
+		{"stat -c %s /var/backups/berth/[a-z]/manifest", cmdRejected},
+		// The one metacharacter-free find berth used to table-judge carries a
+		// glob, so it lives in the registry now (aptUserListsPasted).
+		{"find /etc/apt/sources.list.d -maxdepth 1 -name 'berth-*.list' -print0", cmdAudited},
 
 		// Unknown verbs are rejected, not assumed safe.
 		{"sometool --probe /etc/x", cmdRejected},
@@ -340,10 +353,14 @@ func (v cmdVerdict) String() string {
 }
 
 // shellMetachars force a command into the audited registry. The set is
-// deliberately broad: anything that can compose, redirect, substitute, group or
-// escape is beyond what the tables can honestly judge, so it needs a human's
-// signature instead of a parser's guess.
-const shellMetachars = "&|;<>$`(){}\\\n"
+// deliberately broad: anything that can compose, redirect, substitute, group
+// or escape is beyond what the tables can honestly judge — and so are the
+// filename-expansion characters * ? [ ] (] kept conservatively for symmetry):
+// the shell rewrites argv BEFORE the verb sees it, so `sort *` in a directory
+// holding a file named `-o` becomes `sort -o …`, and no argument table can
+// see that coming. All of it needs a human's signature instead of a parser's
+// guess.
+const shellMetachars = "&|;<>$`(){}\\\n*?[]"
 
 // auditedScripts maps the EXACT text of a generated script to the note
 // recording what was audited about it. Task 5 fills this from the first real
@@ -504,6 +521,36 @@ var auditedScripts = map[string]string{
 	// comparisons — reads only.
 	reloadedSinceCmd("nginx", "/etc/nginx/sites-available/app.example.com", "/etc/nginx/sites-enabled"):       "reloadedSince (reloadstamp.go) for nginx vs the fixture vhost + sites-enabled dir: [ -e ] + [ -nt ] — reads only",
 	reloadedSinceCmd("php8.4-fpm", "/etc/php/8.4/fpm/pool.d/app_example_com.conf", "/etc/php/8.4/fpm/pool.d"): "reloadedSince (reloadstamp.go) for php8.4-fpm vs the fixture pool + pool.d dir: [ -e ] + [ -nt ] — reads only",
+
+	// The glob-gate cascade (2026-07 remediation): filename expansion rewrites
+	// argv before the verb sees it, so * ? [ ] became metacharacters and the
+	// three probes that carry one moved here from the tables. Same discipline
+	// as every entry above: pasted literals for production consts, test-local
+	// mirror generators for the parameterized compositions.
+
+	// discoverUserLists' namespace listing (aptUserListsCmd, aptextras.go), a
+	// production const pasted literally. Audited: find over the fixed
+	// sources.list.d directory with -maxdepth 1 and a -name filter, and
+	// -print0 as the only action — it prints matching paths NUL-separated and
+	// nothing more (the acting predicates -delete/-exec/-fprintf are absent).
+	// The glob is quoted, so the remote shell hands it to find unexpanded.
+	// Nothing writes.
+	aptUserListsPasted: "discoverUserLists (aptextras.go): find -maxdepth 1 -name 'berth-*.list' -print0 over the sources.list.d namespace — reads only",
+
+	// site.Check's enabled-symlink probe (site.go), mirrored by
+	// sameFileProbeCmd for the fixture vhost pair. Audited: the [ … -ef … ]
+	// builtin compares the inode identity of its two path operands and writes
+	// nothing; both paths are shQuote'd, so the brackets reach the builtin as
+	// its own argv, never as a glob.
+	sameFileProbeCmd("/etc/nginx/sites-enabled/app.example.com", "/etc/nginx/sites-available/app.example.com"): "site.Check's enabled-symlink probe (site.go): [ … -ef … ] inode comparison — reads only",
+
+	// site.Check's per-program worker query (site.go), mirrored by
+	// supervisorStatusProbeCmd for the fixture worker. Audited: `status` is a
+	// state dump over supervisord's RPC socket and mutates nothing; the ':*'
+	// program glob is supervisor's own group syntax, shQuote'd so the shell
+	// never expands it. The mutating siblings (start/stop/restart/reread/
+	// update) stay unregistered.
+	supervisorStatusProbeCmd("berth-app_example_com"): "site.Check's worker query (site.go): supervisorctl status <program>:* over the RPC socket — reads only",
 }
 
 // phpPoolConflictProbe84 is the EXACT text phpPoolConflictProbeCmd("8.4")
@@ -596,6 +643,23 @@ const (
 // on purpose (see auditedScripts).
 func commandVProbeCmd(bin string) string {
 	return "command -v " + bin + " >/dev/null 2>&1"
+}
+
+// aptUserListsPasted is the EXACT text of the production const
+// aptUserListsCmd (aptextras.go), pasted as a literal — never referencing the
+// const, which would let an edit re-bless itself.
+const aptUserListsPasted = `find /etc/apt/sources.list.d -maxdepth 1 -name 'berth-*.list' -print0`
+
+// sameFileProbeCmd mirrors site.Check's enabled-symlink probe composition
+// (site.go) — a copy on purpose (see auditedScripts).
+func sameFileProbeCmd(enabled, available string) string {
+	return "[ " + shQuote(enabled) + " -ef " + shQuote(available) + " ]"
+}
+
+// supervisorStatusProbeCmd mirrors site.Check's worker query composition
+// (site.go) — a copy on purpose (see auditedScripts).
+func supervisorStatusProbeCmd(prog string) string {
+	return "supervisorctl status " + shQuote(prog+":*")
 }
 
 // findRegularProbeCmd mirrors findRegularFiles' composition (site.go) — a
@@ -793,20 +857,11 @@ var simpleShapes = []simpleShape{
 	{verb: "certbot", allow: func(a []string) bool { return len(a) == 1 && a[0] == "certificates" }, verdict: cmdException,
 		why: "appends its certificate inventory to /var/log/letsencrypt/letsencrypt.log (~1068 bytes/run) and touches its lock files (measured: certbot 4.0.0, Debian 13)"},
 
-	// The test builtin: ONLY the five-token -ef inode comparison
-	// (`[ <path> -ef <path> ]`, site.Check's enabled-symlink probe) is
-	// allowed. test itself is intrinsically read-only, but pinning the shape
-	// keeps the table honest about what berth actually issues.
-	{verb: "[", allow: func(a []string) bool { return len(a) == 4 && a[1] == "-ef" && a[3] == "]" }, verdict: cmdReadOnly,
-		why: "the [ … -ef … ] inode comparison reads; no other [ shape is issued table-side"},
-
-	// supervisorctl: status is a state query over supervisord's RPC socket
-	// and writes nothing; start/stop/restart/reread/update mutate the
-	// process set (the spec's §4.3 names the verb mutating as a class, so
-	// the read shape is pinned to exactly `status <one program>` — the shape
-	// site.Check issues).
-	{verb: "supervisorctl", allow: func(a []string) bool { return len(a) == 2 && a[0] == "status" }, verdict: cmdReadOnly,
-		why: "only `supervisorctl status <program>` reads; every other subcommand drives the process set"},
+	// The [ … -ef … ] inode probe and the supervisorctl ':*' status query used
+	// to live here; both carry bracket/glob characters, which are
+	// metacharacters now, so they route through the audited registry
+	// (sameFileProbeCmd / supervisorStatusProbeCmd) and the table holds no
+	// entry for either verb — any other spelling of them rejects as unknown.
 
 	// Subcommand verbs, matched POSITIONALLY (`systemctl start cat` must not
 	// pass by containing the token "cat") and pinned to the exact query
@@ -832,8 +887,6 @@ var simpleShapes = []simpleShape{
 		why: "pinned to `command -v <name>` (composer.go): a PATH lookup, nothing executed"},
 	{verb: "openssl", allow: opensslX509IsReadOnly, verdict: cmdReadOnly,
 		why: "pinned to the two x509 reads tls.go issues; -out and -writerand create files even under -noout, and every respelling falls out by not matching"},
-	{verb: "find", allow: findIsUserListDiscovery, verdict: cmdReadOnly,
-		why: "pinned to discoverUserLists' exact namespace listing (aptUserListsCmd, aptextras.go); find's other predicates include ones that act instead of reporting (-delete, -exec, -fprintf)"},
 	{verb: "gpg", allow: gpgIsReadOnly, verdict: cmdReadOnly,
 		why: "pinned to KeyringHoldsExactly's exact argv (apt.go)"},
 	{verb: "mysql", allow: mysqlIsReadOnlyProbe, verdict: cmdReadOnly,
@@ -909,24 +962,6 @@ func opensslX509IsReadOnly(args []string) bool {
 		return !strings.HasPrefix(args[5], "-")
 	}
 	return false
-}
-
-// findIsUserListDiscovery pins discoverUserLists' exact namespace listing
-// (aptUserListsCmd, aptextras.go), the only metacharacter-free find a Check
-// issues. find's predicate language includes ones that act instead of
-// reporting (-delete, -exec/-execdir/-ok/-okdir, -fls/-fprint/-fprint0/
-// -fprintf), so nothing but the exact listing passes.
-func findIsUserListDiscovery(args []string) bool {
-	want := []string{"/etc/apt/sources.list.d", "-maxdepth", "1", "-name", "'berth-*.list'", "-print0"}
-	if len(args) != len(want) {
-		return false
-	}
-	for i, w := range want {
-		if args[i] != w {
-			return false
-		}
-	}
-	return true
 }
 
 // mysqlIsReadOnlyProbe allows only probeSQL's shape
