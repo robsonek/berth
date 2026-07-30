@@ -45,6 +45,7 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{"date -s @0", cmdRejected},
 		{"hostname", cmdReadOnly},
 		{"hostname changed.example", cmdRejected},
+		{"hostname -F /etc/hostname", cmdRejected},
 		{"sort /etc/hosts", cmdReadOnly},
 		{"sort -o /tmp/out /etc/hosts", cmdRejected},
 		{"logrotate -d /etc/logrotate.d/berth", cmdReadOnly},
@@ -64,6 +65,10 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{"hostnamectl set-hostname status", cmdRejected},
 		{"sysctl -w vm.swappiness=1", cmdRejected},
 		{"sysctl -n vm.swappiness", cmdReadOnly},
+		{"sysctl -n -w vm.swappiness=1", cmdRejected},
+		{"sysctl vm.swappiness=1", cmdRejected},
+		{"openssl x509 -noout -in /etc/ssl/cert.pem", cmdReadOnly},
+		{"openssl x509 -noout -out /tmp/x -in /etc/ssl/cert.pem", cmdRejected},
 
 		// An untrusted executable path must never inherit a trusted basename.
 		{"/tmp/cat /etc/hosts", cmdRejected},
@@ -132,7 +137,7 @@ type cmdVerdict int
 
 const (
 	cmdReadOnly  cmdVerdict = iota // a pure read, judged by the tables
-	cmdException                   // allowed, but known to write (see exceptionShapes)
+	cmdException                   // allowed, but known to write (the nginx -t table entry and the php-fpm branch in classifySimple)
 	cmdAudited                     // a generated script whose exact text a human signed off
 	cmdRejected                    // everything else — mutating, unknown, or unparsed
 )
@@ -258,8 +263,10 @@ var simpleShapes = []simpleShape{
 	// Verbs with a writing mode: the predicate must exclude it.
 	{verb: "date", allow: func(a []string) bool { return noneOf(a, "-s", "--set") }, verdict: cmdReadOnly,
 		why: "date -s sets the system clock"},
-	{verb: "hostname", allow: func(a []string) bool { return len(a) == 0 || strings.HasPrefix(a[0], "-") }, verdict: cmdReadOnly,
-		why: "hostname <name> sets the hostname"},
+	{verb: "hostname", allow: func(a []string) bool {
+		return (len(a) == 0 || strings.HasPrefix(a[0], "-")) && noneOf(a, "-F", "--file", "-b", "--boot")
+	}, verdict: cmdReadOnly,
+		why: "hostname <name> sets the hostname, and so do -F/--file and -b/--boot"},
 	{verb: "sort", allow: func(a []string) bool { return noneOf(a, "-o", "--output") }, verdict: cmdReadOnly,
 		why: "sort -o writes a file"},
 	{verb: "grep", allow: func([]string) bool { return true }, verdict: cmdReadOnly},
@@ -290,9 +297,12 @@ var simpleShapes = []simpleShape{
 	{verb: "timedatectl", allow: func(a []string) bool { return firstNonFlag(a) == "show" || firstNonFlag(a) == "status" }, verdict: cmdReadOnly},
 	{verb: "hostnamectl", allow: func(a []string) bool { return firstNonFlag(a) == "status" || firstNonFlag(a) == "" }, verdict: cmdReadOnly},
 	{verb: "swapon", allow: func(a []string) bool { return len(a) == 1 && a[0] == "--show" }, verdict: cmdReadOnly},
-	{verb: "sysctl", allow: func(a []string) bool { return len(a) >= 1 && a[0] == "-n" }, verdict: cmdReadOnly},
+	{verb: "sysctl", allow: sysctlIsReadOnly, verdict: cmdReadOnly},
 	{verb: "command", allow: func(a []string) bool { return len(a) == 2 && a[0] == "-v" }, verdict: cmdReadOnly},
-	{verb: "openssl", allow: func(a []string) bool { return len(a) >= 1 && a[0] == "x509" && hasExact(a, "-noout") }, verdict: cmdReadOnly},
+	{verb: "openssl", allow: func(a []string) bool {
+		return len(a) >= 1 && a[0] == "x509" && hasExact(a, "-noout") && noneOf(a, "-out", "-o")
+	}, verdict: cmdReadOnly,
+		why: "-out/-o writes a file; berth never passes it, so rejecting is free"},
 	{verb: "find", allow: findIsReadOnly, verdict: cmdReadOnly},
 	{verb: "gpg", allow: gpgIsReadOnly, verdict: cmdReadOnly},
 }
@@ -320,6 +330,22 @@ func sedIsReadOnly(args []string) bool {
 	// any script with those letters is coarse; it is also the safe direction,
 	// and berth's own sed scripts (`1p`) do not contain them.
 	return !strings.ContainsAny(firstNonFlag(args), "we")
+}
+
+// sysctlIsReadOnly allows only `sysctl -n <key>...`. Checking a[0] alone is
+// not enough: -w/--write can follow -n, and the bare `key=value` form writes
+// the kernel parameter even WITHOUT -w, so any argument containing '=' is
+// rejected as well.
+func sysctlIsReadOnly(args []string) bool {
+	if len(args) < 1 || args[0] != "-n" || !noneOf(args, "-w", "--write") {
+		return false
+	}
+	for _, a := range args {
+		if strings.Contains(a, "=") {
+			return false
+		}
+	}
+	return true
 }
 
 // systemctlIsReadOnly allows only the query subcommands, taken from the FIRST
