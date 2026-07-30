@@ -74,6 +74,32 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{"sed -i s/a/b/ /etc/x", cmdRejected},
 		{"sed -n w/tmp/x /etc/hosts", cmdRejected},
 
+		// The locale pin berth's parsers use (stat %F and id output are
+		// localized). Only the exact LC_ALL=C token is stripped; the rest is
+		// judged normally, so the pin can never bless a mutation — and no other
+		// assignment is stripped, because a variable like PATH changes WHAT
+		// runs, not how it prints.
+		{"LC_ALL=C stat -c '%U %u %F' '/var/www/app.example.com'", cmdReadOnly},
+		{"LC_ALL=C id -nG appuser", cmdReadOnly},
+		{"LC_ALL=C rm -f /x", cmdRejected},
+		{"LC_ALL=C", cmdRejected},
+		{"PATH=/tmp cat /etc/hosts", cmdRejected},
+
+		// ufw: only the bare status query reads; every other subcommand
+		// (allow, enable, delete…) rewrites rules, so the shape is pinned to
+		// exactly ["status"].
+		{"ufw status", cmdReadOnly},
+		{"ufw status verbose", cmdRejected},
+		{"ufw allow 80,443/tcp", cmdRejected},
+		{"ufw --force enable", cmdRejected},
+
+		// passwd: -S prints status metadata (never a hash); everything else —
+		// including the bare form, -l and -u — changes credentials.
+		{"passwd -S berth", cmdReadOnly},
+		{"passwd -l berth", cmdRejected},
+		{"passwd berth", cmdRejected},
+		{"passwd -S", cmdRejected},
+
 		// Subcommand matching must be POSITIONAL, not "any argument token".
 		{"systemctl start cat", cmdRejected},
 		{"hostnamectl set-hostname status", cmdRejected},
@@ -364,6 +390,10 @@ var simpleShapes = []simpleShape{
 	{verb: "hostnamectl", allow: func(a []string) bool { return firstNonFlag(a) == "status" || firstNonFlag(a) == "" }, verdict: cmdReadOnly},
 	{verb: "swapon", allow: func(a []string) bool { return len(a) == 1 && a[0] == "--show" }, verdict: cmdReadOnly},
 	{verb: "sysctl", allow: sysctlIsReadOnly, verdict: cmdReadOnly},
+	{verb: "ufw", allow: func(a []string) bool { return len(a) == 1 && a[0] == "status" }, verdict: cmdReadOnly,
+		why: "only the bare status query reads; allow/enable/delete rewrite firewall rules"},
+	{verb: "passwd", allow: func(a []string) bool { return len(a) == 2 && a[0] == "-S" }, verdict: cmdReadOnly,
+		why: "passwd -S prints status metadata; every other mode changes credentials"},
 	{verb: "command", allow: func(a []string) bool { return len(a) == 2 && a[0] == "-v" }, verdict: cmdReadOnly},
 	{verb: "openssl", allow: opensslX509IsReadOnly, verdict: cmdReadOnly,
 		why: "every spelling of -out creates and truncates its file even under -noout (verified on OpenSSL 3.6.3)"},
@@ -510,6 +540,15 @@ func classifySimple(cmd string) (cmdVerdict, string) {
 		return cmdRejected, "empty command"
 	}
 	verb, args := fields[0], fields[1:]
+	// The locale pin berth's probes use so parsed output is stable (%F file
+	// types and id's messages are localized). The assignment itself mutates
+	// nothing; the command behind it is judged normally, so the pin can never
+	// launder a mutation. ONLY this exact token is stripped: any other
+	// assignment (PATH=…, IFS=…) changes what runs rather than how it prints,
+	// and stays an unknown verb.
+	if verb == "LC_ALL=C" && len(args) > 0 {
+		return classifySimple(strings.Join(args, " "))
+	}
 	// An absolute or relative path is NOT trusted by its basename: /tmp/cat is
 	// not cat. Only a bare verb name may match the tables.
 	if strings.ContainsRune(verb, '/') {
