@@ -28,6 +28,14 @@ func TestLastFired(t *testing.T) {
 		// they do not AND. Getting this backwards silently doubles or halves
 		// the computed cadence.
 		{"dom and dow are ORed", "0 4 1 * 0", at(2026, 7, 29, 9, 0), at(2026, 7, 26, 4, 0), true},
+		// Vixie: `*/2` starts with `*`, so it does NOT flip the day rule to OR —
+		// but its value set still restricts the day. Asked on an even day, the
+		// previous firing is the day before (an odd day), not the same morning.
+		{"step day-of-month skips even days", "0 4 */2 * *", at(2026, 7, 28, 9, 0), at(2026, 7, 27, 4, 0), true},
+		// dom `*/2` (star-prefixed) ANDs with dow `1`: fires only on Mondays
+		// falling on odd days. Jul 20 2026 is a Monday but an even day, so the
+		// previous firing is Monday Jul 13.
+		{"step dom ANDed with dow", "0 4 */2 * 1", at(2026, 7, 20, 9, 0), at(2026, 7, 13, 4, 0), true},
 		{"unparseable spec", "not a cron", at(2026, 7, 29, 9, 0), time.Time{}, false},
 		{"wrong field count", "30 3 * *", at(2026, 7, 29, 9, 0), time.Time{}, false},
 		{"out of range value", "99 3 * * *", at(2026, 7, 29, 9, 0), time.Time{}, false},

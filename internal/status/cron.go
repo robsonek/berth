@@ -55,9 +55,10 @@ func LastFired(spec string, now time.Time) (time.Time, bool) {
 	if sets[4][7] { // normalise Sunday-as-7 onto Go's Weekday numbering
 		sets[4][0] = true
 	}
-	// "Restricted" per crontab(5) means the field does not START with `*` —
-	// not `field != "*"`. `*/2` in day-of-month is a restriction and must
-	// participate in the dom/dow OR rule.
+	// "Restricted" per Vixie cron means the field does not START with `*` —
+	// not `field != "*"`. The star prefix only decides OR-vs-AND between the
+	// day fields in cronMatches; the field's value set always applies, so a
+	// star-prefixed `*/2` in day-of-month still restricts the day.
 	domRestricted := !strings.HasPrefix(fields[2], "*")
 	dowRestricted := !strings.HasPrefix(fields[4], "*")
 	t := now.Truncate(time.Minute)
@@ -70,24 +71,25 @@ func LastFired(spec string, now time.Time) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// cronMatches reports whether t satisfies the parsed field sets. When BOTH
-// day-of-month and day-of-week are restricted they are ORed, per POSIX cron —
-// ANDing them would silently misreport the cadence.
+// cronMatches reports whether t satisfies the parsed field sets. The day
+// fields are ORed only when BOTH are restricted (neither starts with `*`),
+// per Vixie/Debian cron; otherwise they are ANDed, and the value sets apply
+// in both branches. Getting this rule backwards silently misreports the
+// cadence.
 func cronMatches(t time.Time, sets [5]map[int]bool, domRestricted, dowRestricted bool) bool {
 	if !sets[0][t.Minute()] || !sets[1][t.Hour()] || !sets[3][int(t.Month())] {
 		return false
 	}
 	dom, dow := sets[2][t.Day()], sets[4][int(t.Weekday())]
-	switch {
-	case domRestricted && dowRestricted:
+	// Vixie/Debian semantics: the day fields are ORed only when NEITHER starts
+	// with `*`; otherwise they are ANDed. `*/2` starts with `*`, so it takes the
+	// AND branch — but its bitmask still restricts the day, which is why the set
+	// must be consulted in both branches. Discarding it made an every-other-day
+	// schedule read as daily.
+	if domRestricted && dowRestricted {
 		return dom || dow
-	case domRestricted:
-		return dom
-	case dowRestricted:
-		return dow
-	default:
-		return true
 	}
+	return dom && dow
 }
 
 // parseCronField expands one comma-separated field into the set of values it
