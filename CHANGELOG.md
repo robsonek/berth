@@ -3,6 +3,19 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Added
+
+- `berth status`: read-only fleet view — drift, TLS expiry, backup freshness,
+  service health and disk across every server config, as an interactive TUI
+  with `--json` and plain-table output. It never changes a server's
+  configuration, data, packages, services or certificates; `--drift` runs the
+  same validators provisioning runs (`nginx -t` can create a missing log file).
+  Trust-on-first-use is disabled for the sweep.
+- `apt`: the keyring fingerprint probe no longer initialises root's GnuPG home
+  (`pubring.kbx`/`trustdb.gpg` were created on every run by a read-only check).
+
 ## [0.28.0] — 2026-07-30
 
 ### Added
