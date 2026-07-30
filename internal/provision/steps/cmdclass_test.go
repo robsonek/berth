@@ -48,6 +48,20 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{"hostname -F /etc/hostname", cmdRejected},
 		{"sort /etc/hosts", cmdReadOnly},
 		{"sort -o /tmp/out /etc/hosts", cmdRejected},
+
+		// Getopt spellings — glued values (--set=@0, -F/path), short-option
+		// bundles (-bF, -us) and abbreviated long options (--se) — must not
+		// bypass the writing-flag denylists the way exact tokens once did.
+		{"date --set=@0", cmdRejected},
+		{"date --se=@0", cmdRejected},
+		{"date -us @0", cmdRejected},
+		{"hostname --file=/etc/hostname", cmdRejected},
+		{"hostname -F/etc/hostname", cmdRejected},
+		{"hostname -bF /etc/hostname", cmdRejected},
+		{"hostname -y example", cmdRejected},
+		{"sort --output=/tmp/x /etc/hosts", cmdRejected},
+		{"tail -n 5 /var/log/x", cmdReadOnly},
+		{"tail -F /var/log/x", cmdRejected},
 		{"logrotate -d /etc/logrotate.d/berth", cmdReadOnly},
 		{"logrotate -f /etc/logrotate.conf", cmdRejected},
 		{"fail2ban-client -t", cmdReadOnly},
@@ -67,6 +81,9 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{"sysctl -n vm.swappiness", cmdReadOnly},
 		{"sysctl -n -w vm.swappiness=1", cmdRejected},
 		{"sysctl vm.swappiness=1", cmdRejected},
+		{"sysctl -n -p /etc/sysctl.conf", cmdRejected},
+		{"sysctl -n --system", cmdRejected},
+		{"sysctl -n --load=/etc/sysctl.conf", cmdRejected},
 		{"openssl x509 -noout -in /etc/ssl/cert.pem", cmdReadOnly},
 		{"openssl x509 -noout -out /tmp/x -in /etc/ssl/cert.pem", cmdRejected},
 
@@ -239,6 +256,52 @@ func noneOf(args []string, toks ...string) bool {
 	return true
 }
 
+// mentionsFlag reports whether args mentions any of the given flags in a
+// spelling getopt accepts. Exact-token matching proved bypassable by ordinary
+// spellings — `--set=@0`, `-F/etc/hostname` and the bundle `-bF` all slipped
+// past noneOf — so every denylisted WRITING flag must be matched here instead.
+//
+// Matching by flag shape:
+//   - a long flag (--file) matches the exact token, the glued form
+//     (--file=/x), and any >=3-char prefix abbreviation with or without a
+//     glued value (--fil, --fil=/x) — getopt_long accepts unique
+//     abbreviations. Prefix matching can over-reject an ambiguous
+//     abbreviation the tool itself would refuse, which is the safe direction.
+//   - a single-letter short flag (-F) matches any single-dash token whose
+//     letters include it: the exact -F, the glued -F/x and the bundle -bF
+//     are one and the same match.
+//   - a single-dash multi-letter flag (-out, -delete) matches exactly: that
+//     spelling belongs to non-getopt CLIs (openssl, find) which accept
+//     neither glue nor bundles, and letter-matching would falsely hit reads
+//     such as openssl's -noout.
+func mentionsFlag(args []string, flags ...string) bool {
+	for _, a := range args {
+		for _, f := range flags {
+			if flagMatches(a, f) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// flagMatches implements mentionsFlag for one (argument, flag) pair.
+func flagMatches(arg, flag string) bool {
+	switch {
+	case strings.HasPrefix(flag, "--"): // getopt long flag
+		if !strings.HasPrefix(arg, "--") {
+			return false
+		}
+		name, _, _ := strings.Cut(arg, "=")
+		return len(name) > 2 && strings.HasPrefix(flag, name)
+	case len(flag) == 2: // getopt short flag: -X
+		return len(arg) >= 2 && arg[0] == '-' && arg[1] != '-' &&
+			strings.ContainsRune(arg[1:], rune(flag[1]))
+	default: // non-getopt single-dash word: -out, -delete
+		return arg == flag
+	}
+}
+
 // simpleShapes is the whole table-judged surface. Every entry is an EXACT
 // predicate rather than a bare verb: a review found that verb-only allowlisting
 // blessed `date -s @0`, `hostname changed.example`, `sort -o /tmp/out`,
@@ -254,21 +317,19 @@ var simpleShapes = []simpleShape{
 	{verb: "df", allow: func([]string) bool { return true }, verdict: cmdReadOnly},
 	{verb: "wc", allow: func([]string) bool { return true }, verdict: cmdReadOnly},
 	{verb: "head", allow: func([]string) bool { return true }, verdict: cmdReadOnly},
-	{verb: "tail", allow: func(a []string) bool { return noneOf(a, "-f", "--follow") }, verdict: cmdReadOnly,
-		why: "-f would block forever, which is a hang rather than a write, but still forbidden"},
+	{verb: "tail", allow: func(a []string) bool { return !mentionsFlag(a, "-f", "-F", "--follow") }, verdict: cmdReadOnly,
+		why: "-f/-F would follow forever, which is a hang rather than a write, but still forbidden"},
 	{verb: "readlink", allow: func([]string) bool { return true }, verdict: cmdReadOnly},
 	{verb: "basename", allow: func([]string) bool { return true }, verdict: cmdReadOnly},
 	{verb: "dirname", allow: func([]string) bool { return true }, verdict: cmdReadOnly},
 
 	// Verbs with a writing mode: the predicate must exclude it.
-	{verb: "date", allow: func(a []string) bool { return noneOf(a, "-s", "--set") }, verdict: cmdReadOnly,
-		why: "date -s sets the system clock"},
-	{verb: "hostname", allow: func(a []string) bool {
-		return (len(a) == 0 || strings.HasPrefix(a[0], "-")) && noneOf(a, "-F", "--file", "-b", "--boot")
-	}, verdict: cmdReadOnly,
-		why: "hostname <name> sets the hostname, and so do -F/--file and -b/--boot"},
-	{verb: "sort", allow: func(a []string) bool { return noneOf(a, "-o", "--output") }, verdict: cmdReadOnly,
-		why: "sort -o writes a file"},
+	{verb: "date", allow: func(a []string) bool { return !mentionsFlag(a, "-s", "--set") }, verdict: cmdReadOnly,
+		why: "date -s/--set sets the system clock"},
+	{verb: "hostname", allow: hostnameIsReadOnly, verdict: cmdReadOnly,
+		why: "hostname <name>, -F/--file, -b/--boot and -y/--yp/--nis all set names"},
+	{verb: "sort", allow: func(a []string) bool { return !mentionsFlag(a, "-o", "--output") }, verdict: cmdReadOnly,
+		why: "sort -o/--output writes a file"},
 	{verb: "grep", allow: func([]string) bool { return true }, verdict: cmdReadOnly},
 	{verb: "printf", allow: func([]string) bool { return true }, verdict: cmdReadOnly},
 	{verb: "echo", allow: func([]string) bool { return true }, verdict: cmdReadOnly},
@@ -283,7 +344,7 @@ var simpleShapes = []simpleShape{
 	// read-only in their check-only shape ONLY.
 	{verb: "sshd", allow: func(a []string) bool { return hasExact(a, "-T") }, verdict: cmdReadOnly},
 	{verb: "visudo", allow: func(a []string) bool { return hasExact(a, "-cf") || (hasExact(a, "-c") && hasExact(a, "-f")) }, verdict: cmdReadOnly},
-	{verb: "logrotate", allow: func(a []string) bool { return hasExact(a, "-d") && noneOf(a, "-f", "--force") }, verdict: cmdReadOnly},
+	{verb: "logrotate", allow: func(a []string) bool { return hasExact(a, "-d") && !mentionsFlag(a, "-f", "--force") }, verdict: cmdReadOnly},
 	{verb: "fail2ban-client", allow: func(a []string) bool { return hasExact(a, "-t") && firstNonFlag(a) == "" }, verdict: cmdReadOnly},
 
 	// The two exceptions: allowed, but they WRITE (spec §4.2).
@@ -299,6 +360,10 @@ var simpleShapes = []simpleShape{
 	{verb: "swapon", allow: func(a []string) bool { return len(a) == 1 && a[0] == "--show" }, verdict: cmdReadOnly},
 	{verb: "sysctl", allow: sysctlIsReadOnly, verdict: cmdReadOnly},
 	{verb: "command", allow: func(a []string) bool { return len(a) == 2 && a[0] == "-v" }, verdict: cmdReadOnly},
+	// openssl's CLI is not getopt: its flags are single-dash words (-noout,
+	// -in), glue and bundling do not exist as spellings, and mentionsFlag's
+	// bundle rule for "-o" would falsely match the read flag -noout. Exact
+	// tokens are the complete spelling set here, so noneOf stays.
 	{verb: "openssl", allow: func(a []string) bool {
 		return len(a) >= 1 && a[0] == "x509" && hasExact(a, "-noout") && noneOf(a, "-out", "-o")
 	}, verdict: cmdReadOnly,
@@ -332,12 +397,26 @@ func sedIsReadOnly(args []string) bool {
 	return !strings.ContainsAny(firstNonFlag(args), "we")
 }
 
+// hostnameIsReadOnly: hostname writes when given ANY non-flag argument (the
+// new name to set), via -F/--file (name read from a file), -b/--boot, or
+// -y/--yp/--nis (sets the NIS domain when given a value). So every argument
+// must be a flag, and none may mention a writing one in any getopt spelling.
+func hostnameIsReadOnly(args []string) bool {
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			return false
+		}
+	}
+	return !mentionsFlag(args, "-F", "--file", "-b", "--boot", "-y", "--yp", "--nis")
+}
+
 // sysctlIsReadOnly allows only `sysctl -n <key>...`. Checking a[0] alone is
-// not enough: -w/--write can follow -n, and the bare `key=value` form writes
-// the kernel parameter even WITHOUT -w, so any argument containing '=' is
-// rejected as well.
+// not enough: -w/--write can follow -n, -p/--load/--system apply a config
+// file (writing kernel parameters), and the bare `key=value` form writes
+// even WITHOUT -w, so any argument containing '=' is rejected as well.
 func sysctlIsReadOnly(args []string) bool {
-	if len(args) < 1 || args[0] != "-n" || !noneOf(args, "-w", "--write") {
+	if len(args) < 1 || args[0] != "-n" ||
+		mentionsFlag(args, "-w", "--write", "-p", "--load", "--system") {
 		return false
 	}
 	for _, a := range args {
@@ -358,13 +437,16 @@ func systemctlIsReadOnly(args []string) bool {
 	return false
 }
 
-// findMutators are the predicates that act instead of reporting.
+// findMutators are the predicates that act instead of reporting. find's
+// predicates are non-getopt single-dash words, so mentionsFlag degrades to
+// exact matching for every one of them by design — glued and bundled
+// spellings do not exist for find.
 var findMutators = []string{
 	"-delete", "-exec", "-execdir", "-ok", "-okdir",
 	"-fls", "-fprint", "-fprint0", "-fprintf",
 }
 
-func findIsReadOnly(args []string) bool { return noneOf(args, findMutators...) }
+func findIsReadOnly(args []string) bool { return !mentionsFlag(args, findMutators...) }
 
 // gpgIsReadOnly requires the EXACT flag set that was measured to write nothing.
 // A review pointed out that accepting any gpg command containing --no-options
@@ -377,8 +459,9 @@ func gpgIsReadOnly(args []string) bool {
 			return false
 		}
 	}
-	// Nothing that writes may be present alongside them.
-	return noneOf(args, "--export", "--import", "--output", "-o", "--dearmor", "--gen-key", "--batch-key")
+	// Nothing that writes may be present alongside them, in any spelling
+	// (gpg also accepts glued values and abbreviated long options).
+	return !mentionsFlag(args, "--export", "--import", "--output", "-o", "--dearmor", "--gen-key", "--batch-key")
 }
 
 // classifySimple judges a metacharacter-free command by the shape tables.
