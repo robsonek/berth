@@ -85,11 +85,15 @@ func TestProbeServicesParsesActiveAndEnabled(t *testing.T) {
 		"mariadb\tinactive\tenabled\n" +
 		"fail2ban\tactive\tdisabled\n" +
 		"cron\tactive\tenabled\n" +
+		"ssh\tactive\tenabled\n" +
 		"berth-valkey-app_example_com.service\t\t\n"})
 
-	got, err := probeServices(context.Background(), f, s)
+	got, warn, err := probeServices(context.Background(), f, s)
 	if err != nil {
 		t.Fatalf("probeServices: %v", err)
+	}
+	if warn != nil {
+		t.Fatalf("warn = %v, want none for a complete answer", warn)
 	}
 	byName := map[string]Service{}
 	for _, sv := range got {
@@ -107,6 +111,74 @@ func TestProbeServicesParsesActiveAndEnabled(t *testing.T) {
 	}
 }
 
+// Output carrying only SOME of the requested units (exit 0) is an incomplete
+// answer, not a smaller server: every requested unit must still appear, in the
+// request order, with the unanswered ones reading as down — and the truncation
+// must be reported so it reaches the exit code.
+func TestProbeServicesReportsMissingUnits(t *testing.T) {
+	s := srvFixture()
+	units := unitList(s)
+	f := bssh.NewFakeRunner().On(servicesCmd(units), bssh.Result{Stdout: "" +
+		"nginx\tactive\tenabled\n" +
+		"cron\tactive\tenabled\n"})
+
+	got, warn, err := probeServices(context.Background(), f, s)
+	if err != nil {
+		t.Fatalf("a truncated answer is degraded, not fatal: %v", err)
+	}
+	if len(got) != len(units) {
+		t.Fatalf("got %d entries, want all %d requested units", len(got), len(units))
+	}
+	// The order is the REQUEST order, so the rendered table never shuffles.
+	for i, u := range units {
+		if got[i].Name != u {
+			t.Errorf("unit[%d] = %q, want %q", i, got[i].Name, u)
+		}
+	}
+	for _, sv := range got {
+		if sv.Name != "nginx" && sv.Name != "cron" && (sv.Active || sv.Enabled) {
+			t.Errorf("unanswered unit %q = %+v, must read as down", sv.Name, sv)
+		}
+	}
+	if warn == nil || !strings.Contains(warn.Error(), "ssh") {
+		t.Errorf("warn = %v, want the missing units named", warn)
+	}
+}
+
+// A duplicate row could carry conflicting states and an unexpected row is not
+// something this probe asked about: both are anomalies to report, never to
+// silently fold into the result.
+func TestProbeServicesRejectsDuplicateAndUnexpectedRows(t *testing.T) {
+	s := srvFixture()
+	units := unitList(s)
+	var rows strings.Builder
+	for _, u := range units {
+		rows.WriteString(u + "\tactive\tenabled\n")
+	}
+	rows.WriteString("nginx\tinactive\tdisabled\n") // duplicate, conflicting
+	rows.WriteString("rogue\tactive\tenabled\n")    // never requested
+	f := bssh.NewFakeRunner().On(servicesCmd(units), bssh.Result{Stdout: rows.String()})
+
+	got, warn, err := probeServices(context.Background(), f, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(units) {
+		t.Fatalf("got %d entries, want %d", len(got), len(units))
+	}
+	if !got[0].Active || !got[0].Enabled {
+		t.Errorf("nginx = %+v, want the FIRST row kept, not the duplicate", got[0])
+	}
+	for _, sv := range got {
+		if sv.Name == "rogue" {
+			t.Error("an unexpected row must not enter the result")
+		}
+	}
+	if warn == nil || !strings.Contains(warn.Error(), "duplicate") || !strings.Contains(warn.Error(), "rogue") {
+		t.Errorf("warn = %v, want both anomalies named", warn)
+	}
+}
+
 // A non-zero exit is data, not a Go error (Runner contract). If the command
 // itself fails — sudo denied on a half-broken host — the probe must return an
 // error, not an empty slice that renders as a clean-looking blank at exit 0.
@@ -115,7 +187,7 @@ func TestProbeServicesFailsOnNonZeroExit(t *testing.T) {
 	f := bssh.NewFakeRunner().On(servicesCmd(unitList(s)),
 		bssh.Result{ExitCode: 1, Stderr: "sudo: a password is required\n"})
 
-	got, err := probeServices(context.Background(), f, s)
+	got, _, err := probeServices(context.Background(), f, s)
 	if err == nil {
 		t.Fatalf("probeServices = %v, want error on exit 1", got)
 	}

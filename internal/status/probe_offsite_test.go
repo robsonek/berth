@@ -27,6 +27,36 @@ func TestProbeOffsiteLatestSnapshot(t *testing.T) {
 	}
 }
 
+// restic's --latest 1 groups by (hostname, paths): a repository holding
+// snapshots for this host id under a DIFFERENT path returns one object per
+// group. Blindly taking the first let an unrelated backup stand in for a
+// missing berth snapshot; the newest must win.
+func TestProbeOffsitePicksNewestSnapshot(t *testing.T) {
+	f := bssh.NewFakeRunner().On(offsiteCmd("prod", ""), bssh.Result{Stdout: `[` +
+		`{"time":"2026-07-25T04:15:11Z","short_id":"aaaaaa"},` +
+		`{"time":"2026-07-29T04:15:11Z","short_id":"bbbbbb"}]` + "\n"})
+	got, err := probeOffsite(context.Background(), f, "prod", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SnapshotID != "bbbbbb" {
+		t.Errorf("SnapshotID = %q, want the newest snapshot bbbbbb", got.SnapshotID)
+	}
+	want := time.Date(2026, 7, 29, 4, 15, 11, 0, time.UTC)
+	if got.LastSnapshot == nil || !got.LastSnapshot.Equal(want) {
+		t.Errorf("LastSnapshot = %v, want %s", got.LastSnapshot, want)
+	}
+}
+
+// The query must be scoped to the path berth actually backs up
+// (offsite.sh.tmpl runs `restic backup /var/backups/berth`): without --path,
+// any other backup of the same host id can supply the "latest" snapshot.
+func TestProbeOffsiteCommandScopesToBerthPath(t *testing.T) {
+	if cmd := offsiteCmd("prod", ""); !strings.Contains(cmd, "--path '/var/backups/berth'") {
+		t.Errorf("offsiteCmd must scope the query to berth's backup path:\n%s", cmd)
+	}
+}
+
 // NOENV means the host env file is missing or unreadable. The caller only
 // probes when the CONFIG declares offsite, so this is a real discrepancy —
 // berth was told to back up offsite and the host is not set up for it — and it

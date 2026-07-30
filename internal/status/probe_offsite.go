@@ -23,6 +23,10 @@ import (
 // managed backup script applies (offsite.sh.tmpl's `--host {{.HostID}}`);
 // without it a shared repository returns other servers' snapshots and the
 // parser would happily report one of those as this host's latest backup.
+// --path narrows it further to what berth actually backs up (offsite.sh.tmpl
+// runs `restic backup` on backupBaseDir): restic groups `--latest 1` by
+// (hostname, paths), so same-host snapshots under a DIFFERENT path form their
+// own group and an unrelated backup could stand in for a missing berth one.
 //
 // The host ID is passed in from the config rather than read from a shell
 // variable: it is not a secret, it is known locally, and assuming the env file
@@ -42,7 +46,7 @@ import (
 // derivations are single-sourced. Do not re-derive the option string here.
 func offsiteCmd(hostID, resticOpts string) string {
 	return `if [ -r ` + config.OffsiteEnvPath + ` ]; then set -a; . ` + config.OffsiteEnvPath + `; set +a; ` +
-		`restic` + resticOpts + ` --no-cache --no-lock snapshots --latest 1 --host '` + hostID + `' --json 2>/dev/null || echo FAILED; ` +
+		`restic` + resticOpts + ` --no-cache --no-lock snapshots --latest 1 --host '` + hostID + `' --path '` + backupBaseDir + `' --json 2>/dev/null || echo FAILED; ` +
 		`else echo NOENV; fi`
 }
 
@@ -76,9 +80,18 @@ func probeOffsite(ctx context.Context, r bssh.Runner, hostID, resticOpts string)
 	if json.Unmarshal([]byte(out), &snaps) != nil {
 		st.Error = "unreadable restic output"
 	} else if len(snaps) > 0 {
-		t := snaps[0].Time.UTC()
+		// Defensive: --host + --path should leave one group, but restic emits
+		// one object PER (hostname, paths) group, so if several still come
+		// back the newest wins — never whichever happened to be first.
+		newest := snaps[0]
+		for _, sn := range snaps[1:] {
+			if sn.Time.After(newest.Time) {
+				newest = sn
+			}
+		}
+		t := newest.Time.UTC()
 		st.LastSnapshot = &t
-		st.SnapshotID = snaps[0].ShortID
+		st.SnapshotID = newest.ShortID
 	}
 	return st, nil
 }

@@ -206,6 +206,83 @@ func TestFleetTableServicesColumnCountsDownUnits(t *testing.T) {
 	}
 }
 
+// An expired certificate must survive a healthier site listed after it: the
+// old -1 "unset" sentinel could not tell "no minimum yet" from a genuinely
+// negative minimum, so a later site's 60 days overwrote the -5 and the cell
+// read "min 60d" — an expired certificate rendered as healthy.
+func TestFleetTableExpiredCertSurvivesAHealthierSite(t *testing.T) {
+	h := hostFixture()
+	expired, healthy := -5, 60
+	h.Sites = []status.SiteStatus{
+		{Domain: "old.example.com", Cert: status.CertStatus{Mode: "letsencrypt", Present: true, DaysLeft: &expired}},
+		{Domain: "app.example.com", Cert: status.CertStatus{Mode: "letsencrypt", Present: true, DaysLeft: &healthy}},
+	}
+	var buf bytes.Buffer
+	if err := WriteFleetTable(&buf, []status.HostStatus{h}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "min -5d") || !strings.Contains(out, "!!") {
+		t.Errorf("the expired certificate must set the minimum and the critical marker:\n%s", out)
+	}
+	if strings.Contains(out, "min 60d") {
+		t.Errorf("a healthier site must not mask the expired one:\n%s", out)
+	}
+}
+
+// A timestamp AHEAD of the host clock is an anomaly — a skewed clock or a
+// foreign file — and it used to satisfy d < time.Minute, rendering as the
+// reassuring "just now".
+func TestFleetTableFutureBackupIsNotJustNow(t *testing.T) {
+	h := hostFixture()
+	future := h.HostTime.Add(45 * time.Second)
+	h.Sites[0].Backup.Newest = &future
+	var buf bytes.Buffer
+	if err := WriteFleetTable(&buf, []status.HostStatus{h}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "just now") {
+		t.Errorf("a future timestamp must not render as freshly backed up:\n%s", out)
+	}
+	if !strings.Contains(out, "FUTURE") {
+		t.Errorf("a future timestamp must render as unmistakably odd:\n%s", out)
+	}
+}
+
+// A successful --offsite answer must be visible in the plain table, not only
+// in --json and the TUI: without it a piped `berth status --offsite` was
+// byte-identical to a run without the flag whenever the query succeeded. The
+// answer rides a continuation row because the eight-column header is a fixed
+// shape every row matches.
+func TestFleetTableRendersOffsite(t *testing.T) {
+	at := hostFixture().HostTime
+	snap := at.Add(-3 * time.Hour)
+	for name, tc := range map[string]struct {
+		offsite *status.OffsiteStatus
+		want    []string
+	}{
+		"snapshot":       {&status.OffsiteStatus{Configured: true, LastSnapshot: &snap, SnapshotID: "a91f2c"}, []string{"offsite", "3h ago", "a91f2c"}},
+		"no snapshot":    {&status.OffsiteStatus{Configured: true}, []string{"offsite", "NO SNAPSHOTS"}},
+		"not configured": {&status.OffsiteStatus{Error: "no /etc/berth/offsite.env on the host"}, []string{"offsite", "NOT SET UP", "offsite.env"}},
+		"failure":        {&status.OffsiteStatus{Configured: true, Error: "restic could not read the repository"}, []string{"offsite", "FAILED", "could not read"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := hostFixture()
+			h.Offsite = tc.offsite
+			var buf bytes.Buffer
+			if err := WriteFleetTable(&buf, []status.HostStatus{h}); err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(buf.String(), want) {
+					t.Errorf("missing %q:\n%s", want, buf.String())
+				}
+			}
+		})
+	}
+}
+
 // The reassuring number must not win: with one fresh and one ancient site the
 // cell reports the OLDEST.
 func TestFleetTableBackupReportsOldestSite(t *testing.T) {

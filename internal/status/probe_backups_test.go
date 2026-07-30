@@ -103,8 +103,9 @@ func TestProbeBackupsEmptyDirectoryIsNotAnError(t *testing.T) {
 // still pass if backupsCmd regressed to picking the newest arbitrary file,
 // because the stub controls the 4th column either way.
 func TestBackupsCmdTakesFreshnessFromTheSidecar(t *testing.T) {
+	const sidecarName = `-name "$(basename "$d")-meta-*.manifest"`
 	cmd := backupsCmd([]string{"/var/backups/berth/app_example_com"})
-	if !strings.Contains(cmd, "-name '*-meta-*.manifest'") {
+	if !strings.Contains(cmd, sidecarName) {
 		t.Errorf("freshness must come from the completion sidecar:\n%s", cmd)
 	}
 	// The %T@ selection must be the sidecar find, not the general one.
@@ -112,12 +113,25 @@ func TestBackupsCmdTakesFreshnessFromTheSidecar(t *testing.T) {
 	if i < 0 {
 		t.Fatalf("no mtime selection in:\n%s", cmd)
 	}
-	if !strings.Contains(cmd[:i], "-name '*-meta-*.manifest'") {
+	if !strings.Contains(cmd[:i], sidecarName) {
 		t.Errorf("the mtime column is not taken from the sidecar find:\n%s", cmd)
 	}
 	// Half-written artifacts must not even be counted.
 	if !strings.Contains(cmd, "! -name '.tmp-*'") {
 		t.Errorf("in-progress .tmp-* artifacts must be excluded:\n%s", cmd)
+	}
+}
+
+// The sidecar pattern must be scoped to the directory's OWN pool: a foreign
+// `other-meta-*.manifest` parked in the directory must not supply freshness
+// for a backup that never completed.
+func TestBackupsCmdScopesSidecarToOwnPool(t *testing.T) {
+	cmd := backupsCmd([]string{"/var/backups/berth/app_example_com"})
+	if strings.Contains(cmd, "'*-meta-*.manifest'") {
+		t.Errorf("the sidecar find accepts any pool's sidecar:\n%s", cmd)
+	}
+	if !strings.Contains(cmd, `-name "$(basename "$d")-meta-*.manifest"`) {
+		t.Errorf("the sidecar pattern must derive from the directory's own pool:\n%s", cmd)
 	}
 }
 

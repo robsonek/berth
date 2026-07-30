@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,7 +22,15 @@ func stubHost(s *config.Server) *bssh.FakeRunner {
 		"# managed by berth\nVERSION=0.27.1\nPROVISIONED_AT=2026-07-21T09:14:02Z\n---\n" +
 		"Filesystem 1B-blocks Used Available Capacity Mounted on\n" +
 		"/dev/vda1 41000000000 16000000000 22000000000 41% /\n"})
-	f.On(servicesCmd(unitList(s)), bssh.Result{Stdout: "nginx\tactive\tenabled\nssh\tactive\tenabled\n"})
+	// The services answer is derived from the requested unit list so it is
+	// COMPLETE for whatever server this fixture stubs: probeServices now
+	// flags an answer missing requested units, and a truncated fixture would
+	// plant that probe error in every test built on this stub.
+	var rows strings.Builder
+	for _, u := range unitList(s) {
+		rows.WriteString(u + "\tactive\tenabled\n")
+	}
+	f.On(servicesCmd(unitList(s)), bssh.Result{Stdout: rows.String()})
 	f.On(certsCmd([]string{"/etc/letsencrypt/live/app.example.com/fullchain.pem"}), bssh.Result{
 		Stdout: "/etc/letsencrypt/live/app.example.com/fullchain.pem\tnotAfter=Sep 28 07:31:00 2026 GMT\n"})
 	f.On(backupsCmd([]string{"/var/backups/berth/app_example_com"}), bssh.Result{
@@ -120,6 +129,60 @@ func TestCollectHostKeepsConfigFactsWhenProbesFail(t *testing.T) {
 	}
 	if site.Backup.Newest != nil || site.Backup.Count != 0 {
 		t.Errorf("backup facts the probe never delivered must stay unknown: %+v", site.Backup)
+	}
+}
+
+// df can fail for one operand (a broken /var mount) while printing a valid
+// row for the other. The parsed rows must be kept — they are real data — but
+// the host was NOT fully probed, and the failure must reach ProbeErrors and
+// with it the exit code, instead of rendering a reassuring root percentage.
+func TestCollectHostPartialHostMetaFailureIsRecorded(t *testing.T) {
+	s := collectSrv()
+	f := stubHost(s)
+	f.On(hostMetaCmd, bssh.Result{ExitCode: 1, Stdout: "1785060000\n+0000\n---\n" +
+		"# managed by berth\nVERSION=0.27.1\nPROVISIONED_AT=2026-07-21T09:14:02Z\n---\n" +
+		"Filesystem 1B-blocks Used Available Capacity Mounted on\n" +
+		"/dev/vda1 41000000000 16000000000 22000000000 41% /\n"})
+
+	got := CollectHost(context.Background(), "servers/prod.yml", s, f, nil, nil, false)
+	if !got.Reachable {
+		t.Fatalf("host = %+v, want reachable — a partial df is not a dead host", got)
+	}
+	if len(got.Disk) != 1 || got.Disk[0].Path != "/" {
+		t.Errorf("disk = %+v, want the successfully parsed row kept", got.Disk)
+	}
+	var found bool
+	for _, pe := range got.ProbeErrors {
+		if strings.Contains(pe, "host") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ProbeErrors = %v, want the df failure recorded", got.ProbeErrors)
+	}
+}
+
+// systemctl answering for only SOME of the requested units (at exit 0) is an
+// incomplete answer, not a smaller server: every requested unit must still
+// appear (an unanswered unit reads as down), and the truncation must reach
+// ProbeErrors — otherwise the table says "1 ok" for a seven-unit server.
+func TestCollectHostReportsTruncatedServicesAnswer(t *testing.T) {
+	s := collectSrv()
+	f := stubHost(s)
+	f.On(servicesCmd(unitList(s)), bssh.Result{Stdout: "nginx\tactive\tenabled\n"})
+
+	got := CollectHost(context.Background(), "servers/prod.yml", s, f, nil, nil, false)
+	if want := len(unitList(s)); len(got.Services) != want {
+		t.Errorf("services = %d entries, want all %d requested units", len(got.Services), want)
+	}
+	var found bool
+	for _, pe := range got.ProbeErrors {
+		if strings.Contains(pe, "services") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ProbeErrors = %v, want the truncated services answer recorded", got.ProbeErrors)
 	}
 }
 

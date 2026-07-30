@@ -54,8 +54,9 @@ berth status --json | jq '.hosts[] | select(any(.sites[]?; .cert.days_left < 30)
 ```
 
 `--drift` additionally runs the same validators provisioning runs. One of them,
-`nginx -t`, opens the configured log files and can create a missing one; that
-is the only host-visible effect the command has.
+`nginx -t`, opens the configured log files and can create a missing one. Beyond
+that, status never changes a host's configuration, data, packages, service
+state or certificates.
 
 Host-key verification is strict: only a pinned `ssh.fingerprint` or an existing
 `known_hosts` entry is accepted. There is no trust-on-first-use prompt, because

@@ -49,35 +49,67 @@ func splitSections(stdout string, n int) ([]string, bool) {
 	return parts, i == n-1
 }
 
-func probeHostMeta(ctx context.Context, r bssh.Runner) (time.Time, *Manifest, []Mount, error) {
+// hostMeta is one round trip's parsed answer. ProbeErr is a NON-FATAL
+// degradation: the command exited non-zero but still produced usable output —
+// df failing for one operand (a broken /var mount) while printing a valid row
+// for the other. The caller keeps the parsed facts AND records the failure:
+// hard-failing would discard good rows a partial df still prints, and
+// ignoring the exit code reported the host as successfully probed while its
+// disk figures were incomplete.
+type hostMeta struct {
+	HostTime time.Time
+	Manifest *Manifest
+	Disk     []Mount
+	ProbeErr error
+}
+
+func probeHostMeta(ctx context.Context, r bssh.Runner) (hostMeta, error) {
 	res, err := r.Run(ctx, hostMetaCmd, nil)
 	if err != nil {
-		return time.Time{}, nil, nil, err
+		return hostMeta{}, err
 	}
 	sections, ok := splitSections(res.Stdout, 3)
 	if !ok {
-		return time.Time{}, nil, nil, fmt.Errorf("host meta probe: unexpected output shape")
+		// A TOTAL failure (sudo denied, empty output) lands here: the section
+		// shape is broken, and that stays the hard error it always was.
+		return hostMeta{}, fmt.Errorf("host meta probe: unexpected output shape")
 	}
 	clock := strings.Fields(sections[0])
 	if len(clock) < 1 {
-		return time.Time{}, nil, nil, fmt.Errorf("read host clock: empty")
+		return hostMeta{}, fmt.Errorf("read host clock: empty")
 	}
 	epoch, err := strconv.ParseInt(clock[0], 10, 64)
 	if err != nil {
-		return time.Time{}, nil, nil, fmt.Errorf("read host clock: %w", err)
+		return hostMeta{}, fmt.Errorf("read host clock: %w", err)
 	}
 	// A missing or malformed offset is a MALFORMED PROBE, not a reason to
 	// silently assume UTC: falling back would reintroduce exactly the
 	// timezone bug this line exists to prevent, invisibly.
 	if len(clock) < 2 {
-		return time.Time{}, nil, nil, fmt.Errorf("read host timezone offset: missing")
+		return hostMeta{}, fmt.Errorf("read host timezone offset: missing")
 	}
 	off, ok := parseUTCOffset(clock[1])
 	if !ok {
-		return time.Time{}, nil, nil, fmt.Errorf("read host timezone offset: malformed %q", clock[1])
+		return hostMeta{}, fmt.Errorf("read host timezone offset: malformed %q", clock[1])
 	}
 	zone := time.FixedZone("host", off)
-	return time.Unix(epoch, 0).In(zone), parseManifest(sections[1]), parseDF(sections[2]), nil
+	m := hostMeta{
+		HostTime: time.Unix(epoch, 0).In(zone),
+		Manifest: parseManifest(sections[1]),
+		Disk:     parseDF(sections[2]),
+	}
+	// The compound command's exit status is df's — the last command; cat's
+	// failure is the expected no-manifest case and date failures already died
+	// on the clock parse above. Non-zero means df could not answer for every
+	// operand, so whatever WAS parsed must not read as a full answer.
+	if res.ExitCode != 0 {
+		msg := strings.TrimSpace(res.Stderr)
+		if msg == "" {
+			msg = "(no stderr)"
+		}
+		m.ProbeErr = fmt.Errorf("df exit %d — disk figures may be incomplete: %s", res.ExitCode, msg)
+	}
+	return m, nil
 }
 
 // parseUTCOffset reads a `date +%z` value such as "+0200" or "-0530" into

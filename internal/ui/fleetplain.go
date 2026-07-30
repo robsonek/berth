@@ -56,8 +56,39 @@ func WriteFleetTable(w io.Writer, hosts []status.HostStatus) error {
 				return err
 			}
 		}
+		// The --offsite answer also rides a continuation row, not a ninth
+		// column: the eight-field header is a fixed shape every row matches,
+		// and the flag is opt-in, so a column would sit blank on most runs.
+		// Without this line a SUCCESSFUL query was invisible in plain output —
+		// only failures showed, via the ProbeErrors rows above.
+		if h.Offsite != nil {
+			if _, err := fmt.Fprintf(tw, "  offsite: %s\t\t\t\t\t\t\t\n", offsiteLine(h)); err != nil {
+				return err
+			}
+		}
 	}
 	return tw.Flush()
+}
+
+// offsiteLine covers all four answers a probe can produce. The degraded ones
+// are uppercase for the same reason the cert and backup cells shout: a missing
+// snapshot or a failed query must never scan as fine.
+func offsiteLine(h status.HostStatus) string {
+	o := h.Offsite
+	switch {
+	case !o.Configured:
+		// Only reachable when the CONFIG declares offsite, so an unconfigured
+		// host is a discrepancy, not a no-op.
+		if o.Error != "" {
+			return "NOT SET UP: " + o.Error
+		}
+		return "NOT SET UP"
+	case o.Error != "":
+		return "FAILED: " + o.Error
+	case o.LastSnapshot == nil:
+		return "NO SNAPSHOTS"
+	}
+	return fmt.Sprintf("last snapshot %s (%s)", ageLabel(h.HostTime.Sub(*o.LastSnapshot)), o.SnapshotID)
 }
 
 // servicesCell summarises unit health; the spec lists service health as a
@@ -118,7 +149,11 @@ func driftCell(d *status.DriftReport) string {
 // certificate" apart: the first is fine, the second is a broken site, and
 // rendering both as "none" hides the one that matters.
 func certCell(h status.HostStatus) string {
-	minDays := -1
+	// Initialisation is tracked by a separate boolean, NOT a -1 sentinel: an
+	// expired certificate has a genuinely negative DaysLeft, and a sentinel
+	// that means "unset" below zero let a later healthy site overwrite the
+	// expired minimum — rendering an expired certificate as "min 60d".
+	minDays, haveMin := 0, false
 	declared, missing := 0, 0
 	for _, s := range h.Sites {
 		if s.Cert.Mode == "" {
@@ -129,14 +164,15 @@ func certCell(h status.HostStatus) string {
 			missing++
 			continue
 		}
-		if minDays < 0 || *s.Cert.DaysLeft < minDays {
+		if !haveMin || *s.Cert.DaysLeft < minDays {
 			minDays = *s.Cert.DaysLeft
+			haveMin = true
 		}
 	}
 	switch {
 	case declared == 0:
 		return "no TLS"
-	case missing > 0 && minDays < 0:
+	case missing > 0 && !haveMin:
 		return fmt.Sprintf("MISSING (%d)", missing)
 	case missing > 0:
 		return fmt.Sprintf("min %dd, %d MISSING", minDays, missing)
@@ -180,9 +216,9 @@ func backupCell(h status.HostStatus) string {
 	case never > 0:
 		return fmt.Sprintf("NEVER (%d of %d)", never, enabled)
 	case staleCount > 0:
-		return fmt.Sprintf("%s ago, %d STALE", humanAge(h.HostTime.Sub(*oldest)), staleCount)
+		return fmt.Sprintf("%s, %d STALE", ageLabel(h.HostTime.Sub(*oldest)), staleCount)
 	}
-	return humanAge(h.HostTime.Sub(*oldest)) + " ago"
+	return ageLabel(h.HostTime.Sub(*oldest))
 }
 
 func diskCell(h status.HostStatus) string {
@@ -202,6 +238,11 @@ func diskCell(h status.HostStatus) string {
 // computed against the HOST clock by the caller, never the local one.
 func humanAge(d time.Duration) string {
 	switch {
+	case d < 0:
+		// A timestamp AHEAD of the host clock — a skewed clock, or a foreign
+		// file's mtime — is an anomaly. It used to satisfy d < time.Minute and
+		// render as "just now": the reassuring side of the anomaly.
+		return "FUTURE"
 	case d < time.Minute:
 		return "just now"
 	case d < time.Hour:
@@ -211,4 +252,14 @@ func humanAge(d time.Duration) string {
 	default:
 		return fmt.Sprintf("%dd", int(d.Hours()/24))
 	}
+}
+
+// ageLabel is humanAge plus the " ago" suffix — except for FUTURE, where
+// "FUTURE ago" would read as a rendering bug rather than the anomaly marker
+// it is.
+func ageLabel(d time.Duration) string {
+	if d < 0 {
+		return humanAge(d)
+	}
+	return humanAge(d) + " ago"
 }

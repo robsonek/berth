@@ -67,29 +67,44 @@ func CollectHost(ctx context.Context, cfgPath string, s *config.Server, r bssh.R
 		Endpoint:   fmt.Sprintf("%s:%d", s.Host, s.SSH.Port),
 		ProbedAt:   time.Now().UTC(),
 	}
-	hostTime, manifest, disks, err := probeHostMeta(ctx, r)
+	meta, err := probeHostMeta(ctx, r)
 	if err != nil {
 		h.Error = err.Error()
 		return h
 	}
 	h.Reachable = true
-	h.HostTime = hostTime
-	h.Provisioned = manifest
-	h.Disk = disks
+	h.HostTime = meta.HostTime
+	h.Provisioned = meta.Manifest
+	h.Disk = meta.Disk
+	// A DEGRADED host-meta answer (df failed for one operand but printed the
+	// other) keeps its parsed rows — they are real data — but the failure
+	// must reach ProbeErrors and with it the exit code, or a host with a
+	// broken mount reads as successfully probed behind a reassuring root
+	// percentage.
+	if meta.ProbeErr != nil {
+		h.ProbeErrors = append(h.ProbeErrors, "host: "+meta.ProbeErr.Error())
+	}
 
 	// Each partial failure is APPENDED, never assigned to h.Error: assigning
 	// let the last probe silently erase the earlier ones, and left the host
 	// flagged reachable-and-fine while carrying no facts.
-	if svcs, err := probeServices(ctx, r, s); err != nil {
+	svcs, svcWarn, err := probeServices(ctx, r, s)
+	if err != nil {
 		h.ProbeErrors = append(h.ProbeErrors, "services: "+err.Error())
 	} else {
 		h.Services = svcs
+		// A truncated or garbled answer still yields the full requested unit
+		// list (unanswered units read as down), but it is NOT a complete
+		// answer and must reach the exit code like any other partial failure.
+		if svcWarn != nil {
+			h.ProbeErrors = append(h.ProbeErrors, "services: "+svcWarn.Error())
+		}
 	}
-	certs, err := probeCerts(ctx, r, s, hostTime)
+	certs, err := probeCerts(ctx, r, s, meta.HostTime)
 	if err != nil {
 		h.ProbeErrors = append(h.ProbeErrors, "certificates: "+err.Error())
 	}
-	backups, err := probeBackups(ctx, r, s, hostTime)
+	backups, err := probeBackups(ctx, r, s, meta.HostTime)
 	if err != nil {
 		h.ProbeErrors = append(h.ProbeErrors, "backups: "+err.Error())
 	}

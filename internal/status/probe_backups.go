@@ -33,6 +33,13 @@ func itoa64(v int64) string { return strconv.FormatInt(v, 10) }
 // exists only after a run completed, so its mtime is the honest answer to
 // "when did a backup last SUCCEED".
 //
+// The sidecar pattern is scoped to the directory's OWN pool — its basename,
+// since backupDir is backupBaseDir/<pool> and the script writes the sidecar as
+// `<pool>-meta-<ts>.manifest` into that directory. A bare `*-meta-*.manifest`
+// accepted ANOTHER pool's completion file parked here, letting a backup that
+// never completed render fresh. The $(basename "$d") substitution happens on
+// the host; the `*` stays quoted from the shell so find receives it as a glob.
+//
 // The directory `manifest` and `.lock` are bookkeeping and are excluded from
 // the count and byte total.
 //
@@ -42,7 +49,7 @@ func itoa64(v int64) string { return strconv.FormatInt(v, 10) }
 // prune — so its presence is equivalent to "this run completed".
 func backupsCmd(dirs []string) string {
 	const find = `find "$d" -maxdepth 1 -type f ! -name '.lock' ! -name 'manifest' ! -name '.tmp-*'`
-	const findSidecar = `find "$d" -maxdepth 1 -type f -name '*-meta-*.manifest'`
+	const findSidecar = `find "$d" -maxdepth 1 -type f -name "$(basename "$d")-meta-*.manifest"`
 	quoted := make([]string, 0, len(dirs))
 	for _, d := range dirs {
 		quoted = append(quoted, "'"+d+"'")

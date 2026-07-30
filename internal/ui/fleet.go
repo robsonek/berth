@@ -126,7 +126,7 @@ func writeHostDetail(w *bytes.Buffer, h status.HostStatus) {
 		case h.Offsite.Error != "":
 			when = "FAILED: " + h.Offsite.Error
 		case h.Offsite.LastSnapshot != nil:
-			when = humanAge(h.HostTime.Sub(*h.Offsite.LastSnapshot)) + " ago · " + h.Offsite.SnapshotID
+			when = ageLabel(h.HostTime.Sub(*h.Offsite.LastSnapshot)) + " · " + h.Offsite.SnapshotID
 		default:
 			when = "no snapshot"
 		}

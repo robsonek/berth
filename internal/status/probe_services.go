@@ -74,11 +74,22 @@ func servicesCmd(units []string) string {
 		`; do printf '%s\t%s\t%s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null)" "$(systemctl is-enabled "$u" 2>/dev/null)"; done`
 }
 
-func probeServices(ctx context.Context, r bssh.Runner, s *config.Server) ([]Service, error) {
+// probeServices returns one entry per REQUESTED unit, in the request order.
+// The result is built from unitList, never from whatever rows came back: a
+// truncated answer (exit 0, some units unanswered) used to shrink the slice,
+// and the renderer then said "2 ok" for a seven-unit server. A unit with no
+// row reads as not-active and not-enabled — consistent with the rule above
+// that an absent unit must never read as up.
+//
+// warn carries row-level anomalies (missing, duplicate, unexpected or
+// unparseable rows) while the parsed data is still returned; err is reserved
+// for a probe that produced no usable answer at all. The caller records warn
+// as a partial probe failure so an incomplete answer reaches the exit code.
+func probeServices(ctx context.Context, r bssh.Runner, s *config.Server) (svcs []Service, warn, err error) {
 	units := unitList(s)
 	res, err := r.Run(ctx, servicesCmd(units), nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// A non-zero exit is data, not a Go error (Runner contract) — without
 	// this check a failing command (sudo denied on a half-broken host, the
@@ -90,19 +101,55 @@ func probeServices(ctx context.Context, r bssh.Runner, s *config.Server) ([]Serv
 		if msg == "" {
 			msg = "(no stderr)"
 		}
-		return nil, fmt.Errorf("services probe: exit %d: %s", res.ExitCode, msg)
+		return nil, nil, fmt.Errorf("services probe: exit %d: %s", res.ExitCode, msg)
 	}
-	out := make([]Service, 0, len(units))
+	requested := make(map[string]bool, len(units))
+	for _, u := range units {
+		requested[u] = true
+	}
+	rows := make(map[string]Service, len(units))
+	var anomalies []string
 	for _, line := range strings.Split(strings.TrimRight(res.Stdout, "\n"), "\n") {
-		parts := strings.Split(line, "\t")
-		if len(parts) != 3 || parts[0] == "" {
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		out = append(out, Service{
-			Name:    parts[0],
+		parts := strings.Split(line, "\t")
+		if len(parts) != 3 || parts[0] == "" {
+			anomalies = append(anomalies, fmt.Sprintf("unparseable row %q", line))
+			continue
+		}
+		name := parts[0]
+		switch {
+		case !requested[name]:
+			anomalies = append(anomalies, fmt.Sprintf("unexpected row for %q", name))
+			continue
+		case rows[name].Name != "":
+			// A second row for the same unit could carry CONFLICTING states;
+			// the first one is kept and the duplication is reported.
+			anomalies = append(anomalies, fmt.Sprintf("duplicate row for %q", name))
+			continue
+		}
+		rows[name] = Service{
+			Name:    name,
 			Active:  strings.TrimSpace(parts[1]) == "active",
 			Enabled: strings.TrimSpace(parts[2]) == "enabled",
-		})
+		}
 	}
-	return out, nil
+	out := make([]Service, 0, len(units))
+	var missing []string
+	for _, u := range units {
+		sv, ok := rows[u]
+		if !ok {
+			sv = Service{Name: u} // no answer: down, never up
+			missing = append(missing, u)
+		}
+		out = append(out, sv)
+	}
+	if len(missing) > 0 {
+		anomalies = append(anomalies, "no answer for "+strings.Join(missing, ", "))
+	}
+	if len(anomalies) > 0 {
+		warn = fmt.Errorf("incomplete answer: %s", strings.Join(anomalies, "; "))
+	}
+	return out, warn, nil
 }
