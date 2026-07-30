@@ -170,19 +170,15 @@ func managedSiteFiles(ctx context.Context, r bssh.Runner, s *config.Server) ([]s
 }
 
 // selfSignedCertBase is berth's own namespace for self-signed material; the
-// TLS orphan sweep treats everything under it as berth-owned.
-const selfSignedCertBase = "/etc/ssl/berth"
+// TLS orphan sweep treats everything under it as berth-owned. The value is
+// single-sourced in config beside the other on-host derivations.
+const selfSignedCertBase = config.SelfSignedCertBase
 
 func selfSignedCertDir(domain string) string { return selfSignedCertBase + "/" + domain }
 
 // certDir is where a site's TLS certificate lives: Let's Encrypt's live dir, or
-// a berth-managed dir for self-signed certs.
-func certDir(site config.Site) string {
-	if site.CertMode() == "selfsigned" {
-		return selfSignedCertDir(site.Domain)
-	}
-	return "/etc/letsencrypt/live/" + site.Domain
-}
+// a berth-managed dir for self-signed certs. Single-sourced in config.
+func certDir(site config.Site) string { return config.CertDir(site) }
 
 func certFullchainPath(site config.Site) string { return certDir(site) + "/fullchain.pem" }
 func certKeyPath(site config.Site) string       { return certDir(site) + "/privkey.pem" }

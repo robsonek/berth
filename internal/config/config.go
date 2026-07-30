@@ -635,6 +635,21 @@ func AnyLetsEncrypt(s *Server) bool {
 	return false
 }
 
+// SelfSignedCertBase and LetsEncryptLiveBase are the two roots a site's
+// certificate can live under, chosen by Site.CertMode().
+const (
+	SelfSignedCertBase  = "/etc/ssl/berth"
+	LetsEncryptLiveBase = "/etc/letsencrypt/live"
+)
+
+// CertDir is the directory holding a site's certificate material.
+func CertDir(site Site) string {
+	if site.CertMode() == "selfsigned" {
+		return SelfSignedCertBase + "/" + site.Domain
+	}
+	return LetsEncryptLiveBase + "/" + site.Domain
+}
+
 // FROZEN FOREVER: the on-host name prefixes below root every per-site socket
 // and directory berth derives. They live here — not in the steps that write
 // them — because validation's domain-length cap is computed from their byte
