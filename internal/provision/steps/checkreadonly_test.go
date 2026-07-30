@@ -246,6 +246,47 @@ func TestChecksAreReadOnly(t *testing.T) {
 	}
 }
 
+// TestConvergedIsGenuinelySatisfied pins what makes the converged profile
+// worth its name: every Check must reach a genuine Satisfied:true there — a
+// profile that merely avoids errors would let the contract's deepest paths
+// (site's validators, the value-agreement probes, the runtime tails) go
+// unwalked while everything stayed green. Two steps are exempt, each for a
+// stated reason, and their reasons are pinned so a THIRD unsatisfied step can
+// never hide among them:
+//
+//   - preflight is AlwaysRun with a deliberately unsatisfied Check (it
+//     re-runs apt-get update every run by design);
+//   - identity's verdict is about the LOCAL cache binding, not the host: the
+//     fixture seeds the cache under the declared id with no tombstone at the
+//     host key, which identity honestly reports as not-yet-converged
+//     (wave-3 note; a fixture tombstone would change this, not the host).
+func TestConvergedIsGenuinelySatisfied(t *testing.T) {
+	srv := contractServer(t)
+	wantUnsatisfied := map[string]string{
+		"preflight": "Debian 13 detected",
+		"identity":  "tombstone",
+	}
+	for _, st := range Pipeline(srv, secret.NewRedactor(), false) {
+		r := newRecordingRunner(newFakeHost(t, "converged", srv))
+		res, err := st.Check(context.Background(), provision.RunCtx{FullRun: true}, srv, r)
+		if err != nil {
+			t.Errorf("%s.Check under converged: %v", st.Name(), err)
+			continue
+		}
+		if want, exempt := wantUnsatisfied[st.Name()]; exempt {
+			if res.Satisfied || !strings.Contains(res.Reason, want) {
+				t.Errorf("%s.Check under converged = (satisfied=%v, %q) — the exemption expects an unsatisfied verdict mentioning %q; if the step changed, re-argue the exemption rather than widening it",
+					st.Name(), res.Satisfied, res.Reason, want)
+			}
+			continue
+		}
+		if !res.Satisfied {
+			t.Errorf("%s.Check is not Satisfied under converged (%q) — the profile no longer converges this step, so its Check tail is unwalked and the contract's coverage silently shrank",
+				st.Name(), res.Reason)
+		}
+	}
+}
+
 // TestChecksAreReadOnlyUnderForce covers the one RunCtx flag that changes
 // control flow rather than just content: Force lets an aggregating Check
 // continue PAST the unmanaged-file refusal, reaching commands the plain foreign

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
@@ -674,6 +675,84 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 		}
 		return bssh.Result{ExitCode: 1}, true
 
+	// The wave-4 generated read scripts and probes (site, tls, backups),
+	// each keyed to the exact fixture composition and answered from the
+	// model, never canned.
+
+	// listSupervisorPrograms PARSES the ls output line by line; same ls-glob
+	// semantics as the valkey listing (no match: ls fails on the literal
+	// glob at exit 2, diagnostics eaten by the script's own 2>/dev/null).
+	case cmd == supervisorListPasted:
+		return r.answerLsGlob("/etc/supervisor/conf.d/berth-", ".conf"), true
+	case cmd == backupScriptListPasted:
+		return r.answerLsGlob("/usr/local/sbin/berth-backup-", ""), true
+	case cmd == backupCronListPasted:
+		return r.answerLsGlob("/etc/cron.d/berth-backup-", ""), true
+	case cmd == backupManifestListPasted:
+		return r.answerLsGlob("/var/backups/berth/", "/manifest"), true
+
+	// commandExists reads ONLY the exit code (both streams aim at the null
+	// device). Recognized by reconstruction so only the production shape is
+	// answered; gated on the modelled tool set like the bare `command -v`.
+	case len(f) == 5 && f[0] == "command" && f[1] == "-v" && cmd == commandVProbeCmd(f[2]):
+		if r.h.tools[f[2]] {
+			return bssh.Result{}, true
+		}
+		return bssh.Result{ExitCode: 1}, true
+
+	// findRegularFiles / findDirectories / listRenewalConfs all PARSE the
+	// find output line by line. Answered from a live scan of the model with
+	// the scripts' own semantics: a missing directory is the [ -d ]-guarded
+	// quiet empty (exit 0, no output), matches are the immediate children of
+	// the directory filtered by type and name.
+	case cmd == findRegularProbeCmd("/etc/nginx/sites-available", ""):
+		return r.answerFindRegular("/etc/nginx/sites-available", ""), true
+	case cmd == findRegularProbeCmd("/etc/php/8.4/fpm/pool.d", "*.conf"):
+		return r.answerFindRegular("/etc/php/8.4/fpm/pool.d", "*.conf"), true
+	case cmd == findRegularProbeCmd("/etc/cron.d", "berth-site-*"):
+		return r.answerFindRegular("/etc/cron.d", "berth-site-*"), true
+	case cmd == findDirsProbeCmd(fixtureACMEWebrootBase):
+		return r.answerFindDirs(fixtureACMEWebrootBase), true
+	case cmd == findDirsProbeCmd("/etc/ssl/berth"):
+		return r.answerFindDirs("/etc/ssl/berth"), true
+	case cmd == renewalConfListPasted:
+		return r.answerFindNamed("/etc/letsencrypt/renewal", ".conf"), true
+
+	// certStatus PARSES `certbot certificates` output (parseCertStatus reads
+	// the Certificate Name / Domains / Expiry Date block). The answer derives
+	// from the modelled lineage set — every /etc/letsencrypt/live/<domain>/
+	// fullchain.pem — and the modelled expiry; a host without the certbot
+	// package answers the way a shell does (exit 127), which certStatus
+	// reads as "no certificate" data.
+	case cmd == "certbot certificates":
+		return r.answerCertbotCertificates(), true
+
+	// site.Check's enabled-symlink probe reads ONLY the exit code of the
+	// [ … -ef … ] inode comparison. Recognized by reconstruction; evaluated
+	// by resolving both sides through the modelled symlinks.
+	case len(f) == 5 && f[0] == "[" && f[2] == "-ef" && f[4] == "]" &&
+		cmd == "[ "+shQuote(unq(f[1]))+" -ef "+shQuote(unq(f[3]))+" ]":
+		return r.answerSameFile(unq(f[1]), unq(f[3])), true
+
+	// site.Check PARSES supervisorctl's stdout+stderr for "no such" only —
+	// the loaded/not-loaded distinction is the whole verdict. Loaded derives
+	// from the model: the program's conf file exists and supervisord runs.
+	// No profile models the on-disk-but-never-reread state, so that branch
+	// stays unexercised (same documented limit as the valkey stale-binary
+	// branch). A loaded-but-dormant worker answers STOPPED at exit 3 —
+	// supervisorctl's real exit for a non-RUNNING program, which the Check
+	// ignores.
+	case len(f) == 3 && f[0] == "supervisorctl" && f[1] == "status" &&
+		strings.HasSuffix(unq(f[2]), ":*") &&
+		cmd == "supervisorctl status "+shQuote(unq(f[2])):
+		prog := strings.TrimSuffix(unq(f[2]), ":*")
+		conf, ok := r.h.files["/etc/supervisor/conf.d/"+prog+".conf"]
+		sup, supOK := r.h.unit("supervisor")
+		if ok && conf.kind == "regular file" && supOK && sup.active {
+			return bssh.Result{ExitCode: 3, Stdout: prog + ":" + prog + "_00" + strings.Repeat(" ", 8) + "STOPPED   Not started\n"}, true
+		}
+		return bssh.Result{ExitCode: 4, Stdout: unq(f[2]) + ": ERROR (no such group)\n"}, true
+
 	// Validators just need to succeed so the Check continues. Whether ISSUING
 	// them is allowed is the classifier's judgement, not the model's. Only the
 	// exact check-only shapes are answered blindly: `sshd -T` in particular is
@@ -695,8 +774,9 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 // the two ancestry probes cover — spelled once so the answer cases and the
 // audited-script keys cannot drift apart.
 const (
-	fixtureDeployTreeTail = "/var/www/app.example.com/shared/tmp"
-	fixtureACMEWebroot    = "/var/www/berth-acme/app.example.com"
+	fixtureDeployTreeTail  = "/var/www/app.example.com/shared/tmp"
+	fixtureACMEWebroot     = "/var/www/berth-acme/app.example.com"
+	fixtureACMEWebrootBase = "/var/www/berth-acme"
 
 	// Wave 3: the paths and identities the valkey/tuning/database probes are
 	// keyed on, plus the two secret VALUES the fixture treats as already
@@ -716,6 +796,18 @@ const (
 	// shape (appKeyShape); a malformed value here would fail the database
 	// step's cache preflight loudly, so the shape is self-checking.
 	fixtureAppKey = "base64:Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1C="
+
+	// Wave 4: the offsite secret trio, seeded into the cache AND rendered
+	// into the modelled /etc/berth/offsite.env (they must agree, or
+	// offsite.Check honestly reports drift). fixtureResticValue is 32
+	// alphanumerics — the exact shape the step's own secret.Generate seeding
+	// produces; the s3 pair is operator-supplied, so any single-line
+	// quote-free value is faithful. Identifiers and values deliberately
+	// avoid gosec G101's name heuristics — test-fixture data, not
+	// credentials.
+	fixtureResticValue   = "Fixture0Restic0value0Fixture0000"
+	fixtureOffsiteKeyID  = "Fixture0OffsiteKeyID0Fixture0000"
+	fixtureOffsiteKeyVal = "Fixture0OffsiteKeyVal0Fixture000"
 )
 
 var (
@@ -867,6 +959,159 @@ func (r *recordingRunner) answerServiceLoaded(path, unit string) bssh.Result {
 		return bssh.Result{}
 	}
 	return bssh.Result{ExitCode: 1}
+}
+
+// answerLsGlob evaluates one `ls -1 <glob> 2>/dev/null` discovery over the
+// model: paths matching prefix + one glob-star segment + suffix, where the
+// starred segment — like a real shell glob star — never crosses a '/' and
+// never matches a leading dot. No match answers the way the shell does: ls
+// receives the literal unexpanded glob and fails on it (exit 2, diagnostics
+// eaten by the script's own 2>/dev/null).
+func (r *recordingRunner) answerLsGlob(prefix, suffix string) bssh.Result {
+	var out []string
+	for p := range r.h.files {
+		if mid, ok := globStarSegment(p, prefix, suffix); ok && mid != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return bssh.Result{ExitCode: 2}
+	}
+	slices.Sort(out)
+	return bssh.Result{Stdout: strings.Join(out, "\n") + "\n"}
+}
+
+// globStarSegment reports whether path is prefix + <segment> + suffix with a
+// segment a shell glob star would match: no '/', no leading dot.
+func globStarSegment(path, prefix, suffix string) (string, bool) {
+	rest, ok := strings.CutPrefix(path, prefix)
+	if !ok {
+		return "", false
+	}
+	mid, ok := strings.CutSuffix(rest, suffix)
+	if !ok || strings.Contains(mid, "/") || strings.HasPrefix(mid, ".") {
+		return "", false
+	}
+	return mid, true
+}
+
+// answerFindRegular evaluates findRegularFiles' guarded listing: a missing
+// directory is the [ -d ]-guarded quiet empty; otherwise the immediate
+// REGULAR children matching the -name pattern ("" = all, else one glob star).
+func (r *recordingRunner) answerFindRegular(dir, pattern string) bssh.Result {
+	return r.answerFindChildren(dir, "regular file", func(name string) bool {
+		if pattern == "" {
+			return true
+		}
+		pre, suf, _ := strings.Cut(pattern, "*")
+		_, ok := globStarSegment(name, pre, suf)
+		return ok
+	})
+}
+
+// answerFindDirs evaluates findDirectories: the immediate subdirectories.
+func (r *recordingRunner) answerFindDirs(dir string) bssh.Result {
+	return r.answerFindChildren(dir, "directory", func(string) bool { return true })
+}
+
+// answerFindNamed evaluates listRenewalConfs' listing: every immediate child
+// with the suffix, deliberately with NO type filter (the production find has
+// none, so symlinked confs are included).
+func (r *recordingRunner) answerFindNamed(dir, suffix string) bssh.Result {
+	return r.answerFindChildren(dir, "", func(name string) bool {
+		return strings.HasSuffix(name, suffix)
+	})
+}
+
+func (r *recordingRunner) answerFindChildren(dir, kind string, match func(string) bool) bssh.Result {
+	if d, ok := r.h.files[dir]; !ok || d.kind != "directory" {
+		return bssh.Result{} // [ -d ] short-circuits: exit 0, no output
+	}
+	var out []string
+	for p, f := range r.h.files {
+		name, ok := strings.CutPrefix(p, dir+"/")
+		if !ok || strings.Contains(name, "/") {
+			continue
+		}
+		if kind != "" && f.kind != kind {
+			continue
+		}
+		if match(name) {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return bssh.Result{}
+	}
+	slices.Sort(out)
+	return bssh.Result{Stdout: strings.Join(out, "\n") + "\n"}
+}
+
+// answerCertbotCertificates emits the block layout parseCertStatus consumes,
+// one block per modelled lineage (a /etc/letsencrypt/live/<domain>/
+// fullchain.pem), with the modelled expiry. The host without the package
+// answers exit 127; a certbot with no lineages prints its no-certs notice at
+// exit 0. None of the modelled lineages is a staging cert, so no TEST_CERT
+// annotation appears (the fixture provisions against production).
+func (r *recordingRunner) answerCertbotCertificates() bssh.Result {
+	if _, ok := r.h.packages["certbot"]; !ok {
+		return bssh.Result{ExitCode: 127, Stderr: "sh: 1: certbot: not found"}
+	}
+	var domains []string
+	for p := range r.h.files {
+		rest, ok := strings.CutPrefix(p, "/etc/letsencrypt/live/")
+		if !ok {
+			continue
+		}
+		if dom, ok := strings.CutSuffix(rest, "/fullchain.pem"); ok && !strings.Contains(dom, "/") {
+			domains = append(domains, dom)
+		}
+	}
+	if len(domains) == 0 {
+		return bssh.Result{Stdout: "No certificates found.\n"}
+	}
+	slices.Sort(domains)
+	var b strings.Builder
+	b.WriteString("Found the following certs:\n")
+	days := int(time.Until(r.h.certExpiry).Hours() / 24)
+	for _, d := range domains {
+		fmt.Fprintf(&b, "  Certificate Name: %s\n", d)
+		fmt.Fprintf(&b, "    Serial Number: 0\n    Key Type: ECDSA\n")
+		fmt.Fprintf(&b, "    Domains: %s\n", d)
+		fmt.Fprintf(&b, "    Expiry Date: %s (VALID: %d days)\n",
+			r.h.certExpiry.Format("2006-01-02 15:04:05-07:00"), days)
+		fmt.Fprintf(&b, "    Certificate Path: /etc/letsencrypt/live/%s/fullchain.pem\n", d)
+		fmt.Fprintf(&b, "    Private Key Path: /etc/letsencrypt/live/%s/privkey.pem\n", d)
+	}
+	return bssh.Result{Stdout: b.String()}
+}
+
+// answerSameFile evaluates the [ … -ef … ] inode comparison: both paths must
+// exist and resolve — through the modelled symlinks, bounded like the valkey
+// exec walk — to the same file.
+func (r *recordingRunner) answerSameFile(a, b string) bssh.Result {
+	ra, aok := r.resolve(a)
+	rb, bok := r.resolve(b)
+	if aok && bok && ra == rb {
+		return bssh.Result{}
+	}
+	return bssh.Result{ExitCode: 1}
+}
+
+// resolve follows modelled symlinks to a final path (bounded walk; the model
+// has no link loops on purpose).
+func (r *recordingRunner) resolve(path string) (string, bool) {
+	for range 4 {
+		f, ok := r.h.files[path]
+		if !ok {
+			return "", false
+		}
+		if f.linkTarget == "" {
+			return path, true
+		}
+		path = f.linkTarget
+	}
+	return "", false
 }
 
 // reEnvIdentKey / reEnvCredentialLine / reEnvAppKeyLine are the Go forms of
