@@ -127,12 +127,15 @@ func TestUnknownProfilePanics(t *testing.T) {
 // checks. A review of the first draft found the model could not honestly reach
 // several Checks' tail verdicts without these.
 type fakeFile struct {
-	content    string
-	owner      string
-	group      string
-	uid        int
-	gid        int
-	mode       string // as `stat -c %a` prints it, e.g. "0710"
+	content string
+	owner   string
+	group   string
+	uid     int
+	gid     int
+	// mode holds what `stat -c %a` prints, which has NO leading zero ("710",
+	// not "0710"): berth compares the raw stat stdout against literals like
+	// "root:root 755" (statOwnerMode), so the printed form IS the compared form.
+	mode       string
 	kind       string // as `stat -c %F` prints it
 	mtimeUnix  int64
 	linkTarget string
@@ -298,7 +301,7 @@ func populateInstalled(h *fakeHost, s *config.Server, profile string) {
 // converged profile stays converged after a template change.
 func (h *fakeHost) putManaged(path string, body []byte, profile string) {
 	f := fakeFile{owner: "root", group: "root", uid: 0, gid: 0,
-		mode: "0644", kind: "regular file", mtimeUnix: 1500000000}
+		mode: "644", kind: "regular file", mtimeUnix: 1500000000}
 	switch profile {
 	case "converged", "runtime-stale":
 		f.content = string(body)
@@ -321,15 +324,15 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 		owner, uid = "someoneelse", 1999
 	}
 	h.files[site.DeployPath] = fakeFile{owner: owner, group: "www-data", uid: uid, gid: 33,
-		mode: "0710", kind: "directory", mtimeUnix: 1500000000}
+		mode: "710", kind: "directory", mtimeUnix: 1500000000}
 	h.files[site.DeployPath+"/shared"] = fakeFile{owner: owner, group: owner, uid: uid, gid: uid,
-		mode: "0700", kind: "directory", mtimeUnix: 1500000000}
+		mode: "700", kind: "directory", mtimeUnix: 1500000000}
 
 	// The enabled-vhost symlink is real state on every once-provisioned host:
 	// site's Check probes its identity with `[ -L … ]` and `[ … -ef … ]`
 	// (site.go), which is what fakeFile.linkTarget exists to answer.
 	h.files[nginxEnabledPath(site.Domain)] = fakeFile{owner: "root", group: "root",
-		mode: "0777", kind: "symbolic link", mtimeUnix: 1500000000,
+		mode: "777", kind: "symbolic link", mtimeUnix: 1500000000,
 		linkTarget: nginxAvailablePath(site.Domain)}
 
 	body, err := templates.Render("logrotate.conf.tmpl", nil)
