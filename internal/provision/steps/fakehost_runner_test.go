@@ -552,6 +552,23 @@ func (r *recordingRunner) answer(cmd string) (bssh.Result, bool) {
 const (
 	fixtureDeployTreeTail = "/var/www/app.example.com/shared/tmp"
 	fixtureACMEWebroot    = "/var/www/berth-acme/app.example.com"
+
+	// Wave 3: the paths and identities the valkey/tuning/database probes are
+	// keyed on, plus the two secret VALUES the fixture treats as already
+	// provisioned — they appear in the modelled shared/.env, in the seeded
+	// local secret cache and in the audited stdin pairs, and all three must
+	// agree or database.Check honestly reports disagreement.
+	fixtureSharedEnv      = "/var/www/app.example.com/shared/.env"
+	fixtureValkeyUnit     = "berth-valkey-app_example_com.service"
+	fixtureValkeyUnitPath = "/etc/systemd/system/berth-valkey-app_example_com.service"
+	fixtureMariaDBTuning  = "/etc/mysql/mariadb.conf.d/99-berth.cnf"
+	// 32 alphanumeric chars — the exact shape secret.Generate produces and
+	// reDBPassword accepts.
+	fixtureDBPassword = "Fixture0DBpassword0Fixture0DBpwd"
+	// "base64:" + 43 chars of [A-Za-z0-9+/] + "=" — the exact berth APP_KEY
+	// shape (appKeyShape); a malformed value here would fail the database
+	// step's cache preflight loudly, so the shape is self-checking.
+	fixtureAppKey = "base64:Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1C="
 )
 
 var (

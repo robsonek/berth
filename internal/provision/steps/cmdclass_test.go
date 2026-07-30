@@ -120,6 +120,34 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{"openssl x509 -noout --out /tmp/x -in /etc/ssl/cert.pem", cmdRejected},
 		{"openssl x509 -noout -out=/tmp/x -in /etc/ssl/cert.pem", cmdRejected},
 		{"openssl x509 -noout --out=/tmp/x -in /etc/ssl/cert.pem", cmdRejected},
+		// The database step's information_schema probes (probeSQL,
+		// internal/database/mariadb.go): only the pinned
+		// `--protocol=socket -N -e "SELECT 1 FROM information_schema.…"`
+		// shape reads. Everything else the client could be told to run —
+		// DDL/DML, a second ;-separated statement, INTO OUTFILE (which
+		// writes files as the server), an extra option smuggling its own
+		// statement — must reject.
+		{`mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app'"`, cmdReadOnly},
+		{`mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='app' AND GRANTEE='''app''@''localhost''' LIMIT 1"`, cmdReadOnly},
+		{`mysql --protocol=socket -N -e "DROP DATABASE app"`, cmdRejected},
+		{`mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app' INTO OUTFILE '/tmp/x'"`, cmdRejected},
+		{`mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA; DROP DATABASE app"`, cmdRejected},
+		{`mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app'" --init-command="DROP DATABASE app"`, cmdRejected},
+		{`mysql --protocol=socket`, cmdRejected},
+		{`mysql -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app'"`, cmdRejected},
+
+		// valkey's per-site liveness probe (valkeyPingCmd, valkey.go): PING
+		// over the tenant's own socket mutates nothing. Any other valkey-cli
+		// verb (FLUSHALL, SHUTDOWN, SET…), a socket outside berth's runtime
+		// base, or any other program behind runuser is arbitrary code under
+		// another uid and must reject.
+		{`runuser -u 'appuser' -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' ping`, cmdReadOnly},
+		{`runuser -u 'appuser' -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' flushall`, cmdRejected},
+		{`runuser -u 'appuser' -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' shutdown`, cmdRejected},
+		{`runuser -u 'appuser' -- valkey-cli -s '/tmp/evil.sock' ping`, cmdRejected},
+		{`runuser -u 'appuser' -- rm -rf /var/www`, cmdRejected},
+		{`runuser -l root`, cmdRejected},
+
 		// The keyring probe's exact read shape as issued by
 		// apt.KeyringHoldsExactly (internal/apt/apt.go), and proof that
 		// dropping --trust-model always — the flag that suppresses
@@ -172,6 +200,23 @@ func TestAuditedScriptMustMatchExactly(t *testing.T) {
 	}
 	if got, _ := classifyCommand(script+" ", nil); got != cmdRejected {
 		t.Errorf("a one-character change still passed as %s — the registry must be exact", got)
+	}
+}
+
+// TestAuditedStdinMustMatchExactly: the stdin registry carries the same
+// one-character-drift property as the script registry, on BOTH halves of the
+// pair — a changed script or a changed payload each force a fresh audit.
+func TestAuditedStdinMustMatchExactly(t *testing.T) {
+	cmd := envValueMatchProbeCmd(fixtureSharedEnv, "DB_PASSWORD")
+	stdin := "DB_PASSWORD=" + fixtureDBPassword + "\n"
+	if got, _ := classifyCommand(cmd, []byte(stdin)); got != cmdAudited {
+		t.Errorf("registered (cmd, stdin) pair = %s, want audited", got)
+	}
+	if got, _ := classifyCommand(cmd, []byte(stdin+" ")); got != cmdRejected {
+		t.Errorf("a one-character stdin change still passed as %s — the pair must be exact", got)
+	}
+	if got, _ := classifyCommand(cmd+" ", []byte(stdin)); got != cmdRejected {
+		t.Errorf("a one-character command change still passed as %s — the pair must be exact", got)
 	}
 }
 
@@ -272,6 +317,56 @@ var auditedScripts = map[string]string{
 	// existence test and `[ ! … -nt … ]` mtime comparisons — reads only.
 	reloadedSinceCmd("ssh", "/etc/ssh/sshd_config.d/00-berth.conf"):    "reloadedSince (reloadstamp.go) for ssh vs the sshd drop-in: [ -e ] + [ -nt ] — reads only",
 	reloadedSinceCmd("fail2ban", "/etc/fail2ban/jail.d/99-berth.conf"): "reloadedSince (reloadstamp.go) for fail2ban vs the managed jail: [ -e ] + [ -nt ] — reads only",
+
+	// Wave 3 (nginx, php, valkey, tuning, database), same discipline: pasted
+	// literals for production consts, test-local mirror generators for the
+	// parameterized compositions — never the production helpers themselves.
+
+	// reloadedSince's stamp comparisons for the two units whose core config
+	// nginx.Check and php.Check own. Audited: `[ -e ]` existence test and
+	// `[ ! … -nt … ]` mtime comparisons — reads only.
+	reloadedSinceCmd("nginx", "/etc/nginx/nginx.conf"):                                                                          "reloadedSince (reloadstamp.go) for nginx vs its core config: [ -e ] + [ -nt ] — reads only",
+	reloadedSinceCmd("php8.4-fpm", "/etc/php/8.4/fpm/conf.d/99-berth-opcache.ini", "/etc/php/8.4/fpm/conf.d/99-berth-tuning.ini"): "reloadedSince (reloadstamp.go) for php8.4-fpm vs the two managed drop-ins: [ -e ] + [ -nt ] — reads only",
+
+	// valkey's instance-unit discovery (valkeyListUnitsCmd, valkey.go), a
+	// production const pasted literally. Audited: `ls -1` over a fixed glob
+	// prints matching paths (reads directory entries only); `2>/dev/null`
+	// discards diagnostics into the null device, which is not host state.
+	// Nothing writes.
+	valkeyListUnitsPasted: "valkeyListUnitsCmd (valkey.go): ls -1 over the berth-valkey unit glob, stderr discarded — reads only",
+
+	// valkeyExecCmd's binary-staleness probe (valkey.go) for the fixture
+	// instance. Audited: `systemctl show -p MainPID --value` (reads a unit
+	// property) captured into a shell variable; two `stat -Lc %i` inode reads
+	// (of /proc/<pid>/exe and the packaged binary — -L follows the
+	// valkey-server → valkey-check-rdb symlink, the live-found lesson);
+	// a `[ … = … ]` string comparison. Nothing writes.
+	valkeyExecProbeCmd(fixtureValkeyUnit): "valkeyExecCmd (valkey.go): systemctl show MainPID + two stat -L inode reads compared with [ = ] — reads only",
+
+	// serviceConfigLoaded's mtime-vs-activation probes (tuning.go), issued by
+	// tuning.Check for mariadb and by valkey.Check for each instance unit.
+	// Audited: `stat -c %Y` (mtime read), `systemctl show -p
+	// ActiveEnterTimestamp --value --timestamp=unix` (property read), `tr -d @`
+	// (stream filter on the substitution output), integer `[ -le ]`. Nothing
+	// writes.
+	serviceLoadedProbeCmd(fixtureMariaDBTuning, "mariadb.service"):  "serviceConfigLoaded (tuning.go) for mariadb vs the tuning drop-in: stat %Y + systemctl show + tr + [ -le ] — reads only",
+	serviceLoadedProbeCmd(fixtureValkeyUnitPath, fixtureValkeyUnit): "serviceConfigLoaded (tuning.go) for the fixture valkey instance vs its unit file: stat %Y + systemctl show + tr + [ -le ] — reads only",
+
+	// tuning's RAM probe (memTotalCmd, tuning.go), a production const pasted
+	// literally. Audited: awk reads /proc/meminfo and prints field 2 of the
+	// MemTotal line — the program text contains no output-redirect, no
+	// system() and no getline into a command. Nothing writes.
+	memTotalPasted: "memTotalCmd (tuning.go): awk prints MemTotal's field 2 from /proc/meminfo — reads only",
+
+	// database's shared/.env presence probes (database.go). Audited,
+	// command by command: the C-locale pin (assignment + export, process-local);
+	// `grep -m1` selects the first KEY= line; the shape verdict rides a second
+	// `grep -Eq` (envCredentialPresentScript) or a `printf | sed | grep -Eq`
+	// pipeline (envBerthAppKeyScript) whose sed script only trims trailing
+	// whitespace (s///, no w, no e); verdicts travel as exit codes so the
+	// secret never reaches stdout. Nothing writes.
+	envCredentialProbeCmd(fixtureSharedEnv): "envCredentialPresentScript (database.go): locale pin + grep -m1 | grep -Eq, exit-code verdict — reads only",
+	envAppKeyProbeCmd(fixtureSharedEnv):     "envBerthAppKeyScript (database.go): locale pin + grep -m1 capture + printf|sed|grep -Eq shape test, exit-code signals — reads only",
 }
 
 // phpPoolConflictProbe84 is the EXACT text phpPoolConflictProbeCmd("8.4")
@@ -310,6 +405,52 @@ func sshDirProbeCmd(dir string) string {
 	return "export LC_ALL=C; if [ -e " + q + " ] || [ -L " + q + " ]; then stat -c '%U %F' " + q + " || exit 91; else exit 92; fi"
 }
 
+// valkeyListUnitsPasted / memTotalPasted are the EXACT texts of the
+// production consts valkeyListUnitsCmd (valkey.go) and memTotalCmd
+// (tuning.go), pasted as literals — never referencing the consts, which
+// would let an edit re-bless itself.
+const (
+	valkeyListUnitsPasted = `ls -1 /etc/systemd/system/berth-valkey-*.service 2>/dev/null`
+	memTotalPasted        = `awk '/^MemTotal:/{print $2}' /proc/meminfo`
+)
+
+// valkeyExecProbeCmd mirrors valkeyExecCmd's composition (valkey.go) — a copy
+// on purpose (see auditedScripts).
+func valkeyExecProbeCmd(unit string) string {
+	return `p="$(systemctl show -p MainPID --value ` + unit + `)"; [ "$(stat -Lc %i /proc/$p/exe 2>/dev/null)" = "$(stat -Lc %i /usr/bin/valkey-server 2>/dev/null)" ]`
+}
+
+// serviceLoadedProbeCmd mirrors serviceConfigLoaded's composition (tuning.go)
+// — a copy on purpose (see auditedScripts).
+func serviceLoadedProbeCmd(path, unit string) string {
+	return `[ "$(stat -c %Y ` + shQuote(path) + ` 2>/dev/null)" -le "$(systemctl show -p ActiveEnterTimestamp --value --timestamp=unix ` + unit + ` 2>/dev/null | tr -d @)" ]`
+}
+
+// envCredentialProbeCmd mirrors envCredentialPresentScript's composition
+// (database.go) — a copy on purpose (see auditedScripts).
+func envCredentialProbeCmd(path string) string {
+	return "LC_ALL=C; export LC_ALL; grep -m1 '^DB_PASSWORD=' " + shQuote(path) +
+		" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'"
+}
+
+// envAppKeyProbeCmd mirrors envBerthAppKeyScript's composition (database.go)
+// — a copy on purpose (see auditedScripts).
+func envAppKeyProbeCmd(path string) string {
+	return "LC_ALL=C; export LC_ALL; line=$(grep -m1 '^APP_KEY=' " + shQuote(path) + "); s=$?; " +
+		"if [ $s -eq 1 ]; then exit 1; elif [ $s -ne 0 ]; then exit 2; fi; " +
+		`printf '%s' "$line" | sed 's/[[:space:]]*$//' | grep -Eq '^APP_KEY=base64:[A-Za-z0-9+/]{43}=$' && exit 0; exit 3`
+}
+
+// envValueMatchProbeCmd mirrors envValueMatchScript's composition
+// (database.go) — a copy on purpose (see auditedStdin).
+func envValueMatchProbeCmd(path, key string) string {
+	return "LC_ALL=C; export LC_ALL; IFS= read -r want; " +
+		"line=$(grep -m1 '^" + key + "=' " + shQuote(path) + "); s=$?; " +
+		"if [ $s -eq 1 ]; then exit 3; elif [ $s -ne 0 ]; then exit 2; fi; " +
+		`line=$(printf '%s' "$line" | sed 's/[[:space:]]*$//'); ` +
+		`[ "$line" = "$want" ] && exit 0; exit 1`
+}
+
 // classifyCommand judges one (command, stdin) pair. The detail string names the
 // reason, so a contract failure is actionable rather than a riddle.
 func classifyCommand(cmd string, stdin []byte) (cmdVerdict, string) {
@@ -335,7 +476,21 @@ func classifyCommand(cmd string, stdin []byte) (cmdVerdict, string) {
 type stdinKey struct{ cmd, stdin string }
 
 // auditedStdin registers the pairs where stdin carries DATA, not a program.
-var auditedStdin = map[stdinKey]string{}
+// Keyed by the EXACT (command, stdin) pair — the same one-character-drift
+// discipline as auditedScripts, on both halves.
+var auditedStdin = map[stdinKey]string{
+	// envValueMatches' value-agreement probes (database.go), issued by
+	// database.Check per site for DB_PASSWORD (always) and APP_KEY (when the
+	// live key is berth-shaped). The stdin is the expected KEY=value line —
+	// consumed by `IFS= read -r want` into a shell variable and used ONLY as
+	// the right-hand side of a quoted [ "$line" = "$want" ] string equality:
+	// data, never a program (no eval, no sh, no `-f -`). The script itself:
+	// C-locale pin, read, grep -m1 capture with explicit exit mapping, a
+	// printf|sed trailing-whitespace trim (s///, no w, no e), [ = ]. Reads
+	// only; the verdict is the exit code, the secret never reaches stdout.
+	{cmd: envValueMatchProbeCmd(fixtureSharedEnv, "DB_PASSWORD"), stdin: "DB_PASSWORD=" + fixtureDBPassword + "\n"}: "envValueMatchScript (database.go), DB_PASSWORD agreement: stdin is the expected line, read into a variable and string-compared — data, not a program",
+	{cmd: envValueMatchProbeCmd(fixtureSharedEnv, "APP_KEY"), stdin: "APP_KEY=" + fixtureAppKey + "\n"}:            "envValueMatchScript (database.go), APP_KEY agreement: stdin is the expected line, read into a variable and string-compared — data, not a program",
+}
 
 // simpleShape is an exact predicate for one metacharacter-free command shape.
 // verb is matched exactly (never by basename, so /tmp/cat is not cat), and
@@ -481,6 +636,10 @@ var simpleShapes = []simpleShape{
 		why: "every spelling of -out creates and truncates its file even under -noout (verified on OpenSSL 3.6.3)"},
 	{verb: "find", allow: findIsReadOnly, verdict: cmdReadOnly},
 	{verb: "gpg", allow: gpgIsReadOnly, verdict: cmdReadOnly},
+	{verb: "mysql", allow: mysqlIsReadOnlyProbe, verdict: cmdReadOnly,
+		why: "only probeSQL's -N -e information_schema SELECT reads; any other statement, a ;-chain, INTO OUTFILE or an extra option mutates"},
+	{verb: "runuser", allow: runuserIsValkeyPing, verdict: cmdReadOnly,
+		why: "only `runuser -u <user> -- valkey-cli -s <berth socket> ping` reads; anything else is an arbitrary program under another uid"},
 }
 
 // sedIsReadOnly allows only `sed -n <script> <file>...` where the ONLY option
@@ -586,6 +745,43 @@ func opensslX509IsReadOnly(args []string) bool {
 		}
 	}
 	return true
+}
+
+// mysqlIsReadOnlyProbe allows only probeSQL's shape
+// (internal/database/mariadb.go): `mysql --protocol=socket -N -e
+// "SELECT 1 FROM information_schema.…"`. Every pin is load-bearing:
+// --protocol=socket keeps the probe on the local server, -N -e is the exact
+// spelling probeSQL composes, and the statement must be a single SELECT
+// against information_schema. Rejected on top of that: a second statement
+// (';'), INTO (OUTFILE/DUMPFILE write files as the SERVER process — matching
+// the bare word over-rejects a column literally named INTO, the safe
+// direction), LOAD_FILE (reads server-side files into the result — not a
+// mutation, but nothing berth issues needs it), and any extra double quote
+// (exactly one opening and one closing), so a trailing option such as
+// --init-command="…" cannot smuggle its own statement past the prefix check.
+func mysqlIsReadOnlyProbe(args []string) bool {
+	if len(args) < 4 || args[0] != "--protocol=socket" || args[1] != "-N" || args[2] != "-e" {
+		return false
+	}
+	q := strings.Join(args[3:], " ")
+	if !strings.HasPrefix(q, `"SELECT 1 FROM information_schema.`) ||
+		!strings.HasSuffix(q, `"`) || strings.Count(q, `"`) != 2 {
+		return false
+	}
+	up := strings.ToUpper(q)
+	return !strings.Contains(q, ";") && !strings.Contains(up, "INTO") && !strings.Contains(up, "LOAD_FILE")
+}
+
+// runuserIsValkeyPing allows only valkeyPingCmd's shape (valkey.go):
+// `runuser -u <user> -- valkey-cli -s '/run/berth-valkey/…' ping`, argument
+// by argument. The trailing verb is pinned to `ping` (a PONG probe, mutates
+// nothing) and the socket to berth's per-site runtime base. The user and the
+// socket tail stay free: they are shQuote'd values, and the shape is what
+// makes the command a read.
+func runuserIsValkeyPing(args []string) bool {
+	return len(args) == 7 && args[0] == "-u" && args[2] == "--" &&
+		args[3] == "valkey-cli" && args[4] == "-s" && args[6] == "ping" &&
+		strings.HasPrefix(args[5], "'/run/berth-valkey/")
 }
 
 // findMutators are the predicates that act instead of reporting. find's
