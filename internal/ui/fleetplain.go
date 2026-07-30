@@ -22,6 +22,12 @@ const (
 
 // WriteFleetTable prints one line per host: no ANSI, no in-place updates, safe
 // for CI and pipes.
+//
+// Every host-derived string is passed through SanitizeCell at its print site
+// (see sanitize.go): the manifest VERSION, probe/drift error text and restic
+// output would otherwise carry a hostile host's escape sequences straight to
+// the terminal. The cert/backup/disk/services cells are composed purely of
+// integers and berth string literals, so they carry nothing to sanitize.
 func WriteFleetTable(w io.Writer, hosts []status.HostStatus) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	if _, err := fmt.Fprintln(tw, "HOST\tBERTH\tSITES\tDRIFT\tCERTS\tBACKUP\tDISK\tSERVICES"); err != nil {
@@ -29,21 +35,21 @@ func WriteFleetTable(w io.Writer, hosts []status.HostStatus) error {
 	}
 	for _, h := range hosts {
 		if !h.Reachable {
-			if _, err := fmt.Fprintf(tw, "%s\tunreachable\t-\t-\t-\t-\t-\t%s\n", hostLabel(h), h.Error); err != nil {
+			if _, err := fmt.Fprintf(tw, "%s\tunreachable\t-\t-\t-\t-\t-\t%s\n", SanitizeCell(hostLabel(h)), SanitizeCell(h.Error)); err != nil {
 				return err
 			}
 			continue
 		}
 		if _, err := fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n",
-			hostLabel(h), berthVersion(h), len(h.Sites),
-			driftCell(h.Drift), certCell(h), backupCell(h), diskCell(h),
+			SanitizeCell(hostLabel(h)), SanitizeCell(berthVersion(h)), len(h.Sites),
+			SanitizeCell(driftCell(h.Drift)), certCell(h), backupCell(h), diskCell(h),
 			servicesCell(h)); err != nil {
 			return err
 		}
 		// A reachable host with partial probe failures previously rendered as
 		// fully healthy. Its errors must be visible, not only in --json.
 		for _, pe := range h.ProbeErrors {
-			if _, err := fmt.Fprintf(tw, "  ! %s\t\t\t\t\t\t\t\n", pe); err != nil {
+			if _, err := fmt.Fprintf(tw, "  ! %s\t\t\t\t\t\t\t\n", SanitizeCell(pe)); err != nil {
 				return err
 			}
 		}
@@ -52,7 +58,7 @@ func WriteFleetTable(w io.Writer, hosts []status.HostStatus) error {
 		// alignment. For the expected identity abort the reason IS the remedy
 		// (endpoint mismatch / renamed id -> `--only identity --force`).
 		if h.Drift != nil && h.Drift.Error != "" {
-			if _, err := fmt.Fprintf(tw, "  ! drift: %s\t\t\t\t\t\t\t\n", h.Drift.Error); err != nil {
+			if _, err := fmt.Fprintf(tw, "  ! drift: %s\t\t\t\t\t\t\t\n", SanitizeCell(h.Drift.Error)); err != nil {
 				return err
 			}
 		}
@@ -62,7 +68,7 @@ func WriteFleetTable(w io.Writer, hosts []status.HostStatus) error {
 		// Without this line a SUCCESSFUL query was invisible in plain output —
 		// only failures showed, via the ProbeErrors rows above.
 		if h.Offsite != nil {
-			if _, err := fmt.Fprintf(tw, "  offsite: %s\t\t\t\t\t\t\t\n", offsiteLine(h)); err != nil {
+			if _, err := fmt.Fprintf(tw, "  offsite: %s\t\t\t\t\t\t\t\n", SanitizeCell(offsiteLine(h))); err != nil {
 				return err
 			}
 		}

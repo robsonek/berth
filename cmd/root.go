@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/robsonek/berth/internal/ui"
 	"github.com/robsonek/berth/internal/version"
 	"github.com/spf13/cobra"
 )
@@ -37,7 +38,11 @@ func errNotImplemented(what string) error {
 // force-kills the CLI if anything still refuses to die.
 func Execute() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+		// Error text can embed remote-derived strings (probe stderr, drift
+		// reasons); sanitize this final print like the renderers do — keeping
+		// the deliberate multi-line remedies — so a hostile host cannot drive
+		// the terminal through the exit message either.
+		fmt.Fprintln(os.Stderr, "error:", ui.SanitizeBlock(err.Error()))
 		os.Exit(1)
 	}
 }

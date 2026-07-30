@@ -29,6 +29,14 @@ Notable changes to berth. Older releases are documented on the
 
 ### Fixed
 
+- **Host-derived text is sanitised before it reaches the terminal**
+  (hardening from an external adversarial review): the fleet table/detail
+  views and the provisioning renderers (TUI and plain) now visibly escape
+  control characters in every string that originates on a host — manifest
+  version, probe and drift errors, step reasons, changes, warnings and error
+  text — so a compromised or drifted host can no longer clear the screen,
+  spoof rows or drive OSC clipboard writes through berth's output. Escapes
+  are shown (`\x1b`, `\r`, …), never silently dropped.
 - `apt`: the keyring fingerprint probe no longer initialises root's GnuPG home
   (`pubring.kbx`/`trustdb.gpg` were created on every run by a read-only check).
 

@@ -60,6 +60,10 @@ var (
 	warnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
 )
 
+// view sanitizes the remote-derived strings (error text, warnings — see
+// sanitize.go) BEFORE composing lipgloss styling around them: sanitizing the
+// rendered output would strip berth's own escape sequences. Step names are
+// berth's own constants.
 func (m stepModel) view() string {
 	out := ""
 	for _, name := range m.order {
@@ -69,22 +73,15 @@ func (m stepModel) view() string {
 		case "already":
 			out += okStyle.Render("✔ "+name+" (already)") + "\n"
 		case "failed":
-			out += failStyle.Render("✗ "+name+": "+errText(m.err)) + "\n"
+			out += failStyle.Render("✗ "+name+": "+sanitizeErr(m.err)) + "\n"
 		default:
 			out += "… " + name + "\n"
 		}
 	}
 	for _, w := range m.warnings {
-		out += warnStyle.Render("⚠ "+w) + "\n"
+		out += warnStyle.Render("⚠ "+SanitizeCell(w)) + "\n"
 	}
 	return out
-}
-
-func errText(e error) string {
-	if e == nil {
-		return ""
-	}
-	return e.Error()
 }
 
 // TUIRenderer drives a bubbletea program from the engine's event stream.

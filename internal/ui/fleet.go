@@ -71,19 +71,23 @@ func (m fleetModel) View() string {
 	return b.String()
 }
 
+// writeHostDetail prints the drill-down. Every host-derived string —
+// version, probe/drift errors, domains, cert modes, service names, drift
+// changes, the offsite answer — goes through SanitizeCell at its print site
+// (see sanitize.go); the formatted dates and berth's own literals need none.
 func writeHostDetail(w *bytes.Buffer, h status.HostStatus) {
-	fmt.Fprintf(w, "%s · %s\n", hostLabel(h), h.Endpoint)
+	fmt.Fprintf(w, "%s · %s\n", SanitizeCell(hostLabel(h)), SanitizeCell(h.Endpoint))
 	if h.Provisioned != nil {
 		fmt.Fprintf(w, "provisioned %s by berth %s\n",
-			h.Provisioned.ProvisionedAt.Format("2006-01-02"), h.Provisioned.Version)
+			h.Provisioned.ProvisionedAt.Format("2006-01-02"), SanitizeCell(h.Provisioned.Version))
 	}
 	if h.Error != "" {
-		fmt.Fprintf(w, "error: %s\n", h.Error)
+		fmt.Fprintf(w, "error: %s\n", SanitizeCell(h.Error))
 	}
 	// Partial probe failures: a reachable host that answered only some probes
 	// must not read as fully healthy in the drill-down either.
 	for _, pe := range h.ProbeErrors {
-		fmt.Fprintf(w, "probe error: %s\n", pe)
+		fmt.Fprintf(w, "probe error: %s\n", SanitizeCell(pe))
 	}
 	fmt.Fprintln(w, "\nSITES")
 	for _, s := range h.Sites {
@@ -91,7 +95,7 @@ func writeHostDetail(w *bytes.Buffer, h status.HostStatus) {
 		if s.Cert.NotAfter != nil && s.Cert.DaysLeft != nil {
 			expiry = fmt.Sprintf("%s (%dd)", s.Cert.NotAfter.Format("2006-01-02"), *s.Cert.DaysLeft)
 		}
-		fmt.Fprintf(w, "  %s\t%s\t%s\n", s.Domain, s.Cert.Mode, expiry)
+		fmt.Fprintf(w, "  %s\t%s\t%s\n", SanitizeCell(s.Domain), SanitizeCell(s.Cert.Mode), expiry)
 	}
 	fmt.Fprintln(w, "\nSERVICES")
 	for _, sv := range h.Services {
@@ -102,20 +106,20 @@ func writeHostDetail(w *bytes.Buffer, h status.HostStatus) {
 		if !sv.Enabled {
 			state += " (not enabled)"
 		}
-		fmt.Fprintf(w, "  %s\t%s\n", sv.Name, state)
+		fmt.Fprintf(w, "  %s\t%s\n", SanitizeCell(sv.Name), state)
 	}
 	if h.Drift != nil {
-		fmt.Fprintf(w, "\nDRIFT %s\n", driftCell(h.Drift))
+		fmt.Fprintf(w, "\nDRIFT %s\n", SanitizeCell(driftCell(h.Drift)))
 		// The abort (or did-not-run) reason: for the identity abort it carries
 		// the whole remedy, so the drill-down must show it, not only --json.
 		if h.Drift.Error != "" {
-			fmt.Fprintf(w, "  %s\n", h.Drift.Error)
+			fmt.Fprintf(w, "  %s\n", SanitizeCell(h.Drift.Error))
 		}
 		for _, st := range h.Drift.Steps {
 			if st.Satisfied {
 				continue
 			}
-			fmt.Fprintf(w, "  %s: %v\n", st.Step, st.Changes)
+			fmt.Fprintf(w, "  %s: %v\n", SanitizeCell(st.Step), sanitizeAll(st.Changes))
 		}
 	}
 	if h.Offsite != nil {
@@ -130,7 +134,7 @@ func writeHostDetail(w *bytes.Buffer, h status.HostStatus) {
 		default:
 			when = "no snapshot"
 		}
-		fmt.Fprintf(w, "\nOFFSITE %s\n", when)
+		fmt.Fprintf(w, "\nOFFSITE %s\n", SanitizeCell(when))
 	}
 }
 
