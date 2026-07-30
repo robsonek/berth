@@ -492,20 +492,29 @@ var offsiteEnvKeys = []string{"RESTIC_REPOSITORY", "RESTIC_PASSWORD", "AWS_ACCES
 // /etc/berth/offsite.env by PARSING it, never by dot-sourcing: sourcing the
 // file as shell meant a drifted or hand-edited copy executed arbitrary
 // commands as root (external adversarial review finding). The grammar is
-// exactly what berth writes — offsiteEnvKeys lines in the KEY='value' form,
-// where validation guarantees no value can contain a single quote, a newline
-// or a control character (secret.ValidateSecretValue; Offsite.validate for
-// the repository components) — so for every berth-written file the exported
-// environment is byte-identical to what `set -a; . file; set +a` produced.
+// exactly what berth writes: the managed marker (`# managed by berth` —
+// templates.Render prepends it to EVERY rendered file, this one included)
+// followed by offsiteEnvKeys lines in the KEY='value' form, where validation
+// guarantees no value can contain a single quote, a newline or a control
+// character (secret.ValidateSecretValue; Offsite.validate for the repository
+// components) — so for every berth-written file the exported environment is
+// byte-identical to what `set -a; . file; set +a` produced.
 //
-// Anything else fails CLOSED with exit status 2 and a message that names the
-// offending key, never a value: a half-loaded environment could point restic
-// at the wrong repository, which is worse than refusing to run. Every call
-// site gates on the function's status (set -e in the cron script, && in the
-// provisioning probe, if in the status probe), so nothing runs on a partial
-// load. The parser strips the one layer of single quotes and exports the
-// value literally — no eval, no expansion, so `$(…)`, backticks and
-// backslashes in a legal value survive exactly as sourcing kept them.
+// Inert lines are SKIPPED, not rejected: a line whose first non-blank
+// character is '#', and empty or whitespace-only lines. Under a parser a
+// comment cannot execute anything, so rejecting it would buy no safety — and
+// would reject berth's own rendered file, whose first line IS a comment.
+// The KEY='value' match stays strict on the RAW line (no leading whitespace
+// tolerated there).
+//
+// Anything else fails CLOSED with exit status 2 and a message that names at
+// most the offending key, never a value: a half-loaded environment could
+// point restic at the wrong repository, which is worse than refusing to run.
+// Every call site gates on the function's status (set -e in the cron script,
+// && in the provisioning probe, if in the status probe), so nothing runs on
+// a partial load. The parser strips the one layer of single quotes and
+// exports the value literally — no eval, no expansion, so `$(…)`, backticks
+// and backslashes in a legal value survive exactly as sourcing kept them.
 func OffsiteEnvLoader() string { return offsiteEnvLoaderFor(OffsiteEnvPath) }
 
 // offsiteEnvLoaderFor exists so tests can point the loader at a temp file;
@@ -515,9 +524,12 @@ func offsiteEnvLoaderFor(path string) string {
 	for i, k := range offsiteEnvKeys {
 		pats[i] = k + `=\'*\'`
 	}
+	// The catch-all arm trims leading whitespace into t only to classify the
+	// line as inert (''|'#'*) or unexpected; ${line%%[![:space:]]*} is the
+	// leading-whitespace run (POSIX character classes work in dash's fnmatch).
 	return OffsiteEnvLoadName + `() { while IFS= read -r line || [ -n "$line" ]; do case $line in ` +
 		strings.Join(pats, "|") +
-		`) key=${line%%=*}; val=${line#*=\'}; val=${val%\'}; case $val in *\'*) echo "berth: $key in ` + path + ` has an embedded quote; refusing to load it" >&2; return 2;; esac; export "$key=$val";; *) echo "berth: unexpected line in ` + path + `; refusing to load it" >&2; return 2;; esac; done < ` + path + `; }`
+		`) key=${line%%=*}; val=${line#*=\'}; val=${val%\'}; case $val in *\'*) echo "berth: $key in ` + path + ` has an embedded quote; refusing to load it" >&2; return 2;; esac; export "$key=$val";; *) t=${line#"${line%%[![:space:]]*}"}; case $t in ''|'#'*) ;; *) echo "berth: unexpected line in ` + path + `; refusing to load it" >&2; return 2;; esac;; esac; done < ` + path + `; }`
 }
 
 // Apt declares extra third-party apt repositories and extra packages beyond

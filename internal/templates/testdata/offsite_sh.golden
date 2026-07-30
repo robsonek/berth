@@ -7,7 +7,7 @@ flock -n 9 || { echo "[$(date -u +%FT%TZ)] berth offsite: skipped (another run h
 exec 8>/var/backups/berth/.artifacts.lock
 flock -w 900 8 || { echo "[$(date -u +%FT%TZ)] berth offsite: giving up (local backups still running after 15m)"; exit 1; }
 echo "[$(date -u +%FT%TZ)] berth offsite: start"
-berth_load_offsite_env() { while IFS= read -r line || [ -n "$line" ]; do case $line in RESTIC_REPOSITORY=\'*\'|RESTIC_PASSWORD=\'*\'|AWS_ACCESS_KEY_ID=\'*\'|AWS_SECRET_ACCESS_KEY=\'*\') key=${line%%=*}; val=${line#*=\'}; val=${val%\'}; case $val in *\'*) echo "berth: $key in /etc/berth/offsite.env has an embedded quote; refusing to load it" >&2; return 2;; esac; export "$key=$val";; *) echo "berth: unexpected line in /etc/berth/offsite.env; refusing to load it" >&2; return 2;; esac; done < /etc/berth/offsite.env; }
+berth_load_offsite_env() { while IFS= read -r line || [ -n "$line" ]; do case $line in RESTIC_REPOSITORY=\'*\'|RESTIC_PASSWORD=\'*\'|AWS_ACCESS_KEY_ID=\'*\'|AWS_SECRET_ACCESS_KEY=\'*\') key=${line%%=*}; val=${line#*=\'}; val=${val%\'}; case $val in *\'*) echo "berth: $key in /etc/berth/offsite.env has an embedded quote; refusing to load it" >&2; return 2;; esac; export "$key=$val";; *) t=${line#"${line%%[![:space:]]*}"}; case $t in ''|'#'*) ;; *) echo "berth: unexpected line in /etc/berth/offsite.env; refusing to load it" >&2; return 2;; esac;; esac; done < /etc/berth/offsite.env; }
 berth_load_offsite_env
 restic backup /var/backups/berth --host box-1 --exclude '.tmp-*' --exclude '.lock' --exclude '.artifacts.lock' --exclude '.offsite.lock'
 restic forget --prune --keep-daily 7 --keep-weekly 4 --keep-monthly 6

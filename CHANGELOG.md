@@ -22,10 +22,13 @@ Notable changes to berth. Older releases are documented on the
   offsite query all load the file through one strict allowlist parser instead
   of `set -a; . file`, so a drifted or hand-edited copy can no longer execute
   commands as root — it fails loudly instead (the status probe reports it as a
-  malformed-file discrepancy). For every file berth itself writes the loaded
-  environment is identical to what sourcing produced. Expect a **one-time
-  rewrite of the managed `/usr/local/sbin/berth-offsite` script** on each
-  offsite-enabled host's next provision run (ordinary managed-file drift).
+  malformed-file discrepancy). Comment and blank lines are inert and simply
+  skipped — the managed marker itself is one, and an operator's hand-added
+  annotation does not break the nightly backup. For every file berth itself
+  writes the loaded environment is identical to what sourcing produced.
+  Expect a **one-time rewrite of the managed `/usr/local/sbin/berth-offsite`
+  script** on each offsite-enabled host's next provision run (ordinary
+  managed-file drift).
 
 ### Fixed
 

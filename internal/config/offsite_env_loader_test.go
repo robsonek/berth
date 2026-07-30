@@ -51,10 +51,79 @@ func offsiteEnvVars(dump string) []string {
 	return got
 }
 
-// For every LEGAL env file — one berth itself could write — the loader must
-// export an environment byte-identical to what `set -a; . file; set +a`
-// produced. That is the contract that makes replacing evaluation with parsing
-// safe for already-provisioned hosts.
+// assertLoaderMatchesSourcing writes content to a temp env file and asserts
+// the loader (1) accepts it, (2) exports exactly the environment that
+// `set -a; . file; set +a` exported, and (3) executed nothing (the temp dir
+// gains no droppings). That is the contract that makes replacing evaluation
+// with parsing safe for already-provisioned hosts.
+func assertLoaderMatchesSourcing(t *testing.T, content string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "offsite.env")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sourced, rc := runShell(t, dir, "set -a; . "+path+"; set +a; exec env")
+	if rc != 0 {
+		t.Fatalf("sourcing a legal file failed: rc=%d", rc)
+	}
+	loaded, rc := runShell(t, dir, offsiteEnvLoaderFor(path)+"; "+OffsiteEnvLoadName+" && exec env")
+	if rc != 0 {
+		t.Fatalf("loader rejected a legal file: rc=%d", rc)
+	}
+	want, got := offsiteEnvVars(sourced), offsiteEnvVars(loaded)
+	if strings.Join(want, "\n") != strings.Join(got, "\n") {
+		t.Errorf("exported environment differs from sourcing:\nsourced: %q\nloaded:  %q", want, got)
+	}
+	if len(got) == 0 {
+		t.Fatal("loader exported nothing — the comparison would be vacuous")
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 1 {
+		t.Fatalf("something executed a command from the env file: %v %v", entries, err)
+	}
+}
+
+// The load-bearing case: berth's own RENDERED files, real bytes from the
+// template goldens — which begin with the managed marker comment
+// (templates.Render prepends it to every rendered file). A hand-made fixture
+// missed exactly that and let a loader that rejected berth's own file
+// through review; this test is the reason that cannot happen again.
+func TestOffsiteEnvLoaderLoadsBerthRenderedFiles(t *testing.T) {
+	for _, golden := range []string{"offsite_env.golden", "offsite_env_sftp.golden"} {
+		t.Run(golden, func(t *testing.T) {
+			content, err := os.ReadFile(filepath.Join("..", "templates", "testdata", golden))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Vacuity guard: the point of this test is the real rendered
+			// shape, marker line included.
+			if !strings.HasPrefix(string(content), "# managed by berth\n") {
+				t.Fatalf("golden %s no longer starts with the managed marker — this test must exercise the real rendered shape", golden)
+			}
+			assertLoaderMatchesSourcing(t, string(content))
+		})
+	}
+}
+
+// Inert lines — comments (leading whitespace allowed) and empty or
+// whitespace-only lines — are SKIPPED, not rejected: under a parser they
+// cannot execute anything, and berth's own rendered file BEGINS with the
+// marker comment. An operator's hand-added annotation must not break the
+// nightly backup.
+func TestOffsiteEnvLoaderSkipsInertLines(t *testing.T) {
+	assertLoaderMatchesSourcing(t, "# managed by berth\n"+
+		"\n"+
+		"   \n"+
+		"\t\n"+
+		"   # indented comment\n"+
+		"RESTIC_REPOSITORY='r'\n"+
+		"# trailing comment\n"+
+		"RESTIC_PASSWORD='x'\n")
+}
+
+// Synthetic value-edge fixtures, shaped like the real file (marker line
+// first — see TestOffsiteEnvLoaderLoadsBerthRenderedFiles for why the shape
+// matters).
 func TestOffsiteEnvLoaderMatchesSourcingForLegalFiles(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -78,29 +147,7 @@ func TestOffsiteEnvLoaderMatchesSourcingForLegalFiles(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			path := filepath.Join(dir, "offsite.env")
-			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			sourced, rc := runShell(t, dir, "set -a; . "+path+"; set +a; exec env")
-			if rc != 0 {
-				t.Fatalf("sourcing a legal file failed: rc=%d", rc)
-			}
-			loaded, rc := runShell(t, dir, offsiteEnvLoaderFor(path)+"; "+OffsiteEnvLoadName+" && exec env")
-			if rc != 0 {
-				t.Fatalf("loader rejected a legal file: rc=%d", rc)
-			}
-			want, got := offsiteEnvVars(sourced), offsiteEnvVars(loaded)
-			if strings.Join(want, "\n") != strings.Join(got, "\n") {
-				t.Errorf("exported environment differs from sourcing:\nsourced: %q\nloaded:  %q", want, got)
-			}
-			if len(got) == 0 {
-				t.Fatal("loader exported nothing — the comparison would be vacuous")
-			}
-			if entries, err := os.ReadDir(dir); err != nil || len(entries) != 1 {
-				t.Fatalf("something executed a command from the env file: %v %v", entries, err)
-			}
+			assertLoaderMatchesSourcing(t, "# managed by berth\n"+tc.content)
 		})
 	}
 }
@@ -118,10 +165,11 @@ func TestOffsiteEnvLoaderRejectsHostileFiles(t *testing.T) {
 		{"unknown-key", "LD_PRELOAD='/tmp/evil.so'\n"},
 		{"embedded-quote", "RESTIC_PASSWORD='a'b'\n"},
 		{"unterminated-quote", "RESTIC_PASSWORD='\n"},
+		// A KEY line is matched RAW: comments may be indented (inert either
+		// way), but an assignment with leading whitespace is not something
+		// berth writes and stays rejected.
 		{"leading-whitespace", " RESTIC_PASSWORD='a'\n"},
 		{"trailing-whitespace", "RESTIC_PASSWORD='a' \n"},
-		{"blank-line", "RESTIC_PASSWORD='a'\n\nRESTIC_REPOSITORY='r'\n"},
-		{"comment", "# a comment\nRESTIC_PASSWORD='a'\n"},
 		{"crlf-ending", "RESTIC_PASSWORD='a'\r\n"},
 	}
 	for _, tc := range cases {
