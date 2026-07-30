@@ -101,12 +101,26 @@ func probeFailure(hosts []status.HostStatus) error {
 	var failed []string
 	for _, h := range hosts {
 		switch {
+		case !h.Reachable && h.Endpoint == "":
+			// Only a loaded config yields an endpoint (see status.Collect), so
+			// an empty one identifies a config that never loaded — a different
+			// diagnosis from a dead host, and "unreachable" would send the
+			// operator to the network instead of the file.
+			failed = append(failed, h.ConfigPath+" (config failed to load: "+h.Error+")")
 		case !h.Reachable:
 			failed = append(failed, h.ConfigPath+" (unreachable)")
 		case len(h.ProbeErrors) > 0:
 			failed = append(failed, fmt.Sprintf("%s (%d probes failed)", h.ConfigPath, len(h.ProbeErrors)))
 		case h.Drift != nil && h.Drift.StoppedAt != "":
-			failed = append(failed, h.ConfigPath+" (drift scan aborted at "+h.Drift.StoppedAt+")")
+			// Symmetric with the did-not-run arm below: the reason travels with
+			// the step. For the expected identity abort the error text IS the
+			// remedy (`--only identity --force`), and dropping it left --json
+			// the only place to find it.
+			msg := h.ConfigPath + " (drift scan aborted at " + h.Drift.StoppedAt
+			if h.Drift.Error != "" {
+				msg += ": " + h.Drift.Error
+			}
+			failed = append(failed, msg+")")
 		case h.Drift != nil && h.Drift.Error != "":
 			// Error without StoppedAt means the scan never reached any step,
 			// so the message must not name one.

@@ -90,6 +90,25 @@ func TestFleetTableErrorWithoutStopIsNotClean(t *testing.T) {
 	}
 }
 
+// The abort REASON must reach the operator, not only the abort point: for the
+// expected identity abort the error text carries the whole remedy (an endpoint
+// mismatch or renamed id, fixed with the narrow `--only identity --force`),
+// and hiding it behind --json left the table saying only "aborted at identity".
+func TestFleetTableAbortReasonIsVisible(t *testing.T) {
+	h := hostFixture()
+	h.Drift = &status.DriftReport{
+		StoppedAt: "identity",
+		Error:     "identity: endpoint mismatch: re-bind with --only identity --force",
+	}
+	var buf bytes.Buffer
+	if err := WriteFleetTable(&buf, []status.HostStatus{h}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "--only identity --force") {
+		t.Errorf("the abort reason must be visible in the table:\n%s", buf.String())
+	}
+}
+
 func TestFleetTableNotScannedIsDistinctFromClean(t *testing.T) {
 	h := hostFixture()
 	h.Drift = nil

@@ -93,12 +93,29 @@ func CollectHost(ctx context.Context, cfgPath string, s *config.Server, r bssh.R
 	if err != nil {
 		h.ProbeErrors = append(h.ProbeErrors, "backups: "+err.Error())
 	}
+	// Each site is seeded from the CONFIG first, then overlaid with whatever
+	// the probes returned. Cert.Mode and Backup.Enabled/Dir do not depend on
+	// the host, and a failed probe must not degrade them to zero values:
+	// cert.mode:"" and backup.enabled:false are ANSWERS ("no TLS", "off"),
+	// not "unknown", and reporting them for a site the config declares
+	// otherwise turns a broken probe into reassurance.
 	for _, site := range s.Sites {
-		h.Sites = append(h.Sites, SiteStatus{
-			Domain: site.Domain,
-			Cert:   certs[site.Domain],
-			Backup: backups[site.Domain],
-		})
+		st := SiteStatus{Domain: site.Domain}
+		if site.SSL {
+			// Empty when the site declares no TLS — that emptiness is what
+			// keeps "no TLS" and "declared but missing" apart in the views.
+			st.Cert.Mode = site.CertMode()
+		}
+		if s.BackupsEnabled(site) {
+			st.Backup = BackupStatus{Enabled: true, Dir: backupDir(site.Domain)}
+		}
+		if c, ok := certs[site.Domain]; ok {
+			st.Cert = c
+		}
+		if b, ok := backups[site.Domain]; ok {
+			st.Backup = b
+		}
+		h.Sites = append(h.Sites, st)
 	}
 	if offsite && s.OffsiteEnabled() {
 		o, err := probeOffsite(ctx, r, s.ID, config.OffsiteResticOpts(s.Backups.Offsite))

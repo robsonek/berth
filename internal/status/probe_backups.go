@@ -14,6 +14,11 @@ import (
 // backupBaseDir mirrors the backups step's root (steps/backups.go:17).
 const backupBaseDir = "/var/backups/berth"
 
+// backupDir is one site's backup directory. Single-sourced: the probe scans it
+// and CollectHost seeds the config-derived BackupStatus.Dir from it, so the
+// derivation can never diverge between the two.
+func backupDir(domain string) string { return backupBaseDir + "/" + config.PoolName(domain) }
+
 // itoa64 keeps the test fixtures readable.
 func itoa64(v int64) string { return strconv.FormatInt(v, 10) }
 
@@ -31,9 +36,10 @@ func itoa64(v int64) string { return strconv.FormatInt(v, 10) }
 // The directory `manifest` and `.lock` are bookkeeping and are excluded from
 // the count and byte total.
 //
-// BEFORE IMPLEMENTING: open internal/templates/backup.sh.tmpl and confirm the
-// sidecar's exact name pattern and that it is genuinely written last. If the
-// script's ordering differs, key freshness on whatever it writes last.
+// The script's ordering makes this sound (verified against
+// internal/templates/backup.sh.tmpl): the sidecar is mv'd into place LAST —
+// after the database dump and the files archive, before only the retention
+// prune — so its presence is equivalent to "this run completed".
 func backupsCmd(dirs []string) string {
 	const find = `find "$d" -maxdepth 1 -type f ! -name '.lock' ! -name 'manifest' ! -name '.tmp-*'`
 	const findSidecar = `find "$d" -maxdepth 1 -type f -name '*-meta-*.manifest'`
@@ -56,7 +62,7 @@ func probeBackups(ctx context.Context, r bssh.Runner, s *config.Server, hostTime
 			out[site.Domain] = BackupStatus{Enabled: false}
 			continue
 		}
-		d := backupBaseDir + "/" + config.PoolName(site.Domain)
+		d := backupDir(site.Domain)
 		dirs = append(dirs, d)
 		byDir[d] = site.Domain
 		out[site.Domain] = BackupStatus{Enabled: true, Dir: d}

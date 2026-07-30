@@ -412,10 +412,14 @@ func TestCacheKey(t *testing.T) {
 }
 
 // These derivations name OS users, FPM sockets, systemd units, supervisor
-// programs and the role names inside PostgreSQL dumps on every live host.
+// programs, certificate directories, berth-managed offsite files and the role
+// names inside PostgreSQL dumps on every live host.
 // FROZEN FOREVER as of the first real deployment: changing either function
 // re-identifies every implicitly-named tenant — the owner guard would
 // refuse loudly rather than corrupt, but the config would stop converging.
+//
+// Every expectation below is a LITERAL, never computed with the function under
+// test: a pin that calls the same code it pins passes green through any change.
 func TestDerivationsAreFrozen(t *testing.T) {
 	if got := DerivedSiteUser("app.example.com"); got != "b_appexamplecom_dd46c94b" {
 		t.Fatalf("DerivedSiteUser derivation changed: %s", got)
@@ -440,6 +444,36 @@ func TestDerivationsAreFrozen(t *testing.T) {
 	}
 	if got := DeployKeyPath("b_appexamplecom_dd46c94b"); got != "/home/b_appexamplecom_dd46c94b/.ssh/id_ed25519" {
 		t.Fatalf("DeployKeyPath derivation changed: %s", got)
+	}
+	// FPMServiceName mirrors Debian's own packaging naming rather than a berth
+	// choice, but berth composes sudoers, probes and reload wrappers from it,
+	// so a drive-by change must trip this test all the same.
+	if got := FPMServiceName("8.4"); got != "php8.4-fpm" {
+		t.Fatalf("FPMServiceName derivation changed: %s", got)
+	}
+	if got := ValkeyInstanceUnit("app.example.com"); got != "berth-valkey-app_example_com.service" {
+		t.Fatalf("ValkeyInstanceUnit derivation changed: %s", got)
+	}
+	if SelfSignedCertBase != "/etc/ssl/berth" {
+		t.Fatalf("SelfSignedCertBase changed: %s", SelfSignedCertBase)
+	}
+	if LetsEncryptLiveBase != "/etc/letsencrypt/live" {
+		t.Fatalf("LetsEncryptLiveBase changed: %s", LetsEncryptLiveBase)
+	}
+	if got := CertDir(Site{Domain: "app.example.com"}); got != "/etc/letsencrypt/live/app.example.com" {
+		t.Fatalf("CertDir letsencrypt derivation changed: %s", got)
+	}
+	if got := CertDir(Site{Domain: "app.example.com", SSLMode: "selfsigned"}); got != "/etc/ssl/berth/app.example.com" {
+		t.Fatalf("CertDir selfsigned derivation changed: %s", got)
+	}
+	if OffsiteEnvPath != "/etc/berth/offsite.env" {
+		t.Fatalf("OffsiteEnvPath changed: %s", OffsiteEnvPath)
+	}
+	if OffsiteSSHKeyPath != "/root/.ssh/berth_offsite" {
+		t.Fatalf("OffsiteSSHKeyPath changed: %s", OffsiteSSHKeyPath)
+	}
+	if OffsiteKnownHostsPath != "/root/.ssh/berth_offsite_known_hosts" {
+		t.Fatalf("OffsiteKnownHostsPath changed: %s", OffsiteKnownHostsPath)
 	}
 }
 

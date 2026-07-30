@@ -1,8 +1,12 @@
 // Package status collects read-only facts about berth-provisioned hosts.
 //
-// Nothing in this package mutates anything: it issues read-only commands and,
-// for drift, runs the provisioning pipeline with DryRun set so Apply is never
-// reached. The JSON shape produced by WriteJSON is a contract covered by a
+// The probes issue read-only commands and nothing here writes a local file.
+// The drift scan runs the provisioning pipeline with DryRun set, so Apply is
+// never reached — but a step's Check runs the same validators provisioning
+// runs, and one of those (nginx -t, as root) may create a missing log file.
+// That is the precise promise: no change to a host's configuration, data,
+// packages, service state or certificates, rather than "no writes of any
+// kind". The JSON shape produced by WriteJSON is a contract covered by a
 // golden test — callers script against it.
 package status
 

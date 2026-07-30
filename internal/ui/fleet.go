@@ -80,6 +80,11 @@ func writeHostDetail(w *bytes.Buffer, h status.HostStatus) {
 	if h.Error != "" {
 		fmt.Fprintf(w, "error: %s\n", h.Error)
 	}
+	// Partial probe failures: a reachable host that answered only some probes
+	// must not read as fully healthy in the drill-down either.
+	for _, pe := range h.ProbeErrors {
+		fmt.Fprintf(w, "probe error: %s\n", pe)
+	}
 	fmt.Fprintln(w, "\nSITES")
 	for _, s := range h.Sites {
 		expiry := "no certificate"
@@ -101,6 +106,11 @@ func writeHostDetail(w *bytes.Buffer, h status.HostStatus) {
 	}
 	if h.Drift != nil {
 		fmt.Fprintf(w, "\nDRIFT %s\n", driftCell(h.Drift))
+		// The abort (or did-not-run) reason: for the identity abort it carries
+		// the whole remedy, so the drill-down must show it, not only --json.
+		if h.Drift.Error != "" {
+			fmt.Fprintf(w, "  %s\n", h.Drift.Error)
+		}
 		for _, st := range h.Drift.Steps {
 			if st.Satisfied {
 				continue

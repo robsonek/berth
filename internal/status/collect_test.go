@@ -84,6 +84,45 @@ func TestCollectHostWritesNothing(t *testing.T) {
 	}
 }
 
+// Config-derived facts must survive a failed probe: backup.enabled:false and
+// cert.mode:"" are ANSWERS ("off", "no TLS"), not "unknown", and the config
+// declares otherwise regardless of what the host answered. Degrading them
+// made a declared-TLS site read as plain HTTP and a backed-up site as
+// unprotected whenever a probe failed.
+func TestCollectHostKeepsConfigFactsWhenProbesFail(t *testing.T) {
+	s := collectSrv()
+	f := stubHost(s)
+	// Re-stub the cert and backup probes to fail; On overwrites by exact
+	// command string.
+	denied := bssh.Result{ExitCode: 1, Stderr: "sudo: a password is required\n"}
+	f.On(certsCmd([]string{"/etc/letsencrypt/live/app.example.com/fullchain.pem"}), denied)
+	f.On(backupsCmd([]string{"/var/backups/berth/app_example_com"}), denied)
+
+	got := CollectHost(context.Background(), "servers/prod.yml", s, f, nil, nil, false)
+	if !got.Reachable {
+		t.Fatalf("host = %+v, want reachable", got)
+	}
+	if len(got.ProbeErrors) != 2 {
+		t.Fatalf("ProbeErrors = %v, want the cert and backup failures recorded", got.ProbeErrors)
+	}
+	if len(got.Sites) != 1 {
+		t.Fatalf("sites = %+v, want 1", got.Sites)
+	}
+	site := got.Sites[0]
+	if site.Cert.Mode != "letsencrypt" {
+		t.Errorf("Cert.Mode = %q, want the configured mode to survive the failed probe", site.Cert.Mode)
+	}
+	if site.Cert.Present || site.Cert.DaysLeft != nil {
+		t.Errorf("cert facts the probe never delivered must stay unknown: %+v", site.Cert)
+	}
+	if !site.Backup.Enabled || site.Backup.Dir != "/var/backups/berth/app_example_com" {
+		t.Errorf("Backup = %+v, want the configured enabled+dir to survive the failed probe", site.Backup)
+	}
+	if site.Backup.Newest != nil || site.Backup.Count != 0 {
+		t.Errorf("backup facts the probe never delivered must stay unknown: %+v", site.Backup)
+	}
+}
+
 func TestCollectHostSurfacesAProbeFailure(t *testing.T) {
 	s := collectSrv()
 	f := bssh.NewFakeRunner() // nothing stubbed: the first probe errors

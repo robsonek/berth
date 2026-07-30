@@ -47,6 +47,15 @@ func WriteFleetTable(w io.Writer, hosts []status.HostStatus) error {
 				return err
 			}
 		}
+		// The drift cell names only the abort point; the reason rides a
+		// continuation line because widening the cell would break the table's
+		// alignment. For the expected identity abort the reason IS the remedy
+		// (endpoint mismatch / renamed id -> `--only identity --force`).
+		if h.Drift != nil && h.Drift.Error != "" {
+			if _, err := fmt.Fprintf(tw, "  ! drift: %s\t\t\t\t\t\t\t\n", h.Drift.Error); err != nil {
+				return err
+			}
+		}
 	}
 	return tw.Flush()
 }

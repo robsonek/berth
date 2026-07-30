@@ -38,6 +38,24 @@ func TestFleetModelDetailShowsPerSiteFacts(t *testing.T) {
 	}
 }
 
+// The detail view is where an operator goes to understand a sick host, so a
+// drift abort's reason and any partial probe failures must be rendered there —
+// a reachable host with failed probes must not read as fully healthy.
+func TestFleetModelDetailShowsDriftErrorAndProbeErrors(t *testing.T) {
+	hosts := twoHosts()
+	hosts[0].ProbeErrors = []string{"backups: exit 1: sudo denied"}
+	hosts[0].Drift = &status.DriftReport{
+		StoppedAt: "identity",
+		Error:     "identity: endpoint mismatch: re-bind with --only identity --force",
+	}
+	view := newFleetModel(hosts).toggleDetail().View()
+	for _, want := range []string{"--only identity --force", "sudo denied"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("detail view missing %q:\n%s", want, view)
+		}
+	}
+}
+
 func TestFleetModelListViewShowsEveryHost(t *testing.T) {
 	view := newFleetModel(twoHosts()).View()
 	for _, want := range []string{"prod", "staging"} {
