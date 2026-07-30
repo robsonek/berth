@@ -3,10 +3,13 @@ package status
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
+	"github.com/robsonek/berth/internal/provision/steps"
+	"github.com/robsonek/berth/internal/secret"
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
 
@@ -105,4 +108,83 @@ func CollectHost(ctx context.Context, cfgPath string, s *config.Server, r bssh.R
 		h.Drift = Drift(ctx, s, r, pipeline, red)
 	}
 	return h
+}
+
+// dial opens a connection for a fleet sweep. It is a package-level variable so
+// tests can stub it, following the repo's convention for network-dependent
+// calls.
+//
+// TOFU is deliberately DISABLED: there is no sensible way to ask "do you trust
+// this key?" for hosts probed concurrently, and a read-only sweep is the worst
+// possible place to weaken host-key verification — it is run routinely and
+// inattentively, which is exactly when "yes" gets clicked. Only a pinned
+// fingerprint or a known_hosts entry is accepted.
+var dial = func(ctx context.Context, s *config.Server, knownHosts string) (bssh.Runner, func() error, error) {
+	c, err := bssh.Connect(ctx, s, bssh.HostKeyPolicy{
+		Pinned:     s.SSH.Fingerprint,
+		KnownHosts: knownHosts,
+		AllowTOFU:  false,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return c, c.Close, nil
+}
+
+// Collect probes every config in paths, with bounded concurrency, and returns
+// one entry per path IN INPUT ORDER so the rendered table is stable.
+//
+// Unlike the provisioning pipeline this is NOT fail-fast: hosts are
+// independent, so one failure never costs the operator the rest of the
+// overview.
+func Collect(ctx context.Context, paths []string, opt Options) []HostStatus {
+	parallel := opt.Parallel
+	if parallel <= 0 {
+		parallel = 4
+	}
+	out := make([]HostStatus, len(paths))
+	sem := make(chan struct{}, parallel)
+	var wg sync.WaitGroup
+	for i, p := range paths {
+		wg.Add(1)
+		go func(i int, p string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			out[i] = collectOne(ctx, p, opt)
+		}(i, p)
+	}
+	wg.Wait()
+	return out
+}
+
+func collectOne(ctx context.Context, path string, opt Options) HostStatus {
+	// Every host gets its own deadline, so one slow-but-alive host cannot hold
+	// the sweep open indefinitely. ssh keepalives handle a DEAD transport;
+	// they do nothing for a host that keeps answering.
+	ctx, cancel := context.WithTimeout(ctx, opt.timeout())
+	defer cancel()
+
+	srv, err := config.Load(path)
+	if err != nil {
+		return HostStatus{ConfigPath: path, Error: err.Error(), ProbedAt: time.Now().UTC()}
+	}
+	r, closeConn, err := dial(ctx, srv, opt.KnownHosts)
+	if err != nil {
+		return HostStatus{
+			ID: srv.ID, ConfigPath: path,
+			Endpoint: fmt.Sprintf("%s:%d", srv.Host, srv.SSH.Port),
+			Error:    err.Error(), ProbedAt: time.Now().UTC(),
+		}
+	}
+	defer func() { _ = closeConn() }()
+
+	red := secret.NewRedactor()
+	var pipeline []provision.Step
+	if opt.Drift {
+		// The FULL pipeline (skipSSL false): a scan inspects the whole declared
+		// config, and truncating it would hide the steps most worth inspecting.
+		pipeline = steps.Pipeline(srv, red, false)
+	}
+	return CollectHost(ctx, path, srv, r, pipeline, red, opt.Offsite)
 }

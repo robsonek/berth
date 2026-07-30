@@ -2,6 +2,10 @@ package status
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -89,6 +93,59 @@ func TestCollectHostSurfacesAProbeFailure(t *testing.T) {
 	}
 	if got.ProbedAt.IsZero() {
 		t.Error("ProbedAt must be set even on a failed collection")
+	}
+}
+
+func TestCollectIsolatesAFailedHost(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good.yml")
+	bad := filepath.Join(dir, "bad.yml")
+	body := "id: %s\nhost: 203.0.113.10\nssh:\n  user: berth\n  port: 22\n  key: ~/.ssh/id_ed25519\nphp:\n  version: \"8.4\"\ndatabase:\n  engine: mariadb\nsites:\n  - domain: app.example.com\n    deploy_path: /var/www/app\n    database:\n      name: app\n      user: app\n"
+	if err := os.WriteFile(good, []byte(fmt.Sprintf(body, "good")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bad, []byte(fmt.Sprintf(body, "bad")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := dial
+	t.Cleanup(func() { dial = orig })
+	dial = func(_ context.Context, s *config.Server, _ string) (bssh.Runner, func() error, error) {
+		if s.ID == "bad" {
+			return nil, nil, errors.New("dial tcp: no route to host")
+		}
+		return stubHost(s), func() error { return nil }, nil
+	}
+
+	got := Collect(context.Background(), []string{good, bad}, Options{Parallel: 2})
+
+	if len(got) != 2 {
+		t.Fatalf("got %d hosts, want 2", len(got))
+	}
+	// Order follows the input, not completion order, so the table is stable.
+	if got[0].ID != "good" || got[1].ID != "bad" {
+		t.Errorf("order = %q,%q, want good,bad", got[0].ID, got[1].ID)
+	}
+	if !got[0].Reachable {
+		t.Errorf("the healthy host must still be reported: %+v", got[0])
+	}
+	if got[1].Reachable || got[1].Error == "" {
+		t.Errorf("the dead host = %+v, want unreachable with a reason", got[1])
+	}
+}
+
+func TestCollectReportsAnUnloadableConfig(t *testing.T) {
+	dir := t.TempDir()
+	broken := filepath.Join(dir, "broken.yml")
+	if err := os.WriteFile(broken, []byte("this: [is not: valid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := Collect(context.Background(), []string{broken}, Options{})
+	if len(got) != 1 || got[0].Reachable || got[0].Error == "" {
+		t.Fatalf("got %+v, want one entry with an error", got)
+	}
+	if got[0].ConfigPath != broken {
+		t.Errorf("ConfigPath = %q, want %q", got[0].ConfigPath, broken)
 	}
 }
 
