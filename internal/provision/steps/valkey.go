@@ -26,7 +26,7 @@ const (
 // isolation, no TCP listener, no credentials (same philosophy as the per-site
 // FPM pool). systemd creates Runtime/StateDirectory owned by User=, so the
 // step needs no mkdir/chown and does not depend on appdirs.
-func valkeyInstanceUnit(domain string) string { return "berth-valkey-" + poolName(domain) + ".service" }
+func valkeyInstanceUnit(domain string) string { return config.ValkeyInstanceUnit(domain) }
 func valkeyUnitPath(domain string) string     { return valkeyUnitDir + "/" + valkeyInstanceUnit(domain) }
 func valkeySocketPath(domain string) string {
 	return config.ValkeySocketPath(poolName(domain))

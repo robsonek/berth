@@ -182,6 +182,12 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	// (every step satisfied), except preflight which re-runs apt by design.
 	assertSecondRunIdempotent(t, eng, red, srv, client)
 
+	// The status collector's gate, deliberately right after the idempotency
+	// proof: the engine just showed the host converged, so `berth status
+	// --drift` (the same collection path) must read it as clean — and before
+	// the restore drill, which diverges live state on purpose.
+	assertStatus(t, cfgPath, skipSSL, sslStaging)
+
 	// LAST on purpose: the restore drill deliberately diverges live state
 	// (fresh shared/.env secrets) and re-runs the pipeline to prove the
 	// database step heals the role, the local cache and the client-auth file

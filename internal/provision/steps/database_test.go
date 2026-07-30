@@ -1013,7 +1013,7 @@ func TestDatabaseCheckSourceMariaDBConvergedRepoSatisfied(t *testing.T) {
 	stubGreenRemote(f, s)
 	// Override stubGreenRemote's absent-repo default with the converged pair.
 	f.On("cat "+shQuote(repo.SourceListPath()), bssh.Result{ExitCode: 0, Stdout: string(mustRepoContent(t, repo))})
-	f.On("gpg --show-keys --with-colons "+repo.KeyringPath(), bssh.Result{ExitCode: 0, Stdout: gpgColonsFor(repo.Fingerprint)})
+	f.On("gpg --no-options --no-keyring --trust-model always --show-keys --with-colons "+repo.KeyringPath(), bssh.Result{ExitCode: 0, Stdout: gpgColonsFor(repo.Fingerprint)})
 	f.On(appKeyProbe(s), bssh.Result{ExitCode: 1}) // no berth-format APP_KEY -> no backup required
 	f.On(envValueMatchScript(envPath(s), "DB_PASSWORD"), bssh.Result{ExitCode: 0})
 	cr, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)

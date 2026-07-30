@@ -3,6 +3,64 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Added
+
+- `berth status`: read-only fleet view — drift, TLS expiry, backup freshness,
+  service health and disk across every server config, as an interactive TUI
+  with `--json` and plain-table output. It never changes a server's
+  configuration, data, packages, services or certificates; `--drift` runs the
+  same validators provisioning runs (`nginx -t` can create a missing log file).
+  Trust-on-first-use is disabled for the sweep. `--offsite` additionally queries
+  the offsite restic repository, sourcing its credentials from the host's own
+  `/etc/berth/offsite.env` so no secret enters the status process. The exit code
+  reflects whether **probing** succeeded — an unreachable host, a partial probe
+  failure or an aborted drift scan — and deliberately NOT whether anything needs
+  attention: an expiring certificate or a stale backup is an answer, so filter
+  with `--json` (whose shape is a golden-tested contract). Known limitation: for
+  PostgreSQL the service column reflects Debian's umbrella `postgresql.service`,
+  which stays active while a cluster is down — real cluster liveness is deferred
+  along with per-site database health.
+
+### Changed
+
+- **`/etc/berth/offsite.env` is now parsed, never evaluated as shell**
+  (hardening from an external adversarial review): the nightly offsite backup
+  script, the provisioning repository probe/init and the `berth status`
+  offsite query all load the file through one strict allowlist parser instead
+  of `set -a; . file`, so a drifted or hand-edited copy can no longer execute
+  commands as root — it fails loudly instead (the status probe reports it as a
+  malformed-file discrepancy). Comment and blank lines are inert and simply
+  skipped — the managed marker itself is one, and an operator's hand-added
+  annotation does not break the nightly backup. For every file berth itself
+  writes the loaded environment is identical to what sourcing produced.
+  Expect a **one-time rewrite of the managed `/usr/local/sbin/berth-offsite`
+  script** on each offsite-enabled host's next provision run (ordinary
+  managed-file drift).
+- **Seven more name derivations are now frozen by contract test.** The per-site
+  valkey unit, the two certificate bases and `CertDir`, the three offsite paths
+  and the PHP-FPM service name moved into `internal/config` (the steps delegate,
+  byte-identically) and joined `TestDerivationsAreFrozen` with literal
+  expectations. They name artefacts that already exist on provisioned hosts —
+  systemd unit filenames, certificate directories, managed key and env paths —
+  and were previously pinned only *transitively*, because every test expectation
+  was computed with the same function it was meant to pin. Renaming any of them
+  now requires a conscious BREAKING entry here, which is the point.
+
+### Fixed
+
+- **Host-derived text is sanitised before it reaches the terminal**
+  (hardening from an external adversarial review): the fleet table/detail
+  views and the provisioning renderers (TUI and plain) now visibly escape
+  control characters in every string that originates on a host — manifest
+  version, probe and drift errors, step reasons, changes, warnings and error
+  text — so a compromised or drifted host can no longer clear the screen,
+  spoof rows or drive OSC clipboard writes through berth's output. Escapes
+  are shown (`\x1b`, `\r`, …), never silently dropped.
+- `apt`: the keyring fingerprint probe no longer initialises root's GnuPG home
+  (`pubring.kbx`/`trustdb.gpg` were created on every run by a read-only check).
+
 ## [0.28.0] — 2026-07-30
 
 ### Added

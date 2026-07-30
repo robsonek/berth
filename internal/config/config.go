@@ -435,6 +435,103 @@ func (k OffsiteKeep) MonthlyEff() int {
 	return k.Monthly
 }
 
+// OffsiteEnvPath, OffsiteSSHKeyPath and OffsiteKnownHostsPath are the on-host
+// paths the offsite step manages. They live here because the restic option
+// string that references the key and pin paths is built here, and the status
+// probe's command sources the env file; steps delegates so there is one
+// definition.
+const (
+	// OffsiteEnvPath is the env file (root:root 0600) holding the restic
+	// repository, password and S3 credentials; the managed backup script and
+	// the status probe both source it on the host so no secret ever leaves it.
+	OffsiteEnvPath = "/etc/berth/offsite.env"
+
+	OffsiteSSHKeyPath = "/root/.ssh/berth_offsite"
+	// OffsiteKnownHostsPath is a DEDICATED, fully berth-managed pin file —
+	// the shared /root/.ssh/known_hosts is never touched, no config value is
+	// ever composed into a sed/grep program (root-injection surface), and
+	// key rotation is ordinary managed-file drift.
+	OffsiteKnownHostsPath = "/root/.ssh/berth_offsite_known_hosts"
+)
+
+// OffsiteResticOpts renders the extra restic CLI flags for the backend:
+// empty for s3 (credentials ride the env file); for sftp one fully-pinned
+// sftp.command — -F /dev/null + IdentitiesOnly + StrictHostKeyChecking +
+// GlobalKnownHostsFile=/dev/null (-F /dev/null does NOT neutralize the
+// default /etc/ssh/ssh_known_hosts, which could widen or break the pin) +
+// the dedicated UserKnownHostsFile mean root's personal ssh config, agent
+// identities and TOFU can neither widen nor bypass the pin; BatchMode
+// keeps cron from ever prompting, and ServerAliveInterval/CountMax kill
+// the transport when a hung-but-TCP-alive peer stops answering (restic
+// would otherwise wedge forever holding the shared artifacts lock).
+// Values are config-validated to be quote- and whitespace-free, so the
+// single-quoted composition is sound. Always empty or leading-space so
+// "restic"+opts composes.
+func OffsiteResticOpts(o *Offsite) string {
+	if o.Backend != "sftp" {
+		return ""
+	}
+	return fmt.Sprintf(" -o sftp.command='ssh -F /dev/null -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/dev/null -o UserKnownHostsFile=%s -i %s -p %d %s@%s -s sftp'",
+		OffsiteKnownHostsPath, OffsiteSSHKeyPath, o.PortEff(), o.User, o.Host)
+}
+
+// OffsiteEnvLoadName is the shell function OffsiteEnvLoader defines. Call
+// sites compose "<definition>; <name> && restic …" (or call the name inside
+// an if) — the name is exported so no call site hardcodes it and a rename
+// cannot leave a script calling an undefined function.
+const OffsiteEnvLoadName = "berth_load_offsite_env"
+
+// offsiteEnvKeys are the exact environment keys offsite_env.tmpl renders —
+// the loader's allowlist. Adding a key to the template without adding it here
+// makes every loader call site fail LOUDLY on the new line (cron backup, the
+// provisioning repository probe, the status probe), never silently: keep the
+// two lists in sync.
+var offsiteEnvKeys = []string{"RESTIC_REPOSITORY", "RESTIC_PASSWORD", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}
+
+// OffsiteEnvLoader returns a one-line POSIX-sh function definition that loads
+// /etc/berth/offsite.env by PARSING it, never by dot-sourcing: sourcing the
+// file as shell meant a drifted or hand-edited copy executed arbitrary
+// commands as root (external adversarial review finding). The grammar is
+// exactly what berth writes: the managed marker (`# managed by berth` —
+// templates.Render prepends it to EVERY rendered file, this one included)
+// followed by offsiteEnvKeys lines in the KEY='value' form, where validation
+// guarantees no value can contain a single quote, a newline or a control
+// character (secret.ValidateSecretValue; Offsite.validate for the repository
+// components) — so for every berth-written file the exported environment is
+// byte-identical to what `set -a; . file; set +a` produced.
+//
+// Inert lines are SKIPPED, not rejected: a line whose first non-blank
+// character is '#', and empty or whitespace-only lines. Under a parser a
+// comment cannot execute anything, so rejecting it would buy no safety — and
+// would reject berth's own rendered file, whose first line IS a comment.
+// The KEY='value' match stays strict on the RAW line (no leading whitespace
+// tolerated there).
+//
+// Anything else fails CLOSED with exit status 2 and a message that names at
+// most the offending key, never a value: a half-loaded environment could
+// point restic at the wrong repository, which is worse than refusing to run.
+// Every call site gates on the function's status (set -e in the cron script,
+// && in the provisioning probe, if in the status probe), so nothing runs on
+// a partial load. The parser strips the one layer of single quotes and
+// exports the value literally — no eval, no expansion, so `$(…)`, backticks
+// and backslashes in a legal value survive exactly as sourcing kept them.
+func OffsiteEnvLoader() string { return offsiteEnvLoaderFor(OffsiteEnvPath) }
+
+// offsiteEnvLoaderFor exists so tests can point the loader at a temp file;
+// production always goes through OffsiteEnvLoader (the on-host path).
+func offsiteEnvLoaderFor(path string) string {
+	pats := make([]string, len(offsiteEnvKeys))
+	for i, k := range offsiteEnvKeys {
+		pats[i] = k + `=\'*\'`
+	}
+	// The catch-all arm trims leading whitespace into t only to classify the
+	// line as inert (''|'#'*) or unexpected; ${line%%[![:space:]]*} is the
+	// leading-whitespace run (POSIX character classes work in dash's fnmatch).
+	return OffsiteEnvLoadName + `() { while IFS= read -r line || [ -n "$line" ]; do case $line in ` +
+		strings.Join(pats, "|") +
+		`) key=${line%%=*}; val=${line#*=\'}; val=${val%\'}; case $val in *\'*) echo "berth: $key in ` + path + ` has an embedded quote; refusing to load it" >&2; return 2;; esac; export "$key=$val";; *) t=${line#"${line%%[![:space:]]*}"}; case $t in ''|'#'*) ;; *) echo "berth: unexpected line in ` + path + `; refusing to load it" >&2; return 2;; esac;; esac; done < ` + path + `; }`
+}
+
 // Apt declares extra third-party apt repositories and extra packages beyond
 // what berth's own steps install. Repos are fully declarative (removed from
 // the config -> swept from the host); packages are INSTALL-ONLY by design —
@@ -612,6 +709,43 @@ func (s *Server) AnyBackupsEnabled() bool {
 // (filesystem-safe: dots -> underscores). Single source of truth shared by the
 // steps package and validation so program names never diverge.
 func PoolName(domain string) string { return strings.ReplaceAll(domain, ".", "_") }
+
+// FPMServiceName is the systemd unit of the shared per-version PHP-FPM master.
+func FPMServiceName(phpVersion string) string { return "php" + phpVersion + "-fpm" }
+
+// ValkeyInstanceUnit is the systemd unit of a site's dedicated valkey instance.
+func ValkeyInstanceUnit(domain string) string {
+	return "berth-valkey-" + PoolName(domain) + ".service"
+}
+
+// AnyLetsEncrypt reports whether any site will hold a Let's Encrypt
+// certificate — the only cert mode that uses certbot, and therefore what
+// decides whether the certbot renewal timer is a required unit. The equality
+// against "letsencrypt" is EXACT rather than `!= "selfsigned"` so a future
+// third cert mode does not silently claim it needs certbot.
+func AnyLetsEncrypt(s *Server) bool {
+	for _, site := range s.Sites {
+		if site.SSL && site.CertMode() == "letsencrypt" {
+			return true
+		}
+	}
+	return false
+}
+
+// SelfSignedCertBase and LetsEncryptLiveBase are the two roots a site's
+// certificate can live under, chosen by Site.CertMode().
+const (
+	SelfSignedCertBase  = "/etc/ssl/berth"
+	LetsEncryptLiveBase = "/etc/letsencrypt/live"
+)
+
+// CertDir is the directory holding a site's certificate material.
+func CertDir(site Site) string {
+	if site.CertMode() == "selfsigned" {
+		return SelfSignedCertBase + "/" + site.Domain
+	}
+	return LetsEncryptLiveBase + "/" + site.Domain
+}
 
 // FROZEN FOREVER: the on-host name prefixes below root every per-site socket
 // and directory berth derives. They live here — not in the steps that write

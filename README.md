@@ -38,6 +38,40 @@ berth provision servers/<name>.yml --dry-run   # preview changes only
 berth site key servers/<name>.yml [domain]     # print each site's git deploy public key
 ```
 
+### Checking a fleet
+
+`berth status` probes servers read-only and reports what is actually on them.
+It never changes a server's configuration, data, packages, services or
+certificates — repair is an explicit `berth provision <config>`.
+
+```bash
+berth status                      # every config in ./servers
+berth status servers/prod.yml     # one host
+berth status --drift              # add the full read-only Check sweep (slow)
+berth status --offsite            # also query the offsite restic repository
+berth status --timeout 5m         # per-host budget (default 1m, 10m with --drift)
+berth status --json | jq '.hosts[] | select(any(.sites[]?; .cert.days_left < 30))'
+```
+
+`--drift` additionally runs the same validators provisioning runs. One of them,
+`nginx -t`, opens the configured log files and can create a missing one. Beyond
+that, status never changes a host's configuration, data, packages, service
+state or certificates.
+
+Host-key verification is strict: only a pinned `ssh.fingerprint` or an existing
+`known_hosts` entry is accepted. There is no trust-on-first-use prompt, because
+hosts are probed concurrently and a routine read-only command is the wrong
+place to be asked to trust a new key.
+
+The exit code reflects whether probing succeeded — an unreachable host, a
+partial probe failure, or an aborted drift scan. It does **not** reflect
+whether anything needs attention: an expiring certificate is data, so filter it
+with `--json`.
+
+One caveat: for PostgreSQL the service column reflects Debian's umbrella
+`postgresql` unit, which can stay active while an individual cluster is down —
+it is not a cluster health check.
+
 ## Highlights
 
 - **Single, dependency-free binary** for Linux, macOS, and Windows — no runtime

@@ -216,7 +216,15 @@ func primaryFingerprints(colons string) []string {
 // a crash between the keyring and list writes must re-trigger EnsureRepo —
 // never read as satisfied.
 func (m *Manager) KeyringHoldsExactly(ctx context.Context, repo Repo) (bool, error) {
-	res, err := m.r.Run(ctx, "gpg --show-keys --with-colons "+repo.KeyringPath(), nil)
+	// Read ONLY the given keyring and touch nothing in root's ~/.gnupg. Bare
+	// gpg initialises its default keybox AND its trust database, so this
+	// read-only Check was creating files on every provision run.
+	//
+	// --trust-model always is the load-bearing flag: --no-keyring alone still
+	// creates trustdb.gpg, and so does adding --no-auto-check-trustdb.
+	// Verified on GnuPG 2.5.21 and pinned by TestKeyringProbeWritesNothing —
+	// do not trim it on the assumption that a shorter form is equivalent.
+	res, err := m.r.Run(ctx, "gpg --no-options --no-keyring --trust-model always --show-keys --with-colons "+repo.KeyringPath(), nil)
 	if err != nil {
 		return false, err
 	}

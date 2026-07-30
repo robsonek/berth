@@ -72,7 +72,7 @@ const logrotatePath = "/etc/logrotate.d/berth"
 func renderLogrotate() ([]byte, error) { return templates.Render("logrotate.conf.tmpl", nil) }
 
 // fpmService is the systemd unit for the configured PHP-FPM version.
-func fpmService(s *config.Server) string { return "php" + s.PHP.Version + "-fpm" }
+func fpmService(s *config.Server) string { return config.FPMServiceName(s.PHP.Version) }
 
 // defaultFPMPoolPath is the distro's default pool; berth disables it so its own
 // per-site pools own their sockets rather than colliding with the stock www pool.
@@ -170,19 +170,15 @@ func managedSiteFiles(ctx context.Context, r bssh.Runner, s *config.Server) ([]s
 }
 
 // selfSignedCertBase is berth's own namespace for self-signed material; the
-// TLS orphan sweep treats everything under it as berth-owned.
-const selfSignedCertBase = "/etc/ssl/berth"
+// TLS orphan sweep treats everything under it as berth-owned. The value is
+// single-sourced in config beside the other on-host derivations.
+const selfSignedCertBase = config.SelfSignedCertBase
 
 func selfSignedCertDir(domain string) string { return selfSignedCertBase + "/" + domain }
 
 // certDir is where a site's TLS certificate lives: Let's Encrypt's live dir, or
-// a berth-managed dir for self-signed certs.
-func certDir(site config.Site) string {
-	if site.CertMode() == "selfsigned" {
-		return selfSignedCertDir(site.Domain)
-	}
-	return "/etc/letsencrypt/live/" + site.Domain
-}
+// a berth-managed dir for self-signed certs. Single-sourced in config.
+func certDir(site config.Site) string { return config.CertDir(site) }
 
 func certFullchainPath(site config.Site) string { return certDir(site) + "/fullchain.pem" }
 func certKeyPath(site config.Site) string       { return certDir(site) + "/privkey.pem" }

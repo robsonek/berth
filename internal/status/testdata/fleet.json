@@ -1,0 +1,79 @@
+{
+  "hosts": [
+    {
+      "id": "prod",
+      "config_path": "servers/prod.yml",
+      "endpoint": "203.0.113.10:22",
+      "reachable": true,
+      "provisioned": {
+        "version": "0.27.1",
+        "provisioned_at": "2026-07-21T10:00:00Z"
+      },
+      "sites": [
+        {
+          "domain": "app.example.com",
+          "cert": {
+            "mode": "letsencrypt",
+            "present": true,
+            "not_after": "2026-09-28T07:31:00Z",
+            "days_left": 61
+          },
+          "backup": {
+            "enabled": true,
+            "dir": "/var/backups/berth/app_example_com",
+            "newest": "2026-07-29T03:30:00Z",
+            "count": 7,
+            "bytes": 418000000,
+            "stale": false
+          }
+        }
+      ],
+      "services": [
+        {
+          "name": "nginx",
+          "active": true,
+          "enabled": true
+        }
+      ],
+      "disk": [
+        {
+          "path": "/",
+          "used_pct": 41,
+          "free_bytes": 22000000000
+        }
+      ],
+      "drift": {
+        "steps": [
+          {
+            "step": "site",
+            "satisfied": true
+          }
+        ],
+        "drifted": 0
+      },
+      "offsite": {
+        "configured": true,
+        "last_snapshot": "2026-07-29T04:15:11Z",
+        "snapshot_id": "a91f2c"
+      },
+      "probed_at": "2026-07-29T10:00:00Z",
+      "host_time": "2026-07-29T10:00:00Z"
+    },
+    {
+      "id": "fresh",
+      "config_path": "servers/fresh.yml",
+      "endpoint": "203.0.113.11:22",
+      "reachable": true,
+      "probed_at": "2026-07-29T10:00:00Z",
+      "host_time": "2026-07-29T10:00:00Z"
+    },
+    {
+      "id": "gone",
+      "config_path": "servers/gone.yml",
+      "endpoint": "203.0.113.12:22",
+      "reachable": false,
+      "error": "dial tcp: connect: no route to host",
+      "probed_at": "2026-07-29T10:00:00Z"
+    }
+  ]
+}

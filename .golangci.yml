@@ -28,6 +28,22 @@ linters:
       - path: test/integration/envoverwrite_test\.go
         linters: [gosec]
         text: "G204"
+      # TestKeyringProbeWritesNothing deliberately executes the EXACT gpg
+      # command string captured from KeyringHoldsExactly against a throwaway
+      # GNUPGHOME — running the real binary is the point (it pins the
+      # no-write flag set). The "tainted" argv is the production-authored
+      # command and test-owned temp paths, never user input.
+      - path: internal/apt/apt_test\.go
+        linters: [gosec]
+        text: "G204"
+      # The offsite env-loader tests write fixture files into their own
+      # t.TempDir() and run both the loader and `set -a; . file` against them
+      # — proving the parse-don't-source loader exports exactly what sourcing
+      # did. gosec's taint analysis cannot see that the "tainted" path is a
+      # test-owned temp dir joined with a constant basename, never user input.
+      - path: internal/config/offsite_env_loader_test\.go
+        linters: [gosec]
+        text: "G703"
       # gosec pattern-matches the offsite secret NAME constants
       # (OffsiteS3SecretKey, OffsiteResticPassword) as hardcoded
       # credentials; they are secret-cache map KEYS (names), never values.

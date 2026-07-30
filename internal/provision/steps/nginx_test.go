@@ -40,7 +40,7 @@ func stubNginxRepoConverged(t *testing.T, f *bssh.FakeRunner) {
 	t.Helper()
 	repo := apt.NginxOrg()
 	f.On("cat "+shQuote(repo.SourceListPath()), bssh.Result{ExitCode: 0, Stdout: string(mustRepoContent(t, repo))})
-	f.On("gpg --show-keys --with-colons "+repo.KeyringPath(), bssh.Result{ExitCode: 0, Stdout: gpgColonsFor(repo.Fingerprint)})
+	f.On("gpg --no-options --no-keyring --trust-model always --show-keys --with-colons "+repo.KeyringPath(), bssh.Result{ExitCode: 0, Stdout: gpgColonsFor(repo.Fingerprint)})
 }
 
 // stubEnsureRepoChain stubs apt.EnsureRepo's full command sequence for repo:
