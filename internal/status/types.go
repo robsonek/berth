@@ -2,12 +2,12 @@
 //
 // The probes issue read-only commands and nothing here writes a local file.
 // The drift scan runs the provisioning pipeline with DryRun set, so Apply is
-// never reached — but a step's Check runs the same validators provisioning
-// runs, and some of those append a line to a log their own service owns (the
-// measured list is enforced by TestChecksAreReadOnly in the steps package).
-// That is the precise promise: no change to a host's configuration, data,
-// packages, service state or certificates, rather than "no writes of any
-// kind". The JSON shape produced by WriteJSON is a contract covered by a
+// never reached — but a step's Check runs the same probes provisioning runs,
+// and a few of those leave a log-side trace (a validator's notice in its own
+// service's log, a PAM session pair in the journal; the evidence-backed list
+// is enforced by TestChecksAreReadOnly in the steps package). That is the
+// precise promise: no change to a host's configuration, data, packages,
+// service state or certificates, rather than "no writes of any kind". The JSON shape produced by WriteJSON is a contract covered by a
 // golden test — callers script against it.
 package status
 

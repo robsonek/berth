@@ -53,8 +53,8 @@ berth status --timeout 5m         # per-host budget (default 1m, 10m with --drif
 berth status --json | jq '.hosts[] | select(any(.sites[]?; .cert.days_left < 30))'
 ```
 
-`--drift` additionally runs the same validators a provisioning run does. Some
-of them append a line to their own service's log; no configuration, data,
+`--drift` additionally runs the same validators a provisioning run does. A few
+probes leave a line in a service log or the journal; no configuration, data,
 packages, services or certificates change.
 
 Host-key verification is strict: only a pinned `ssh.fingerprint` or an existing
