@@ -185,13 +185,15 @@ type fakeHost struct {
 // unit resolves a systemd unit name against the model, accepting the
 // ".service"-suffixed spelling of a unit modelled under its bare name —
 // systemd treats "mariadb" and "mariadb.service" identically, and the Checks
-// use both spellings. Only ".service" is trimmed: "x.timer" must never
-// resolve to a service modelled as "x".
+// use both spellings. Only ".service" is trimmed — "x.timer" must never
+// resolve to a service modelled as "x" — and only ONCE, onto a bare name:
+// "x.service.service" is not a spelling systemd equates with "x.service",
+// so a doubled suffix must not resolve to a unit modelled WITH its suffix.
 func (h *fakeHost) unit(name string) (fakeUnit, bool) {
 	if u, ok := h.units[name]; ok {
 		return u, true
 	}
-	if base, ok := strings.CutSuffix(name, ".service"); ok {
+	if base, ok := strings.CutSuffix(name, ".service"); ok && !strings.HasSuffix(base, ".service") {
 		u, found := h.units[base]
 		return u, found
 	}
@@ -888,6 +890,9 @@ func fixtureRenewalConf(domain string) string {
 // database.Check never hashes this file; it greps the DB_CONNECTION,
 // DB_PASSWORD and APP_KEY lines and compares the latter two against the
 // seeded local cache, so the fixture values must be the cache's values.
+// The other keys (DB_HOST/DB_PORT/DB_SOCKET, the cache/queue/redis block)
+// are mirrored for the seed-map fidelity above but VERIFIED BY NO CHECK
+// today — no probe reads them, so a wrong value there cannot fail a test.
 func fixtureSharedEnvBody() []byte {
 	body, err := secret.EnvFile(map[string]string{
 		"APP_ENV":          "production",

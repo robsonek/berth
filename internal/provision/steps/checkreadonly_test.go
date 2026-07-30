@@ -167,16 +167,16 @@ func TestChecksAreReadOnly(t *testing.T) {
 			switch {
 			case profile == "foreign":
 				if checkErr != nil {
-					want, allowed := expectedRefusals[st.Name()]
-					if !allowed {
+					switch want, allowed := expectedRefusals[st.Name()]; {
+					case !allowed:
 						add("%s.Check errored under %q but is not in expectedRefusals:\n    %v\n"+
 							"  Either this is the refusal the step MEANS to give — add it with the\n"+
 							"  substring to match — or the model is incomplete and the error is a symptom.",
 							st.Name(), profile, checkErr)
-					} else if !strings.Contains(checkErr.Error(), want) {
+					case !strings.Contains(checkErr.Error(), want):
 						add("%s.Check's refusal under %q changed:\n    got:  %v\n    want substring: %q",
 							st.Name(), profile, checkErr, want)
-					} else {
+					default:
 						sawRefusal[st.Name()] = true
 					}
 				}

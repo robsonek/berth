@@ -440,9 +440,10 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 	// is gated on the modelled account set: a blanket exit 0 made the
 	// "account missing" early return unreachable on every profile, and fresh
 	// exists to walk it. Absent is exit 1, data — not a Go error. No stdout is
-	// modelled: nobody parses it, and `LC_ALL=C id -nG …` falls to unanswered
-	// via its env prefix. getent is deliberately NOT answered here — userHome
-	// PARSES its passwd row, so Task 5 must model a real row from evidence.
+	// modelled: nobody parses it (`LC_ALL=C id -nG …` is stripped of its
+	// locale pin and answered by the group-membership case below). getent is
+	// deliberately NOT answered here — userHome PARSES its passwd row, so
+	// Task 5 must model a real row from evidence.
 	case f[0] == "id" && len(f) == 2:
 		if r.h.users[f[1]] {
 			return bssh.Result{}, true
