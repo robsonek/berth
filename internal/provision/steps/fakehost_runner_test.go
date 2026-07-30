@@ -3,6 +3,8 @@ package steps
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -150,18 +152,34 @@ func TestRecordingRunnerGatesIDOnModelledAccounts(t *testing.T) {
 }
 
 // sshd -T is not a validator: sshdEffective PARSES its stdout, and an empty
-// answer at exit 0 reads as "every directive missing", driving hardening.Check
-// into the misdiagnosis branch and truncating its tail out of classification.
-// Only the exact check-only shapes may be answered blindly.
+// answer at exit 0 would read as "every directive missing", driving
+// hardening.Check into the misdiagnosis branch and truncating its tail out of
+// classification. So the answer is MODELLED, never blind: the hardened
+// directives appear exactly when berth's drop-in is byte-converged in the
+// model, and a fresh host answers the stock values instead.
 func TestRecordingRunnerAnswersOnlyCheckShapedValidators(t *testing.T) {
-	r := newRecordingRunner(newFakeHost(t, "converged", contractServer(t)))
+	s := contractServer(t)
+	r := newRecordingRunner(newFakeHost(t, "converged", s))
 	ctx := context.Background()
 
 	if res, err := r.Run(ctx, "sshd -t", nil); err != nil || res.ExitCode != 0 {
 		t.Errorf("sshd -t = (%+v, %v), want blind success — it is a pure validator", res, err)
 	}
-	if _, err := r.Run(ctx, "sshd -T", nil); err == nil {
-		t.Error("sshd -T must be unanswered — its stdout is parsed, blank success misdiagnoses")
+	res, err := r.Run(ctx, "sshd -T", nil)
+	if err != nil || res.ExitCode != 0 {
+		t.Fatalf("converged sshd -T = (%+v, %v), want the modelled dump", res, err)
+	}
+	for _, want := range sshdEffectiveWant {
+		if !strings.Contains(res.Stdout, want) {
+			t.Errorf("converged sshd -T lacks %q — hardening.Check would misdiagnose an override", want)
+		}
+	}
+	fresh := newRecordingRunner(newFakeHost(t, "fresh", s))
+	if res, err = fresh.Run(ctx, "sshd -T", nil); err != nil {
+		t.Fatalf("fresh sshd -T: %v", err)
+	}
+	if strings.Contains(res.Stdout, "permitrootlogin no") {
+		t.Error("fresh sshd -T must answer the STOCK values — a hardened dump without the drop-in would bless an unhardened host")
 	}
 	if _, err := r.Run(ctx, "nginx -s reload", nil); err == nil {
 		t.Error("nginx without -t must be unanswered — only the validator shape is blind-answered")
@@ -227,6 +245,13 @@ func unq(s string) string { return strings.Trim(s, "'\"") }
 // it does not know. Task 5 extends this; keep every addition narrow — answering
 // "any unknown command succeeds" would destroy the contract's value.
 func (r *recordingRunner) answer(cmd string) (bssh.Result, bool) {
+	// The locale pin berth's parse-sensitive probes carry
+	// (assertSiteTreeOwners, assertGroupMembership). The assignment changes
+	// output language only, so the answer is the pinned command's; only this
+	// exact token is stripped, mirroring the classifier's rule.
+	if rest, ok := strings.CutPrefix(cmd, "LC_ALL=C "); ok {
+		return r.answer(rest)
+	}
 	f := strings.Fields(cmd)
 	if len(f) == 0 {
 		return bssh.Result{}, false
@@ -367,6 +392,46 @@ func (r *recordingRunner) answer(cmd string) (bssh.Result, bool) {
 		}
 		return bssh.Result{ExitCode: 1, Stderr: "id: '" + f[1] + "': no such user"}, true
 
+	// assertGroupMembership (accounts.go) PARSES the space-separated group
+	// names looking for the account's eponymous group. useradd -m creates
+	// exactly that group, so a modelled account's membership is its own name —
+	// and nothing more, so a Check requiring some OTHER group would honestly
+	// fail rather than be masked. Absent accounts answer exit 1, the same gate
+	// as the bare `id` above.
+	case f[0] == "id" && len(f) == 3 && f[1] == "-nG":
+		u := unq(f[2])
+		if r.h.users[u] {
+			return bssh.Result{Stdout: u + "\n"}, true
+		}
+		return bssh.Result{ExitCode: 1, Stderr: "id: '" + u + "': no such user"}, true
+
+	// hardening.Check PARSES this stdout twice: strings.Contains for
+	// "Status: active" and the 443/udp QUIC rule regexp. Provisioned profiles
+	// answer the enabled ruleset berth writes; a host without the package
+	// answers the way a shell does — exit 127, which the Check reads as
+	// "not active" data.
+	case cmd == "ufw status":
+		if _, ok := r.h.packages["ufw"]; !ok {
+			return bssh.Result{ExitCode: 127, Stderr: "sh: 1: ufw: not found"}, true
+		}
+		return bssh.Result{Stdout: "Status: active\n\n" +
+			"To                         Action      From\n" +
+			"--                         ------      ----\n" +
+			"22/tcp                     ALLOW       Anywhere\n" +
+			"80,443/tcp                 ALLOW       Anywhere\n"}, true
+
+	// consolePasswordUsable (accounts.go) PARSES field 2 of the status line:
+	// P (usable), L (locked), NP (none) — anything else is a hard error there.
+	// A provisioned account whose password berth never set is locked, which is
+	// useradd's default and the fixture's break_glass-off posture. Reached
+	// only for existing accounts: accounts.Check early-returns on a missing
+	// account long before the console probe.
+	case f[0] == "passwd" && len(f) == 3 && f[1] == "-S":
+		if r.h.users[f[2]] {
+			return bssh.Result{Stdout: f[2] + " L 07/30/2026 0 99999 7 -1\n"}, true
+		}
+		return bssh.Result{ExitCode: 252, Stderr: "passwd: user '" + f[2] + "' does not exist"}, true
+
 	case f[0] == "df":
 		return bssh.Result{Stdout: r.h.dfRows}, true
 	case f[0] == "swapon":
@@ -388,11 +453,87 @@ func (r *recordingRunner) answer(cmd string) (bssh.Result, bool) {
 		}
 		return bssh.Result{Stdout: r.h.gpgKeys}, true
 
+	// The generated read scripts wave 2 audited, each keyed to the exact text
+	// the fixture produces (the same test-local generators the registry uses)
+	// and answered from the model, never canned.
+
+	// assertPHPVersionExclusive PARSES 'M <path>' / 'S <path>' lines. The scan
+	// stays live rather than answering a canned empty: a future profile that
+	// models another version's pool changes the answer instead of being masked.
+	case cmd == phpPoolConflictProbe84:
+		return r.answerPHPPoolConflicts("8.4"), true
+
+	// AssertRootControlledAncestry PARSES '%n %u %a %F' lines for the
+	// components that exist; absent ones are skipped, like the real script.
+	case cmd == ancestryProbeCmd(accountsAncestry...):
+		return r.answerAncestry(accountsAncestry), true
+	case cmd == ancestryProbeCmd(appdirsAncestry...):
+		return r.answerAncestry(appdirsAncestry), true
+
+	// noSymlinkInPath reads ONLY the exit code: every existing component must
+	// be a real directory (a symlink or other type answers 1).
+	case cmd == noSymlinkWalkCmd(fixtureDeployTreeTail):
+		return r.answerNoSymlinkWalk(fixtureDeployTreeTail), true
+	case cmd == noSymlinkWalkCmd(fixtureACMEWebroot):
+		return r.answerNoSymlinkWalk(fixtureACMEWebroot), true
+
+	// assertOwnSSHDir PARSES '%U %F' when the entry exists and reads exit 92
+	// as its own "absent" signal.
+	case cmd == sshDirProbeCmd("/home/berth/.ssh"):
+		return r.answerSSHDirProbe("/home/berth/.ssh"), true
+	case cmd == sshDirProbeCmd("/home/appuser/.ssh"):
+		return r.answerSSHDirProbe("/home/appuser/.ssh"), true
+
+	// sshdOptsGuard PARSES the file body for the last SSHD_OPTS assignment;
+	// keyed to the production const so the model tracks the issued shape. A
+	// missing file is exit 0 with no output — the probe's own semantics
+	// (`test ! -e` short-circuits the cat).
+	case cmd == sshdOptsProbe:
+		if file, ok := r.h.files["/etc/default/ssh"]; ok {
+			return bssh.Result{Stdout: file.content}, true
+		}
+		return bssh.Result{}, true
+
+	// sshdEffective PARSES this dump (lowercase "key value" lines, first-match
+	// semantics). The effective values derive from the modelled sshd state:
+	// berth's drop-in is the only auth-directive source the model knows, so
+	// exactly when it is byte-converged do the hardened values hold; otherwise
+	// the stock Debian defaults answer, so a misconverged host honestly lacks
+	// the directives instead of being blessed.
+	case cmd == "sshd -T":
+		lines := []string{"port 22", "addressfamily any", "pubkeyauthentication yes"}
+		if file, ok := r.h.files[sshdDropInPath]; ok && file.content == sshdDropInBody {
+			lines = append(lines, "permitrootlogin no", "passwordauthentication no", "kbdinteractiveauthentication no")
+		} else {
+			lines = append(lines, "permitrootlogin prohibit-password", "passwordauthentication yes", "kbdinteractiveauthentication yes")
+		}
+		return bssh.Result{Stdout: strings.Join(lines, "\n") + "\n"}, true
+
+	// reloadedSince (reloadstamp.go) reads ONLY the exit code of its stamp
+	// existence + mtime chain. Recognized by strict parse-and-reconstruct, so
+	// only the production shape is ever answered; evaluated from the model's
+	// mtimes with real `-nt` semantics (an absent path is never newer).
+	case strings.HasPrefix(cmd, "[ -e '"):
+		stamp, paths, ok := parseReloadedSince(cmd)
+		if !ok {
+			return bssh.Result{}, false
+		}
+		st, present := r.h.files[stamp]
+		if !present {
+			return bssh.Result{ExitCode: 1}, true
+		}
+		for _, p := range paths {
+			if file, ok := r.h.files[p]; ok && file.mtimeUnix > st.mtimeUnix {
+				return bssh.Result{ExitCode: 1}, true
+			}
+		}
+		return bssh.Result{}, true
+
 	// Validators just need to succeed so the Check continues. Whether ISSUING
 	// them is allowed is the classifier's judgement, not the model's. Only the
 	// exact check-only shapes are answered blindly: `sshd -T` in particular is
-	// NOT a validator — sshdEffective parses its stdout, and a blank success
-	// would read as "every directive missing" and misdiagnose hardening.Check.
+	// NOT a validator — sshdEffective parses its stdout, so it is answered
+	// from the modelled drop-in state above, never blindly.
 	// hasExact is case-sensitive, so -T never matches -t and falls through.
 	case f[0] == "nginx" && hasExact(f, "-t"),
 		strings.HasPrefix(f[0], "php-fpm") && hasExact(f, "-t"),
@@ -403,4 +544,122 @@ func (r *recordingRunner) answer(cmd string) (bssh.Result, bool) {
 		return bssh.Result{}, true
 	}
 	return bssh.Result{}, false
+}
+
+// The fixture paths the wave-2 generated scripts walk, and the component lists
+// the two ancestry probes cover — spelled once so the answer cases and the
+// audited-script keys cannot drift apart.
+const (
+	fixtureDeployTreeTail = "/var/www/app.example.com/shared/tmp"
+	fixtureACMEWebroot    = "/var/www/berth-acme/app.example.com"
+)
+
+var (
+	accountsAncestry = []string{"/", "/home"}
+	appdirsAncestry  = []string{"/", "/var", "/var/www", "/var/www/berth-acme"}
+)
+
+// rePoolListen mirrors the listen-directive match inside
+// phpPoolConflictProbeCmd's grep -Eq, in Go regexp form.
+var rePoolListen = regexp.MustCompile(`(?m)^[ \t]*listen[ \t]*=[ \t]*"?/run/php/berth-`)
+
+// answerPHPPoolConflicts evaluates the pool-conflict probe over the model:
+// every pool.d conf of a version other than the configured one, classified
+// 'M' (berth's INI marker as the first line) or 'S' (a foreign file bound to
+// a berth socket), in sorted order because the real glob expands sorted.
+func (r *recordingRunner) answerPHPPoolConflicts(version string) bssh.Result {
+	var pools []string
+	for p := range r.h.files {
+		if strings.HasPrefix(p, "/etc/php/") && strings.Contains(p, "/fpm/pool.d/") &&
+			strings.HasSuffix(p, ".conf") && !strings.HasPrefix(p, "/etc/php/"+version+"/") {
+			pools = append(pools, p)
+		}
+	}
+	slices.Sort(pools)
+	var out strings.Builder
+	for _, p := range pools {
+		first, _, _ := strings.Cut(r.h.files[p].content, "\n")
+		switch {
+		case first == managedMarkerINI:
+			fmt.Fprintf(&out, "M %s\n", p)
+		case rePoolListen.MatchString(r.h.files[p].content):
+			fmt.Fprintf(&out, "S %s\n", p)
+		}
+	}
+	return bssh.Result{Stdout: out.String()}
+}
+
+// answerAncestry emits one '%n %u %a %F' line per component that exists in
+// the model, skipping absent ones — the production script's exact behavior.
+func (r *recordingRunner) answerAncestry(paths []string) bssh.Result {
+	var out strings.Builder
+	for _, p := range paths {
+		if file, ok := r.h.files[p]; ok {
+			fmt.Fprintf(&out, "%s %d %s %s\n", p, file.uid, file.mode, file.kind)
+		}
+	}
+	return bssh.Result{Stdout: out.String()}
+}
+
+// answerNoSymlinkWalk evaluates the brace-group walk: exit 1 when any
+// EXISTING component is a symlink or not a directory, 0 otherwise (absent
+// components pass — a fresh path is created normally).
+func (r *recordingRunner) answerNoSymlinkWalk(p string) bssh.Result {
+	cur := ""
+	for _, part := range strings.Split(strings.TrimPrefix(p, "/"), "/") {
+		cur += "/" + part
+		if file, ok := r.h.files[cur]; ok && (file.linkTarget != "" || file.kind != "directory") {
+			return bssh.Result{ExitCode: 1}
+		}
+	}
+	return bssh.Result{}
+}
+
+// answerSSHDirProbe evaluates assertOwnSSHDir's probe: exit 92 for a
+// genuinely absent entry, otherwise the '%U %F' pair the guard parses.
+func (r *recordingRunner) answerSSHDirProbe(dir string) bssh.Result {
+	file, ok := r.h.files[dir]
+	if !ok {
+		return bssh.Result{ExitCode: 92}
+	}
+	return bssh.Result{Stdout: file.owner + " " + file.kind + "\n"}
+}
+
+// parseReloadedSince recognizes reloadstamp.go's probe shape:
+//
+//	[ -e '<stamp>' ] && [ ! '<p1>' -nt '<stamp>' ] && …
+//
+// A loose scan extracts the candidate stamp and paths, then the command is
+// RECONSTRUCTED via reloadedSinceCmd and compared byte-for-byte, so only the
+// exact production shape is ever recognized — anything else stays unanswered.
+func parseReloadedSince(cmd string) (stamp string, paths []string, ok bool) {
+	rest, found := strings.CutPrefix(cmd, "[ -e '")
+	if !found {
+		return "", nil, false
+	}
+	stamp, rest, found = strings.Cut(rest, "' ]")
+	if !found || strings.Contains(stamp, "'") {
+		return "", nil, false
+	}
+	for rest != "" {
+		seg, found := strings.CutPrefix(rest, " && [ ! '")
+		if !found {
+			return "", nil, false
+		}
+		p, tail, found := strings.Cut(seg, "' -nt '"+stamp+"' ]")
+		if !found || strings.Contains(p, "'") {
+			return "", nil, false
+		}
+		paths = append(paths, p)
+		rest = tail
+	}
+	unit, found := strings.CutPrefix(stamp, "/var/lib/berth/")
+	if !found {
+		return "", nil, false
+	}
+	unit, found = strings.CutSuffix(unit, ".reloaded")
+	if !found || reloadedSinceCmd(unit, paths...) != cmd {
+		return "", nil, false
+	}
+	return stamp, paths, true
 }

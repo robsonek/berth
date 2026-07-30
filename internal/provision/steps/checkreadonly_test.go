@@ -18,9 +18,19 @@ import (
 // ANY error as "intended" would let a genuine failure hide. Under every other
 // profile a Check must return nil.
 var expectedRefusals = map[string]string{
-	"accounts": "not managed by berth",
+	// accounts: the same tree-ownership guard as appdirs, and it fires FIRST —
+	// accounts.Check runs assertSiteTreeOwners as a tree-safety preflight
+	// BEFORE any managed-file probe (accounts.go: an existing tree under a
+	// different identity must refuse before any account, key or sudoers is
+	// created), so under foreign the owner refusal is the one the step means
+	// to give, not the drift policy's.
+	"accounts": "owned by",
 	"appdirs":  "owned by",
-	"site":     "not managed by berth",
+	// hardening: a foreign sshd drop-in at berth's path aborts unless --force
+	// (standard managed-file drift policy — the sshd_config.d probe is the
+	// first managed file hardening.Check classifies).
+	"hardening": "not managed by berth",
+	"site":      "not managed by berth",
 	// preflight: the foreign apt lock-timeout drop-in aborts unless --force —
 	// deliberate (preflight.go: without this gate even `--only identity` would
 	// clobber a foreign file, preflight being always-run).
