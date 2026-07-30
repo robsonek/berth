@@ -12,7 +12,16 @@ Notable changes to berth. Older releases are documented on the
   with `--json` and plain-table output. It never changes a server's
   configuration, data, packages, services or certificates; `--drift` runs the
   same validators provisioning runs (`nginx -t` can create a missing log file).
-  Trust-on-first-use is disabled for the sweep.
+  Trust-on-first-use is disabled for the sweep. `--offsite` additionally queries
+  the offsite restic repository, sourcing its credentials from the host's own
+  `/etc/berth/offsite.env` so no secret enters the status process. The exit code
+  reflects whether **probing** succeeded — an unreachable host, a partial probe
+  failure or an aborted drift scan — and deliberately NOT whether anything needs
+  attention: an expiring certificate or a stale backup is an answer, so filter
+  with `--json` (whose shape is a golden-tested contract). Known limitation: for
+  PostgreSQL the service column reflects Debian's umbrella `postgresql.service`,
+  which stays active while a cluster is down — real cluster liveness is deferred
+  along with per-site database health.
 
 ### Changed
 
@@ -29,6 +38,15 @@ Notable changes to berth. Older releases are documented on the
   Expect a **one-time rewrite of the managed `/usr/local/sbin/berth-offsite`
   script** on each offsite-enabled host's next provision run (ordinary
   managed-file drift).
+- **Seven more name derivations are now frozen by contract test.** The per-site
+  valkey unit, the two certificate bases and `CertDir`, the three offsite paths
+  and the PHP-FPM service name moved into `internal/config` (the steps delegate,
+  byte-identically) and joined `TestDerivationsAreFrozen` with literal
+  expectations. They name artefacts that already exist on provisioned hosts —
+  systemd unit filenames, certificate directories, managed key and env paths —
+  and were previously pinned only *transitively*, because every test expectation
+  was computed with the same function it was meant to pin. Renaming any of them
+  now requires a conscious BREAKING entry here, which is the point.
 
 ### Fixed
 
