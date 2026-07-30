@@ -85,15 +85,21 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{"sysctl -n --system", cmdRejected},
 		{"sysctl -n --load=/etc/sysctl.conf", cmdRejected},
 		{"openssl x509 -noout -in /etc/ssl/cert.pem", cmdReadOnly},
+		// openssl accepts an option with one or two dashes and a separate or
+		// glued '=' value, and every such spelling of -out creates and
+		// truncates its file even under -noout (verified on 3.6.3). All four
+		// must reject — two rounds of enumerating exact tokens each missed
+		// one, so the predicate now matches the normalized option NAME.
 		{"openssl x509 -noout -out /tmp/x -in /etc/ssl/cert.pem", cmdRejected},
-		// openssl accepts every option with one or two dashes; --out creates
-		// and truncates its file even under -noout (verified on 3.6.3).
 		{"openssl x509 -noout --out /tmp/x -in /etc/ssl/cert.pem", cmdRejected},
-		// The keyring probe's exact read shape, and proof that dropping
-		// --trust-model always — the flag that suppresses trustdb.gpg
-		// creation — breaks the match.
-		{"gpg --no-options --no-keyring --trust-model always --show-keys /usr/share/keyrings/example.gpg", cmdReadOnly},
-		{"gpg --no-options --no-keyring --show-keys /usr/share/keyrings/example.gpg", cmdRejected},
+		{"openssl x509 -noout -out=/tmp/x -in /etc/ssl/cert.pem", cmdRejected},
+		{"openssl x509 -noout --out=/tmp/x -in /etc/ssl/cert.pem", cmdRejected},
+		// The keyring probe's exact read shape as issued by
+		// apt.KeyringHoldsExactly (internal/apt/apt.go), and proof that
+		// dropping --trust-model always — the flag that suppresses
+		// trustdb.gpg creation — breaks the match.
+		{"gpg --no-options --no-keyring --trust-model always --show-keys --with-colons /usr/share/keyrings/example.gpg", cmdReadOnly},
+		{"gpg --no-options --no-keyring --show-keys --with-colons /usr/share/keyrings/example.gpg", cmdRejected},
 
 		// An untrusted executable path must never inherit a trusted basename.
 		{"/tmp/cat /etc/hosts", cmdRejected},
@@ -254,20 +260,11 @@ func firstNonFlag(args []string) string {
 	return ""
 }
 
-// noneOf reports whether args avoids every listed token.
-func noneOf(args []string, toks ...string) bool {
-	for _, t := range toks {
-		if hasExact(args, t) {
-			return false
-		}
-	}
-	return true
-}
-
 // mentionsFlag reports whether args mentions any of the given flags in a
 // spelling getopt accepts. Exact-token matching proved bypassable by ordinary
 // spellings — `--set=@0`, `-F/etc/hostname` and the bundle `-bF` all slipped
-// past noneOf — so every denylisted WRITING flag must be matched here instead.
+// past an exact-token denylist — so every denylisted WRITING flag must be
+// matched here instead.
 //
 // Matching by flag shape:
 //   - a long flag (--file) matches the exact token, the glued form
@@ -368,15 +365,8 @@ var simpleShapes = []simpleShape{
 	{verb: "swapon", allow: func(a []string) bool { return len(a) == 1 && a[0] == "--show" }, verdict: cmdReadOnly},
 	{verb: "sysctl", allow: sysctlIsReadOnly, verdict: cmdReadOnly},
 	{verb: "command", allow: func(a []string) bool { return len(a) == 2 && a[0] == "-v" }, verdict: cmdReadOnly},
-	// openssl's CLI is not getopt: its option parser accepts every option
-	// with one OR two dashes ("Allow -nnn and --nnn", apps/lib/opt.c) but
-	// does NO abbreviation and NO bundling, so an enumerated exact set is
-	// both necessary and sufficient. mentionsFlag's bundle rule for "-o"
-	// would falsely match the read flag -noout, so noneOf stays.
-	{verb: "openssl", allow: func(a []string) bool {
-		return len(a) >= 1 && a[0] == "x509" && hasExact(a, "-noout") && noneOf(a, "-out", "--out", "-o", "--o")
-	}, verdict: cmdReadOnly,
-		why: "-out/--out creates and truncates its file even under -noout (verified on OpenSSL 3.6.3)"},
+	{verb: "openssl", allow: opensslX509IsReadOnly, verdict: cmdReadOnly,
+		why: "every spelling of -out creates and truncates its file even under -noout (verified on OpenSSL 3.6.3)"},
 	{verb: "find", allow: findIsReadOnly, verdict: cmdReadOnly},
 	{verb: "gpg", allow: gpgIsReadOnly, verdict: cmdReadOnly},
 }
@@ -444,6 +434,46 @@ func systemctlIsReadOnly(args []string) bool {
 		return true
 	}
 	return false
+}
+
+// optName normalizes one argument to the option NAME openssl's parser would
+// see: apps/lib/opt.c strips one or two leading dashes ("Allow -nnn and
+// --nnn") and snips a glued "=value" ("If we have --flag=foo, snip it off").
+// A non-option argument normalizes to "". Matching the normalized name
+// covers every spelling the parser derives, so nothing here depends on
+// enumerating them.
+func optName(arg string) string {
+	if !strings.HasPrefix(arg, "-") {
+		return ""
+	}
+	name := strings.TrimPrefix(strings.TrimPrefix(arg, "-"), "-")
+	name, _, _ = strings.Cut(name, "=")
+	return name
+}
+
+// opensslX509IsReadOnly allows only `openssl x509 -noout …` where no argument
+// normalizes to the option name "out". Two rounds of enumerating -out's exact
+// tokens each missed a spelling (first --out, then the glued -out=FILE and
+// --out=FILE — every one of which creates and truncates its file even under
+// -noout), so the predicate matches by normalized name instead. -noout
+// normalizes to "noout", never "out" — the property that keeps the read
+// alive, and the reason openssl does not route through mentionsFlag, whose
+// short-flag rule would letter-match the 'o' in -noout. "o" is also denied:
+// openssl refuses it as unknown, so that is free over-rejection.
+//
+// Probed on OpenSSL 3.6.3: -out=F and --out=F exit 0 and create F; -o, --o,
+// the abbreviation -ou= and the three-dash ---out= all exit 1 with no file.
+func opensslX509IsReadOnly(args []string) bool {
+	if len(args) < 1 || args[0] != "x509" || !hasExact(args, "-noout") {
+		return false
+	}
+	for _, a := range args {
+		switch optName(a) {
+		case "out", "o":
+			return false
+		}
+	}
+	return true
 }
 
 // findMutators are the predicates that act instead of reporting. find's
