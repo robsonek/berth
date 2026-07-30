@@ -3,6 +3,8 @@ package steps
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -60,11 +62,33 @@ var expectedRefusals = map[string]string{
 	// clean from /proc/meminfo; checkTuned's managedFileSatisfied is the
 	// first refusal.
 	"tuning": "not managed by berth",
+	// backups: a foreign file at the per-site backup-script path aborts
+	// unless --force — the FIRST managed file backups.Check classifies
+	// (managedFileOK on the script). Guard order verified: the engine lookup
+	// and renders are local; the script's cat is the step's first remote
+	// probe, so the refusal is the very first command's verdict.
+	"backups": "not managed by berth",
+	// offsite: a foreign file at /etc/berth/offsite.env aborts unless
+	// --force. Guard order verified: pkgInstalled(restic) and the /etc/berth
+	// stat are data-only reads, the secret-cache load is local (and the
+	// fixture cache is healthy — a missing s3 credential would be a
+	// WORKSTATION error, deliberately not modelled; see contractServer);
+	// the env file's managedFileOK is the first guard that can refuse.
+	"offsite": "not managed by berth",
+	// tls: a foreign file at the certbot renewal deploy hook aborts unless
+	// --force. Guard order verified: orphan discovery and the renewal-conf
+	// parse only read; the certificate loop returns UNSATISFIED (not an
+	// error) on any cert state — the foreign model deliberately carries a
+	// valid certificate so the Check gets PAST that loop to the hook's
+	// checkManagedFile, the step's only refusing guard.
+	"tls": "not managed by berth",
 	// Task 5 completes this map from the discovery run. Every entry must be a
 	// refusal the step MEANS to give, never a symptom of an incomplete model.
 	// database deliberately has NO entry: its foreign truth is a tree berth
 	// never provisioned (no shared/.env), where the step honestly reports
-	// "credential not yet persisted" — unsatisfied, not a refusal.
+	// "credential not yet persisted" — unsatisfied, not a refusal. manifest
+	// has none either: /var/lib/berth is berth-exclusive, so there is no
+	// foreign-file story for it to refuse over.
 }
 
 // TestChecksAreReadOnly is the contract.
@@ -105,7 +129,11 @@ func TestChecksAreReadOnly(t *testing.T) {
 
 	type key struct{ step, profile string }
 	issued := map[key]int{}
-	sawException := map[string]bool{} // exception command -> observed
+	// sawException is keyed on the FULL command text, not its first word: a
+	// first-word key would let a future exception command merely STARTING
+	// with "nginx" satisfy the observed-assertion below.
+	sawException := map[string]bool{} // exact exception command -> observed
+	sawRefusal := map[string]bool{}   // step -> refused under foreign with the expected substring
 	sawGPG := false
 	var violations []string
 	add := func(format string, a ...any) { violations = append(violations, fmt.Sprintf(format, a...)) }
@@ -148,6 +176,8 @@ func TestChecksAreReadOnly(t *testing.T) {
 					} else if !strings.Contains(checkErr.Error(), want) {
 						add("%s.Check's refusal under %q changed:\n    got:  %v\n    want substring: %q",
 							st.Name(), profile, checkErr, want)
+					} else {
+						sawRefusal[st.Name()] = true
 					}
 				}
 			case checkErr != nil:
@@ -170,7 +200,7 @@ func TestChecksAreReadOnly(t *testing.T) {
 				case cmdReadOnly, cmdAudited:
 					// allowed
 				case cmdException:
-					sawException[strings.Fields(rec.cmd)[0]] = true
+					sawException[rec.cmd] = true
 				default:
 					add("%s.Check issued a REJECTED command under %q:\n    %s\n  reason: %s\n"+
 						"  A Check must be side-effect-free. Either move this to Apply, or — if it\n"+
@@ -214,13 +244,31 @@ func TestChecksAreReadOnly(t *testing.T) {
 	// reaches them — which is precisely what the first draft of this plan got
 	// wrong: site.Check returns at its first unsatisfied managed file, before
 	// the validators, so a shallow converged profile never recorded either.
-	if !sawException["nginx"] {
+	if !sawException["nginx -t"] {
 		add("nginx -t was never observed. It is declared an exception, so a run that never\n" +
 			"  reaches it proves nothing about it. Make the converged profile deep enough that\n" +
 			"  site.Check gets past its managed-file loop to the validators.")
 	}
-	if !sawException["php-fpm8.4"] {
-		add("php-fpm -t was never observed — same reason as nginx -t above.")
+	// The php validator's command embeds the fixture's php.version, so the
+	// key is derived from the same fixture the pipeline ran with — a version
+	// bump changes both sides together.
+	if phpFpmT := "php-fpm" + srv.PHP.Version + " -t"; !sawException[phpFpmT] {
+		add("%q was never observed — same reason as nginx -t above. (The key derives from\n"+
+			"  the fixture's php.version %q; if the version changed, the exception command\n"+
+			"  changed with it.)", phpFpmT, srv.PHP.Version)
+	}
+	// Guard 4c, the symmetry of 4b for the OTHER allowance this contract
+	// grants: every expectedRefusals entry must have been observed under
+	// foreign. An entry nobody exercises is a dead allowance — if a model or
+	// production change made the step stop refusing, the contract would stay
+	// green while the ownership/drift guard it documents went untested.
+	for _, step := range slices.Sorted(maps.Keys(expectedRefusals)) {
+		if !sawRefusal[step] {
+			add("%s is in expectedRefusals but never refused under %q — the entry is dead.\n"+
+				"  Either the foreign model no longer walks that step's refusing guard, or the\n"+
+				"  step stopped refusing; both mean the documented guard went unexercised.",
+				step, "foreign")
+		}
 	}
 	// And the gpg keyring probe, the original offender this contract exists for.
 	if !sawGPG {
