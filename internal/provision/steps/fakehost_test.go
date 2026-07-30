@@ -292,6 +292,9 @@ func populateInstalled(h *fakeHost, s *config.Server, profile string) {
 		"nginx", "php" + s.PHP.Version + "-fpm", "php" + s.PHP.Version + "-cli",
 		"mariadb-server", "valkey-server", "supervisor", "fail2ban", "ufw",
 		"certbot", "restic", "cron", "unattended-upgrades", "curl", "gnupg",
+		// The rest of basePackages (systembase.go): a converged host has them
+		// all, or base.Check honestly reports it unconverged.
+		"git", "rsync", "unzip", "ca-certificates",
 	} {
 		h.packages[p] = "Status: install ok installed"
 	}
@@ -377,4 +380,69 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 	// there is no template; Apply writes []byte(aptLockTimeoutBody) verbatim,
 	// so the const IS the rendered form.
 	h.putManaged(aptLockTimeoutPath, []byte(aptLockTimeoutBody), profile)
+
+	// base's APT Periodic config, rendered by the same function base.Check
+	// compares against. The foreign variant putManaged writes is NOT the
+	// debconf stock copy, so it stays outside the stockAutoUpgrades adoption
+	// allowlist and walks the refusal branch the drift policy means to give.
+	autoUp, err := renderAutoUpgrades()
+	if err != nil {
+		panic("render apt_auto_upgrades.conf.tmpl: " + err.Error())
+	}
+	h.putManaged(autoUpgradesPath, autoUp, profile)
+
+	// The declared apt repos: the source list is rendered by the same
+	// SourceContent the step compares against. The pinned keyring exists only
+	// where the list reads up-to-date (converged/runtime-stale) — those are
+	// the profiles whose Check reaches KeyringHoldsExactly, and its presence
+	// is what lets the gpg answer serve the modelled key material (guard 4b).
+	for _, cfg := range s.Apt.Repos {
+		repo := userRepo(cfg)
+		src, err := repo.SourceContent()
+		if err != nil {
+			panic("render apt source list for " + repo.Name + ": " + err.Error())
+		}
+		h.putManaged(repo.SourceListPath(), src, profile)
+		if profile == "converged" || profile == "runtime-stale" {
+			h.files[repo.KeyringPath()] = fakeFile{owner: "root", group: "root",
+				mode: "644", kind: "regular file", mtimeUnix: 1500000000}
+		}
+	}
+	// The sweep namespace: drifted models an UNDECLARED berth-owned list (the
+	// exact state the apt step's sweep exists to remove — strict marker as the
+	// first line, canonical berth-*.list name); foreign models a marker-less
+	// impostor at the same path, which the sweep must classify as foreign and
+	// leave alone. converged has neither — nothing undeclared lingers there.
+	const ghostList = "/etc/apt/sources.list.d/berth-oldrepo.list"
+	switch profile {
+	case "drifted":
+		h.files[ghostList] = fakeFile{
+			content: templates.ManagedMarker + "\ndeb [signed-by=/usr/share/keyrings/berth-oldrepo.gpg] https://old.example.com/debian trixie main\n",
+			owner:   "root", group: "root", mode: "644", kind: "regular file",
+			mtimeUnix: 1500000000}
+	case "foreign":
+		h.files[ghostList] = fakeFile{
+			content: "deb https://old.example.com/debian trixie main\n",
+			owner:   "root", group: "root", mode: "644", kind: "regular file",
+			mtimeUnix: 1500000000}
+	}
+}
+
+// aptUserLists returns the modelled paths the apt step's find discovery
+// (aptUserListsCmd) would print: entries directly under
+// /etc/apt/sources.list.d whose name matches berth-*.list. Sorted, because a
+// Go map has no iteration order and the answer must be deterministic.
+func (h *fakeHost) aptUserLists() []string {
+	var out []string
+	for p := range h.files {
+		base, ok := strings.CutPrefix(p, "/etc/apt/sources.list.d/")
+		if !ok || strings.Contains(base, "/") {
+			continue
+		}
+		if strings.HasPrefix(base, "berth-") && strings.HasSuffix(base, ".list") {
+			out = append(out, p)
+		}
+	}
+	slices.Sort(out)
+	return out
 }

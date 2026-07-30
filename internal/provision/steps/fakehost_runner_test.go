@@ -250,6 +250,19 @@ func (r *recordingRunner) answer(cmd string) (bssh.Result, bool) {
 		}
 		return bssh.Result{ExitCode: 1}, true
 
+	// The apt step's sweep discovery, keyed to the production const. Answered
+	// from the model (never canned): the matching paths, NUL-separated the way
+	// find -print0 emits them — discoverUserLists PARSES this by splitting on
+	// \x00. find exits 0 with empty output when nothing matches, so an empty
+	// namespace is data, not an error.
+	case cmd == aptUserListsCmd:
+		var out strings.Builder
+		for _, p := range r.h.aptUserLists() {
+			out.WriteString(p)
+			out.WriteByte(0)
+		}
+		return bssh.Result{Stdout: out.String()}, true
+
 	case f[0] == "cat" && len(f) == 2:
 		if file, ok := r.h.files[unq(f[1])]; ok {
 			return bssh.Result{Stdout: file.content}, true

@@ -25,6 +25,15 @@ var expectedRefusals = map[string]string{
 	// deliberate (preflight.go: without this gate even `--only identity` would
 	// clobber a foreign file, preflight being always-run).
 	"preflight": "not managed by berth",
+	// base: a foreign 20auto-upgrades aborts unless --force (systembase.go —
+	// content outside the stockAutoUpgrades adoption allowlist is operator
+	// intent, the exact case the drift policy exists to protect).
+	"base": "not managed by berth",
+	// apt: a foreign file at a DECLARED repo's source-list path aborts unless
+	// --force (aptextras.go, standard managed-file policy). Undeclared foreign
+	// files in the namespace are merely skipped — the refusal is only for the
+	// path berth is about to write.
+	"apt": "not managed by berth",
 	// Task 5 completes this map from the discovery run. Every entry must be a
 	// refusal the step MEANS to give, never a symptom of an incomplete model.
 }
