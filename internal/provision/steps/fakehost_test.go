@@ -181,6 +181,13 @@ var fakeHostProfiles = []string{"fresh", "converged", "drifted", "foreign", "run
 func contractServer(t *testing.T) *config.Server {
 	t.Helper()
 	dir := t.TempDir()
+	// The secret cache is anchored at $HOME/.berth (os.UserHomeDir,
+	// internal/secret/env.go), and identity.Check reads it. Redirect HOME here,
+	// in the fixture, so EVERY consumer gets the isolation — a contract that
+	// read the developer's real ~/.berth would be machine-dependent.
+	// USERPROFILE is what os.UserHomeDir reads on Windows (CI runs 3 OSes).
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
 	keyPath := filepath.Join(dir, "id_ed25519")
 	if err := os.WriteFile(keyPath, []byte("-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n-----END OPENSSH PRIVATE KEY-----\n"), 0o600); err != nil {
 		t.Fatalf("write fixture key: %v", err)

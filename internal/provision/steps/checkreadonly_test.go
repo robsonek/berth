@@ -1,0 +1,227 @@
+package steps
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"strings"
+	"testing"
+
+	"github.com/robsonek/berth/internal/provision"
+	"github.com/robsonek/berth/internal/secret"
+)
+
+// expectedRefusals lists the ONLY steps allowed to return an error under the
+// foreign profile, with a substring of the refusal each must give. A refusal is
+// a correct outcome there — foreign files and a foreign-owned site tree are
+// exactly what the ownership and drift guards exist to reject — but accepting
+// ANY error as "intended" would let a genuine failure hide. Under every other
+// profile a Check must return nil.
+var expectedRefusals = map[string]string{
+	"accounts": "not managed by berth",
+	"appdirs":  "owned by",
+	"site":     "not managed by berth",
+	// Task 5 completes this map from the discovery run. Every entry must be a
+	// refusal the step MEANS to give, never a symptom of an incomplete model.
+}
+
+// TestChecksAreReadOnly is the contract.
+//
+// WHAT THIS DOES NOT PROVE — read before trusting it. It does not prove a Check
+// is read-only on a REAL host. It proves that the commands a Check ISSUES under
+// five modelled states fall in a classified set. Three gaps remain: a path none
+// of the five profiles visits; a shape the model answers so generically that it
+// masks a branch; and a Go-side effect that never reaches the Runner at all —
+// a Check calling os.WriteFile, os/exec or a network API is invisible here. The
+// fleet-status spec's original "strictly read-only" claim was wrong in exactly
+// this way, so this test states its limits rather than implying it has none.
+func TestChecksAreReadOnly(t *testing.T) {
+	srv := contractServer(t)
+	pipeline := Pipeline(srv, secret.NewRedactor(), false)
+
+	// Guard 1: the pipeline must be EXACTLY the expected set, by name. A count
+	// alone would pass if one step were replaced by a duplicate of another, and
+	// a new conditionally-registered step could be omitted while the old total
+	// still matched.
+	wantSteps := []string{
+		"identity", "preflight", "base", "system", "apt", "php", "nginx",
+		"composer", "valkey", "supervisor", "accounts", "hardening", "appdirs",
+		"database", "site", "tls", "tuning", "backups", "offsite", "manifest",
+	}
+	var gotSteps []string
+	for _, st := range pipeline {
+		gotSteps = append(gotSteps, st.Name())
+	}
+	sort.Strings(gotSteps)
+	wantSorted := append([]string(nil), wantSteps...)
+	sort.Strings(wantSorted)
+	if strings.Join(gotSteps, ",") != strings.Join(wantSorted, ",") {
+		t.Fatalf("pipeline steps changed.\n got: %v\nwant: %v\n"+
+			"If a step was added, add it to wantSteps AND make sure contractServer()\n"+
+			"registers it — otherwise this contract silently skips it.", gotSteps, wantSorted)
+	}
+
+	type key struct{ step, profile string }
+	issued := map[key]int{}
+	sawException := map[string]bool{} // exception command -> observed
+	sawGPG := false
+	var violations []string
+	add := func(format string, a ...any) { violations = append(violations, fmt.Sprintf(format, a...)) }
+
+	for _, profile := range fakeHostProfiles {
+		for _, st := range pipeline {
+			h := newFakeHost(t, profile, srv)
+			r := newRecordingRunner(h)
+			rc := provision.RunCtx{FullRun: true}
+			if profile == "foreign" {
+				// Force changes whether an aggregating Check continues past the
+				// unmanaged-file refusal, so foreign is run BOTH ways below.
+				rc.Force = false
+			}
+
+			_, checkErr := st.Check(context.Background(), rc, srv, r)
+
+			// Guard 2: every command must have been answerable, regardless of
+			// what the Check returned. A Check may swallow a probe error
+			// (sshdConflictSources degrades deliberately), so the Check's own
+			// error is not a reliable signal.
+			for _, u := range r.unanswered() {
+				add("%s.Check asked the fake host a question it cannot answer under %q:\n"+
+					"    %s\n"+
+					"  Teach answer() in fakehost_runner_test.go this shape so the Check can\n"+
+					"  complete. Until then this profile's coverage of %s.Check is a PREFIX.",
+					st.Name(), profile, u, st.Name())
+			}
+
+			// Guard 3: the error policy, per profile.
+			switch {
+			case profile == "foreign":
+				if checkErr != nil {
+					want, allowed := expectedRefusals[st.Name()]
+					if !allowed {
+						add("%s.Check errored under %q but is not in expectedRefusals:\n    %v\n"+
+							"  Either this is the refusal the step MEANS to give — add it with the\n"+
+							"  substring to match — or the model is incomplete and the error is a symptom.",
+							st.Name(), profile, checkErr)
+					} else if !strings.Contains(checkErr.Error(), want) {
+						add("%s.Check's refusal under %q changed:\n    got:  %v\n    want substring: %q",
+							st.Name(), profile, checkErr, want)
+					}
+				}
+			case checkErr != nil:
+				add("%s.Check errored under %q, where a verdict is required:\n    %v\n"+
+					"  Only the foreign profile may produce refusals. An error here means the\n"+
+					"  fixture or the model cannot drive this Check to a verdict.",
+					st.Name(), profile, checkErr)
+			}
+
+			// A Check must never write a file, whatever its verdict.
+			for _, w := range r.writes() {
+				add("%s.Check called WriteFile(%s) under %q — a Check must never write.",
+					st.Name(), w.Path, profile)
+			}
+
+			for _, rec := range r.recorded() {
+				issued[key{st.Name(), profile}]++
+				verdict, detail := classifyCommand(rec.cmd, rec.stdin)
+				switch verdict {
+				case cmdReadOnly, cmdAudited:
+					// allowed
+				case cmdException:
+					sawException[strings.Fields(rec.cmd)[0]] = true
+				default:
+					add("%s.Check issued a REJECTED command under %q:\n    %s\n  reason: %s\n"+
+						"  A Check must be side-effect-free. Either move this to Apply, or — if it\n"+
+						"  genuinely only reads — add its exact shape to cmdclass_test.go with a\n"+
+						"  one-line justification. If it is a generated script, register its exact\n"+
+						"  text in auditedScripts after reading every command inside it.",
+						st.Name(), profile, rec.cmd, detail)
+				}
+				if strings.HasPrefix(rec.cmd, "gpg ") {
+					sawGPG = true
+				}
+			}
+		}
+	}
+
+	// Guard 4a: no step may be silently unexercised. identity is the one step
+	// that legitimately issues nothing — its Check discards the Runner in its
+	// signature — but it is still INVOKED above and must have recorded zero.
+	for _, st := range pipeline {
+		total := 0
+		for _, profile := range fakeHostProfiles {
+			total += issued[key{st.Name(), profile}]
+		}
+		switch st.Name() {
+		case "identity":
+			if total != 0 {
+				add("identity.Check issued %d command(s). Its signature discards the Runner today;\n"+
+					"  if that changed, it must join the classified set rather than stay excluded.", total)
+			}
+		default:
+			if total == 0 {
+				add("%s.Check issued NO commands under any profile — either the harness never\n"+
+					"  reached it, or it returns before probing. Both make this contract vacuous\n"+
+					"  for that step.", st.Name())
+			}
+		}
+	}
+
+	// Guard 4b: the declared exceptions must have been OBSERVED. Declaring
+	// nginx -t and php-fpm -t as exceptions proves nothing if no profile ever
+	// reaches them — which is precisely what the first draft of this plan got
+	// wrong: site.Check returns at its first unsatisfied managed file, before
+	// the validators, so a shallow converged profile never recorded either.
+	if !sawException["nginx"] {
+		add("nginx -t was never observed. It is declared an exception, so a run that never\n" +
+			"  reaches it proves nothing about it. Make the converged profile deep enough that\n" +
+			"  site.Check gets past its managed-file loop to the validators.")
+	}
+	if !sawException["php-fpm8.4"] {
+		add("php-fpm -t was never observed — same reason as nginx -t above.")
+	}
+	// And the gpg keyring probe, the original offender this contract exists for.
+	if !sawGPG {
+		add("the gpg keyring probe was never observed. contractServer() must declare an apt\n" +
+			"  repo whose source list and keyring are reachable, or the command that started\n" +
+			"  this whole line of work is not actually covered.")
+	}
+
+	for _, st := range pipeline {
+		row := st.Name() + ":"
+		for _, profile := range fakeHostProfiles {
+			row += fmt.Sprintf("  %s=%d", profile, issued[key{st.Name(), profile}])
+		}
+		t.Log(row)
+	}
+
+	if len(violations) > 0 {
+		out := ""
+		for i, v := range violations {
+			out += fmt.Sprintf("[%d] %s\n\n", i+1, v)
+		}
+		t.Fatalf("read-only Check contract violated in %d place(s):\n\n%s", len(violations), out)
+	}
+}
+
+// TestChecksAreReadOnlyUnderForce covers the one RunCtx flag that changes
+// control flow rather than just content: Force lets an aggregating Check
+// continue PAST the unmanaged-file refusal, reaching commands the plain foreign
+// run never gets to. SSLStaging and FullRun:false change content and messages
+// rather than which commands are issued, so they stay deferred.
+func TestChecksAreReadOnlyUnderForce(t *testing.T) {
+	srv := contractServer(t)
+	var violations []string
+	for _, st := range Pipeline(srv, secret.NewRedactor(), false) {
+		r := newRecordingRunner(newFakeHost(t, "foreign", srv))
+		_, _ = st.Check(context.Background(), provision.RunCtx{FullRun: true, Force: true}, srv, r)
+		for _, rec := range r.recorded() {
+			if v, detail := classifyCommand(rec.cmd, rec.stdin); v == cmdRejected {
+				violations = append(violations, fmt.Sprintf("%s.Check under foreign+Force: %s (%s)", st.Name(), rec.cmd, detail))
+			}
+		}
+	}
+	if len(violations) > 0 {
+		t.Fatalf("rejected commands under foreign+Force:\n  %s", strings.Join(violations, "\n  "))
+	}
+}
