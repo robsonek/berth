@@ -963,11 +963,11 @@ func (r *recordingRunner) answerServiceLoaded(path, unit string) bssh.Result {
 }
 
 // answerLsGlob evaluates one `ls -1 <glob> 2>/dev/null` discovery over the
-// model: paths matching prefix + one glob-star segment + suffix, where the
-// starred segment — like a real shell glob star — never crosses a '/' and
-// never matches a leading dot. No match answers the way the shell does: ls
-// receives the literal unexpanded glob and fails on it (exit 2, diagnostics
-// eaten by the script's own 2>/dev/null).
+// model: paths matching prefix + one non-empty starred segment + suffix (see
+// globStarSegment for how the segment rules compare to a real shell's). No
+// match answers the way the shell does: ls receives the literal unexpanded
+// glob and fails on it (exit 2, diagnostics eaten by the script's own
+// 2>/dev/null).
 func (r *recordingRunner) answerLsGlob(prefix, suffix string) bssh.Result {
 	var out []string
 	for p := range r.h.files {
@@ -982,8 +982,13 @@ func (r *recordingRunner) answerLsGlob(prefix, suffix string) bssh.Result {
 	return bssh.Result{Stdout: strings.Join(out, "\n") + "\n"}
 }
 
-// globStarSegment reports whether path is prefix + <segment> + suffix with a
-// segment a shell glob star would match: no '/', no leading dot.
+// globStarSegment reports whether path is prefix + <segment> + suffix, with
+// the segment barred from containing '/' or starting with a dot. That is
+// STRICTER than a real shell star — mid-component a shell's * happily
+// matches a leading dot (the hidden-file rule applies only when the pattern
+// starts the component), and here the dot rule is applied unconditionally —
+// so the evaluator can only under-match, the safe direction; no fixture
+// path is affected either way.
 func globStarSegment(path, prefix, suffix string) (string, bool) {
 	rest, ok := strings.CutPrefix(path, prefix)
 	if !ok {

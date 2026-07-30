@@ -298,21 +298,18 @@ func TestChecksAreReadOnly(t *testing.T) {
 // worth its name: every Check must reach a genuine Satisfied:true there — a
 // profile that merely avoids errors would let the contract's deepest paths
 // (site's validators, the value-agreement probes, the runtime tails) go
-// unwalked while everything stayed green. Two steps are exempt, each for a
-// stated reason, and their reasons are pinned so a THIRD unsatisfied step can
-// never hide among them:
-//
-//   - preflight is AlwaysRun with a deliberately unsatisfied Check (it
-//     re-runs apt-get update every run by design);
-//   - identity's verdict is about the LOCAL cache binding, not the host: the
-//     fixture seeds the cache under the declared id with no tombstone at the
-//     host key, which identity honestly reports as not-yet-converged
-//     (wave-3 note; a fixture tombstone would change this, not the host).
+// unwalked while everything stayed green. Exactly ONE step is exempt, for a
+// structural reason, and its Reason is pinned so a second unsatisfied step
+// can never hide behind it: preflight is AlwaysRun with a deliberately
+// unsatisfied Check (it re-runs apt-get update every run by design), so it
+// cannot be converged by definition. identity is deliberately NOT exempt —
+// its earlier "tombstone missing" verdict was a modelling gap, not a
+// property, and contractServer now converges the local cache identity with
+// the step's own Apply.
 func TestConvergedIsGenuinelySatisfied(t *testing.T) {
 	srv := contractServer(t)
 	wantUnsatisfied := map[string]string{
 		"preflight": "Debian 13 detected",
-		"identity":  "tombstone",
 	}
 	for _, st := range Pipeline(srv, secret.NewRedactor(), false) {
 		r := newRecordingRunner(newFakeHost(t, "converged", srv))
