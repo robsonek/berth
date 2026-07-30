@@ -187,6 +187,59 @@ func TestRecordingRunnerAnswersOnlyCheckShapedValidators(t *testing.T) {
 	}
 }
 
+// The wave-3 answers must derive from modelled STATE, never canned: a reply
+// that ignores the model would mask exactly the branch its profile exists to
+// walk. Four pins: the instance-unit listing follows the modelled files, the
+// PONG and the information_schema scalar follow the modelled runtime, and the
+// value-agreement probe follows its stdin.
+func TestRecordingRunnerDerivesWave3AnswersFromState(t *testing.T) {
+	ctx := context.Background()
+	s := contractServer(t)
+
+	// Instance discovery: fresh has no unit files (ls fails on the literal
+	// glob, output empty); converged lists exactly the modelled unit path.
+	fresh := newRecordingRunner(newFakeHost(t, "fresh", s))
+	if res, err := fresh.Run(ctx, valkeyListUnitsPasted, nil); err != nil || res.ExitCode == 0 || res.Stdout != "" {
+		t.Errorf("fresh unit listing = (%+v, %v), want empty at exit!=0", res, err)
+	}
+	convHost := newFakeHost(t, "converged", s)
+	conv := newRecordingRunner(convHost)
+	if res, err := conv.Run(ctx, valkeyListUnitsPasted, nil); err != nil || res.Stdout != fixtureValkeyUnitPath+"\n" {
+		t.Errorf("converged unit listing = (%+v, %v), want exactly the modelled unit", res, err)
+	}
+
+	// The PONG follows the unit's runtime state, not the command shape.
+	ping := valkeyPingProbeCmd("appuser", "app_example_com")
+	if res, err := conv.Run(ctx, ping, nil); err != nil || res.ExitCode != 0 || !strings.Contains(res.Stdout, "PONG") {
+		t.Errorf("active instance ping = (%+v, %v), want PONG at exit 0", res, err)
+	}
+	down := convHost.units[fixtureValkeyUnit]
+	down.active = false
+	convHost.units[fixtureValkeyUnit] = down
+	if res, err := conv.Run(ctx, ping, nil); err != nil || res.ExitCode == 0 {
+		t.Errorf("stopped instance ping = (%+v, %v), want a connect failure", res, err)
+	}
+
+	// The scalar probe follows the modelled database set and daemon state.
+	if res, err := conv.Run(ctx, mariadbDBExistsProbe("app"), nil); err != nil || strings.TrimSpace(res.Stdout) != "1" {
+		t.Errorf("existing database probe = (%+v, %v), want \"1\"", res, err)
+	}
+	delete(convHost.databases, "app")
+	if res, err := conv.Run(ctx, mariadbDBExistsProbe("app"), nil); err != nil || res.ExitCode != 0 || res.Stdout != "" {
+		t.Errorf("missing database probe = (%+v, %v), want an empty result set at exit 0", res, err)
+	}
+
+	// The agreement probe compares the stdin-borne expectation against the
+	// modelled .env: the fixture value matches, any other honestly does not.
+	match := envValueMatchProbeCmd(fixtureSharedEnv, "DB_PASSWORD")
+	if res, err := conv.Run(ctx, match, []byte("DB_PASSWORD="+fixtureDBValue+"\n")); err != nil || res.ExitCode != 0 {
+		t.Errorf("agreeing value = (%+v, %v), want exit 0", res, err)
+	}
+	if res, err := conv.Run(ctx, match, []byte("DB_PASSWORD=SomethingElse0000000000000000000\n")); err != nil || res.ExitCode != 1 {
+		t.Errorf("disagreeing value = (%+v, %v), want exit 1", res, err)
+	}
+}
+
 // Every standalone show probe today passes --value (valkey.go); answering
 // value-only output to a probe WITHOUT it would silently hand Task 5 the wrong
 // format, so the shape is refused instead.
