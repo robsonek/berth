@@ -1,9 +1,15 @@
 package steps
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
+
+// rePHPFpmVerb is the exact grammar of the one variable verb: Debian's
+// version-numbered FPM binary, php-fpm<major>.<minor>. classifySimple matches
+// the whole name against it before the -t shape is even considered.
+var rePHPFpmVerb = regexp.MustCompile(`^php-fpm[0-9]+\.[0-9]+$`)
 
 // TestClassifyCommandPolicy is the policy, stated as a table. Rows are either
 // shapes this package's Checks issue today, or shapes that could hide a write.
@@ -28,11 +34,18 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{"getent passwd appuser", cmdReadOnly},
 		{"id -u appuser", cmdReadOnly},
 
-		// The three exceptions, all evidence-backed (spec §4.2; certbot
-		// measured 2026-07, see its shape entry). Exact shapes.
+		// The named exceptions, all evidence-backed (spec §4.2; certbot and
+		// runuser measured 2026-07, see their shape entries — runuser's row
+		// sits with its rejected siblings below). Exact shapes.
 		{"nginx -t", cmdException},
 		{"php-fpm8.4 -t", cmdException},
 		{"certbot certificates", cmdException},
+		// The verb grammar is part of the pin: a bare prefix match blessed
+		// ANY executable name starting with php-fpm as the audited validator,
+		// so the name must be the version-numbered binary exactly.
+		{"php-fpm-wiper -t", cmdRejected},
+		{"php-fpm -t", cmdRejected},
+		{"php-fpm8 -t", cmdRejected},
 		// Every other certbot subcommand drives issuance/renewal state and
 		// must reject — pinned the way mysql's and runuser's mutating
 		// siblings were. Extra arguments on the listing reject too: only the
@@ -193,11 +206,14 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{`mysql -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app'"`, cmdRejected},
 
 		// valkey's per-site liveness probe (valkeyPingCmd, valkey.go): PING
-		// over the tenant's own socket mutates nothing. Any other valkey-cli
-		// verb (FLUSHALL, SHUTDOWN, SET…), a socket outside berth's runtime
-		// base, or any other program behind runuser is arbitrary code under
-		// another uid and must reject.
-		{`runuser -u 'appuser' -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' ping`, cmdReadOnly},
+		// over the tenant's own socket mutates nothing on the valkey side,
+		// but runuser itself opens a PAM session and pam_unix logs two lines
+		// to the journal per invocation (measured 2026-07, Debian 13) — so
+		// the probe is the FOURTH named exception, not a read. Any other
+		// valkey-cli verb (FLUSHALL, SHUTDOWN, SET…), a socket outside
+		// berth's runtime base, or any other program behind runuser is
+		// arbitrary code under another uid and must reject.
+		{`runuser -u 'appuser' -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' ping`, cmdException},
 		{`runuser -u 'appuser' -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' flushall`, cmdRejected},
 		{`runuser -u 'appuser' -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' shutdown`, cmdRejected},
 		{`runuser -u 'appuser' -- valkey-cli -s '/tmp/evil.sock' ping`, cmdRejected},
@@ -334,7 +350,7 @@ type cmdVerdict int
 
 const (
 	cmdReadOnly  cmdVerdict = iota // a pure read, judged by the tables
-	cmdException                   // allowed, but known to write (the nginx -t and certbot certificates table entries and the php-fpm branch in classifySimple)
+	cmdException                   // allowed, but known to write (the nginx -t, certbot certificates and runuser table entries and the php-fpm branch in classifySimple)
 	cmdAudited                     // a generated script whose exact text a human signed off
 	cmdRejected                    // everything else — mutating, unknown, or unparsed
 )
@@ -891,8 +907,16 @@ var simpleShapes = []simpleShape{
 		why: "pinned to KeyringHoldsExactly's exact argv (apt.go)"},
 	{verb: "mysql", allow: mysqlIsReadOnlyProbe, verdict: cmdReadOnly,
 		why: "only probeSQL's -N -e information_schema SELECT reads; any other statement, a ;-chain, INTO OUTFILE or an extra option mutates"},
-	{verb: "runuser", allow: runuserIsValkeyPing, verdict: cmdReadOnly,
-		why: "only `runuser -u <user> -- valkey-cli -s <berth socket> ping` reads; anything else is an arbitrary program under another uid"},
+	// The fourth exception: runuser itself writes. Every invocation opens a
+	// PAM session, and pam_unix logs exactly two lines to the journal —
+	// "session opened for user <user>… by <user>(uid=0)" and "session closed
+	// for user <user>" (measured 2026-07 on a provisioned Debian 13 host).
+	// valkey.Check pings each instance through it, per site per run, so the
+	// journal grows on every drift scan. The shape stays pinned to the PING
+	// probe; anything else behind runuser is an arbitrary program under
+	// another uid and rejects.
+	{verb: "runuser", allow: runuserIsValkeyPing, verdict: cmdException,
+		why: "runuser opens a PAM session: pam_unix writes two session lines to the journal per invocation (measured 2026-07, Debian 13)"},
 }
 
 // sedIsReadOnly pins the one sed shape the policy table blesses:
@@ -991,10 +1015,12 @@ func mysqlIsReadOnlyProbe(args []string) bool {
 
 // runuserIsValkeyPing allows only valkeyPingCmd's shape (valkey.go):
 // `runuser -u <user> -- valkey-cli -s '/run/berth-valkey/…' ping`, argument
-// by argument. The trailing verb is pinned to `ping` (a PONG probe, mutates
-// nothing) and the socket to berth's per-site runtime base. The user and the
-// socket tail stay free: they are shQuote'd values, and the shape is what
-// makes the command a read.
+// by argument. The trailing verb is pinned to `ping` (a PONG probe — the
+// valkey side mutates nothing) and the socket to berth's per-site runtime
+// base. The user and the socket tail stay free: they are shQuote'd values,
+// and the shape is what bounds the command. The verdict is cmdException, not
+// a read: runuser itself logs a PAM session open/close pair to the journal
+// on every invocation (see the table entry).
 func runuserIsValkeyPing(args []string) bool {
 	return len(args) == 7 && args[0] == "-u" && args[2] == "--" &&
 		args[3] == "valkey-cli" && args[4] == "-s" && args[6] == "ping" &&
@@ -1041,10 +1067,17 @@ func classifySimple(cmd string) (cmdVerdict, string) {
 		return cmdRejected, "executable given by path, not by name: " + verb
 	}
 	// php-fpm<version> is the one verb whose name varies, so it is matched by
-	// prefix. It is an EXCEPTION, not a read: it appends a "test is successful"
-	// notice to the PHP-FPM log on every invocation (measured, spec §1.1).
+	// pattern — the FULL version-numbered binary name Debian ships
+	// (php-fpm<major>.<minor>), never a bare prefix: a prefix match blessed
+	// any executable whose name merely STARTED with php-fpm
+	// (`php-fpm-wiper -t` classified as the audited validator). It is an
+	// EXCEPTION, not a read: it appends a "test is successful" notice to the
+	// PHP-FPM log on every invocation (measured, spec §1.1).
 	if strings.HasPrefix(verb, "php-fpm") {
-		if hasExact(args, "-t") && len(args) == 1 {
+		if !rePHPFpmVerb.MatchString(verb) {
+			return cmdRejected, "not the version-numbered php-fpm binary (php-fpm<maj>.<min>): " + verb
+		}
+		if len(args) == 1 && args[0] == "-t" {
 			return cmdException, "php-fpm -t appends a notice to the PHP-FPM log"
 		}
 		return cmdRejected, "only `php-fpm<ver> -t` is allowed"
