@@ -144,6 +144,9 @@ func TestFleetTableDistinguishesNoTLSFromMissingCert(t *testing.T) {
 func TestFleetTableUnparsedDiskIsNotZeroPercent(t *testing.T) {
 	h := hostFixture()
 	h.Disk = nil
+	// A healthy Services entry, or the SERVICES column also renders "?" and
+	// the assertion below no longer isolates the disk column.
+	h.Services = []status.Service{{Name: "nginx", Active: true, Enabled: true}}
 	var buf bytes.Buffer
 	if err := WriteFleetTable(&buf, []status.HostStatus{h}); err != nil {
 		t.Fatal(err)
