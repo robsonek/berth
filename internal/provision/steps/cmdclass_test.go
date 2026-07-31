@@ -252,6 +252,15 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{`setpriv --reuid 'appuser' --regid 'appuser' --init-groups -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' flushall`, cmdRejected},
 		{`setpriv --reuid 'appuser' --regid 'appuser' --init-groups -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' shutdown`, cmdRejected},
 		{`setpriv --reuid 'appuser' --regid 'appuser' --init-groups -- valkey-cli -s '/tmp/evil.sock' ping`, cmdRejected},
+		// The socket slot is the FULL valkeySocketPath form, not a prefix: a
+		// prefix pin accepted a dot-dot walk out of the runtime base, and a
+		// leaf other than valkey.sock is not a socket berth composes.
+		{`setpriv --reuid 'appuser' --regid 'appuser' --init-groups -- valkey-cli -s '/run/berth-valkey/../../etc/x' ping`, cmdRejected},
+		{`setpriv --reuid 'appuser' --regid 'appuser' --init-groups -- valkey-cli -s '/run/berth-valkey/app_example_com/other.sock' ping`, cmdRejected},
+		// The identity operands are the shQuote'd site user, nothing else:
+		// production always quotes, so the unquoted spelling is not a shape
+		// berth issues (safe direction, as with swapon --show).
+		{`setpriv --reuid appuser --regid appuser --init-groups -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' ping`, cmdRejected},
 		{`setpriv --reuid 'appuser' --regid 'appuser' --init-groups -- rm -rf /var/www`, cmdRejected},
 		{`setpriv --reuid 'appuser' --regid 'appuser' -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' ping`, cmdRejected},
 		{`setpriv --reuid 'appuser' --regid 'root' --init-groups -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' ping`, cmdRejected},
@@ -1170,20 +1179,34 @@ func mysqlIsReadOnlyProbe(args []string) bool {
 	return !strings.Contains(q, ";") && !strings.Contains(up, "INTO") && !strings.Contains(up, "LOAD_FILE")
 }
 
+// reValkeyPingSocket / reValkeyPingUser pin the two value slots of
+// valkeyPingCmd's shape (valkey.go), anchored end-to-end, quotes included.
+// The socket is shQuote'd valkeySocketPath(domain): berth's runtime base,
+// ONE pool component, the literal valkey.sock leaf. PoolName maps the
+// domain's dots to underscores, so a pool component carries no dot at all —
+// the slot's character class has none, and '..' cannot even be spelled (a
+// bare prefix pin accepted '/run/berth-valkey/../../etc/x'). The identity
+// operands are the shQuote'd site user: config.Validate's reLinuxUser shape,
+// which DerivedSiteUser's b_<slug>_<8hex> form also fits.
+var (
+	reValkeyPingSocket = regexp.MustCompile(`^'/run/berth-valkey/[a-z0-9_-]+/valkey\.sock'$`)
+	reValkeyPingUser   = regexp.MustCompile(`^'[a-z_][a-z0-9_-]{0,31}'$`)
+)
+
 // setprivIsValkeyPing allows only valkeyPingCmd's shape (valkey.go):
 // `setpriv --reuid <user> --regid <user> --init-groups -- valkey-cli -s
-// '/run/berth-valkey/…' ping`, argument by argument. The trailing verb is
-// pinned to `ping` (a PONG probe — the valkey side mutates nothing), the
-// socket to berth's per-site runtime base, and the uid/gid operands to the
-// SAME value — production passes one site user to both. --init-groups is
-// pinned by position: dropping it changes what the probe can reach, so the
-// shorter spelling must not ride along. The user and the socket tail stay
-// free: they are shQuote'd values, and the shape is what bounds the command.
+// '/run/berth-valkey/<pool>/valkey.sock' ping`, argument by argument. The
+// trailing verb is pinned to `ping` (a PONG probe — the valkey side mutates
+// nothing), the socket and identity operands to the full forms above, and
+// the uid/gid operands to the SAME value — production passes one site user
+// to both. --init-groups is pinned by position: dropping it changes what
+// the probe can reach, so the shorter spelling must not ride along.
 func setprivIsValkeyPing(args []string) bool {
 	return len(args) == 10 && args[0] == "--reuid" && args[2] == "--regid" &&
 		args[1] == args[3] && args[4] == "--init-groups" && args[5] == "--" &&
 		args[6] == "valkey-cli" && args[7] == "-s" && args[9] == "ping" &&
-		strings.HasPrefix(args[8], "'/run/berth-valkey/")
+		reValkeyPingUser.MatchString(args[1]) &&
+		reValkeyPingSocket.MatchString(args[8])
 }
 
 // gpgIsReadOnly pins KeyringHoldsExactly's EXACT argv (apt.go): six fixed
