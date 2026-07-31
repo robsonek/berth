@@ -27,7 +27,7 @@ func assertValkeyIsolation(ctx context.Context, t *testing.T, c *bssh.Client, sr
 	for _, site := range srv.Sites {
 		user := srv.SiteUser(site)
 		assertExitZero(ctx, t, c, "valkey PONG as owner "+site.Domain,
-			fmt.Sprintf("sudo runuser -u %s -- valkey-cli -s %s ping", user, sock(site.Domain)))
+			valkeyPingAs(user, sock(site.Domain)))
 
 		env, err := c.Run(ctx, "sudo cat "+site.DeployPath+"/shared/.env", nil)
 		if err != nil {
@@ -48,8 +48,7 @@ func assertValkeyIsolation(ctx context.Context, t *testing.T, c *bssh.Client, sr
 	// EACCES — no hang). Anything but a nonzero exit is an isolation breach.
 	if len(srv.Sites) >= 2 {
 		a, b := srv.Sites[0], srv.Sites[1]
-		res, err := c.Run(ctx, fmt.Sprintf("sudo runuser -u %s -- valkey-cli -s %s ping",
-			srv.SiteUser(a), sock(b.Domain)), nil)
+		res, err := c.Run(ctx, valkeyPingAs(srv.SiteUser(a), sock(b.Domain)), nil)
 		if err != nil {
 			t.Fatalf("cross-tenant probe: %v", err)
 		}
@@ -66,4 +65,17 @@ func assertValkeyIsolation(ctx context.Context, t *testing.T, c *bssh.Client, sr
 	if stock.ExitCode == 0 {
 		t.Error("stock valkey-server must be disabled")
 	}
+}
+
+// valkeyPingAs mirrors valkeyPingCmd's composition (internal/provision/steps/
+// valkey.go) under the suite's sudo prefix — a deliberate copy, not a call:
+// the production helper is unexported, and this assertion's job is to prove
+// the exact command production ships works (and stays denied cross-tenant) on
+// a real host, so a shared helper would re-bless any production change
+// automatically. If valkeyPingCmd changes shape, update this in the same PR.
+// --init-groups is part of what is being proven: it grants the site user's
+// supplementary groups, which socket access can depend on.
+func valkeyPingAs(user, sock string) string {
+	return fmt.Sprintf("sudo setpriv --reuid '%s' --regid '%s' --init-groups -- valkey-cli -s '%s' ping",
+		user, user, sock)
 }

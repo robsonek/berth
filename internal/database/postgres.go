@@ -31,9 +31,11 @@ func (Postgres) EnvConnection() (driver, host, port, socket string) {
 }
 
 // runPSQL pipes a SQL script to psql as the postgres superuser. ON_ERROR_STOP
-// makes any failing statement abort with a non-zero exit.
+// makes any failing statement abort with a non-zero exit. -X skips
+// ~postgres/.psqlrc: a startup file can carry \! shell escapes, so without it
+// psql would execute whatever a tampered or corrupted .psqlrc contains.
 func runPSQL(ctx context.Context, r bssh.Runner, sql string) error {
-	res, err := r.Run(ctx, "sudo -u postgres psql -v ON_ERROR_STOP=1", []byte(sql))
+	res, err := r.Run(ctx, "sudo -u postgres psql -X -v ON_ERROR_STOP=1", []byte(sql))
 	if err != nil {
 		return err
 	}
@@ -55,8 +57,11 @@ func (Postgres) EnsureDatabase(ctx context.Context, r bssh.Runner, name string) 
 
 // probePSQL runs a read-only scalar query as the postgres superuser (peer
 // auth) and reports whether it returned "1". A non-zero exit is false, nil.
+// -X skips ~postgres/.psqlrc: a startup file can carry \! shell escapes, and
+// this probe runs from a read-only Check — a Check must never read (let alone
+// execute) that file.
 func probePSQL(ctx context.Context, r bssh.Runner, query string) (bool, error) {
-	res, err := r.Run(ctx, `sudo -u postgres psql -tAc "`+query+`"`, nil)
+	res, err := r.Run(ctx, `sudo -u postgres psql -X -tAc "`+query+`"`, nil)
 	if err != nil {
 		return false, err
 	}

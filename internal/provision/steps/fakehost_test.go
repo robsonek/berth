@@ -23,29 +23,29 @@ import (
 // missing any of them would leave that step silently unexercised while every
 // other guard still passed.
 func TestContractServerRegistersEveryStep(t *testing.T) {
-	s := contractServer(t)
-	pipeline := Pipeline(s, secret.NewRedactor(), false)
+	for _, variant := range contractVariants {
+		t.Run(variant, func(t *testing.T) {
+			s := variantServer(t, variant)
+			pipeline := Pipeline(s, secret.NewRedactor(), false)
 
-	seen := map[string]bool{}
-	for _, st := range pipeline {
-		if seen[st.Name()] {
-			t.Errorf("duplicate step %q — the contract counts steps by name", st.Name())
-		}
-		seen[st.Name()] = true
-	}
-	for _, want := range []string{
-		"identity", "preflight", "base", "system", "apt", "php", "nginx",
-		"composer", "valkey", "supervisor", "accounts", "hardening", "appdirs",
-		"database", "site", "tls", "tuning", "backups", "offsite", "manifest",
-	} {
-		if !seen[want] {
-			t.Errorf("step %q is not registered — contractServer() must make the pipeline complete", want)
-		}
-	}
-	// An apt repo must be declared, or nothing reaches KeyringHoldsExactly and
-	// the gpg offender this contract exists to catch is never recorded.
-	if len(s.Apt.Repos) == 0 {
-		t.Error("contractServer must declare an apt repo so the keyring probe is exercised")
+			seen := map[string]bool{}
+			for _, st := range pipeline {
+				if seen[st.Name()] {
+					t.Errorf("duplicate step %q — the contract counts steps by name", st.Name())
+				}
+				seen[st.Name()] = true
+			}
+			for _, want := range wantStepsFor(variant) {
+				if !seen[want] {
+					t.Errorf("step %q is not registered — variantServer(%q) must make the pipeline complete", want, variant)
+				}
+			}
+			// An apt repo must be declared, or nothing reaches KeyringHoldsExactly and
+			// the gpg offender this contract exists to catch is never recorded.
+			if len(s.Apt.Repos) == 0 {
+				t.Errorf("variantServer(%q) must declare an apt repo so the keyring probe is exercised", variant)
+			}
+		})
 	}
 }
 
@@ -144,6 +144,9 @@ type fakeFile struct {
 	kind       string // as `stat -c %F` prints it
 	mtimeUnix  int64
 	linkTarget string
+	// size backs `stat -c %s` — today only the swapfile-size probe reads it,
+	// so it stays zero everywhere else and no answer serves it generically.
+	size int64
 }
 
 // fakeUnit is one systemd unit. An ABSENT property is an error rather than blank
@@ -177,6 +180,11 @@ type fakeHost struct {
 	// probes: which tenant databases exist, and which "user:db" grant pairs.
 	databases map[string]bool
 	dbGrants  map[string]bool
+	// sysctlValues backs `sysctl -n <key>`: the RUNNING kernel values, which
+	// exist on every host (fresh included) independently of any drop-in.
+	// checkSysctl compares them against the drop-in's targets, so a value
+	// here diverging from sysctlKeys is what "running values stale" means.
+	sysctlValues map[string]string
 	// certExpiry backs the `certbot certificates` answer: the notAfter of
 	// every modelled Let's Encrypt lineage. Set relative to the wall clock
 	// because tls.Check compares it against time.Now() (certRenewWindow) —
@@ -207,14 +215,37 @@ func (h *fakeHost) unit(name string) (fakeUnit, bool) {
 // healthy, drifted stops at byte drift, fresh at absence, foreign at refusal.
 var fakeHostProfiles = []string{"fresh", "converged", "drifted", "foreign", "runtime-stale"}
 
-// contractServer is the fixture the whole contract uses. It is built so
-// steps.Pipeline registers EVERY step, and so no Check depends on the
-// developer's machine: the ssh key and the secret cache live under t.TempDir().
+// contractVariants names the configurations the contract runs over — the
+// matrix is variants × profiles × steps. One configuration leaves whole
+// production branches uncontracted: a mutating command inside a branch the
+// fixture never enables would pass every guard. baseline is the ORIGINAL
+// fixture, preserved unchanged so today's coverage cannot shrink; maximal
+// turns on every system knob (swap + swappiness, the kernel sysctl drop-in,
+// timezone, static hostname — all opt-in and all off in baseline) and gives
+// the site a repository (the deploy-key and known-host probes); postgres
+// swaps the database engine, whose Check probes are engine-specific code the
+// mariadb variants never reach. postgres differs from baseline in the engine
+// ALONE, so a violation there is engine-attributable on sight — the knob and
+// repository branches are engine-independent and already contracted by
+// maximal, and a fourth all-on variant would re-run them for no new edge.
+var contractVariants = []string{"baseline", "maximal", "postgres"}
+
+// contractServer is the baseline fixture — see variantServer for the set.
+func contractServer(t *testing.T) *config.Server {
+	return variantServer(t, "baseline")
+}
+
+// variantServer is the fixture the whole contract uses, in the named variant.
+// Every variant is built so steps.Pipeline registers every step its config
+// gates in, and so no Check depends on the developer's machine: the ssh key
+// and the secret cache live under t.TempDir() (HOME is redirected per call,
+// so each variant's cache is isolated — callers must not mix servers from
+// two variants in one scope and expect both caches reachable).
 //
 // The field spellings here were checked against internal/config/config.go — an
 // earlier draft used a type name that does not exist (config.Queue; it is
 // config.QueueConfig) and would not have compiled.
-func contractServer(t *testing.T) *config.Server {
+func variantServer(t *testing.T, variant string) *config.Server {
 	t.Helper()
 	dir := t.TempDir()
 	// The secret cache is anchored at $HOME/.berth (os.UserHomeDir,
@@ -264,6 +295,47 @@ func contractServer(t *testing.T) *config.Server {
 			SSLEmail:   "ops@example.com",
 			Queue:      &config.QueueConfig{Processes: 2, Tries: 3},
 		}},
+	}
+	// The variant mutations happen HERE — after the literal, before the cache
+	// seed and the identity convergence — because both of those key off the
+	// server's ID and endpoint, so a variant changing the ID after seeding
+	// would strand the cache under the wrong key.
+	switch variant {
+	case "baseline":
+		// The original fixture, byte-for-byte: today's coverage preserved.
+	case "maximal":
+		srv.ID = "contract-maximal"
+		// Every opt-in system knob ON: swap reaches the swapfile-size stat,
+		// swapon and swappiness probes; sysctl the drop-in + `sysctl -n`
+		// read-backs; timezone/hostname the timedatectl/hostnamectl queries
+		// and the /etc/hosts alias parse. The zone spelling is config.go's
+		// own doc example; the hostname is a documentation-range name.
+		srv.System = config.System{
+			Swap:     "2G",
+			Sysctl:   true,
+			Timezone: "Europe/Warsaw",
+			Hostname: "web1.example.com",
+		}
+		// A repository reaches accounts.Check's deploy-key completeness
+		// probes and the git host's known_hosts lookup (the redirection-
+		// bearing ssh-keygen -F). ssh:// form with a NON-DEFAULT port on
+		// purpose: known_hosts stores such endpoints under the
+		// "[host]:port" token (GitEndpoint), so this exercises the token-
+		// composition branch the scp-like default-port form skips — the
+		// bare-hostname token stays pinned as a policy row and registry
+		// entry in cmdclass_test.go (both forms come from the same
+		// composition; the data differs, the code path is a superset here).
+		srv.Sites[0].Repository = "ssh://git@git.example.com:2222/app/app.git"
+	case "postgres":
+		srv.ID = "contract-postgres"
+		// The engine variant: postgres source debian (a valid pairing per
+		// config.Validate — the engine's one upstream would be pgdg). The
+		// pipeline registers NO tuning step for it (registry.go), and
+		// database.Check's engine probes go through peer-auth psql instead
+		// of the mysql client.
+		srv.Database = config.Database{Engine: "postgres", Source: "debian"}
+	default:
+		panic("unknown contract variant: " + variant)
 	}
 	// database.Check compares the LIVE shared/.env against the LOCAL secret
 	// cache (value agreement, DB password always, APP_KEY when berth-shaped);
@@ -343,6 +415,18 @@ func newFakeHost(t *testing.T, profile string, s *config.Server) *fakeHost {
 		dbGrants:  map[string]bool{},
 		timezone:  "Etc/UTC",
 		hostname:  "box-1",
+		// The RUNNING kernel values checkSysctl reads back, at their Debian 13
+		// stock: they exist on every host, fresh included. somaxconn's stock
+		// EQUALS berth's target (the kernel default is 4096 since 5.4) — kept
+		// honest on purpose, so the stale-values walk gets past an agreeing
+		// key to the genuinely differing tcp_tw_reuse instead of tripping on
+		// a fabricated first mismatch.
+		sysctlValues: map[string]string{
+			"net.core.somaxconn":          "4096",
+			"net.ipv4.tcp_tw_reuse":       "2",
+			"fs.file-max":                 "9223372036854775807",
+			"fs.inotify.max_user_watches": "65536",
+		},
 		// ~3.8 GiB, a realistic small VPS; comfortably above the 80% cap for
 		// the default 256M buffer pool, so the RAM guard passes on its data.
 		memTotalKB: 3986812,
@@ -362,6 +446,22 @@ func newFakeHost(t *testing.T, profile string, s *config.Server) *fakeHost {
 		h.files[d] = fakeFile{owner: "root", group: "root", uid: 0, gid: 0,
 			mode: "755", kind: "directory", mtimeUnix: 1400000000}
 	}
+	// /etc/fstab, /etc/hosts and the live vm.swappiness exist on every Debian
+	// host before berth touches anything, fresh included: the system step's
+	// swap branch PARSES fstab for /swapfile lines (fstabSwapState) and the
+	// hostname branch PARSES hosts for 127.0.1.1 lines (hostsAliasConverged),
+	// so both carry realistic stock content — including the image's own
+	// 127.0.1.1 alias for its hostname, the exact line berth's marked alias
+	// replaces. The proc value is the kernel default 60.
+	h.files[fstabPath] = fakeFile{content: stockFstab,
+		owner: "root", group: "root", mode: "644", kind: "regular file",
+		mtimeUnix: 1400000000}
+	h.files[hostsPath] = fakeFile{content: "127.0.0.1 localhost\n127.0.1.1 box-1\n" + stockHostsTail,
+		owner: "root", group: "root", mode: "644", kind: "regular file",
+		mtimeUnix: 1400000000}
+	h.files[swappinessProcPath] = fakeFile{content: "60\n",
+		owner: "root", group: "root", mode: "644", kind: "regular file",
+		mtimeUnix: 1400000000}
 	// /etc/default/ssh ships with openssh-server on every host berth can reach
 	// (it connects over sshd), fresh included. hardening's sshdOptsGuard PARSES
 	// it for the last SSHD_OPTS assignment; this is the stock Debian content,
@@ -394,8 +494,19 @@ func newFakeHost(t *testing.T, profile string, s *config.Server) *fakeHost {
 	}
 	populateInstalled(h, s, profile)
 	populateManagedFiles(h, s, profile)
+	populateSystemArtifacts(h, s, profile)
 	return h
 }
+
+// stockFstab / stockHostsTail are the Debian-image content of the two files
+// the system step parses — third-party state like /etc/os-release, hand-
+// modelled from a real image, never marker-managed.
+const (
+	stockFstab = "# /etc/fstab: static file system information.\n" +
+		"UUID=00000000-0000-0000-0000-000000000000 / ext4 errors=remount-ro 0 1\n"
+	stockHostsTail = "\n::1 localhost ip6-localhost ip6-loopback\n" +
+		"ff02::1 ip6-allnodes\nff02::2 ip6-allrouters\n"
+)
 
 // populateInstalled marks packages installed, units up and tools present. Under
 // runtime-stale the units are up but flagged as needing a reload, which is the
@@ -405,11 +516,16 @@ func populateInstalled(h *fakeHost, s *config.Server, profile string) {
 	if profile == "runtime-stale" {
 		needReload, stamp = "yes", "@1000000000" // active since BEFORE the files
 	}
+	eng, err := dbpkg.Get(s.Database.Engine)
+	if err != nil {
+		panic("look up the fixture database engine: " + err.Error())
+	}
 	for _, p := range []string{
 		"nginx", "php" + s.PHP.Version + "-fpm", "php" + s.PHP.Version + "-cli",
-		// The engine PDO driver php.Check probes last (mariadb -> pdo_mysql).
-		"php" + s.PHP.Version + "-mysql",
-		"mariadb-server", "valkey-server", "supervisor", "fail2ban", "ufw",
+		// The engine PDO driver php.Check probes last (phpPDOExt: mariadb ->
+		// pdo_mysql, postgres -> pdo_pgsql).
+		"php" + s.PHP.Version + "-" + phpPDOExt(s.Database.Engine),
+		eng.ServerPackage(), "valkey-server", "supervisor", "fail2ban", "ufw",
 		"certbot", "restic", "cron", "unattended-upgrades", "curl", "gnupg",
 		// The rest of basePackages (systembase.go): a converged host has them
 		// all, or base.Check honestly reports it unconverged.
@@ -418,7 +534,7 @@ func populateInstalled(h *fakeHost, s *config.Server, profile string) {
 		h.packages[p] = "Status: install ok installed"
 	}
 	units := []string{
-		"nginx", config.FPMServiceName(s.PHP.Version), "mariadb", "fail2ban",
+		"nginx", config.FPMServiceName(s.PHP.Version), engineUnit(s.Database.Engine), "fail2ban",
 		"cron", "ssh", "supervisor", "certbot.timer", "ufw",
 	}
 	for _, site := range s.Sites {
@@ -438,7 +554,7 @@ func populateInstalled(h *fakeHost, s *config.Server, profile string) {
 	// exactly what valkey.Check requires, so it must be modelled as present-
 	// but-down, not absent.
 	h.units["valkey-server.service"] = fakeUnit{active: false, enabled: false, props: map[string]string{}}
-	for _, tool := range []string{"nginx", "php-fpm" + s.PHP.Version, "restic", "certbot", "gpg", "logrotate", "supervisorctl", "composer", "mysqldump"} {
+	for _, tool := range []string{"nginx", "php-fpm" + s.PHP.Version, "restic", "certbot", "gpg", "logrotate", "supervisorctl", "composer", dumpClientBinary(s.Database.Engine)} {
 		h.tools[tool] = true
 	}
 	// Every modelled LE lineage is comfortably outside the 30-day renew
@@ -481,7 +597,100 @@ func populateInstalled(h *fakeHost, s *config.Server, profile string) {
 				mode: "700", kind: "directory", mtimeUnix: 1500000000}
 		}
 	}
-	h.swapRows = "NAME TYPE SIZE USED PRIO\n/swapfile file 2G 0B -2\n"
+}
+
+// engineUnit is the database server's systemd unit for the modelled engine.
+// No berth Check probes it by name today — it exists so the SQL-probe answers
+// can gate on a running daemon the way a real client's connect would.
+func engineUnit(engine string) string {
+	if engine == "postgres" {
+		return "postgresql"
+	}
+	return "mariadb"
+}
+
+// populateSystemArtifacts models the state behind the system step's opt-in
+// knobs (swap, sysctl, timezone, hostname). Only what the CONFIG declares is
+// modelled — a knob-off variant's removal branches read the stock base files
+// instead, exactly like a real host berth never touched there.
+func populateSystemArtifacts(h *fakeHost, s *config.Server, profile string) {
+	if s.System.Swap != "" {
+		wantBytes, err := config.ParseSwapBytes(s.System.Swap)
+		if err != nil {
+			panic("parse the fixture system.swap: " + err.Error())
+		}
+		// /etc/fstab is appended-to, never rendered, so the step's own
+		// fstabSwapLine const IS the written form and the fixture uses it
+		// (the rendered-bytes rule, applied to a composed line). foreign
+		// carries an operator swap line WITHOUT the trailing marker — the
+		// ownership state checkSwap's conflict guard means to refuse; a
+		// drifted config models a resized swap (the size-mismatch branch).
+		line, size := fstabSwapLine, wantBytes
+		switch profile {
+		case "foreign":
+			line = swapfilePath + " none swap sw 0 0"
+		case "drifted":
+			size = wantBytes / 2
+		}
+		h.files[fstabPath] = fakeFile{content: stockFstab + line + "\n",
+			owner: "root", group: "root", mode: "644", kind: "regular file",
+			mtimeUnix: 1500000000}
+		h.files[swapfilePath] = fakeFile{owner: "root", group: "root",
+			mode: "600", kind: "regular file", mtimeUnix: 1500000000, size: size}
+		// The swap area is ACTIVE on every provisioned profile — the exact
+		// `--show=NAME --noheadings` output: bare paths, no header line.
+		h.swapRows = swapfilePath + "\n"
+		body, err := renderSwapSysctl()
+		if err != nil {
+			panic("render sysctl_swap.conf.tmpl: " + err.Error())
+		}
+		h.putManaged(swapSysctlPath, body, profile)
+		// The pre-berth swappiness baseline applySwap records before its
+		// first drop-in write; a real capture on a stock image holds the
+		// kernel default 60.
+		h.files[swappinessStatePath] = fakeFile{content: "60\n",
+			owner: "root", group: "root", mode: "644", kind: "regular file",
+			mtimeUnix: 1500000000}
+		// The LIVE vm.swappiness follows the drop-in only where the reload
+		// happened: runtime-stale keeps the kernel default — the crash-
+		// between-write-and-reload state whose "+ sysctl -p" change branch
+		// that profile exists to walk.
+		if profile != "runtime-stale" {
+			f := h.files[swappinessProcPath]
+			f.content = swappinessValue + "\n"
+			h.files[swappinessProcPath] = f
+		}
+	}
+	if s.System.Sysctl {
+		body, err := renderSysctl()
+		if err != nil {
+			panic("render sysctl_berth.conf.tmpl: " + err.Error())
+		}
+		h.putManaged(sysctlPath, body, profile)
+		// Running values follow the drop-in only under converged; runtime-
+		// stale keeps the stock base values, so checkSysctl honestly reads
+		// "running values stale" there. drifted/foreign/fresh never get past
+		// the file classify to the `sysctl -n` read-backs.
+		if profile == "converged" {
+			for _, kv := range sysctlKeys {
+				h.sysctlValues[kv.Key] = kv.Value
+			}
+		}
+	}
+	// Timezone and hostname are plain system state with no removal branch:
+	// the provisioned-and-reloaded profiles hold the configured values, the
+	// rest keep the image's own — an honest not-yet-applied state, never a
+	// refusal (the 127.0.1.1 alias is replaced without --force by design).
+	if s.System.Timezone != "" && (profile == "converged" || profile == "runtime-stale") {
+		h.timezone = s.System.Timezone
+	}
+	if s.System.Hostname != "" && (profile == "converged" || profile == "runtime-stale") {
+		h.hostname = s.System.Hostname
+		h.files[hostsPath] = fakeFile{
+			content: "127.0.0.1 localhost\n" + hostsHostnameLine(s.System.Hostname) + "\n" + stockHostsTail,
+			owner:   "root", group: "root", mode: "644", kind: "regular file",
+			mtimeUnix: 1500000000}
+	}
 }
 
 // setMeta adjusts the probed metadata of an existing modelled file. putManaged
@@ -523,6 +732,14 @@ func (h *fakeHost) putManaged(path string, body []byte, profile string) {
 // it is done the contract's converged assertion fails BY DESIGN.
 func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 	site := s.Sites[0]
+	// The engine drives the client-auth file, the backup script's dump
+	// command and the tuning drop-in's existence — dbpkg.Get IS the lookup
+	// the steps themselves make, so the fixture renders with the same engine
+	// object the Checks compare against.
+	eng, err := dbpkg.Get(s.Database.Engine)
+	if err != nil {
+		panic("look up the fixture database engine: " + err.Error())
+	}
 	owner, uid := s.SiteUser(site), 1001
 	if profile == "foreign" {
 		owner, uid = "someoneelse", 1999
@@ -618,6 +835,43 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 	h.putManaged(reloadFPMScriptPath, reloadWrapper, profile)
 	h.setMeta(reloadFPMScriptPath, "root", "root", "755")
 
+	// The per-site deploy-key material and the git host's known_hosts entry
+	// (accounts.go), modelled only when the site declares a repository. All
+	// three are third-party or secret-bearing state, never marker-managed:
+	// the key pair is Apply's ssh-keygen output (probed by existence only)
+	// and known_hosts is ssh-keyscan output, hand-modelled from the real
+	// one-line format because the -F lookup's verdict rides its host field.
+	for _, st := range s.Sites {
+		if st.Repository == "" {
+			continue
+		}
+		host, port, err := config.GitEndpoint(st.Repository)
+		if err != nil {
+			panic("parse the fixture repository: " + err.Error())
+		}
+		// known_hosts stores non-22 endpoints under the "[host]:port" token —
+		// the same composition accounts.Check runs, and the exact format
+		// ssh-keyscan -p emits, so the modelled line matches what a real heal
+		// would have written.
+		token := host
+		if port != "" {
+			token = "[" + host + "]:" + port
+		}
+		u := s.SiteUser(st)
+		key := deployKeyPath(u)
+		h.files[key] = fakeFile{
+			content: "-----BEGIN OPENSSH PRIVATE KEY-----\nfixture-deploy\n-----END OPENSSH PRIVATE KEY-----\n",
+			owner:   u, group: u, uid: 1001, gid: 1001, mode: "600",
+			kind: "regular file", mtimeUnix: 1500000000}
+		h.files[key+".pub"] = fakeFile{content: "ssh-ed25519 AAAAC3Nza fixture-deploy\n",
+			owner: u, group: u, uid: 1001, gid: 1001, mode: "644",
+			kind: "regular file", mtimeUnix: 1500000000}
+		h.files["/home/"+u+"/.ssh/known_hosts"] = fakeFile{
+			content: token + " ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKey0000000000000000000000000\n",
+			owner:   u, group: u, uid: 1001, gid: 1001, mode: "644",
+			kind: "regular file", mtimeUnix: 1500000000}
+	}
+
 	// hardening's two managed files: the sshd drop-in is the step's own const,
 	// the jail the same renderer its Check calls.
 	h.putManaged(sshdDropInPath, []byte(sshdDropInBody), profile)
@@ -642,13 +896,16 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 	h.files[phpLogDir] = fakeFile{owner: "root", group: "root", uid: 0, gid: 0,
 		mode: "755", kind: "directory", mtimeUnix: 1500000000}
 
-	// tuning's MariaDB drop-in and valkey's per-site instance unit, same
-	// renderer-fed discipline.
-	mariadbTuning, err := renderMariaDBTuning(s)
-	if err != nil {
-		panic("render mariadb_tuning.cnf.tmpl: " + err.Error())
+	// tuning's MariaDB drop-in (only that engine registers the step, and a
+	// postgres host has no /etc/mysql to hold it) and valkey's per-site
+	// instance unit, same renderer-fed discipline.
+	if s.Database.Engine == "mariadb" {
+		mariadbTuning, err := renderMariaDBTuning(s)
+		if err != nil {
+			panic("render mariadb_tuning.cnf.tmpl: " + err.Error())
+		}
+		h.putManaged(mariadbTuningPath, mariadbTuning, profile)
 	}
-	h.putManaged(mariadbTuningPath, mariadbTuning, profile)
 	for _, st := range s.Sites {
 		unit, err := renderValkeyUnit(s, st)
 		if err != nil {
@@ -657,22 +914,25 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 		h.putManaged(valkeyUnitPath(st.Domain), unit, profile)
 	}
 
-	// The site's shared/.env and ~/.my.cnf are secret-bearing, seed-if-absent
-	// files — NEVER marker-managed, so putManaged's foreign/drifted grammar
-	// does not apply. Provisioned profiles carry them with the values the
-	// seeded local cache also holds (a healthy host agrees with its cache);
-	// foreign carries neither — a tree berth never provisioned has no berth
-	// .env, and database.Check honestly stops at "credential not yet
-	// persisted" instead of refusing. The .env body is built by the same
-	// secret.EnvFile serializer the seed uses, over a kv mirroring
-	// seedSharedEnv's (database.go).
+	// The site's shared/.env and ~/.my.cnf (~/.pgpass under postgres) are
+	// secret-bearing, seed-if-absent files — NEVER marker-managed, so
+	// putManaged's foreign/drifted grammar does not apply. Provisioned
+	// profiles carry them with the values the seeded local cache also holds
+	// (a healthy host agrees with its cache); foreign carries neither — a
+	// tree berth never provisioned has no berth .env, and database.Check
+	// honestly stops at "credential not yet persisted" instead of refusing.
+	// The .env body is built by the same secret.EnvFile serializer the seed
+	// uses, over a kv mirroring seedSharedEnv's (database.go); the client-
+	// auth content comes from the engine's own ClientAuthFile — the exact
+	// bytes the step seeds (only existence is ever probed, but a fixture for
+	// a file berth renders must BE the rendered output).
 	if profile != "foreign" {
 		user := s.SiteUser(site)
-		h.files[sharedEnvPath(site)] = fakeFile{content: string(fixtureSharedEnvBody()),
+		h.files[sharedEnvPath(site)] = fakeFile{content: string(fixtureSharedEnvBody(s)),
 			owner: user, group: user, uid: 1001, gid: 1001,
 			mode: "600", kind: "regular file", mtimeUnix: 1500000000}
-		h.files["/home/"+user+"/.my.cnf"] = fakeFile{
-			content: string(dbpkg.MariaDB{}.ClientAuthFile(s.SiteDBName(site), s.SiteDBUser(site), fixtureDBValue)),
+		h.files["/home/"+user+"/"+eng.ClientAuthFileName()] = fakeFile{
+			content: string(eng.ClientAuthFile(s.SiteDBName(site), s.SiteDBUser(site), fixtureDBValue)),
 			owner:   user, group: user, uid: 1001, gid: 1001,
 			mode: "600", kind: "regular file", mtimeUnix: 1500000000}
 	}
@@ -778,7 +1038,7 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 	// fragment and the root-owned directory skeleton (Decision 1: a root
 	// cron must never write into tenant territory, so owner/mode ARE the
 	// step's contract and its Check stats them all).
-	bscript, err := renderBackupScript(s, site, dbpkg.MariaDB{})
+	bscript, err := renderBackupScript(s, site, eng)
 	if err != nil {
 		panic("render backup.sh.tmpl: " + err.Error())
 	}
@@ -899,18 +1159,20 @@ func fixtureRenewalConf(domain string) string {
 
 // fixtureSharedEnvBody is the modelled site's shared/.env as a successful
 // provision leaves it: the kv mirrors seedSharedEnv's map (database.go) for
-// the fixture site over the mariadb engine with Valkey on — a copy on
+// the fixture site over the configured engine with Valkey on — a copy on
 // purpose, so a production seed change makes database.Check's probes read
 // honestly different bytes here — and the serialization is the SAME
 // secret.EnvFile the seed calls (sorted keys, one KEY=value per line).
 // database.Check never hashes this file; it greps the DB_CONNECTION,
 // DB_PASSWORD and APP_KEY lines and compares the latter two against the
-// seeded local cache, so the fixture values must be the cache's values.
-// The other keys (DB_HOST/DB_PORT/DB_SOCKET, the cache/queue/redis block)
-// are mirrored for the seed-map fidelity above but VERIFIED BY NO CHECK
-// today — no probe reads them, so a wrong value there cannot fail a test.
-func fixtureSharedEnvBody() []byte {
-	body, err := secret.EnvFile(map[string]string{
+// seeded local cache, so the fixture values must be the cache's values —
+// and DB_CONNECTION must be the engine's driver, or assertEnvEngineMatch
+// rightly hard-errors. The other keys (DB_HOST/DB_PORT/DB_SOCKET, the
+// cache/queue/redis block) are mirrored for the seed-map fidelity above but
+// VERIFIED BY NO CHECK today — no probe reads them, so a wrong value there
+// cannot fail a test.
+func fixtureSharedEnvBody(s *config.Server) []byte {
+	kv := map[string]string{
 		"APP_ENV":          "production",
 		"APP_DEBUG":        "false",
 		"APP_URL":          "https://app.example.com",
@@ -931,7 +1193,17 @@ func fixtureSharedEnvBody() []byte {
 		"REDIS_PORT":       "0",
 		"REDIS_DB":         "0",
 		"REDIS_CACHE_DB":   "1",
-	})
+	}
+	if s.Database.Engine == "postgres" {
+		// Postgres.EnvConnection mirrored: pgsql over TCP loopback (the app
+		// role cannot use peer auth), and no DB_SOCKET key — seedSharedEnv
+		// sets it only for a non-empty socket.
+		kv["DB_CONNECTION"] = "pgsql"
+		kv["DB_HOST"] = "127.0.0.1"
+		kv["DB_PORT"] = "5432"
+		delete(kv, "DB_SOCKET")
+	}
+	body, err := secret.EnvFile(kv)
 	if err != nil {
 		panic("render the fixture shared/.env: " + err.Error())
 	}

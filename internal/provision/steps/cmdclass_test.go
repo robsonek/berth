@@ -34,9 +34,8 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{"getent passwd appuser", cmdReadOnly},
 		{"id -u appuser", cmdReadOnly},
 
-		// The named exceptions, all evidence-backed (spec §4.2; certbot and
-		// runuser measured 2026-07, see their shape entries — runuser's row
-		// sits with its rejected siblings below). Exact shapes.
+		// The named exceptions, all evidence-backed (spec §4.2; certbot
+		// measured 2026-07, see its shape entry). Exact shapes.
 		{"nginx -t", cmdException},
 		{"php-fpm8.4 -t", cmdException},
 		{"certbot certificates", cmdException},
@@ -47,7 +46,7 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{"php-fpm -t", cmdRejected},
 		{"php-fpm8 -t", cmdRejected},
 		// Every other certbot subcommand drives issuance/renewal state and
-		// must reject — pinned the way mysql's and runuser's mutating
+		// must reject — pinned the way mysql's and setpriv's mutating
 		// siblings were. Extra arguments on the listing reject too: only the
 		// bare inventory was measured.
 		{"certbot certonly --webroot -w /var/www/berth-acme/app.example.com -d app.example.com", cmdRejected},
@@ -205,19 +204,73 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{`mysql --protocol=socket`, cmdRejected},
 		{`mysql -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app'"`, cmdRejected},
 
+		// The postgres engine's catalog probes (probePSQL,
+		// internal/database/postgres.go): sudo is THE privilege wrapper, so
+		// only the exact peer-auth `psql -X -tAc "<statement>"` shape reads —
+		// and the statement is pinned by ANCHORED GRAMMAR, not prefix: a
+		// prefix pin ("SELECT 1 FROM pg_") blessed a trailing FOR UPDATE,
+		// which takes row locks (tuple-header writes plus WAL) — the same
+		// prefix-not-shape weakness that broke the denylists. DDL/DML, a
+		// ;-chain, SELECT INTO (creates a table), COPY (writes files as the
+		// server), the locking clauses, a smuggled second -c, a different
+		// target user, the -X-less spelling (without -X psql reads
+		// ~postgres/.psqlrc, whose \! escapes execute — the pre-review
+		// production shape, pinned so a regression fails loudly), Apply's
+		// stdin-fed psql and pg_dump, and any other program behind sudo must
+		// all reject. Function calls and psql backslash commands never even
+		// reach the predicate — parentheses and backslashes are
+		// metacharacters, and none of that text is registered.
+		{`sudo -u postgres psql -X -tAc "SELECT 1 FROM pg_database WHERE datname='app'"`, cmdReadOnly},
+		{`sudo -u postgres psql -X -tAc "SELECT 1 FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE d.datname='app' AND r.rolname='app'"`, cmdReadOnly},
+		{`sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='app'"`, cmdRejected},
+		{`sudo -u postgres psql -X -tAc "SELECT 1 FROM pg_catalog.pg_class FOR UPDATE"`, cmdRejected},
+		{`sudo -u postgres psql -X -tAc "SELECT 1 FROM pg_database WHERE datname='app' FOR UPDATE"`, cmdRejected},
+		{`sudo -u postgres psql -X -tAc "SELECT 1 FROM pg_database WHERE datname='app' FOR SHARE"`, cmdRejected},
+		{`sudo -u postgres psql -X -tAc "DROP DATABASE app"`, cmdRejected},
+		{`sudo -u postgres psql -X -tAc "SELECT 1 FROM pg_database; DROP DATABASE app"`, cmdRejected},
+		{`sudo -u postgres psql -X -tAc "SELECT 1 FROM pg_database INTO scratch"`, cmdRejected},
+		{`sudo -u postgres psql -X -tAc "COPY pg_database TO '/tmp/x'"`, cmdRejected},
+		{`sudo -u postgres psql -X -tAc "SELECT 1 FROM pg_database" -c "DROP DATABASE app"`, cmdRejected},
+		{`sudo -u postgres psql -f /tmp/script.sql`, cmdRejected},
+		{`sudo -u postgres psql -X -v ON_ERROR_STOP=1`, cmdRejected},
+		{`sudo -u postgres pg_dump 'app'`, cmdRejected},
+		{`sudo -u root psql -X -tAc "SELECT 1 FROM pg_database WHERE datname='app'"`, cmdRejected},
+		{`sudo rm -rf /var/www`, cmdRejected},
+		{`sudo -i`, cmdRejected},
+		{`sudo -u postgres psql -X -tAc "SELECT 1 FROM pg_stat_file('/etc/shadow')"`, cmdRejected}, // parens: the metachar route, unregistered
+
 		// valkey's per-site liveness probe (valkeyPingCmd, valkey.go): PING
 		// over the tenant's own socket mutates nothing on the valkey side,
-		// but runuser itself opens a PAM session and pam_unix logs two lines
-		// to the journal per invocation (measured 2026-07, Debian 13) — so
-		// the probe is the FOURTH named exception, not a read. Any other
-		// valkey-cli verb (FLUSHALL, SHUTDOWN, SET…), a socket outside
-		// berth's runtime base, or any other program behind runuser is
-		// arbitrary code under another uid and must reject.
-		{`runuser -u 'appuser' -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' ping`, cmdException},
-		{`runuser -u 'appuser' -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' flushall`, cmdRejected},
-		{`runuser -u 'appuser' -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' shutdown`, cmdRejected},
-		{`runuser -u 'appuser' -- valkey-cli -s '/tmp/evil.sock' ping`, cmdRejected},
-		{`runuser -u 'appuser' -- rm -rf /var/www`, cmdRejected},
+		// and setpriv changes credentials without PAM, so — unlike the
+		// runuser wrapper it replaced — nothing reaches the journal (measured
+		// 2026-07 on a provisioned Debian 13 host: setpriv 0 lines, runuser 2)
+		// and the probe is a plain read again. Any other valkey-cli verb
+		// (FLUSHALL, SHUTDOWN, SET…), a socket outside berth's runtime base,
+		// a dropped --init-groups, a uid/gid mismatch, or any other program
+		// behind setpriv is arbitrary code under another uid and must reject.
+		{`setpriv --reuid 'appuser' --regid 'appuser' --init-groups -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' ping`, cmdReadOnly},
+		{`setpriv --reuid 'appuser' --regid 'appuser' --init-groups -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' flushall`, cmdRejected},
+		{`setpriv --reuid 'appuser' --regid 'appuser' --init-groups -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' shutdown`, cmdRejected},
+		{`setpriv --reuid 'appuser' --regid 'appuser' --init-groups -- valkey-cli -s '/tmp/evil.sock' ping`, cmdRejected},
+		// The socket slot is the FULL valkeySocketPath form, not a prefix: a
+		// prefix pin accepted a dot-dot walk out of the runtime base, and a
+		// leaf other than valkey.sock is not a socket berth composes.
+		{`setpriv --reuid 'appuser' --regid 'appuser' --init-groups -- valkey-cli -s '/run/berth-valkey/../../etc/x' ping`, cmdRejected},
+		{`setpriv --reuid 'appuser' --regid 'appuser' --init-groups -- valkey-cli -s '/run/berth-valkey/app_example_com/other.sock' ping`, cmdRejected},
+		// The identity operands are the shQuote'd site user, nothing else:
+		// production always quotes, so the unquoted spelling is not a shape
+		// berth issues (safe direction, as with swapon --show).
+		{`setpriv --reuid appuser --regid appuser --init-groups -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' ping`, cmdRejected},
+		{`setpriv --reuid 'appuser' --regid 'appuser' --init-groups -- rm -rf /var/www`, cmdRejected},
+		{`setpriv --reuid 'appuser' --regid 'appuser' -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' ping`, cmdRejected},
+		{`setpriv --reuid 'appuser' --regid 'root' --init-groups -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' ping`, cmdRejected},
+		{`setpriv --reuid root -- sh`, cmdRejected},
+		// runuser is rejected ENTIRELY now: no Check issues it any more, and
+		// it is a privilege-changing wrapper that writes (the PAM session
+		// pair). The exact old ping form is pinned so a regression back to it
+		// fails loudly instead of riding a stale allowance.
+		{`runuser -u 'x' -- valkey-cli -s '/run/berth-valkey/a/valkey.sock' ping`, cmdRejected},
+		{`runuser -u 'appuser' -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' ping`, cmdRejected},
 		{`runuser -l root`, cmdRejected},
 
 		// The test builtin's -ef comparison (site.Check probes that the
@@ -278,6 +331,30 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		// The one metacharacter-free find berth used to table-judge carries a
 		// glob, so it lives in the registry now (aptUserListsPasted).
 		{"find /etc/apt/sources.list.d -maxdepth 1 -name 'berth-*.list' -print0", cmdAudited},
+
+		// The swapfile-size probe carries a redirection, so it rides the
+		// registry (swapfileSizeProbePasted); the same script aimed anywhere
+		// else — or any other redirection-bearing stat — stays unregistered
+		// and rejects, exact-text discipline as everywhere.
+		{`stat -c %s '/swapfile' 2>/dev/null`, cmdAudited},
+		{`stat -c %s '/etc/shadow' 2>/dev/null`, cmdRejected},
+
+		// The known-host lookup rides the registry too (its redirections
+		// force it there). Its in-place-rewriting siblings -R (remove) and
+		// -H (hash) must never pass, nor a lookup in a file the audit never
+		// covered — and ssh-keygen has NO table entry, so a redirection-free
+		// respelling rejects as an unknown verb rather than by accident.
+		{`ssh-keygen -F 'git.example.com' -f '/home/appuser/.ssh/known_hosts' >/dev/null 2>&1`, cmdAudited},
+		// The non-default-port endpoint's "[host]:port" token — the other
+		// branch of the same composition — and proof the registry is exact on
+		// the port: a token nobody audited rejects.
+		{`ssh-keygen -F '[git.example.com]:2222' -f '/home/appuser/.ssh/known_hosts' >/dev/null 2>&1`, cmdAudited},
+		{`ssh-keygen -F '[git.example.com]:2200' -f '/home/appuser/.ssh/known_hosts' >/dev/null 2>&1`, cmdRejected},
+		{`ssh-keygen -R 'git.example.com' -f '/home/appuser/.ssh/known_hosts' >/dev/null 2>&1`, cmdRejected},
+		{`ssh-keygen -H -f '/home/appuser/.ssh/known_hosts' >/dev/null 2>&1`, cmdRejected},
+		{`ssh-keygen -F 'git.example.com' -f '/etc/ssh/ssh_known_hosts' >/dev/null 2>&1`, cmdRejected},
+		{`ssh-keygen -F git.example.com`, cmdRejected},
+		{`ssh-keygen -t ed25519 -N x -f /tmp/key`, cmdRejected},
 
 		// Unknown verbs are rejected, not assumed safe.
 		{"sometool --probe /etc/x", cmdRejected},
@@ -350,7 +427,7 @@ type cmdVerdict int
 
 const (
 	cmdReadOnly  cmdVerdict = iota // a pure read, judged by the tables
-	cmdException                   // allowed, but known to write (the nginx -t, certbot certificates and runuser table entries and the php-fpm branch in classifySimple)
+	cmdException                   // allowed, but known to write (the nginx -t and certbot certificates table entries and the php-fpm branch in classifySimple)
 	cmdAudited                     // a generated script whose exact text a human signed off
 	cmdRejected                    // everything else — mutating, unknown, or unparsed
 )
@@ -505,8 +582,11 @@ var auditedScripts = map[string]string{
 	// commandExists' PATH probe (backups.go), issued for the engine's dump
 	// binary. Audited: `command -v` resolves a name against PATH without
 	// executing anything; both redirections aim at the null device and the
-	// caller reads only the exit code. Nothing writes.
+	// caller reads only the exit code. Nothing writes. One entry per engine
+	// binary the variants reach (dumpClientBinary: mariadb → mysqldump,
+	// postgres → pg_dump).
 	commandVProbeCmd("mysqldump"): "commandExists (backups.go) for the mariadb dump client: command -v with output discarded — reads only",
+	commandVProbeCmd("pg_dump"):   "commandExists (backups.go) for the postgres dump client: command -v with output discarded — reads only",
 
 	// findRegularFiles' guarded listings (site.go), issued by orphanSiteFiles
 	// over the three orphan namespaces. Audited: `[ -d ]` existence test
@@ -567,6 +647,34 @@ var auditedScripts = map[string]string{
 	// never expands it. The mutating siblings (start/stop/restart/reread/
 	// update) stay unregistered.
 	supervisorStatusProbeCmd("berth-app_example_com"): "site.Check's worker query (site.go): supervisorctl status <program>:* over the RPC socket — reads only",
+
+	// swapfileSize's existence + size probe (system.go), reached only with
+	// system.swap declared (the maximal variant), pasted literally — the
+	// production composition is a const path through shQuote, so the literal
+	// IS the issued text. Audited: `stat -c %s` reads one metadata field;
+	// `2>/dev/null` discards the missing-file diagnostic into the null
+	// device, which is not host state; the caller reads the exit code and
+	// parses the decimal size. Nothing writes. Any other `stat … 2>…`
+	// spelling stays unregistered and rejects.
+	swapfileSizeProbePasted: "swapfileSize (system.go): stat -c %s of /swapfile, stderr discarded — reads only",
+
+	// accounts.Check's git known-host lookup (accounts.go), reached only when
+	// a site declares a repository (the maximal variant), mirrored by
+	// sshKnownHostProbeCmd for the fixture endpoint. Audited: `ssh-keygen -F`
+	// is the find mode — it SEARCHES the file named by -f for the host token
+	// and prints any matching entries, unlike its rewriting siblings -R
+	// (removes entries in place) and -H (hashes the file in place), both of
+	// which stay unregistered; both streams aim at the null device and only
+	// the exit code answers. Nothing writes — note Apply's healing sibling
+	// (`ssh-keygen -F … || ssh-keyscan …>>…`) is a DIFFERENT text and never
+	// rides this entry. TWO tokens, one per branch of the composition:
+	// known_hosts stores a non-22 endpoint under "[host]:port", a default-
+	// port one under the bare hostname. The fixture repository carries a
+	// non-default port, so the port-bearing form is the exercised one; the
+	// bare form stays registered as the default-port sibling of the same
+	// composition, held by its policy row.
+	sshKnownHostProbeCmd("git.example.com", "/home/appuser/.ssh/known_hosts"):        "accounts.Check's known-host lookup (accounts.go), default-port token: ssh-keygen -F find mode over the site user's known_hosts, output discarded — reads only",
+	sshKnownHostProbeCmd("[git.example.com]:2222", "/home/appuser/.ssh/known_hosts"): "accounts.Check's known-host lookup (accounts.go), the [host]:port token of the fixture's non-default-port endpoint: same find-mode read as the bare form",
 }
 
 // phpPoolConflictProbe84 is the EXACT text phpPoolConflictProbeCmd("8.4")
@@ -665,6 +773,17 @@ func commandVProbeCmd(bin string) string {
 // aptUserListsCmd (aptextras.go), pasted as a literal — never referencing the
 // const, which would let an edit re-bless itself.
 const aptUserListsPasted = `find /etc/apt/sources.list.d -maxdepth 1 -name 'berth-*.list' -print0`
+
+// swapfileSizeProbePasted is the EXACT text swapfileSize (system.go) issues —
+// a const composition over the const swapfile path, pasted as a literal (see
+// aptUserListsPasted for why never the production helper).
+const swapfileSizeProbePasted = `stat -c %s '/swapfile' 2>/dev/null`
+
+// sshKnownHostProbeCmd mirrors accounts.Check's known-host lookup composition
+// (accounts.go) — a copy on purpose (see auditedScripts).
+func sshKnownHostProbeCmd(token, knownHosts string) string {
+	return "ssh-keygen -F " + shQuote(token) + " -f " + shQuote(knownHosts) + " >/dev/null 2>&1"
+}
 
 // sameFileProbeCmd mirrors site.Check's enabled-symlink probe composition
 // (site.go) — a copy on purpose (see auditedScripts).
@@ -907,16 +1026,31 @@ var simpleShapes = []simpleShape{
 		why: "pinned to KeyringHoldsExactly's exact argv (apt.go)"},
 	{verb: "mysql", allow: mysqlIsReadOnlyProbe, verdict: cmdReadOnly,
 		why: "only probeSQL's -N -e information_schema SELECT reads; any other statement, a ;-chain, INTO OUTFILE or an extra option mutates"},
-	// The fourth exception: runuser itself writes. Every invocation opens a
-	// PAM session, and pam_unix logs exactly two lines to the journal —
-	// "session opened for user <user>… by <user>(uid=0)" and "session closed
-	// for user <user>" (measured 2026-07 on a provisioned Debian 13 host).
-	// valkey.Check pings each instance through it, per site per run, so the
-	// journal grows on every drift scan. The shape stays pinned to the PING
-	// probe; anything else behind runuser is an arbitrary program under
-	// another uid and rejects.
-	{verb: "runuser", allow: runuserIsValkeyPing, verdict: cmdException,
-		why: "runuser opens a PAM session: pam_unix writes two session lines to the journal per invocation (measured 2026-07, Debian 13)"},
+	// sudo is THE privilege wrapper — everything behind it is arbitrary code
+	// as another uid unless the whole argv is pinned. The one shape a Check
+	// issues in-text is postgres's peer-auth catalog probe (berth's own
+	// root wrapping happens at the SSH transport, never in command text).
+	// Adjudicated a READ, not a fourth exception, on a CATEGORICAL ground:
+	// sudo's authentication logging is a record THAT berth was invoked,
+	// kept by the auditing subsystem — not a change to anything the promise
+	// covers (the server's configuration, data, packages, services,
+	// certificates). It is unavoidable for any tool doing privileged work
+	// and accompanies every command alike, whether the sudo was added by
+	// the transport or written into the command text by a step — which is
+	// why it sits outside the exception list rather than in it; see the
+	// contract header in checkreadonly_test.go.
+	{verb: "sudo", allow: sudoIsPostgresCatalogProbe, verdict: cmdReadOnly,
+		why: "pinned to probePSQL's peer-auth catalog SELECTs (database/postgres.go); any other statement, option or program behind sudo mutates or executes arbitrarily"},
+	// valkey's liveness probe, a plain read since it moved off runuser:
+	// setpriv changes credentials directly, without PAM, so nothing reaches
+	// the journal (measured 2026-07 on a provisioned Debian 13 host: setpriv
+	// 0 lines, runuser 2 — the pam_unix session pair that made the old
+	// wrapper the fourth exception). The shape stays pinned to the PING
+	// probe; anything else behind setpriv is an arbitrary program under
+	// another uid and rejects. runuser has NO table entry any more: no Check
+	// issues it, so it rejects as an unknown verb — see its policy rows.
+	{verb: "setpriv", allow: setprivIsValkeyPing, verdict: cmdReadOnly,
+		why: "pinned to valkeyPingCmd's shape (valkey.go): a credential change without PAM into valkey-cli PING on a berth socket"},
 }
 
 // sedIsReadOnly pins the one sed shape the policy table blesses:
@@ -988,6 +1122,49 @@ func opensslX509IsReadOnly(args []string) bool {
 	return false
 }
 
+// pgCatalogProbeStatements are the EXACT statement grammars probePSQL
+// composes (internal/database/postgres.go) — DatabaseExists' pg_database
+// lookup and UserGranted's ownership join — anchored end-to-end, double
+// quotes included. The value slots accept exactly config.Validate's
+// SQL-identifier shape (reSQLIdent: [A-Za-z_][A-Za-z0-9_]{0,63}); an
+// identifier can carry no quote, space or keyword, so no clause fits in a
+// slot and nothing can follow the closing quote. The previous pin was a
+// PREFIX ("SELECT 1 FROM pg_"), and a prefix blessed a trailing FOR UPDATE
+// — row locks write tuple-header state and WAL — the same prefix-not-shape
+// weakness that let nine denylists fail open. With anchored grammars there
+// is nowhere to append: FOR UPDATE/FOR SHARE, a second statement, INTO,
+// COPY and a smuggled quote all fail the match, with no scan for any of
+// them needed.
+var pgCatalogProbeStatements = []*regexp.Regexp{
+	regexp.MustCompile(`^"SELECT 1 FROM pg_database WHERE datname='[A-Za-z_][A-Za-z0-9_]{0,63}'"$`),
+	regexp.MustCompile(`^"SELECT 1 FROM pg_database d JOIN pg_roles r ON r\.oid = d\.datdba WHERE d\.datname='[A-Za-z_][A-Za-z0-9_]{0,63}' AND r\.rolname='[A-Za-z_][A-Za-z0-9_]{0,63}'"$`),
+}
+
+// sudoIsPostgresCatalogProbe allows only probePSQL's two catalog probes
+// (internal/database/postgres.go): `sudo -u postgres psql -X -tAc "<one of
+// pgCatalogProbeStatements>"`. Every pin is load-bearing: the target user
+// must be postgres (peer auth on the local cluster), the program psql with
+// exactly -X -tAc — -X skips ~postgres/.psqlrc, whose \! escapes would
+// execute a startup file's contents from inside a read-only Check, so the
+// -X-less spelling is pinned rejected — and the statement must match one of
+// the anchored grammars above. Function calls (pg_read_file, \gexec's DO
+// blocks, dollar quoting) never even reach this predicate: parentheses,
+// backslashes and '$' are shell metacharacters, and no such text is
+// registered in auditedScripts.
+func sudoIsPostgresCatalogProbe(args []string) bool {
+	if len(args) < 6 || args[0] != "-u" || args[1] != "postgres" || args[2] != "psql" ||
+		args[3] != "-X" || args[4] != "-tAc" {
+		return false
+	}
+	q := strings.Join(args[5:], " ")
+	for _, re := range pgCatalogProbeStatements {
+		if re.MatchString(q) {
+			return true
+		}
+	}
+	return false
+}
+
 // mysqlIsReadOnlyProbe allows only probeSQL's shape
 // (internal/database/mariadb.go): `mysql --protocol=socket -N -e
 // "SELECT 1 FROM information_schema.…"`. Every pin is load-bearing:
@@ -1013,18 +1190,34 @@ func mysqlIsReadOnlyProbe(args []string) bool {
 	return !strings.Contains(q, ";") && !strings.Contains(up, "INTO") && !strings.Contains(up, "LOAD_FILE")
 }
 
-// runuserIsValkeyPing allows only valkeyPingCmd's shape (valkey.go):
-// `runuser -u <user> -- valkey-cli -s '/run/berth-valkey/…' ping`, argument
-// by argument. The trailing verb is pinned to `ping` (a PONG probe — the
-// valkey side mutates nothing) and the socket to berth's per-site runtime
-// base. The user and the socket tail stay free: they are shQuote'd values,
-// and the shape is what bounds the command. The verdict is cmdException, not
-// a read: runuser itself logs a PAM session open/close pair to the journal
-// on every invocation (see the table entry).
-func runuserIsValkeyPing(args []string) bool {
-	return len(args) == 7 && args[0] == "-u" && args[2] == "--" &&
-		args[3] == "valkey-cli" && args[4] == "-s" && args[6] == "ping" &&
-		strings.HasPrefix(args[5], "'/run/berth-valkey/")
+// reValkeyPingSocket / reValkeyPingUser pin the two value slots of
+// valkeyPingCmd's shape (valkey.go), anchored end-to-end, quotes included.
+// The socket is shQuote'd valkeySocketPath(domain): berth's runtime base,
+// ONE pool component, the literal valkey.sock leaf. PoolName maps the
+// domain's dots to underscores, so a pool component carries no dot at all —
+// the slot's character class has none, and '..' cannot even be spelled (a
+// bare prefix pin accepted '/run/berth-valkey/../../etc/x'). The identity
+// operands are the shQuote'd site user: config.Validate's reLinuxUser shape,
+// which DerivedSiteUser's b_<slug>_<8hex> form also fits.
+var (
+	reValkeyPingSocket = regexp.MustCompile(`^'/run/berth-valkey/[a-z0-9_-]+/valkey\.sock'$`)
+	reValkeyPingUser   = regexp.MustCompile(`^'[a-z_][a-z0-9_-]{0,31}'$`)
+)
+
+// setprivIsValkeyPing allows only valkeyPingCmd's shape (valkey.go):
+// `setpriv --reuid <user> --regid <user> --init-groups -- valkey-cli -s
+// '/run/berth-valkey/<pool>/valkey.sock' ping`, argument by argument. The
+// trailing verb is pinned to `ping` (a PONG probe — the valkey side mutates
+// nothing), the socket and identity operands to the full forms above, and
+// the uid/gid operands to the SAME value — production passes one site user
+// to both. --init-groups is pinned by position: dropping it changes what
+// the probe can reach, so the shorter spelling must not ride along.
+func setprivIsValkeyPing(args []string) bool {
+	return len(args) == 10 && args[0] == "--reuid" && args[2] == "--regid" &&
+		args[1] == args[3] && args[4] == "--init-groups" && args[5] == "--" &&
+		args[6] == "valkey-cli" && args[7] == "-s" && args[9] == "ping" &&
+		reValkeyPingUser.MatchString(args[1]) &&
+		reValkeyPingSocket.MatchString(args[8])
 }
 
 // gpgIsReadOnly pins KeyringHoldsExactly's EXACT argv (apt.go): six fixed

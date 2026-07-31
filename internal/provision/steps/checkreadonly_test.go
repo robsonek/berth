@@ -91,39 +91,106 @@ var expectedRefusals = map[string]string{
 	// foreign-file story for it to refuse over.
 }
 
+// refusalsFor returns the foreign-profile error policy for one variant.
+// baseline IS expectedRefusals; a variant adds or drops entries exactly where
+// its config changes which refusing guards exist, and guard 4c still demands
+// every remaining entry be OBSERVED, per variant.
+func refusalsFor(variant string) map[string]string {
+	m := maps.Clone(expectedRefusals)
+	switch variant {
+	case "maximal":
+		// system: with system.swap declared, foreign's unmarked /swapfile
+		// fstab line walks checkSwap's conflict guard (system.go) — the
+		// swap-file ownership rule (berth adopts only what it can prove it
+		// created), and the FIRST guard the step's Check reaches, ahead of
+		// the swappiness drop-in's drift classify.
+		m["system"] = "not managed by berth"
+	case "postgres":
+		// tuning is registered only for the mariadb engine (registry.go), so
+		// there is no Check to refuse — keeping the entry would be exactly
+		// the dead allowance guard 4c exists to reject.
+		delete(m, "tuning")
+	}
+	return m
+}
+
+// wantStepsFor returns guard 1's exact pipeline step-set for one variant —
+// per variant because registration is config-gated (tuning is registered
+// only for the mariadb engine).
+func wantStepsFor(variant string) []string {
+	steps := []string{
+		"identity", "preflight", "base", "system", "apt", "php", "nginx",
+		"composer", "valkey", "supervisor", "accounts", "hardening", "appdirs",
+		"database", "site", "tls", "tuning", "backups", "offsite", "manifest",
+	}
+	if variant == "postgres" {
+		steps = slices.DeleteFunc(steps, func(s string) bool { return s == "tuning" })
+	}
+	return steps
+}
+
 // TestChecksAreReadOnly is the contract.
 //
 // THE PROMISE IT ENFORCES: every command a Check issues is read-only, except
-// FOUR named writers — `nginx -t` (as root may create a missing log file),
-// `php-fpm<ver> -t` (appends a notice to the PHP-FPM log), `certbot
+// THREE named writers — `nginx -t` (as root may create a missing log file),
+// `php-fpm<ver> -t` (appends a notice to the PHP-FPM log) and `certbot
 // certificates` (appends its certificate inventory to certbot's own log and
-// touches its lock files; measured on certbot 4.0.0, Debian 13) and the
-// valkey PING probe's `runuser` wrapper (pam_unix logs a session open/close
-// pair to the journal per invocation; measured 2026-07, Debian 13). All four
+// touches its lock files; measured on certbot 4.0.0, Debian 13). All three
 // are evidence-backed, and Guard 4b below requires each to be OBSERVED, so
-// none can rot into an unexercised allowance.
+// none can rot into an unexercised allowance. (The valkey PING probe was the
+// fourth: its `runuser` wrapper logged a PAM session pair to the journal per
+// invocation. It runs through `setpriv` now — no PAM, nothing written — so
+// it is classified a plain read and runuser is rejected outright.)
 //
 // WHAT THIS DOES NOT PROVE — read before trusting it. It does not prove a Check
 // is read-only on a REAL host. It proves that the commands a Check ISSUES under
 // five modelled states fall in a classified set. Three gaps remain: a path none
-// of the five profiles visits; a shape the model answers so generically that it
-// masks a branch; and a Go-side effect that never reaches the Runner at all —
+// of the profiles×variants visits; a shape the model answers so generically that
+// it masks a branch; and a Go-side effect that never reaches the Runner at all —
 // a Check calling os.WriteFile, os/exec or a network API is invisible here. The
 // fleet-status spec's original "strictly read-only" claim was wrong in exactly
 // this way, so this test states its limits rather than implying it has none.
+//
+// SUDO'S LOGGING IS OUTSIDE THE PROMISE, categorically: it is an
+// authentication record THAT berth was invoked, kept by the host's auditing
+// subsystem, not a change to anything the promise covers — the server's
+// configuration, data, packages, services or certificates. It is unavoidable
+// for any tool that does privileged work, and it accompanies every command
+// alike whether the sudo was added below the seam by the transport (berth's
+// Runner wraps every command in `sudo -n -- /bin/sh -c …` on a non-root
+// connection, internal/ssh/client.go — the normal case) or written into the
+// command text by a step (the postgres engine's `sudo -u postgres psql`
+// probe). That is why the probe is classified a READ on an exact allowlist
+// rather than a fourth exception: the exception list names commands that
+// change covered state, and an authentication record is not one — putting it
+// there would misfile a property of doing privileged work at all as a
+// property of one shape. For scale, not as the argument: the wrapper's
+// logging measures three journal lines per command (its command line plus a
+// pam_unix session pair) on a provisioned Debian 13 host, so a drift sweep
+// leaves over a hundred lines purely by working over SSH. The line this
+// draws is between the unavoidable record of privileged invocation and
+// avoidable writes: the valkey probe's runuser wrapper carried an AVOIDABLE
+// PAM session pair — setpriv does the same credential change without it —
+// which is why that one was engineered away rather than excused.
 func TestChecksAreReadOnly(t *testing.T) {
-	srv := contractServer(t)
+	for _, variant := range contractVariants {
+		t.Run(variant, func(t *testing.T) { checksAreReadOnly(t, variant) })
+	}
+}
+
+// checksAreReadOnly runs the full contract for ONE variant: every guard below
+// applies per variant, so a violation names its configuration via the subtest
+// and its own message.
+func checksAreReadOnly(t *testing.T, variant string) {
+	srv := variantServer(t, variant)
 	pipeline := Pipeline(srv, secret.NewRedactor(), false)
+	expectedRefusals := refusalsFor(variant)
 
 	// Guard 1: the pipeline must be EXACTLY the expected set, by name. A count
 	// alone would pass if one step were replaced by a duplicate of another, and
 	// a new conditionally-registered step could be omitted while the old total
 	// still matched.
-	wantSteps := []string{
-		"identity", "preflight", "base", "system", "apt", "php", "nginx",
-		"composer", "valkey", "supervisor", "accounts", "hardening", "appdirs",
-		"database", "site", "tls", "tuning", "backups", "offsite", "manifest",
-	}
+	wantSteps := wantStepsFor(variant)
 	var gotSteps []string
 	for _, st := range pipeline {
 		gotSteps = append(gotSteps, st.Name())
@@ -132,9 +199,9 @@ func TestChecksAreReadOnly(t *testing.T) {
 	wantSorted := append([]string(nil), wantSteps...)
 	sort.Strings(wantSorted)
 	if strings.Join(gotSteps, ",") != strings.Join(wantSorted, ",") {
-		t.Fatalf("pipeline steps changed.\n got: %v\nwant: %v\n"+
-			"If a step was added, add it to wantSteps AND make sure contractServer()\n"+
-			"registers it — otherwise this contract silently skips it.", gotSteps, wantSorted)
+		t.Fatalf("pipeline steps changed under the %q config.\n got: %v\nwant: %v\n"+
+			"If a step was added, add it to wantStepsFor AND make sure variantServer()\n"+
+			"registers it — otherwise this contract silently skips it.", variant, gotSteps, wantSorted)
 	}
 
 	type key struct{ step, profile string }
@@ -276,17 +343,12 @@ func TestChecksAreReadOnly(t *testing.T) {
 			"  tls.Check's certStatus issues it for every letsencrypt site; if no profile\n" +
 			"  reaches it, the tls model regressed.")
 	}
-	// The fourth exception — runuser's PAM session logging (two pam_unix
-	// journal lines per invocation, measured 2026-07 on a provisioned
-	// Debian 13 host). valkey.Check pings each instance through it, so at
-	// least one profile must record it; the key derives from the fixture the
-	// pipeline ran with (site user + the domain's pool derivation), like the
-	// php-fpm key above.
-	if ping := valkeyPingProbeCmd(srv.SiteUser(srv.Sites[0]), strings.ReplaceAll(srv.Sites[0].Domain, ".", "_")); !sawException[ping] {
-		add("%q was never observed — same reason as nginx -t above. (valkey.Check pings\n"+
-			"  each instance through runuser; if no profile reaches it, the valkey model\n"+
-			"  regressed.)", ping)
-	}
+	// There is no fourth exception any more: the valkey PING probe's runuser
+	// wrapper (a PAM session pair in the journal per invocation) was replaced
+	// by setpriv, which writes nothing, so the probe is judged a plain read
+	// by the tables. Its coverage is not lost — the fake host still answers
+	// only the exact probe shape, and TestConvergedIsGenuinelySatisfied
+	// requires valkey.Check to reach Satisfied, which needs the PONG.
 	// Guard 4c, the symmetry of 4b for the OTHER allowance this contract
 	// grants: every expectedRefusals entry must have been observed under
 	// foreign. An entry nobody exercises is a dead allowance — if a model or
@@ -302,7 +364,7 @@ func TestChecksAreReadOnly(t *testing.T) {
 	}
 	// And the gpg keyring probe, the original offender this contract exists for.
 	if !sawGPG {
-		add("the gpg keyring probe was never observed. contractServer() must declare an apt\n" +
+		add("the gpg keyring probe was never observed. variantServer() must declare an apt\n" +
 			"  repo whose source list and keyring are reachable, or the command that started\n" +
 			"  this whole line of work is not actually covered.")
 	}
@@ -320,7 +382,7 @@ func TestChecksAreReadOnly(t *testing.T) {
 		for i, v := range violations {
 			out += fmt.Sprintf("[%d] %s\n\n", i+1, v)
 		}
-		t.Fatalf("read-only Check contract violated in %d place(s):\n\n%s", len(violations), out)
+		t.Fatalf("read-only Check contract violated under the %q config in %d place(s):\n\n%s", variant, len(violations), out)
 	}
 }
 
@@ -337,28 +399,32 @@ func TestChecksAreReadOnly(t *testing.T) {
 // property, and contractServer now converges the local cache identity with
 // the step's own Apply.
 func TestConvergedIsGenuinelySatisfied(t *testing.T) {
-	srv := contractServer(t)
-	wantUnsatisfied := map[string]string{
-		"preflight": "Debian 13 detected",
-	}
-	for _, st := range Pipeline(srv, secret.NewRedactor(), false) {
-		r := newRecordingRunner(newFakeHost(t, "converged", srv))
-		res, err := st.Check(context.Background(), provision.RunCtx{FullRun: true}, srv, r)
-		if err != nil {
-			t.Errorf("%s.Check under converged: %v", st.Name(), err)
-			continue
-		}
-		if want, exempt := wantUnsatisfied[st.Name()]; exempt {
-			if res.Satisfied || !strings.Contains(res.Reason, want) {
-				t.Errorf("%s.Check under converged = (satisfied=%v, %q) — the exemption expects an unsatisfied verdict mentioning %q; if the step changed, re-argue the exemption rather than widening it",
-					st.Name(), res.Satisfied, res.Reason, want)
+	for _, variant := range contractVariants {
+		t.Run(variant, func(t *testing.T) {
+			srv := variantServer(t, variant)
+			wantUnsatisfied := map[string]string{
+				"preflight": "Debian 13 detected",
 			}
-			continue
-		}
-		if !res.Satisfied {
-			t.Errorf("%s.Check is not Satisfied under converged (%q) — the profile no longer converges this step, so its Check tail is unwalked and the contract's coverage silently shrank",
-				st.Name(), res.Reason)
-		}
+			for _, st := range Pipeline(srv, secret.NewRedactor(), false) {
+				r := newRecordingRunner(newFakeHost(t, "converged", srv))
+				res, err := st.Check(context.Background(), provision.RunCtx{FullRun: true}, srv, r)
+				if err != nil {
+					t.Errorf("%s.Check under converged (%q config): %v", st.Name(), variant, err)
+					continue
+				}
+				if want, exempt := wantUnsatisfied[st.Name()]; exempt {
+					if res.Satisfied || !strings.Contains(res.Reason, want) {
+						t.Errorf("%s.Check under converged (%q config) = (satisfied=%v, %q) — the exemption expects an unsatisfied verdict mentioning %q; if the step changed, re-argue the exemption rather than widening it",
+							st.Name(), variant, res.Satisfied, res.Reason, want)
+					}
+					continue
+				}
+				if !res.Satisfied {
+					t.Errorf("%s.Check is not Satisfied under converged (%q config: %q) — the profile no longer converges this step, so its Check tail is unwalked and the contract's coverage silently shrank",
+						st.Name(), variant, res.Reason)
+				}
+			}
+		})
 	}
 }
 
@@ -374,13 +440,21 @@ func TestConvergedIsGenuinelySatisfied(t *testing.T) {
 // that suddenly records nothing would all be invisible to the five primary
 // runs, because they never take these branches.
 func TestChecksAreReadOnlyUnderForce(t *testing.T) {
-	srv := contractServer(t)
+	for _, variant := range contractVariants {
+		t.Run(variant, func(t *testing.T) { checksAreReadOnlyUnderForce(t, variant) })
+	}
+}
+
+func checksAreReadOnlyUnderForce(t *testing.T, variant string) {
+	srv := variantServer(t, variant)
 	// The error policy under Force: the managed-file drift refusals ("not
 	// managed by berth") are exactly what Force bypasses, so the steps that
 	// refuse under plain foreign must reach a verdict here — EXCEPT the two
 	// tree-ownership guards, which are documented as not bypassable with
-	// --force (accounts.go, appdirs.go) and must keep refusing. Both sides
-	// are asserted: an unexpected error and a missing refusal each fail.
+	// --force (accounts.go, appdirs.go) and must keep refusing, in EVERY
+	// variant (the maximal system refusal is a drift-policy takeover, so
+	// Force bypasses it like the rest). Both sides are asserted: an
+	// unexpected error and a missing refusal each fail.
 	forceRefusals := map[string]string{
 		"accounts": "owned by",
 		"appdirs":  "owned by",
@@ -443,6 +517,6 @@ func TestChecksAreReadOnlyUnderForce(t *testing.T) {
 		for i, v := range violations {
 			out += fmt.Sprintf("[%d] %s\n\n", i+1, v)
 		}
-		t.Fatalf("read-only contract violated under foreign+Force in %d place(s):\n\n%s", len(violations), out)
+		t.Fatalf("read-only contract violated under foreign+Force (%q config) in %d place(s):\n\n%s", variant, len(violations), out)
 	}
 }

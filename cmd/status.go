@@ -30,8 +30,9 @@ func newStatusCmd() *cobra.Command {
 		// The wording is deliberate and must not be tightened back to "never
 		// changes anything": --drift runs the pipeline's read-only Checks,
 		// and a few of their probes leave a log-side trace (a validator's
-		// notice in its own service's log, a PAM session pair in the
-		// journal). The promise stays generic on purpose — the exact list is
+		// notice in its own service's log; sudo's authentication records in
+		// the journal accompany every command on a non-root connection). The
+		// promise stays generic on purpose — the exact list is
 		// evidence-backed and enforced by TestChecksAreReadOnly (steps
 		// package), so naming probes here would only go stale. An absolute
 		// promise the code cannot keep is worse than a precise one (spec §2.1).

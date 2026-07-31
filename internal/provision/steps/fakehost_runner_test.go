@@ -249,6 +249,37 @@ func TestRecordingRunnerDerivesWave3AnswersFromState(t *testing.T) {
 	}
 }
 
+// The postgres scalar answers must derive from modelled state exactly like
+// the mariadb ones: the database set, the daemon and the package each flip
+// the verdict, so a canned "1" can never mask the branch a profile means to
+// walk.
+func TestRecordingRunnerDerivesPostgresAnswersFromState(t *testing.T) {
+	ctx := context.Background()
+	s := variantServer(t, "postgres")
+	// The probes are keyed on the fixture's DERIVED identities, never
+	// re-typed literals — the frozen-derivation convention.
+	db, user := s.SiteDBName(s.Sites[0]), s.SiteDBUser(s.Sites[0])
+	convHost := newFakeHost(t, "converged", s)
+	conv := newRecordingRunner(convHost)
+	if res, err := conv.Run(ctx, pgDBExistsProbe(db), nil); err != nil || strings.TrimSpace(res.Stdout) != "1" {
+		t.Errorf("existing database probe = (%+v, %v), want \"1\"", res, err)
+	}
+	delete(convHost.databases, db)
+	if res, err := conv.Run(ctx, pgDBExistsProbe(db), nil); err != nil || res.ExitCode != 0 || res.Stdout != "" {
+		t.Errorf("missing database probe = (%+v, %v), want an empty result set at exit 0", res, err)
+	}
+	down := convHost.units["postgresql"]
+	down.active = false
+	convHost.units["postgresql"] = down
+	if res, err := conv.Run(ctx, pgUserGrantedProbe(user, db), nil); err != nil || res.ExitCode == 0 {
+		t.Errorf("stopped daemon probe = (%+v, %v), want psql's connect failure", res, err)
+	}
+	fresh := newRecordingRunner(newFakeHost(t, "fresh", s))
+	if res, err := fresh.Run(ctx, pgDBExistsProbe(db), nil); err != nil || res.ExitCode == 0 {
+		t.Errorf("fresh probe = (%+v, %v), want sudo's unknown-user failure", res, err)
+	}
+}
+
 // Every standalone show probe today passes --value (valkey.go); answering
 // value-only output to a probe WITHOUT it would silently hand Task 5 the wrong
 // format, so the shape is refused instead.
@@ -379,6 +410,19 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 		}
 		return bssh.Result{ExitCode: 1}, true
 
+	// swapfileSize's probe (system.go), keyed to the pasted literal in
+	// auditedScripts and answered from the modelled file size — the only
+	// consumer of fakeFile.size. A missing swapfile answers exit 1 with the
+	// diagnostic already discarded by the probe's own 2>/dev/null. This case
+	// must sit ABOVE the generic stat case: the Fields-parse there would
+	// take "2>/dev/null" for the path and answer from the wrong entry.
+	case cmd == swapfileSizeProbePasted:
+		file, ok := r.h.files[swapfilePath]
+		if !ok {
+			return bssh.Result{ExitCode: 1}, true
+		}
+		return bssh.Result{Stdout: strconv.FormatInt(file.size, 10) + "\n"}, true
+
 	case f[0] == "stat":
 		file, ok := r.h.files[unq(f[len(f)-1])]
 		if !ok {
@@ -500,12 +544,29 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 
 	case f[0] == "df":
 		return bssh.Result{Stdout: r.h.dfRows}, true
-	case f[0] == "swapon":
+
+	// The three system-knob queries, each pinned to the ONE argv its Check
+	// issues (swapActive / checkTimezone / checkHostname, system.go) because
+	// each PARSES the answer: swapActive scans for a line that IS the bare
+	// path (the --show=NAME --noheadings format — no header, no columns),
+	// the other two TrimSpace a single value. Answering a different spelling
+	// in these formats would hand a production drift the wrong shape, so it
+	// falls to unanswered.
+	case cmd == "swapon --show=NAME --noheadings":
 		return bssh.Result{Stdout: r.h.swapRows}, true
-	case f[0] == "timedatectl":
+	case cmd == "timedatectl show -p Timezone --value":
 		return bssh.Result{Stdout: r.h.timezone + "\n"}, true
-	case f[0] == "hostnamectl":
+	case cmd == "hostnamectl --static":
 		return bssh.Result{Stdout: r.h.hostname + "\n"}, true
+
+	// checkSysctl's read-back of the RUNNING kernel values (string-compared,
+	// one bare value line). Answered only for modelled keys: an unmodelled
+	// key is a modelling gap, not blank success.
+	case f[0] == "sysctl" && len(f) == 3 && f[1] == "-n":
+		if v, ok := r.h.sysctlValues[f[2]]; ok {
+			return bssh.Result{Stdout: v + "\n"}, true
+		}
+		return bssh.Result{}, false
 
 	case f[0] == "gpg":
 		// Only the EXACT argv KeyringHoldsExactly issues (apt.go) is answered;
@@ -557,6 +618,14 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 		return r.answerSSHDirProbe("/home/berth/.ssh"), true
 	case cmd == sshDirProbeCmd("/home/appuser/.ssh"):
 		return r.answerSSHDirProbe("/home/appuser/.ssh"), true
+
+	// accounts.Check's git known-host lookup, keyed to the exact fixture
+	// composition and answered with real ssh-keygen -F semantics over the
+	// modelled file (the caller reads ONLY the exit code — both streams aim
+	// at the null device): 0 iff some line's host field carries the token,
+	// 1 on a present file without it, 255 when the file itself is missing.
+	case cmd == sshKnownHostProbeCmd(fixtureGitKnownHost, fixtureKnownHostsPath):
+		return r.answerKnownHostLookup(fixtureGitKnownHost, fixtureKnownHostsPath), true
 
 	// sshdOptsGuard PARSES the file body for the last SSHD_OPTS assignment;
 	// keyed to the production const so the model tracks the issued shape. A
@@ -655,6 +724,14 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 		return r.answerMySQLScalar(r.h.databases["app"]), true
 	case cmd == mariadbUserGrantedProbe("app", "app"):
 		return r.answerMySQLScalar(r.h.dbGrants["app:app"]), true
+
+	// probePSQL, the postgres twin (the postgres variant): PARSES stdout
+	// (trimmed "1") and the exit code, answered from the same modelled sets
+	// gated on the postgres package + daemon.
+	case cmd == pgDBExistsProbe("app"):
+		return r.answerPSQLScalar(r.h.databases["app"]), true
+	case cmd == pgUserGrantedProbe("app", "app"):
+		return r.answerPSQLScalar(r.h.dbGrants["app:app"]), true
 
 	// envCredentialPresent / envHasBerthAppKey / envValueMatches read ONLY
 	// exit codes (the secret never enters stdout); evaluated over the
@@ -814,6 +891,14 @@ const (
 	// step's cache preflight loudly, so the shape is self-checking.
 	fixtureAppKey = "base64:Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1C="
 
+	// The fixture repository's endpoint pieces (maximal variant): the
+	// "[host]:port" known-hosts token accounts.Check composes for the
+	// fixture's non-default-port endpoint (GitEndpoint over
+	// sites[0].repository), and the site user's known_hosts path it aims
+	// the -F lookup at.
+	fixtureGitKnownHost   = "[git.example.com]:2222"
+	fixtureKnownHostsPath = "/home/appuser/.ssh/known_hosts"
+
 	// Wave 4: the offsite secret trio, seeded into the cache AND rendered
 	// into the modelled /etc/berth/offsite.env (they must agree, or
 	// offsite.Check honestly reports drift). fixtureResticValue is 32
@@ -898,6 +983,29 @@ func (r *recordingRunner) answerSSHDirProbe(dir string) bssh.Result {
 	return bssh.Result{Stdout: file.owner + " " + file.kind + "\n"}
 }
 
+// answerKnownHostLookup evaluates ssh-keygen -F over the modelled file: a
+// known_hosts host field is a comma-separated list of tokens, and the find
+// mode matches a whole token (never a substring). A missing file is exit 255
+// — ssh-keygen's own usage-error exit, distinct from the not-found 1; the
+// consumer treats every non-zero alike (accounts.go: "either way Apply
+// re-scans"), so the distinction costs nothing and stays honest.
+func (r *recordingRunner) answerKnownHostLookup(token, path string) bssh.Result {
+	file, ok := r.h.files[path]
+	if !ok {
+		return bssh.Result{ExitCode: 255}
+	}
+	for _, line := range strings.Split(file.content, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || strings.HasPrefix(fields[0], "#") {
+			continue
+		}
+		if slices.Contains(strings.Split(fields[0], ","), token) {
+			return bssh.Result{}
+		}
+	}
+	return bssh.Result{ExitCode: 1}
+}
+
 // mariadbDBExistsProbe / mariadbUserGrantedProbe mirror probeSQL's
 // composition over DatabaseExists/UserGranted (internal/database/mariadb.go)
 // — copies on purpose, so a production probe change makes the answer fall
@@ -913,7 +1021,9 @@ func mariadbUserGrantedProbe(user, db string) string {
 // valkeyPingProbeCmd mirrors valkeyPingCmd's composition (valkey.go) — a copy
 // on purpose (see above).
 func valkeyPingProbeCmd(user, pool string) string {
-	return "runuser -u " + shQuote(user) + " -- valkey-cli -s " + shQuote("/run/berth-valkey/"+pool+"/valkey.sock") + " ping"
+	qu := shQuote(user)
+	return "setpriv --reuid " + qu + " --regid " + qu + " --init-groups -- valkey-cli -s " +
+		shQuote("/run/berth-valkey/"+pool+"/valkey.sock") + " ping"
 }
 
 // answerMySQLScalar evaluates a probeSQL query whose modelled truth is hit:
@@ -926,6 +1036,40 @@ func (r *recordingRunner) answerMySQLScalar(hit bool) bssh.Result {
 	}
 	if u, ok := r.h.unit("mariadb.service"); !ok || !u.active {
 		return bssh.Result{ExitCode: 1, Stderr: "ERROR 2002 (HY000): Can't connect to local server"}
+	}
+	if hit {
+		return bssh.Result{Stdout: "1\n"}
+	}
+	return bssh.Result{}
+}
+
+// pgDBExistsProbe / pgUserGrantedProbe mirror probePSQL's composition over
+// DatabaseExists/UserGranted (internal/database/postgres.go) — copies on
+// purpose, so a production probe change makes the answer fall away loudly
+// instead of feeding the new shape a stale reply.
+func pgProbeCmd(query string) string {
+	return `sudo -u postgres psql -X -tAc "` + query + `"`
+}
+
+func pgDBExistsProbe(db string) string {
+	return pgProbeCmd("SELECT 1 FROM pg_database WHERE datname='" + db + "'")
+}
+
+func pgUserGrantedProbe(user, db string) string {
+	return pgProbeCmd("SELECT 1 FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE d.datname='" + db + "' AND r.rolname='" + user + "'")
+}
+
+// answerPSQLScalar is answerMySQLScalar's postgres twin: psql -tA prints the
+// bare value for a matching row and nothing for an empty result set, both at
+// exit 0. Without the server package there is no postgres account for sudo
+// to become (its own exit 1); a stopped daemon answers psql's connect
+// failure, which exits 2.
+func (r *recordingRunner) answerPSQLScalar(hit bool) bssh.Result {
+	if _, ok := r.h.packages["postgresql"]; !ok {
+		return bssh.Result{ExitCode: 1, Stderr: "sudo: unknown user postgres"}
+	}
+	if u, ok := r.h.unit("postgresql"); !ok || !u.active {
+		return bssh.Result{ExitCode: 2, Stderr: `psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed`}
 	}
 	if hit {
 		return bssh.Result{Stdout: "1\n"}

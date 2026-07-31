@@ -117,8 +117,19 @@ func desiredValkeyUnitPaths(s *config.Server) map[string]bool {
 // valkeyPingCmd probes an instance AS THE SITE USER over its socket: a PONG
 // proves both that the daemon answers and that the socket path admits the
 // tenant (owner-only runtime dir + socket perms) — the step's whole point.
+//
+// setpriv, not runuser: runuser opens a PAM session, and pam_unix logs a
+// session open/close pair to the journal on every invocation — so a
+// read-only Check wrote to the host, per site, per run. setpriv changes
+// credentials directly without PAM (verified on a provisioned Debian 13
+// host: PONG on the tenant's own socket, Permission denied cross-tenant,
+// zero journal lines). --init-groups is load-bearing: it grants the site
+// user's supplementary groups, which socket access can depend on — do not
+// "simplify" it away.
 func valkeyPingCmd(user, domain string) string {
-	return "runuser -u " + shQuote(user) + " -- valkey-cli -s " + shQuote(valkeySocketPath(domain)) + " ping"
+	qu := shQuote(user)
+	return "setpriv --reuid " + qu + " --regid " + qu + " --init-groups -- valkey-cli -s " +
+		shQuote(valkeySocketPath(domain)) + " ping"
 }
 
 // unitCacheFresh reports whether systemd's loaded copy of unit matches the

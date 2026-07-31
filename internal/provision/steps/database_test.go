@@ -1148,7 +1148,7 @@ func TestDatabaseApplyPostgresFromPGDG(t *testing.T) {
 	stubEnsureRepoChain(f, repo)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
-	f.On("sudo -u postgres psql -v ON_ERROR_STOP=1", bssh.Result{})
+	f.On("sudo -u postgres psql -X -v ON_ERROR_STOP=1", bssh.Result{})
 
 	stubClientAuthAbsent(f, s, ".pgpass")
 	stubEnvSeed(f, s)
@@ -1922,7 +1922,7 @@ func TestDatabaseApplyPostgresSeedsPgpass(t *testing.T) {
 	f.On("test -e '/home/deploy/.pgpass'", bssh.Result{ExitCode: 1}) // fresh box: no client creds yet
 	stubEnvSeed(f, s)
 	stubClientAuthSeed(f, s, ".pgpass")
-	f.On("sudo -u postgres psql -v ON_ERROR_STOP=1", bssh.Result{})
+	f.On("sudo -u postgres psql -X -v ON_ERROR_STOP=1", bssh.Result{})
 
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)

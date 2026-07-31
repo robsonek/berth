@@ -8,13 +8,15 @@ Notable changes to berth. Older releases are documented on the
 ### Added
 
 - **Every pipeline `Check` is now enforced by contract test to issue only
-  read-only commands**, across five modelled host states, with named,
-  evidence-backed exceptions for the probes whose only host-side effect is a
-  line in a service log or the journal. Any command containing a shell
-  metacharacter must match an audited registry of the exact scripts berth
-  generates, byte for byte, so editing a probe helper forces a fresh audit of
-  what it sends to the host. Closes the last deferred item of the
-  `berth status` work.
+  read-only commands**, across a matrix of server configurations × five
+  modelled host states — the configurations reach the branches one config
+  cannot (every opt-in system knob, a deploy repository, the PostgreSQL
+  engine) — with named, evidence-backed exceptions for the probes whose only
+  host-side effect is a line in a service log or the journal. Any command
+  containing a shell metacharacter must match an audited registry of the
+  exact scripts berth generates, byte for byte, so editing a probe helper
+  forces a fresh audit of what it sends to the host. Closes the last
+  deferred item of the `berth status` work.
 
 ### Fixed
 
@@ -23,16 +25,32 @@ Notable changes to berth. Older releases are documented on the
   commands as root from inside a read-only check — including under
   `berth status --drift`. The codename is now read as data. Same class as the
   offsite env sourcing hardened in 0.29.0.
+- **The PostgreSQL engine's `psql` calls no longer read `~postgres/.psqlrc`.**
+  Both invocations ran without `-X`, and a psql startup file can carry `\!`
+  shell escapes — so a tampered or corrupted `.psqlrc` executed arbitrary
+  commands as the `postgres` user from inside a read-only check, including on
+  every `berth status --drift` sweep against a PostgreSQL host. Both now pass
+  `-X` (the probe from its Check, the SQL batch from Apply alike). Same class
+  as the `preflight` fix above.
 - **The documented effect of `berth status --drift` was incomplete.** The help
   text and README admitted a single log-file side effect, but the sweep runs
   every validator provisioning runs, and more of its probes than the docs
   named leave a log-side trace on every invocation — a validator's notice in
-  its own service's log, and a PAM session pair in the journal from the
-  valkey liveness probe's `runuser` wrapper. Both now make the accurate,
-  general promise — a few probes leave a line in a service log or the
-  journal; no configuration, data, packages, services or certificates
-  change — and the contract test above is what keeps it honest. No behaviour
-  changed; the claim was imprecise, not the code.
+  its own service's log and, until the entry below removed it, a PAM session
+  pair in the journal from the valkey liveness probe's `runuser` wrapper.
+  Both now make the accurate, general promise — a few probes leave a line in
+  a service log or the journal; no configuration, data, packages, services
+  or certificates change — and the contract test above is what keeps it
+  honest. No behaviour changed; the claim was imprecise, not the code.
+- **The valkey liveness probe no longer writes to the journal.** It ran
+  `valkey-cli` through `runuser`, which opens a PAM session, and pam_unix
+  logs a session open/close pair per invocation — so a read-only check wrote
+  two journal lines per site on every run, including every
+  `berth status --drift` sweep (the probe the entry above names). It now runs
+  through `setpriv`, which changes the credentials without PAM and writes
+  nothing. Cross-tenant isolation is unchanged, verified on a live
+  provisioned Debian 13 host: the probe still answers PONG on the tenant's
+  own socket and Permission denied on a sibling's.
 
 ## [0.29.0] — 2026-07-30
 
