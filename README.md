@@ -35,8 +35,13 @@ On Windows, download the `.zip` archive for your architecture, extract
 berth init                            # interactive wizard → servers/<name>.yml
 berth provision servers/<name>.yml    # provision the server (idempotent)
 berth provision servers/<name>.yml --dry-run   # preview changes only
+berth provision servers/<name>.yml --no-tty    # plain output, no live TUI (CI, scripts)
 berth site key servers/<name>.yml [domain]     # print each site's git deploy public key
 ```
+
+`provision` also takes `--only <step>` to run a single phase, `--force` to
+overwrite resources berth does not manage, and two TLS switches — `--ssl-staging`
+and `--skip-ssl` — both explained with the certificate handling further down.
 
 ### Checking a fleet
 
@@ -751,6 +756,15 @@ actually served (not just written to disk). Provisioning with `--ssl-staging`
 issues certificates against the Let's Encrypt staging CA; a later run without
 the flag detects the staging certificate and automatically re-issues it
 against production.
+
+`--skip-ssl` skips the TLS phase entirely — useful when DNS does not point at
+the host yet, or on a first run you intend to finish later. Two consequences
+worth knowing before you use it. Sites keep serving over plain HTTP until a run
+without the flag issues their certificates. And because the run is deliberately
+incomplete, it does **not** write the version manifest berth normally leaves at
+`/var/lib/berth/manifest`: a truncated run must not attest that the host matches
+its config. `berth status` therefore shows the host as `not provisioned` until a
+full run finishes, which is the intended signal rather than a defect.
 
 ### Removing a site
 
