@@ -295,6 +295,18 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{`stat -c %s '/swapfile' 2>/dev/null`, cmdAudited},
 		{`stat -c %s '/etc/shadow' 2>/dev/null`, cmdRejected},
 
+		// The known-host lookup rides the registry too (its redirections
+		// force it there). Its in-place-rewriting siblings -R (remove) and
+		// -H (hash) must never pass, nor a lookup in a file the audit never
+		// covered — and ssh-keygen has NO table entry, so a redirection-free
+		// respelling rejects as an unknown verb rather than by accident.
+		{`ssh-keygen -F 'git.example.com' -f '/home/appuser/.ssh/known_hosts' >/dev/null 2>&1`, cmdAudited},
+		{`ssh-keygen -R 'git.example.com' -f '/home/appuser/.ssh/known_hosts' >/dev/null 2>&1`, cmdRejected},
+		{`ssh-keygen -H -f '/home/appuser/.ssh/known_hosts' >/dev/null 2>&1`, cmdRejected},
+		{`ssh-keygen -F 'git.example.com' -f '/etc/ssh/ssh_known_hosts' >/dev/null 2>&1`, cmdRejected},
+		{`ssh-keygen -F git.example.com`, cmdRejected},
+		{`ssh-keygen -t ed25519 -N x -f /tmp/key`, cmdRejected},
+
 		// Unknown verbs are rejected, not assumed safe.
 		{"sometool --probe /etc/x", cmdRejected},
 	}
@@ -593,6 +605,18 @@ var auditedScripts = map[string]string{
 	// parses the decimal size. Nothing writes. Any other `stat … 2>…`
 	// spelling stays unregistered and rejects.
 	swapfileSizeProbePasted: "swapfileSize (system.go): stat -c %s of /swapfile, stderr discarded — reads only",
+
+	// accounts.Check's git known-host lookup (accounts.go), reached only when
+	// a site declares a repository (the maximal variant), mirrored by
+	// sshKnownHostProbeCmd for the fixture endpoint. Audited: `ssh-keygen -F`
+	// is the find mode — it SEARCHES the file named by -f for the host token
+	// and prints any matching entries, unlike its rewriting siblings -R
+	// (removes entries in place) and -H (hashes the file in place), both of
+	// which stay unregistered; both streams aim at the null device and only
+	// the exit code answers. Nothing writes — note Apply's healing sibling
+	// (`ssh-keygen -F … || ssh-keyscan …>>…`) is a DIFFERENT text and never
+	// rides this entry.
+	sshKnownHostProbeCmd("git.example.com", "/home/appuser/.ssh/known_hosts"): "accounts.Check's known-host lookup (accounts.go): ssh-keygen -F find mode over the site user's known_hosts, output discarded — reads only",
 }
 
 // phpPoolConflictProbe84 is the EXACT text phpPoolConflictProbeCmd("8.4")
@@ -696,6 +720,12 @@ const aptUserListsPasted = `find /etc/apt/sources.list.d -maxdepth 1 -name 'bert
 // a const composition over the const swapfile path, pasted as a literal (see
 // aptUserListsPasted for why never the production helper).
 const swapfileSizeProbePasted = `stat -c %s '/swapfile' 2>/dev/null`
+
+// sshKnownHostProbeCmd mirrors accounts.Check's known-host lookup composition
+// (accounts.go) — a copy on purpose (see auditedScripts).
+func sshKnownHostProbeCmd(token, knownHosts string) string {
+	return "ssh-keygen -F " + shQuote(token) + " -f " + shQuote(knownHosts) + " >/dev/null 2>&1"
+}
 
 // sameFileProbeCmd mirrors site.Check's enabled-symlink probe composition
 // (site.go) — a copy on purpose (see auditedScripts).

@@ -588,6 +588,14 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 	case cmd == sshDirProbeCmd("/home/appuser/.ssh"):
 		return r.answerSSHDirProbe("/home/appuser/.ssh"), true
 
+	// accounts.Check's git known-host lookup, keyed to the exact fixture
+	// composition and answered with real ssh-keygen -F semantics over the
+	// modelled file (the caller reads ONLY the exit code — both streams aim
+	// at the null device): 0 iff some line's host field carries the token,
+	// 1 on a present file without it, 255 when the file itself is missing.
+	case cmd == sshKnownHostProbeCmd(fixtureGitHost, fixtureKnownHostsPath):
+		return r.answerKnownHostLookup(fixtureGitHost, fixtureKnownHostsPath), true
+
 	// sshdOptsGuard PARSES the file body for the last SSHD_OPTS assignment;
 	// keyed to the production const so the model tracks the issued shape. A
 	// missing file is exit 0 with no output — the probe's own semantics
@@ -844,6 +852,12 @@ const (
 	// step's cache preflight loudly, so the shape is self-checking.
 	fixtureAppKey = "base64:Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1C="
 
+	// The fixture repository's endpoint pieces (maximal variant): the git
+	// host GitEndpoint parses out of sites[0].repository, and the site
+	// user's known_hosts path accounts.Check composes for the -F lookup.
+	fixtureGitHost        = "git.example.com"
+	fixtureKnownHostsPath = "/home/appuser/.ssh/known_hosts"
+
 	// Wave 4: the offsite secret trio, seeded into the cache AND rendered
 	// into the modelled /etc/berth/offsite.env (they must agree, or
 	// offsite.Check honestly reports drift). fixtureResticValue is 32
@@ -926,6 +940,29 @@ func (r *recordingRunner) answerSSHDirProbe(dir string) bssh.Result {
 		return bssh.Result{ExitCode: 92}
 	}
 	return bssh.Result{Stdout: file.owner + " " + file.kind + "\n"}
+}
+
+// answerKnownHostLookup evaluates ssh-keygen -F over the modelled file: a
+// known_hosts host field is a comma-separated list of tokens, and the find
+// mode matches a whole token (never a substring). A missing file is exit 255
+// — ssh-keygen's own usage-error exit, distinct from the not-found 1; the
+// consumer treats every non-zero alike (accounts.go: "either way Apply
+// re-scans"), so the distinction costs nothing and stays honest.
+func (r *recordingRunner) answerKnownHostLookup(token, path string) bssh.Result {
+	file, ok := r.h.files[path]
+	if !ok {
+		return bssh.Result{ExitCode: 255}
+	}
+	for _, line := range strings.Split(file.content, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || strings.HasPrefix(fields[0], "#") {
+			continue
+		}
+		if slices.Contains(strings.Split(fields[0], ","), token) {
+			return bssh.Result{}
+		}
+	}
+	return bssh.Result{ExitCode: 1}
 }
 
 // mariadbDBExistsProbe / mariadbUserGrantedProbe mirror probeSQL's

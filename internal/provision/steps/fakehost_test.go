@@ -221,7 +221,8 @@ var fakeHostProfiles = []string{"fresh", "converged", "drifted", "foreign", "run
 // fixture never enables would pass every guard. baseline is the ORIGINAL
 // fixture, preserved unchanged so today's coverage cannot shrink; maximal
 // turns on every system knob (swap + swappiness, the kernel sysctl drop-in,
-// timezone, static hostname — all opt-in and all off in baseline).
+// timezone, static hostname — all opt-in and all off in baseline) and gives
+// the site a repository (the deploy-key and known-host probes).
 var contractVariants = []string{"baseline", "maximal"}
 
 // contractServer is the baseline fixture — see variantServer for the set.
@@ -310,6 +311,11 @@ func variantServer(t *testing.T, variant string) *config.Server {
 			Timezone: "Europe/Warsaw",
 			Hostname: "web1.example.com",
 		}
+		// A repository reaches accounts.Check's deploy-key completeness
+		// probes and the git host's known_hosts lookup (the redirection-
+		// bearing ssh-keygen -F). scp-like SSH form, the shape validGitURL
+		// accepts; the default port keeps the token the bare hostname.
+		srv.Sites[0].Repository = "git@git.example.com:app/app.git"
 	default:
 		panic("unknown contract variant: " + variant)
 	}
@@ -787,6 +793,35 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 	}
 	h.putManaged(reloadFPMScriptPath, reloadWrapper, profile)
 	h.setMeta(reloadFPMScriptPath, "root", "root", "755")
+
+	// The per-site deploy-key material and the git host's known_hosts entry
+	// (accounts.go), modelled only when the site declares a repository. All
+	// three are third-party or secret-bearing state, never marker-managed:
+	// the key pair is Apply's ssh-keygen output (probed by existence only)
+	// and known_hosts is ssh-keyscan output, hand-modelled from the real
+	// one-line format because the -F lookup's verdict rides its host field.
+	for _, st := range s.Sites {
+		if st.Repository == "" {
+			continue
+		}
+		host, _, err := config.GitEndpoint(st.Repository)
+		if err != nil {
+			panic("parse the fixture repository: " + err.Error())
+		}
+		u := s.SiteUser(st)
+		key := deployKeyPath(u)
+		h.files[key] = fakeFile{
+			content: "-----BEGIN OPENSSH PRIVATE KEY-----\nfixture-deploy\n-----END OPENSSH PRIVATE KEY-----\n",
+			owner:   u, group: u, uid: 1001, gid: 1001, mode: "600",
+			kind: "regular file", mtimeUnix: 1500000000}
+		h.files[key+".pub"] = fakeFile{content: "ssh-ed25519 AAAAC3Nza fixture-deploy\n",
+			owner: u, group: u, uid: 1001, gid: 1001, mode: "644",
+			kind: "regular file", mtimeUnix: 1500000000}
+		h.files["/home/"+u+"/.ssh/known_hosts"] = fakeFile{
+			content: host + " ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKey0000000000000000000000000\n",
+			owner:   u, group: u, uid: 1001, gid: 1001, mode: "644",
+			kind: "regular file", mtimeUnix: 1500000000}
+	}
 
 	// hardening's two managed files: the sshd drop-in is the step's own const,
 	// the jail the same renderer its Check calls.
