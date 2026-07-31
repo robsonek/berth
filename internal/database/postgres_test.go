@@ -8,7 +8,7 @@ import (
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
 
-const psqlCmd = "sudo -u postgres psql -v ON_ERROR_STOP=1"
+const psqlCmd = "sudo -u postgres psql -X -v ON_ERROR_STOP=1"
 
 func TestPostgresEnsureUserUsesStdinNotArgv(t *testing.T) {
 	f := bssh.NewFakeRunner()
@@ -91,8 +91,8 @@ func TestPostgresMetadata(t *testing.T) {
 
 func TestPostgresProbes(t *testing.T) {
 	p := Postgres{}
-	dbCmd := `sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='myapp'"`
-	ownerCmd := `sudo -u postgres psql -tAc "SELECT 1 FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE d.datname='myapp' AND r.rolname='myapp'"`
+	dbCmd := `sudo -u postgres psql -X -tAc "SELECT 1 FROM pg_database WHERE datname='myapp'"`
+	ownerCmd := `sudo -u postgres psql -X -tAc "SELECT 1 FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE d.datname='myapp' AND r.rolname='myapp'"`
 	probes := []struct {
 		name string
 		cmd  string

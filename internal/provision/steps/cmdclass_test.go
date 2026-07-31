@@ -206,28 +206,38 @@ func TestClassifyCommandPolicy(t *testing.T) {
 
 		// The postgres engine's catalog probes (probePSQL,
 		// internal/database/postgres.go): sudo is THE privilege wrapper, so
-		// only the exact peer-auth `psql -tAc "SELECT 1 FROM pg_…"` shape
-		// reads. DDL/DML, a ;-chain, SELECT INTO (creates a table), COPY
-		// (writes files as the server), a smuggled second -c, a different
-		// target user, Apply's stdin-fed psql and pg_dump, and any other
-		// program behind sudo must all reject. Function calls and psql
-		// backslash commands never even reach the predicate — parentheses
-		// and backslashes are metacharacters, and none of that text is
-		// registered.
-		{`sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='app'"`, cmdReadOnly},
-		{`sudo -u postgres psql -tAc "SELECT 1 FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE d.datname='app' AND r.rolname='app'"`, cmdReadOnly},
-		{`sudo -u postgres psql -tAc "DROP DATABASE app"`, cmdRejected},
-		{`sudo -u postgres psql -tAc "SELECT 1 FROM pg_database; DROP DATABASE app"`, cmdRejected},
-		{`sudo -u postgres psql -tAc "SELECT 1 FROM pg_database INTO scratch"`, cmdRejected},
-		{`sudo -u postgres psql -tAc "COPY pg_database TO '/tmp/x'"`, cmdRejected},
-		{`sudo -u postgres psql -tAc "SELECT 1 FROM pg_database" -c "DROP DATABASE app"`, cmdRejected},
+		// only the exact peer-auth `psql -X -tAc "<statement>"` shape reads —
+		// and the statement is pinned by ANCHORED GRAMMAR, not prefix: a
+		// prefix pin ("SELECT 1 FROM pg_") blessed a trailing FOR UPDATE,
+		// which takes row locks (tuple-header writes plus WAL) — the same
+		// prefix-not-shape weakness that broke the denylists. DDL/DML, a
+		// ;-chain, SELECT INTO (creates a table), COPY (writes files as the
+		// server), the locking clauses, a smuggled second -c, a different
+		// target user, the -X-less spelling (without -X psql reads
+		// ~postgres/.psqlrc, whose \! escapes execute — the pre-review
+		// production shape, pinned so a regression fails loudly), Apply's
+		// stdin-fed psql and pg_dump, and any other program behind sudo must
+		// all reject. Function calls and psql backslash commands never even
+		// reach the predicate — parentheses and backslashes are
+		// metacharacters, and none of that text is registered.
+		{`sudo -u postgres psql -X -tAc "SELECT 1 FROM pg_database WHERE datname='app'"`, cmdReadOnly},
+		{`sudo -u postgres psql -X -tAc "SELECT 1 FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE d.datname='app' AND r.rolname='app'"`, cmdReadOnly},
+		{`sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='app'"`, cmdRejected},
+		{`sudo -u postgres psql -X -tAc "SELECT 1 FROM pg_catalog.pg_class FOR UPDATE"`, cmdRejected},
+		{`sudo -u postgres psql -X -tAc "SELECT 1 FROM pg_database WHERE datname='app' FOR UPDATE"`, cmdRejected},
+		{`sudo -u postgres psql -X -tAc "SELECT 1 FROM pg_database WHERE datname='app' FOR SHARE"`, cmdRejected},
+		{`sudo -u postgres psql -X -tAc "DROP DATABASE app"`, cmdRejected},
+		{`sudo -u postgres psql -X -tAc "SELECT 1 FROM pg_database; DROP DATABASE app"`, cmdRejected},
+		{`sudo -u postgres psql -X -tAc "SELECT 1 FROM pg_database INTO scratch"`, cmdRejected},
+		{`sudo -u postgres psql -X -tAc "COPY pg_database TO '/tmp/x'"`, cmdRejected},
+		{`sudo -u postgres psql -X -tAc "SELECT 1 FROM pg_database" -c "DROP DATABASE app"`, cmdRejected},
 		{`sudo -u postgres psql -f /tmp/script.sql`, cmdRejected},
-		{`sudo -u postgres psql -v ON_ERROR_STOP=1`, cmdRejected},
+		{`sudo -u postgres psql -X -v ON_ERROR_STOP=1`, cmdRejected},
 		{`sudo -u postgres pg_dump 'app'`, cmdRejected},
-		{`sudo -u root psql -tAc "SELECT 1 FROM pg_database WHERE datname='app'"`, cmdRejected},
+		{`sudo -u root psql -X -tAc "SELECT 1 FROM pg_database WHERE datname='app'"`, cmdRejected},
 		{`sudo rm -rf /var/www`, cmdRejected},
 		{`sudo -i`, cmdRejected},
-		{`sudo -u postgres psql -tAc "SELECT 1 FROM pg_stat_file('/etc/shadow')"`, cmdRejected}, // parens: the metachar route, unregistered
+		{`sudo -u postgres psql -X -tAc "SELECT 1 FROM pg_stat_file('/etc/shadow')"`, cmdRejected}, // parens: the metachar route, unregistered
 
 		// valkey's per-site liveness probe (valkeyPingCmd, valkey.go): PING
 		// over the tenant's own socket mutates nothing on the valkey side,
@@ -1000,14 +1010,17 @@ var simpleShapes = []simpleShape{
 	// as another uid unless the whole argv is pinned. The one shape a Check
 	// issues in-text is postgres's peer-auth catalog probe (berth's own
 	// root wrapping happens at the SSH transport, never in command text).
-	// Adjudicated a READ, not a fourth exception: sudo's authentication
-	// logging (a command line plus a PAM session pair in the journal)
-	// already accompanies EVERY probe via the transport wrapper on a
-	// non-root connection — measured at three lines per command — so it is
-	// a property of the seam, not of this shape; see the contract header in
-	// checkreadonly_test.go.
+	// Adjudicated a READ, not a fourth exception, on a CATEGORICAL ground:
+	// sudo's authentication logging is a record THAT berth was invoked,
+	// kept by the auditing subsystem — not a change to anything the promise
+	// covers (the server's configuration, data, packages, services,
+	// certificates). It is unavoidable for any tool doing privileged work
+	// and accompanies every command alike, whether the sudo was added by
+	// the transport or written into the command text by a step — which is
+	// why it sits outside the exception list rather than in it; see the
+	// contract header in checkreadonly_test.go.
 	{verb: "sudo", allow: sudoIsPostgresCatalogProbe, verdict: cmdReadOnly,
-		why: "pinned to probePSQL's peer-auth catalog SELECT (database/postgres.go); any other statement, option or program behind sudo mutates or executes arbitrarily"},
+		why: "pinned to probePSQL's peer-auth catalog SELECTs (database/postgres.go); any other statement, option or program behind sudo mutates or executes arbitrarily"},
 	// valkey's liveness probe, a plain read since it moved off runuser:
 	// setpriv changes credentials directly, without PAM, so nothing reaches
 	// the journal (measured 2026-07 on a provisioned Debian 13 host: setpriv
@@ -1089,31 +1102,47 @@ func opensslX509IsReadOnly(args []string) bool {
 	return false
 }
 
-// sudoIsPostgresCatalogProbe allows only probePSQL's shape
-// (internal/database/postgres.go): `sudo -u postgres psql -tAc
-// "SELECT 1 FROM pg_…"`. Every pin is load-bearing: the target user must be
-// postgres (peer auth on the local cluster), the program psql with exactly
-// -tAc, and the statement one double-quoted SELECT against a pg_ catalog.
-// Rejected on top of the shape, mirroring the mysql predicate: a second
-// statement (';'), INTO (SELECT … INTO creates a table — the bare-word
-// match over-rejects a column literally named INTO, the safe direction),
-// COPY (writes server-side files as the postgres process), and any extra
-// double quote (exactly one opening and one closing), so a trailing option
-// or a second -c cannot smuggle its own statement past the prefix check.
-// Function calls (pg_read_file, \gexec's DO blocks, dollar quoting) never
-// even reach this predicate: parentheses, backslashes and '$' are shell
-// metacharacters, and no such text is registered in auditedScripts.
+// pgCatalogProbeStatements are the EXACT statement grammars probePSQL
+// composes (internal/database/postgres.go) — DatabaseExists' pg_database
+// lookup and UserGranted's ownership join — anchored end-to-end, double
+// quotes included. The value slots accept exactly config.Validate's
+// SQL-identifier shape (reSQLIdent: [A-Za-z_][A-Za-z0-9_]{0,63}); an
+// identifier can carry no quote, space or keyword, so no clause fits in a
+// slot and nothing can follow the closing quote. The previous pin was a
+// PREFIX ("SELECT 1 FROM pg_"), and a prefix blessed a trailing FOR UPDATE
+// — row locks write tuple-header state and WAL — the same prefix-not-shape
+// weakness that let nine denylists fail open. With anchored grammars there
+// is nowhere to append: FOR UPDATE/FOR SHARE, a second statement, INTO,
+// COPY and a smuggled quote all fail the match, with no scan for any of
+// them needed.
+var pgCatalogProbeStatements = []*regexp.Regexp{
+	regexp.MustCompile(`^"SELECT 1 FROM pg_database WHERE datname='[A-Za-z_][A-Za-z0-9_]{0,63}'"$`),
+	regexp.MustCompile(`^"SELECT 1 FROM pg_database d JOIN pg_roles r ON r\.oid = d\.datdba WHERE d\.datname='[A-Za-z_][A-Za-z0-9_]{0,63}' AND r\.rolname='[A-Za-z_][A-Za-z0-9_]{0,63}'"$`),
+}
+
+// sudoIsPostgresCatalogProbe allows only probePSQL's two catalog probes
+// (internal/database/postgres.go): `sudo -u postgres psql -X -tAc "<one of
+// pgCatalogProbeStatements>"`. Every pin is load-bearing: the target user
+// must be postgres (peer auth on the local cluster), the program psql with
+// exactly -X -tAc — -X skips ~postgres/.psqlrc, whose \! escapes would
+// execute a startup file's contents from inside a read-only Check, so the
+// -X-less spelling is pinned rejected — and the statement must match one of
+// the anchored grammars above. Function calls (pg_read_file, \gexec's DO
+// blocks, dollar quoting) never even reach this predicate: parentheses,
+// backslashes and '$' are shell metacharacters, and no such text is
+// registered in auditedScripts.
 func sudoIsPostgresCatalogProbe(args []string) bool {
-	if len(args) < 5 || args[0] != "-u" || args[1] != "postgres" || args[2] != "psql" || args[3] != "-tAc" {
+	if len(args) < 6 || args[0] != "-u" || args[1] != "postgres" || args[2] != "psql" ||
+		args[3] != "-X" || args[4] != "-tAc" {
 		return false
 	}
-	q := strings.Join(args[4:], " ")
-	if !strings.HasPrefix(q, `"SELECT 1 FROM pg_`) ||
-		!strings.HasSuffix(q, `"`) || strings.Count(q, `"`) != 2 {
-		return false
+	q := strings.Join(args[5:], " ")
+	for _, re := range pgCatalogProbeStatements {
+		if re.MatchString(q) {
+			return true
+		}
 	}
-	up := strings.ToUpper(q)
-	return !strings.Contains(q, ";") && !strings.Contains(up, "INTO") && !strings.Contains(up, "COPY")
+	return false
 }
 
 // mysqlIsReadOnlyProbe allows only probeSQL's shape

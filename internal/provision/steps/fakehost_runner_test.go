@@ -1046,7 +1046,7 @@ func (r *recordingRunner) answerMySQLScalar(hit bool) bssh.Result {
 // purpose, so a production probe change makes the answer fall away loudly
 // instead of feeding the new shape a stale reply.
 func pgProbeCmd(query string) string {
-	return `sudo -u postgres psql -tAc "` + query + `"`
+	return `sudo -u postgres psql -X -tAc "` + query + `"`
 }
 
 func pgDBExistsProbe(db string) string {
