@@ -97,13 +97,19 @@ var expectedRefusals = map[string]string{
 // every remaining entry be OBSERVED, per variant.
 func refusalsFor(variant string) map[string]string {
 	m := maps.Clone(expectedRefusals)
-	if variant == "maximal" {
+	switch variant {
+	case "maximal":
 		// system: with system.swap declared, foreign's unmarked /swapfile
 		// fstab line walks checkSwap's conflict guard (system.go) — the
 		// swap-file ownership rule (berth adopts only what it can prove it
 		// created), and the FIRST guard the step's Check reaches, ahead of
 		// the swappiness drop-in's drift classify.
 		m["system"] = "not managed by berth"
+	case "postgres":
+		// tuning is registered only for the mariadb engine (registry.go), so
+		// there is no Check to refuse — keeping the entry would be exactly
+		// the dead allowance guard 4c exists to reject.
+		delete(m, "tuning")
 	}
 	return m
 }
@@ -144,6 +150,21 @@ func wantStepsFor(variant string) []string {
 // a Check calling os.WriteFile, os/exec or a network API is invisible here. The
 // fleet-status spec's original "strictly read-only" claim was wrong in exactly
 // this way, so this test states its limits rather than implying it has none.
+//
+// THE SEAM ITSELF WRITES, and this contract cannot see it: berth's Runner
+// wraps every command in `sudo -n -- /bin/sh -c …` whenever it is connected
+// as a non-root user (internal/ssh/client.go), which is the normal case, and
+// sudo's authentication logging accompanies each wrapped command — its
+// command line plus a pam_unix session open/close pair, three journal lines
+// per command, measured on a provisioned Debian 13 host. A drift sweep
+// issuing dozens of probes therefore writes over a hundred journal lines per
+// host purely by doing privileged work over SSH; none of it changes the
+// server's configuration or data, and all of it sits below the seam this
+// contract governs, which starts at the command a Check hands to the Runner.
+// That measurement is also why the postgres engine's in-text
+// `sudo -u postgres psql` probe is classified a READ on an exact allowlist
+// rather than a fourth exception: it adds one journal line to the three its
+// command already generates by being run at all.
 func TestChecksAreReadOnly(t *testing.T) {
 	for _, variant := range contractVariants {
 		t.Run(variant, func(t *testing.T) { checksAreReadOnly(t, variant) })

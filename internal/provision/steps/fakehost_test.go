@@ -222,8 +222,13 @@ var fakeHostProfiles = []string{"fresh", "converged", "drifted", "foreign", "run
 // fixture, preserved unchanged so today's coverage cannot shrink; maximal
 // turns on every system knob (swap + swappiness, the kernel sysctl drop-in,
 // timezone, static hostname — all opt-in and all off in baseline) and gives
-// the site a repository (the deploy-key and known-host probes).
-var contractVariants = []string{"baseline", "maximal"}
+// the site a repository (the deploy-key and known-host probes); postgres
+// swaps the database engine, whose Check probes are engine-specific code the
+// mariadb variants never reach. postgres differs from baseline in the engine
+// ALONE, so a violation there is engine-attributable on sight — the knob and
+// repository branches are engine-independent and already contracted by
+// maximal, and a fourth all-on variant would re-run them for no new edge.
+var contractVariants = []string{"baseline", "maximal", "postgres"}
 
 // contractServer is the baseline fixture — see variantServer for the set.
 func contractServer(t *testing.T) *config.Server {
@@ -316,6 +321,14 @@ func variantServer(t *testing.T, variant string) *config.Server {
 		// bearing ssh-keygen -F). scp-like SSH form, the shape validGitURL
 		// accepts; the default port keeps the token the bare hostname.
 		srv.Sites[0].Repository = "git@git.example.com:app/app.git"
+	case "postgres":
+		srv.ID = "contract-postgres"
+		// The engine variant: postgres source debian (a valid pairing per
+		// config.Validate — the engine's one upstream would be pgdg). The
+		// pipeline registers NO tuning step for it (registry.go), and
+		// database.Check's engine probes go through peer-auth psql instead
+		// of the mysql client.
+		srv.Database = config.Database{Engine: "postgres", Source: "debian"}
 	default:
 		panic("unknown contract variant: " + variant)
 	}
@@ -498,11 +511,16 @@ func populateInstalled(h *fakeHost, s *config.Server, profile string) {
 	if profile == "runtime-stale" {
 		needReload, stamp = "yes", "@1000000000" // active since BEFORE the files
 	}
+	eng, err := dbpkg.Get(s.Database.Engine)
+	if err != nil {
+		panic("look up the fixture database engine: " + err.Error())
+	}
 	for _, p := range []string{
 		"nginx", "php" + s.PHP.Version + "-fpm", "php" + s.PHP.Version + "-cli",
-		// The engine PDO driver php.Check probes last (mariadb -> pdo_mysql).
-		"php" + s.PHP.Version + "-mysql",
-		"mariadb-server", "valkey-server", "supervisor", "fail2ban", "ufw",
+		// The engine PDO driver php.Check probes last (phpPDOExt: mariadb ->
+		// pdo_mysql, postgres -> pdo_pgsql).
+		"php" + s.PHP.Version + "-" + phpPDOExt(s.Database.Engine),
+		eng.ServerPackage(), "valkey-server", "supervisor", "fail2ban", "ufw",
 		"certbot", "restic", "cron", "unattended-upgrades", "curl", "gnupg",
 		// The rest of basePackages (systembase.go): a converged host has them
 		// all, or base.Check honestly reports it unconverged.
@@ -511,7 +529,7 @@ func populateInstalled(h *fakeHost, s *config.Server, profile string) {
 		h.packages[p] = "Status: install ok installed"
 	}
 	units := []string{
-		"nginx", config.FPMServiceName(s.PHP.Version), "mariadb", "fail2ban",
+		"nginx", config.FPMServiceName(s.PHP.Version), engineUnit(s.Database.Engine), "fail2ban",
 		"cron", "ssh", "supervisor", "certbot.timer", "ufw",
 	}
 	for _, site := range s.Sites {
@@ -531,7 +549,7 @@ func populateInstalled(h *fakeHost, s *config.Server, profile string) {
 	// exactly what valkey.Check requires, so it must be modelled as present-
 	// but-down, not absent.
 	h.units["valkey-server.service"] = fakeUnit{active: false, enabled: false, props: map[string]string{}}
-	for _, tool := range []string{"nginx", "php-fpm" + s.PHP.Version, "restic", "certbot", "gpg", "logrotate", "supervisorctl", "composer", "mysqldump"} {
+	for _, tool := range []string{"nginx", "php-fpm" + s.PHP.Version, "restic", "certbot", "gpg", "logrotate", "supervisorctl", "composer", dumpClientBinary(s.Database.Engine)} {
 		h.tools[tool] = true
 	}
 	// Every modelled LE lineage is comfortably outside the 30-day renew
@@ -574,6 +592,16 @@ func populateInstalled(h *fakeHost, s *config.Server, profile string) {
 				mode: "700", kind: "directory", mtimeUnix: 1500000000}
 		}
 	}
+}
+
+// engineUnit is the database server's systemd unit for the modelled engine.
+// No berth Check probes it by name today — it exists so the SQL-probe answers
+// can gate on a running daemon the way a real client's connect would.
+func engineUnit(engine string) string {
+	if engine == "postgres" {
+		return "postgresql"
+	}
+	return "mariadb"
 }
 
 // populateSystemArtifacts models the state behind the system step's opt-in
@@ -699,6 +727,14 @@ func (h *fakeHost) putManaged(path string, body []byte, profile string) {
 // it is done the contract's converged assertion fails BY DESIGN.
 func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 	site := s.Sites[0]
+	// The engine drives the client-auth file, the backup script's dump
+	// command and the tuning drop-in's existence — dbpkg.Get IS the lookup
+	// the steps themselves make, so the fixture renders with the same engine
+	// object the Checks compare against.
+	eng, err := dbpkg.Get(s.Database.Engine)
+	if err != nil {
+		panic("look up the fixture database engine: " + err.Error())
+	}
 	owner, uid := s.SiteUser(site), 1001
 	if profile == "foreign" {
 		owner, uid = "someoneelse", 1999
@@ -847,13 +883,16 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 	h.files[phpLogDir] = fakeFile{owner: "root", group: "root", uid: 0, gid: 0,
 		mode: "755", kind: "directory", mtimeUnix: 1500000000}
 
-	// tuning's MariaDB drop-in and valkey's per-site instance unit, same
-	// renderer-fed discipline.
-	mariadbTuning, err := renderMariaDBTuning(s)
-	if err != nil {
-		panic("render mariadb_tuning.cnf.tmpl: " + err.Error())
+	// tuning's MariaDB drop-in (only that engine registers the step, and a
+	// postgres host has no /etc/mysql to hold it) and valkey's per-site
+	// instance unit, same renderer-fed discipline.
+	if s.Database.Engine == "mariadb" {
+		mariadbTuning, err := renderMariaDBTuning(s)
+		if err != nil {
+			panic("render mariadb_tuning.cnf.tmpl: " + err.Error())
+		}
+		h.putManaged(mariadbTuningPath, mariadbTuning, profile)
 	}
-	h.putManaged(mariadbTuningPath, mariadbTuning, profile)
 	for _, st := range s.Sites {
 		unit, err := renderValkeyUnit(s, st)
 		if err != nil {
@@ -862,22 +901,25 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 		h.putManaged(valkeyUnitPath(st.Domain), unit, profile)
 	}
 
-	// The site's shared/.env and ~/.my.cnf are secret-bearing, seed-if-absent
-	// files — NEVER marker-managed, so putManaged's foreign/drifted grammar
-	// does not apply. Provisioned profiles carry them with the values the
-	// seeded local cache also holds (a healthy host agrees with its cache);
-	// foreign carries neither — a tree berth never provisioned has no berth
-	// .env, and database.Check honestly stops at "credential not yet
-	// persisted" instead of refusing. The .env body is built by the same
-	// secret.EnvFile serializer the seed uses, over a kv mirroring
-	// seedSharedEnv's (database.go).
+	// The site's shared/.env and ~/.my.cnf (~/.pgpass under postgres) are
+	// secret-bearing, seed-if-absent files — NEVER marker-managed, so
+	// putManaged's foreign/drifted grammar does not apply. Provisioned
+	// profiles carry them with the values the seeded local cache also holds
+	// (a healthy host agrees with its cache); foreign carries neither — a
+	// tree berth never provisioned has no berth .env, and database.Check
+	// honestly stops at "credential not yet persisted" instead of refusing.
+	// The .env body is built by the same secret.EnvFile serializer the seed
+	// uses, over a kv mirroring seedSharedEnv's (database.go); the client-
+	// auth content comes from the engine's own ClientAuthFile — the exact
+	// bytes the step seeds (only existence is ever probed, but a fixture for
+	// a file berth renders must BE the rendered output).
 	if profile != "foreign" {
 		user := s.SiteUser(site)
-		h.files[sharedEnvPath(site)] = fakeFile{content: string(fixtureSharedEnvBody()),
+		h.files[sharedEnvPath(site)] = fakeFile{content: string(fixtureSharedEnvBody(s)),
 			owner: user, group: user, uid: 1001, gid: 1001,
 			mode: "600", kind: "regular file", mtimeUnix: 1500000000}
-		h.files["/home/"+user+"/.my.cnf"] = fakeFile{
-			content: string(dbpkg.MariaDB{}.ClientAuthFile(s.SiteDBName(site), s.SiteDBUser(site), fixtureDBValue)),
+		h.files["/home/"+user+"/"+eng.ClientAuthFileName()] = fakeFile{
+			content: string(eng.ClientAuthFile(s.SiteDBName(site), s.SiteDBUser(site), fixtureDBValue)),
 			owner:   user, group: user, uid: 1001, gid: 1001,
 			mode: "600", kind: "regular file", mtimeUnix: 1500000000}
 	}
@@ -983,7 +1025,7 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 	// fragment and the root-owned directory skeleton (Decision 1: a root
 	// cron must never write into tenant territory, so owner/mode ARE the
 	// step's contract and its Check stats them all).
-	bscript, err := renderBackupScript(s, site, dbpkg.MariaDB{})
+	bscript, err := renderBackupScript(s, site, eng)
 	if err != nil {
 		panic("render backup.sh.tmpl: " + err.Error())
 	}
@@ -1104,18 +1146,20 @@ func fixtureRenewalConf(domain string) string {
 
 // fixtureSharedEnvBody is the modelled site's shared/.env as a successful
 // provision leaves it: the kv mirrors seedSharedEnv's map (database.go) for
-// the fixture site over the mariadb engine with Valkey on — a copy on
+// the fixture site over the configured engine with Valkey on — a copy on
 // purpose, so a production seed change makes database.Check's probes read
 // honestly different bytes here — and the serialization is the SAME
 // secret.EnvFile the seed calls (sorted keys, one KEY=value per line).
 // database.Check never hashes this file; it greps the DB_CONNECTION,
 // DB_PASSWORD and APP_KEY lines and compares the latter two against the
-// seeded local cache, so the fixture values must be the cache's values.
-// The other keys (DB_HOST/DB_PORT/DB_SOCKET, the cache/queue/redis block)
-// are mirrored for the seed-map fidelity above but VERIFIED BY NO CHECK
-// today — no probe reads them, so a wrong value there cannot fail a test.
-func fixtureSharedEnvBody() []byte {
-	body, err := secret.EnvFile(map[string]string{
+// seeded local cache, so the fixture values must be the cache's values —
+// and DB_CONNECTION must be the engine's driver, or assertEnvEngineMatch
+// rightly hard-errors. The other keys (DB_HOST/DB_PORT/DB_SOCKET, the
+// cache/queue/redis block) are mirrored for the seed-map fidelity above but
+// VERIFIED BY NO CHECK today — no probe reads them, so a wrong value there
+// cannot fail a test.
+func fixtureSharedEnvBody(s *config.Server) []byte {
+	kv := map[string]string{
 		"APP_ENV":          "production",
 		"APP_DEBUG":        "false",
 		"APP_URL":          "https://app.example.com",
@@ -1136,7 +1180,17 @@ func fixtureSharedEnvBody() []byte {
 		"REDIS_PORT":       "0",
 		"REDIS_DB":         "0",
 		"REDIS_CACHE_DB":   "1",
-	})
+	}
+	if s.Database.Engine == "postgres" {
+		// Postgres.EnvConnection mirrored: pgsql over TCP loopback (the app
+		// role cannot use peer auth), and no DB_SOCKET key — seedSharedEnv
+		// sets it only for a non-empty socket.
+		kv["DB_CONNECTION"] = "pgsql"
+		kv["DB_HOST"] = "127.0.0.1"
+		kv["DB_PORT"] = "5432"
+		delete(kv, "DB_SOCKET")
+	}
+	body, err := secret.EnvFile(kv)
 	if err != nil {
 		panic("render the fixture shared/.env: " + err.Error())
 	}

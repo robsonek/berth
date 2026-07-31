@@ -204,6 +204,31 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{`mysql --protocol=socket`, cmdRejected},
 		{`mysql -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app'"`, cmdRejected},
 
+		// The postgres engine's catalog probes (probePSQL,
+		// internal/database/postgres.go): sudo is THE privilege wrapper, so
+		// only the exact peer-auth `psql -tAc "SELECT 1 FROM pg_…"` shape
+		// reads. DDL/DML, a ;-chain, SELECT INTO (creates a table), COPY
+		// (writes files as the server), a smuggled second -c, a different
+		// target user, Apply's stdin-fed psql and pg_dump, and any other
+		// program behind sudo must all reject. Function calls and psql
+		// backslash commands never even reach the predicate — parentheses
+		// and backslashes are metacharacters, and none of that text is
+		// registered.
+		{`sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='app'"`, cmdReadOnly},
+		{`sudo -u postgres psql -tAc "SELECT 1 FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE d.datname='app' AND r.rolname='app'"`, cmdReadOnly},
+		{`sudo -u postgres psql -tAc "DROP DATABASE app"`, cmdRejected},
+		{`sudo -u postgres psql -tAc "SELECT 1 FROM pg_database; DROP DATABASE app"`, cmdRejected},
+		{`sudo -u postgres psql -tAc "SELECT 1 FROM pg_database INTO scratch"`, cmdRejected},
+		{`sudo -u postgres psql -tAc "COPY pg_database TO '/tmp/x'"`, cmdRejected},
+		{`sudo -u postgres psql -tAc "SELECT 1 FROM pg_database" -c "DROP DATABASE app"`, cmdRejected},
+		{`sudo -u postgres psql -f /tmp/script.sql`, cmdRejected},
+		{`sudo -u postgres psql -v ON_ERROR_STOP=1`, cmdRejected},
+		{`sudo -u postgres pg_dump 'app'`, cmdRejected},
+		{`sudo -u root psql -tAc "SELECT 1 FROM pg_database WHERE datname='app'"`, cmdRejected},
+		{`sudo rm -rf /var/www`, cmdRejected},
+		{`sudo -i`, cmdRejected},
+		{`sudo -u postgres psql -tAc "SELECT 1 FROM pg_stat_file('/etc/shadow')"`, cmdRejected}, // parens: the metachar route, unregistered
+
 		// valkey's per-site liveness probe (valkeyPingCmd, valkey.go): PING
 		// over the tenant's own socket mutates nothing on the valkey side,
 		// and setpriv changes credentials without PAM, so — unlike the
@@ -533,8 +558,11 @@ var auditedScripts = map[string]string{
 	// commandExists' PATH probe (backups.go), issued for the engine's dump
 	// binary. Audited: `command -v` resolves a name against PATH without
 	// executing anything; both redirections aim at the null device and the
-	// caller reads only the exit code. Nothing writes.
+	// caller reads only the exit code. Nothing writes. One entry per engine
+	// binary the variants reach (dumpClientBinary: mariadb → mysqldump,
+	// postgres → pg_dump).
 	commandVProbeCmd("mysqldump"): "commandExists (backups.go) for the mariadb dump client: command -v with output discarded — reads only",
+	commandVProbeCmd("pg_dump"):   "commandExists (backups.go) for the postgres dump client: command -v with output discarded — reads only",
 
 	// findRegularFiles' guarded listings (site.go), issued by orphanSiteFiles
 	// over the three orphan namespaces. Audited: `[ -d ]` existence test
@@ -968,6 +996,18 @@ var simpleShapes = []simpleShape{
 		why: "pinned to KeyringHoldsExactly's exact argv (apt.go)"},
 	{verb: "mysql", allow: mysqlIsReadOnlyProbe, verdict: cmdReadOnly,
 		why: "only probeSQL's -N -e information_schema SELECT reads; any other statement, a ;-chain, INTO OUTFILE or an extra option mutates"},
+	// sudo is THE privilege wrapper — everything behind it is arbitrary code
+	// as another uid unless the whole argv is pinned. The one shape a Check
+	// issues in-text is postgres's peer-auth catalog probe (berth's own
+	// root wrapping happens at the SSH transport, never in command text).
+	// Adjudicated a READ, not a fourth exception: sudo's authentication
+	// logging (a command line plus a PAM session pair in the journal)
+	// already accompanies EVERY probe via the transport wrapper on a
+	// non-root connection — measured at three lines per command — so it is
+	// a property of the seam, not of this shape; see the contract header in
+	// checkreadonly_test.go.
+	{verb: "sudo", allow: sudoIsPostgresCatalogProbe, verdict: cmdReadOnly,
+		why: "pinned to probePSQL's peer-auth catalog SELECT (database/postgres.go); any other statement, option or program behind sudo mutates or executes arbitrarily"},
 	// valkey's liveness probe, a plain read since it moved off runuser:
 	// setpriv changes credentials directly, without PAM, so nothing reaches
 	// the journal (measured 2026-07 on a provisioned Debian 13 host: setpriv
@@ -1047,6 +1087,33 @@ func opensslX509IsReadOnly(args []string) bool {
 		return !strings.HasPrefix(args[5], "-")
 	}
 	return false
+}
+
+// sudoIsPostgresCatalogProbe allows only probePSQL's shape
+// (internal/database/postgres.go): `sudo -u postgres psql -tAc
+// "SELECT 1 FROM pg_…"`. Every pin is load-bearing: the target user must be
+// postgres (peer auth on the local cluster), the program psql with exactly
+// -tAc, and the statement one double-quoted SELECT against a pg_ catalog.
+// Rejected on top of the shape, mirroring the mysql predicate: a second
+// statement (';'), INTO (SELECT … INTO creates a table — the bare-word
+// match over-rejects a column literally named INTO, the safe direction),
+// COPY (writes server-side files as the postgres process), and any extra
+// double quote (exactly one opening and one closing), so a trailing option
+// or a second -c cannot smuggle its own statement past the prefix check.
+// Function calls (pg_read_file, \gexec's DO blocks, dollar quoting) never
+// even reach this predicate: parentheses, backslashes and '$' are shell
+// metacharacters, and no such text is registered in auditedScripts.
+func sudoIsPostgresCatalogProbe(args []string) bool {
+	if len(args) < 5 || args[0] != "-u" || args[1] != "postgres" || args[2] != "psql" || args[3] != "-tAc" {
+		return false
+	}
+	q := strings.Join(args[4:], " ")
+	if !strings.HasPrefix(q, `"SELECT 1 FROM pg_`) ||
+		!strings.HasSuffix(q, `"`) || strings.Count(q, `"`) != 2 {
+		return false
+	}
+	up := strings.ToUpper(q)
+	return !strings.Contains(q, ";") && !strings.Contains(up, "INTO") && !strings.Contains(up, "COPY")
 }
 
 // mysqlIsReadOnlyProbe allows only probeSQL's shape
