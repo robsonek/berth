@@ -94,14 +94,15 @@ var expectedRefusals = map[string]string{
 // TestChecksAreReadOnly is the contract.
 //
 // THE PROMISE IT ENFORCES: every command a Check issues is read-only, except
-// FOUR named writers — `nginx -t` (as root may create a missing log file),
-// `php-fpm<ver> -t` (appends a notice to the PHP-FPM log), `certbot
+// THREE named writers — `nginx -t` (as root may create a missing log file),
+// `php-fpm<ver> -t` (appends a notice to the PHP-FPM log) and `certbot
 // certificates` (appends its certificate inventory to certbot's own log and
-// touches its lock files; measured on certbot 4.0.0, Debian 13) and the
-// valkey PING probe's `runuser` wrapper (pam_unix logs a session open/close
-// pair to the journal per invocation; measured 2026-07, Debian 13). All four
+// touches its lock files; measured on certbot 4.0.0, Debian 13). All three
 // are evidence-backed, and Guard 4b below requires each to be OBSERVED, so
-// none can rot into an unexercised allowance.
+// none can rot into an unexercised allowance. (The valkey PING probe was the
+// fourth: its `runuser` wrapper logged a PAM session pair to the journal per
+// invocation. It runs through `setpriv` now — no PAM, nothing written — so
+// it is classified a plain read and runuser is rejected outright.)
 //
 // WHAT THIS DOES NOT PROVE — read before trusting it. It does not prove a Check
 // is read-only on a REAL host. It proves that the commands a Check ISSUES under
@@ -276,17 +277,12 @@ func TestChecksAreReadOnly(t *testing.T) {
 			"  tls.Check's certStatus issues it for every letsencrypt site; if no profile\n" +
 			"  reaches it, the tls model regressed.")
 	}
-	// The fourth exception — runuser's PAM session logging (two pam_unix
-	// journal lines per invocation, measured 2026-07 on a provisioned
-	// Debian 13 host). valkey.Check pings each instance through it, so at
-	// least one profile must record it; the key derives from the fixture the
-	// pipeline ran with (site user + the domain's pool derivation), like the
-	// php-fpm key above.
-	if ping := valkeyPingProbeCmd(srv.SiteUser(srv.Sites[0]), strings.ReplaceAll(srv.Sites[0].Domain, ".", "_")); !sawException[ping] {
-		add("%q was never observed — same reason as nginx -t above. (valkey.Check pings\n"+
-			"  each instance through runuser; if no profile reaches it, the valkey model\n"+
-			"  regressed.)", ping)
-	}
+	// There is no fourth exception any more: the valkey PING probe's runuser
+	// wrapper (a PAM session pair in the journal per invocation) was replaced
+	// by setpriv, which writes nothing, so the probe is judged a plain read
+	// by the tables. Its coverage is not lost — the fake host still answers
+	// only the exact probe shape, and TestConvergedIsGenuinelySatisfied
+	// requires valkey.Check to reach Satisfied, which needs the PONG.
 	// Guard 4c, the symmetry of 4b for the OTHER allowance this contract
 	// grants: every expectedRefusals entry must have been observed under
 	// foreign. An entry nobody exercises is a dead allowance — if a model or

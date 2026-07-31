@@ -33,6 +33,15 @@ Notable changes to berth. Older releases are documented on the
   journal; no configuration, data, packages, services or certificates
   change — and the contract test above is what keeps it honest. No behaviour
   changed; the claim was imprecise, not the code.
+- **The valkey liveness probe no longer writes to the journal.** It ran
+  `valkey-cli` through `runuser`, which opens a PAM session, and pam_unix
+  logs a session open/close pair per invocation — so a read-only check wrote
+  two journal lines per site on every run, including every
+  `berth status --drift` sweep (the probe the entry above names). It now runs
+  through `setpriv`, which changes the credentials without PAM and writes
+  nothing. Cross-tenant isolation is unchanged, verified on a live
+  provisioned Debian 13 host: the probe still answers PONG on the tenant's
+  own socket and Permission denied on a sibling's.
 
 ## [0.29.0] — 2026-07-30
 

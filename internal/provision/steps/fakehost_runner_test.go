@@ -913,7 +913,9 @@ func mariadbUserGrantedProbe(user, db string) string {
 // valkeyPingProbeCmd mirrors valkeyPingCmd's composition (valkey.go) — a copy
 // on purpose (see above).
 func valkeyPingProbeCmd(user, pool string) string {
-	return "runuser -u " + shQuote(user) + " -- valkey-cli -s " + shQuote("/run/berth-valkey/"+pool+"/valkey.sock") + " ping"
+	qu := shQuote(user)
+	return "setpriv --reuid " + qu + " --regid " + qu + " --init-groups -- valkey-cli -s " +
+		shQuote("/run/berth-valkey/"+pool+"/valkey.sock") + " ping"
 }
 
 // answerMySQLScalar evaluates a probeSQL query whose modelled truth is hit:

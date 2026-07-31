@@ -34,9 +34,8 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{"getent passwd appuser", cmdReadOnly},
 		{"id -u appuser", cmdReadOnly},
 
-		// The named exceptions, all evidence-backed (spec §4.2; certbot and
-		// runuser measured 2026-07, see their shape entries — runuser's row
-		// sits with its rejected siblings below). Exact shapes.
+		// The named exceptions, all evidence-backed (spec §4.2; certbot
+		// measured 2026-07, see its shape entry). Exact shapes.
 		{"nginx -t", cmdException},
 		{"php-fpm8.4 -t", cmdException},
 		{"certbot certificates", cmdException},
@@ -47,7 +46,7 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{"php-fpm -t", cmdRejected},
 		{"php-fpm8 -t", cmdRejected},
 		// Every other certbot subcommand drives issuance/renewal state and
-		// must reject — pinned the way mysql's and runuser's mutating
+		// must reject — pinned the way mysql's and setpriv's mutating
 		// siblings were. Extra arguments on the listing reject too: only the
 		// bare inventory was measured.
 		{"certbot certonly --webroot -w /var/www/berth-acme/app.example.com -d app.example.com", cmdRejected},
@@ -207,17 +206,27 @@ func TestClassifyCommandPolicy(t *testing.T) {
 
 		// valkey's per-site liveness probe (valkeyPingCmd, valkey.go): PING
 		// over the tenant's own socket mutates nothing on the valkey side,
-		// but runuser itself opens a PAM session and pam_unix logs two lines
-		// to the journal per invocation (measured 2026-07, Debian 13) — so
-		// the probe is the FOURTH named exception, not a read. Any other
-		// valkey-cli verb (FLUSHALL, SHUTDOWN, SET…), a socket outside
-		// berth's runtime base, or any other program behind runuser is
-		// arbitrary code under another uid and must reject.
-		{`runuser -u 'appuser' -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' ping`, cmdException},
-		{`runuser -u 'appuser' -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' flushall`, cmdRejected},
-		{`runuser -u 'appuser' -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' shutdown`, cmdRejected},
-		{`runuser -u 'appuser' -- valkey-cli -s '/tmp/evil.sock' ping`, cmdRejected},
-		{`runuser -u 'appuser' -- rm -rf /var/www`, cmdRejected},
+		// and setpriv changes credentials without PAM, so — unlike the
+		// runuser wrapper it replaced — nothing reaches the journal (measured
+		// 2026-07 on a provisioned Debian 13 host: setpriv 0 lines, runuser 2)
+		// and the probe is a plain read again. Any other valkey-cli verb
+		// (FLUSHALL, SHUTDOWN, SET…), a socket outside berth's runtime base,
+		// a dropped --init-groups, a uid/gid mismatch, or any other program
+		// behind setpriv is arbitrary code under another uid and must reject.
+		{`setpriv --reuid 'appuser' --regid 'appuser' --init-groups -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' ping`, cmdReadOnly},
+		{`setpriv --reuid 'appuser' --regid 'appuser' --init-groups -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' flushall`, cmdRejected},
+		{`setpriv --reuid 'appuser' --regid 'appuser' --init-groups -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' shutdown`, cmdRejected},
+		{`setpriv --reuid 'appuser' --regid 'appuser' --init-groups -- valkey-cli -s '/tmp/evil.sock' ping`, cmdRejected},
+		{`setpriv --reuid 'appuser' --regid 'appuser' --init-groups -- rm -rf /var/www`, cmdRejected},
+		{`setpriv --reuid 'appuser' --regid 'appuser' -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' ping`, cmdRejected},
+		{`setpriv --reuid 'appuser' --regid 'root' --init-groups -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' ping`, cmdRejected},
+		{`setpriv --reuid root -- sh`, cmdRejected},
+		// runuser is rejected ENTIRELY now: no Check issues it any more, and
+		// it is a privilege-changing wrapper that writes (the PAM session
+		// pair). The exact old ping form is pinned so a regression back to it
+		// fails loudly instead of riding a stale allowance.
+		{`runuser -u 'x' -- valkey-cli -s '/run/berth-valkey/a/valkey.sock' ping`, cmdRejected},
+		{`runuser -u 'appuser' -- valkey-cli -s '/run/berth-valkey/app_example_com/valkey.sock' ping`, cmdRejected},
 		{`runuser -l root`, cmdRejected},
 
 		// The test builtin's -ef comparison (site.Check probes that the
@@ -350,7 +359,7 @@ type cmdVerdict int
 
 const (
 	cmdReadOnly  cmdVerdict = iota // a pure read, judged by the tables
-	cmdException                   // allowed, but known to write (the nginx -t, certbot certificates and runuser table entries and the php-fpm branch in classifySimple)
+	cmdException                   // allowed, but known to write (the nginx -t and certbot certificates table entries and the php-fpm branch in classifySimple)
 	cmdAudited                     // a generated script whose exact text a human signed off
 	cmdRejected                    // everything else — mutating, unknown, or unparsed
 )
@@ -907,16 +916,16 @@ var simpleShapes = []simpleShape{
 		why: "pinned to KeyringHoldsExactly's exact argv (apt.go)"},
 	{verb: "mysql", allow: mysqlIsReadOnlyProbe, verdict: cmdReadOnly,
 		why: "only probeSQL's -N -e information_schema SELECT reads; any other statement, a ;-chain, INTO OUTFILE or an extra option mutates"},
-	// The fourth exception: runuser itself writes. Every invocation opens a
-	// PAM session, and pam_unix logs exactly two lines to the journal —
-	// "session opened for user <user>… by <user>(uid=0)" and "session closed
-	// for user <user>" (measured 2026-07 on a provisioned Debian 13 host).
-	// valkey.Check pings each instance through it, per site per run, so the
-	// journal grows on every drift scan. The shape stays pinned to the PING
-	// probe; anything else behind runuser is an arbitrary program under
-	// another uid and rejects.
-	{verb: "runuser", allow: runuserIsValkeyPing, verdict: cmdException,
-		why: "runuser opens a PAM session: pam_unix writes two session lines to the journal per invocation (measured 2026-07, Debian 13)"},
+	// valkey's liveness probe, a plain read since it moved off runuser:
+	// setpriv changes credentials directly, without PAM, so nothing reaches
+	// the journal (measured 2026-07 on a provisioned Debian 13 host: setpriv
+	// 0 lines, runuser 2 — the pam_unix session pair that made the old
+	// wrapper the fourth exception). The shape stays pinned to the PING
+	// probe; anything else behind setpriv is an arbitrary program under
+	// another uid and rejects. runuser has NO table entry any more: no Check
+	// issues it, so it rejects as an unknown verb — see its policy rows.
+	{verb: "setpriv", allow: setprivIsValkeyPing, verdict: cmdReadOnly,
+		why: "pinned to valkeyPingCmd's shape (valkey.go): a credential change without PAM into valkey-cli PING on a berth socket"},
 }
 
 // sedIsReadOnly pins the one sed shape the policy table blesses:
@@ -1013,18 +1022,20 @@ func mysqlIsReadOnlyProbe(args []string) bool {
 	return !strings.Contains(q, ";") && !strings.Contains(up, "INTO") && !strings.Contains(up, "LOAD_FILE")
 }
 
-// runuserIsValkeyPing allows only valkeyPingCmd's shape (valkey.go):
-// `runuser -u <user> -- valkey-cli -s '/run/berth-valkey/…' ping`, argument
-// by argument. The trailing verb is pinned to `ping` (a PONG probe — the
-// valkey side mutates nothing) and the socket to berth's per-site runtime
-// base. The user and the socket tail stay free: they are shQuote'd values,
-// and the shape is what bounds the command. The verdict is cmdException, not
-// a read: runuser itself logs a PAM session open/close pair to the journal
-// on every invocation (see the table entry).
-func runuserIsValkeyPing(args []string) bool {
-	return len(args) == 7 && args[0] == "-u" && args[2] == "--" &&
-		args[3] == "valkey-cli" && args[4] == "-s" && args[6] == "ping" &&
-		strings.HasPrefix(args[5], "'/run/berth-valkey/")
+// setprivIsValkeyPing allows only valkeyPingCmd's shape (valkey.go):
+// `setpriv --reuid <user> --regid <user> --init-groups -- valkey-cli -s
+// '/run/berth-valkey/…' ping`, argument by argument. The trailing verb is
+// pinned to `ping` (a PONG probe — the valkey side mutates nothing), the
+// socket to berth's per-site runtime base, and the uid/gid operands to the
+// SAME value — production passes one site user to both. --init-groups is
+// pinned by position: dropping it changes what the probe can reach, so the
+// shorter spelling must not ride along. The user and the socket tail stay
+// free: they are shQuote'd values, and the shape is what bounds the command.
+func setprivIsValkeyPing(args []string) bool {
+	return len(args) == 10 && args[0] == "--reuid" && args[2] == "--regid" &&
+		args[1] == args[3] && args[4] == "--init-groups" && args[5] == "--" &&
+		args[6] == "valkey-cli" && args[7] == "-s" && args[9] == "ping" &&
+		strings.HasPrefix(args[8], "'/run/berth-valkey/")
 }
 
 // gpgIsReadOnly pins KeyringHoldsExactly's EXACT argv (apt.go): six fixed
