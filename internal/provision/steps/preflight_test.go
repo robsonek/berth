@@ -12,7 +12,7 @@ import (
 
 // stubTrixie stubs the OS-release probe every preflight Check starts with.
 func stubTrixie(f *bssh.FakeRunner) {
-	f.On(". /etc/os-release && echo $VERSION_CODENAME", bssh.Result{Stdout: "trixie\n"})
+	f.On(osReleaseCodenameCmd, bssh.Result{Stdout: "VERSION_CODENAME=trixie\n"})
 }
 
 // lockTimeoutCatCmd is the managed-file read probe for the apt lock-timeout
@@ -21,10 +21,52 @@ func lockTimeoutCatCmd() string { return "cat " + shQuote(aptLockTimeoutPath) }
 
 func TestPreflightRejectsNonTrixie(t *testing.T) {
 	f := bssh.NewFakeRunner()
-	f.On(". /etc/os-release && echo $VERSION_CODENAME", bssh.Result{Stdout: "bookworm\n"})
+	f.On(osReleaseCodenameCmd, bssh.Result{Stdout: "VERSION_CODENAME=bookworm\n"})
 	_, err := Preflight().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
-	if err == nil {
-		t.Fatal("expected rejection of non-trixie")
+	// Match the message, not just non-nil: a bare err check once passed
+	// vacuously on FakeRunner's unstubbed-command error.
+	if err == nil || !strings.Contains(err.Error(), "unsupported OS") {
+		t.Fatalf("expected the unsupported-OS rejection of bookworm; got %v", err)
+	}
+}
+
+// A missing VERSION_CODENAME line (grep exit 1, empty stdout) must land in the
+// same unsupported-OS rejection the sourcing form gave for an unset variable,
+// not a new error path.
+func TestPreflightRejectsMissingCodenameLine(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On(osReleaseCodenameCmd, bssh.Result{ExitCode: 1})
+	_, err := Preflight().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
+	if err == nil || !strings.Contains(err.Error(), "unsupported OS") {
+		t.Fatalf("expected the unsupported-OS rejection on a missing codename line; got %v", err)
+	}
+}
+
+// os-release permits a quoted value (VERSION_CODENAME="trixie"); the parser
+// must strip that layer itself now that no shell evaluates the assignment.
+func TestPreflightAcceptsQuotedCodename(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On(osReleaseCodenameCmd, bssh.Result{Stdout: "VERSION_CODENAME=\"trixie\"\n"})
+	f.On(lockTimeoutCatCmd(), bssh.Result{ExitCode: 1})
+	cr, err := Preflight().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
+	if err != nil || cr.Satisfied {
+		t.Fatalf("quoted trixie should pass; got cr=%+v err=%v", cr, err)
+	}
+}
+
+// A tampered os-release must be read as DATA. The old form sourced the file, so
+// a substitution in it executed as root during a read-only check.
+func TestPreflightReadsOSReleaseAsData(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	stubTrixie(f)
+	f.On(lockTimeoutCatCmd(), bssh.Result{ExitCode: 1})
+	if _, err := Preflight().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.HasPrefix(c.Cmd, ". ") || strings.Contains(c.Cmd, "&& echo $") {
+			t.Errorf("preflight still sources a file: %q", c.Cmd)
+		}
 	}
 }
 

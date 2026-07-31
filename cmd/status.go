@@ -27,16 +27,20 @@ func newStatusCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "status [server...]",
 		Short: "Show a read-only view of one or more provisioned servers",
-		// The wording is deliberate and must not be shortened back to "never
-		// changes anything": --drift runs the pipeline's validators, and
-		// nginx -t can create a missing log file. An absolute promise the
-		// code cannot keep is worse than a precise one (spec §2.1).
+		// The wording is deliberate and must not be tightened back to "never
+		// changes anything": --drift runs the pipeline's read-only Checks,
+		// and a few of their probes leave a log-side trace (a validator's
+		// notice in its own service's log, a PAM session pair in the
+		// journal). The promise stays generic on purpose — the exact list is
+		// evidence-backed and enforced by TestChecksAreReadOnly (steps
+		// package), so naming probes here would only go stale. An absolute
+		// promise the code cannot keep is worse than a precise one (spec §2.1).
 		Long: "Probes each server read-only and reports drift, certificate expiry, backup\n" +
 			"freshness, service health and disk. It never changes a host's configuration,\n" +
 			"data, packages, services or certificates: repair stays an explicit\n" +
 			"`berth provision <config>`. With --drift it additionally runs the same\n" +
-			"validators provisioning runs (nginx -t among them), which can create a\n" +
-			"missing log file.",
+			"validators a provisioning run does; a few probes leave a line in a service\n" +
+			"log or the journal, and the promise above still holds.",
 		RunE: func(cmd *cobra.Command, args []string) error { return runStatus(cmd, args, f) },
 	}
 	c.Flags().StringVar(&f.configDir, "config-dir", "servers", "directory to scan when no configs are given")

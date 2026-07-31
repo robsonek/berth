@@ -3,6 +3,37 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Added
+
+- **Every pipeline `Check` is now enforced by contract test to issue only
+  read-only commands**, across five modelled host states, with named,
+  evidence-backed exceptions for the probes whose only host-side effect is a
+  line in a service log or the journal. Any command containing a shell
+  metacharacter must match an audited registry of the exact scripts berth
+  generates, byte for byte, so editing a probe helper forces a fresh audit of
+  what it sends to the host. Closes the last deferred item of the
+  `berth status` work.
+
+### Fixed
+
+- **`preflight` no longer sources `/etc/os-release`.** Its Check ran
+  `. /etc/os-release && …`, so a tampered or corrupted file executed arbitrary
+  commands as root from inside a read-only check — including under
+  `berth status --drift`. The codename is now read as data. Same class as the
+  offsite env sourcing hardened in 0.29.0.
+- **The documented effect of `berth status --drift` was incomplete.** The help
+  text and README admitted a single log-file side effect, but the sweep runs
+  every validator provisioning runs, and more of its probes than the docs
+  named leave a log-side trace on every invocation — a validator's notice in
+  its own service's log, and a PAM session pair in the journal from the
+  valkey liveness probe's `runuser` wrapper. Both now make the accurate,
+  general promise — a few probes leave a line in a service log or the
+  journal; no configuration, data, packages, services or certificates
+  change — and the contract test above is what keeps it honest. No behaviour
+  changed; the claim was imprecise, not the code.
+
 ## [0.29.0] — 2026-07-30
 
 ### Added
