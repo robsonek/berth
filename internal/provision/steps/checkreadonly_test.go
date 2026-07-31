@@ -151,20 +151,27 @@ func wantStepsFor(variant string) []string {
 // fleet-status spec's original "strictly read-only" claim was wrong in exactly
 // this way, so this test states its limits rather than implying it has none.
 //
-// THE SEAM ITSELF WRITES, and this contract cannot see it: berth's Runner
-// wraps every command in `sudo -n -- /bin/sh -c …` whenever it is connected
-// as a non-root user (internal/ssh/client.go), which is the normal case, and
-// sudo's authentication logging accompanies each wrapped command — its
-// command line plus a pam_unix session open/close pair, three journal lines
-// per command, measured on a provisioned Debian 13 host. A drift sweep
-// issuing dozens of probes therefore writes over a hundred journal lines per
-// host purely by doing privileged work over SSH; none of it changes the
-// server's configuration or data, and all of it sits below the seam this
-// contract governs, which starts at the command a Check hands to the Runner.
-// That measurement is also why the postgres engine's in-text
-// `sudo -u postgres psql` probe is classified a READ on an exact allowlist
-// rather than a fourth exception: it adds one journal line to the three its
-// command already generates by being run at all.
+// SUDO'S LOGGING IS OUTSIDE THE PROMISE, categorically: it is an
+// authentication record THAT berth was invoked, kept by the host's auditing
+// subsystem, not a change to anything the promise covers — the server's
+// configuration, data, packages, services or certificates. It is unavoidable
+// for any tool that does privileged work, and it accompanies every command
+// alike whether the sudo was added below the seam by the transport (berth's
+// Runner wraps every command in `sudo -n -- /bin/sh -c …` on a non-root
+// connection, internal/ssh/client.go — the normal case) or written into the
+// command text by a step (the postgres engine's `sudo -u postgres psql`
+// probe). That is why the probe is classified a READ on an exact allowlist
+// rather than a fourth exception: the exception list names commands that
+// change covered state, and an authentication record is not one — putting it
+// there would misfile a property of doing privileged work at all as a
+// property of one shape. For scale, not as the argument: the wrapper's
+// logging measures three journal lines per command (its command line plus a
+// pam_unix session pair) on a provisioned Debian 13 host, so a drift sweep
+// leaves over a hundred lines purely by working over SSH. The line this
+// draws is between the unavoidable record of privileged invocation and
+// avoidable writes: the valkey probe's runuser wrapper carried an AVOIDABLE
+// PAM session pair — setpriv does the same credential change without it —
+// which is why that one was engineered away rather than excused.
 func TestChecksAreReadOnly(t *testing.T) {
 	for _, variant := range contractVariants {
 		t.Run(variant, func(t *testing.T) { checksAreReadOnly(t, variant) })
