@@ -288,6 +288,13 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		// glob, so it lives in the registry now (aptUserListsPasted).
 		{"find /etc/apt/sources.list.d -maxdepth 1 -name 'berth-*.list' -print0", cmdAudited},
 
+		// The swapfile-size probe carries a redirection, so it rides the
+		// registry (swapfileSizeProbePasted); the same script aimed anywhere
+		// else — or any other redirection-bearing stat — stays unregistered
+		// and rejects, exact-text discipline as everywhere.
+		{`stat -c %s '/swapfile' 2>/dev/null`, cmdAudited},
+		{`stat -c %s '/etc/shadow' 2>/dev/null`, cmdRejected},
+
 		// Unknown verbs are rejected, not assumed safe.
 		{"sometool --probe /etc/x", cmdRejected},
 	}
@@ -576,6 +583,16 @@ var auditedScripts = map[string]string{
 	// never expands it. The mutating siblings (start/stop/restart/reread/
 	// update) stay unregistered.
 	supervisorStatusProbeCmd("berth-app_example_com"): "site.Check's worker query (site.go): supervisorctl status <program>:* over the RPC socket — reads only",
+
+	// swapfileSize's existence + size probe (system.go), reached only with
+	// system.swap declared (the maximal variant), pasted literally — the
+	// production composition is a const path through shQuote, so the literal
+	// IS the issued text. Audited: `stat -c %s` reads one metadata field;
+	// `2>/dev/null` discards the missing-file diagnostic into the null
+	// device, which is not host state; the caller reads the exit code and
+	// parses the decimal size. Nothing writes. Any other `stat … 2>…`
+	// spelling stays unregistered and rejects.
+	swapfileSizeProbePasted: "swapfileSize (system.go): stat -c %s of /swapfile, stderr discarded — reads only",
 }
 
 // phpPoolConflictProbe84 is the EXACT text phpPoolConflictProbeCmd("8.4")
@@ -674,6 +691,11 @@ func commandVProbeCmd(bin string) string {
 // aptUserListsCmd (aptextras.go), pasted as a literal — never referencing the
 // const, which would let an edit re-bless itself.
 const aptUserListsPasted = `find /etc/apt/sources.list.d -maxdepth 1 -name 'berth-*.list' -print0`
+
+// swapfileSizeProbePasted is the EXACT text swapfileSize (system.go) issues —
+// a const composition over the const swapfile path, pasted as a literal (see
+// aptUserListsPasted for why never the production helper).
+const swapfileSizeProbePasted = `stat -c %s '/swapfile' 2>/dev/null`
 
 // sameFileProbeCmd mirrors site.Check's enabled-symlink probe composition
 // (site.go) — a copy on purpose (see auditedScripts).

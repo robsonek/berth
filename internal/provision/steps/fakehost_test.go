@@ -23,29 +23,29 @@ import (
 // missing any of them would leave that step silently unexercised while every
 // other guard still passed.
 func TestContractServerRegistersEveryStep(t *testing.T) {
-	s := contractServer(t)
-	pipeline := Pipeline(s, secret.NewRedactor(), false)
+	for _, variant := range contractVariants {
+		t.Run(variant, func(t *testing.T) {
+			s := variantServer(t, variant)
+			pipeline := Pipeline(s, secret.NewRedactor(), false)
 
-	seen := map[string]bool{}
-	for _, st := range pipeline {
-		if seen[st.Name()] {
-			t.Errorf("duplicate step %q — the contract counts steps by name", st.Name())
-		}
-		seen[st.Name()] = true
-	}
-	for _, want := range []string{
-		"identity", "preflight", "base", "system", "apt", "php", "nginx",
-		"composer", "valkey", "supervisor", "accounts", "hardening", "appdirs",
-		"database", "site", "tls", "tuning", "backups", "offsite", "manifest",
-	} {
-		if !seen[want] {
-			t.Errorf("step %q is not registered — contractServer() must make the pipeline complete", want)
-		}
-	}
-	// An apt repo must be declared, or nothing reaches KeyringHoldsExactly and
-	// the gpg offender this contract exists to catch is never recorded.
-	if len(s.Apt.Repos) == 0 {
-		t.Error("contractServer must declare an apt repo so the keyring probe is exercised")
+			seen := map[string]bool{}
+			for _, st := range pipeline {
+				if seen[st.Name()] {
+					t.Errorf("duplicate step %q — the contract counts steps by name", st.Name())
+				}
+				seen[st.Name()] = true
+			}
+			for _, want := range wantStepsFor(variant) {
+				if !seen[want] {
+					t.Errorf("step %q is not registered — variantServer(%q) must make the pipeline complete", want, variant)
+				}
+			}
+			// An apt repo must be declared, or nothing reaches KeyringHoldsExactly and
+			// the gpg offender this contract exists to catch is never recorded.
+			if len(s.Apt.Repos) == 0 {
+				t.Errorf("variantServer(%q) must declare an apt repo so the keyring probe is exercised", variant)
+			}
+		})
 	}
 }
 
@@ -144,6 +144,9 @@ type fakeFile struct {
 	kind       string // as `stat -c %F` prints it
 	mtimeUnix  int64
 	linkTarget string
+	// size backs `stat -c %s` — today only the swapfile-size probe reads it,
+	// so it stays zero everywhere else and no answer serves it generically.
+	size int64
 }
 
 // fakeUnit is one systemd unit. An ABSENT property is an error rather than blank
@@ -177,6 +180,11 @@ type fakeHost struct {
 	// probes: which tenant databases exist, and which "user:db" grant pairs.
 	databases map[string]bool
 	dbGrants  map[string]bool
+	// sysctlValues backs `sysctl -n <key>`: the RUNNING kernel values, which
+	// exist on every host (fresh included) independently of any drop-in.
+	// checkSysctl compares them against the drop-in's targets, so a value
+	// here diverging from sysctlKeys is what "running values stale" means.
+	sysctlValues map[string]string
 	// certExpiry backs the `certbot certificates` answer: the notAfter of
 	// every modelled Let's Encrypt lineage. Set relative to the wall clock
 	// because tls.Check compares it against time.Now() (certRenewWindow) —
@@ -207,14 +215,31 @@ func (h *fakeHost) unit(name string) (fakeUnit, bool) {
 // healthy, drifted stops at byte drift, fresh at absence, foreign at refusal.
 var fakeHostProfiles = []string{"fresh", "converged", "drifted", "foreign", "runtime-stale"}
 
-// contractServer is the fixture the whole contract uses. It is built so
-// steps.Pipeline registers EVERY step, and so no Check depends on the
-// developer's machine: the ssh key and the secret cache live under t.TempDir().
+// contractVariants names the configurations the contract runs over — the
+// matrix is variants × profiles × steps. One configuration leaves whole
+// production branches uncontracted: a mutating command inside a branch the
+// fixture never enables would pass every guard. baseline is the ORIGINAL
+// fixture, preserved unchanged so today's coverage cannot shrink; maximal
+// turns on every system knob (swap + swappiness, the kernel sysctl drop-in,
+// timezone, static hostname — all opt-in and all off in baseline).
+var contractVariants = []string{"baseline", "maximal"}
+
+// contractServer is the baseline fixture — see variantServer for the set.
+func contractServer(t *testing.T) *config.Server {
+	return variantServer(t, "baseline")
+}
+
+// variantServer is the fixture the whole contract uses, in the named variant.
+// Every variant is built so steps.Pipeline registers every step its config
+// gates in, and so no Check depends on the developer's machine: the ssh key
+// and the secret cache live under t.TempDir() (HOME is redirected per call,
+// so each variant's cache is isolated — callers must not mix servers from
+// two variants in one scope and expect both caches reachable).
 //
 // The field spellings here were checked against internal/config/config.go — an
 // earlier draft used a type name that does not exist (config.Queue; it is
 // config.QueueConfig) and would not have compiled.
-func contractServer(t *testing.T) *config.Server {
+func variantServer(t *testing.T, variant string) *config.Server {
 	t.Helper()
 	dir := t.TempDir()
 	// The secret cache is anchored at $HOME/.berth (os.UserHomeDir,
@@ -264,6 +289,29 @@ func contractServer(t *testing.T) *config.Server {
 			SSLEmail:   "ops@example.com",
 			Queue:      &config.QueueConfig{Processes: 2, Tries: 3},
 		}},
+	}
+	// The variant mutations happen HERE — after the literal, before the cache
+	// seed and the identity convergence — because both of those key off the
+	// server's ID and endpoint, so a variant changing the ID after seeding
+	// would strand the cache under the wrong key.
+	switch variant {
+	case "baseline":
+		// The original fixture, byte-for-byte: today's coverage preserved.
+	case "maximal":
+		srv.ID = "contract-maximal"
+		// Every opt-in system knob ON: swap reaches the swapfile-size stat,
+		// swapon and swappiness probes; sysctl the drop-in + `sysctl -n`
+		// read-backs; timezone/hostname the timedatectl/hostnamectl queries
+		// and the /etc/hosts alias parse. The zone spelling is config.go's
+		// own doc example; the hostname is a documentation-range name.
+		srv.System = config.System{
+			Swap:     "2G",
+			Sysctl:   true,
+			Timezone: "Europe/Warsaw",
+			Hostname: "web1.example.com",
+		}
+	default:
+		panic("unknown contract variant: " + variant)
 	}
 	// database.Check compares the LIVE shared/.env against the LOCAL secret
 	// cache (value agreement, DB password always, APP_KEY when berth-shaped);
@@ -343,6 +391,18 @@ func newFakeHost(t *testing.T, profile string, s *config.Server) *fakeHost {
 		dbGrants:  map[string]bool{},
 		timezone:  "Etc/UTC",
 		hostname:  "box-1",
+		// The RUNNING kernel values checkSysctl reads back, at their Debian 13
+		// stock: they exist on every host, fresh included. somaxconn's stock
+		// EQUALS berth's target (the kernel default is 4096 since 5.4) — kept
+		// honest on purpose, so the stale-values walk gets past an agreeing
+		// key to the genuinely differing tcp_tw_reuse instead of tripping on
+		// a fabricated first mismatch.
+		sysctlValues: map[string]string{
+			"net.core.somaxconn":          "4096",
+			"net.ipv4.tcp_tw_reuse":       "2",
+			"fs.file-max":                 "9223372036854775807",
+			"fs.inotify.max_user_watches": "65536",
+		},
 		// ~3.8 GiB, a realistic small VPS; comfortably above the 80% cap for
 		// the default 256M buffer pool, so the RAM guard passes on its data.
 		memTotalKB: 3986812,
@@ -362,6 +422,22 @@ func newFakeHost(t *testing.T, profile string, s *config.Server) *fakeHost {
 		h.files[d] = fakeFile{owner: "root", group: "root", uid: 0, gid: 0,
 			mode: "755", kind: "directory", mtimeUnix: 1400000000}
 	}
+	// /etc/fstab, /etc/hosts and the live vm.swappiness exist on every Debian
+	// host before berth touches anything, fresh included: the system step's
+	// swap branch PARSES fstab for /swapfile lines (fstabSwapState) and the
+	// hostname branch PARSES hosts for 127.0.1.1 lines (hostsAliasConverged),
+	// so both carry realistic stock content — including the image's own
+	// 127.0.1.1 alias for its hostname, the exact line berth's marked alias
+	// replaces. The proc value is the kernel default 60.
+	h.files[fstabPath] = fakeFile{content: stockFstab,
+		owner: "root", group: "root", mode: "644", kind: "regular file",
+		mtimeUnix: 1400000000}
+	h.files[hostsPath] = fakeFile{content: "127.0.0.1 localhost\n127.0.1.1 box-1\n" + stockHostsTail,
+		owner: "root", group: "root", mode: "644", kind: "regular file",
+		mtimeUnix: 1400000000}
+	h.files[swappinessProcPath] = fakeFile{content: "60\n",
+		owner: "root", group: "root", mode: "644", kind: "regular file",
+		mtimeUnix: 1400000000}
 	// /etc/default/ssh ships with openssh-server on every host berth can reach
 	// (it connects over sshd), fresh included. hardening's sshdOptsGuard PARSES
 	// it for the last SSHD_OPTS assignment; this is the stock Debian content,
@@ -394,8 +470,19 @@ func newFakeHost(t *testing.T, profile string, s *config.Server) *fakeHost {
 	}
 	populateInstalled(h, s, profile)
 	populateManagedFiles(h, s, profile)
+	populateSystemArtifacts(h, s, profile)
 	return h
 }
+
+// stockFstab / stockHostsTail are the Debian-image content of the two files
+// the system step parses — third-party state like /etc/os-release, hand-
+// modelled from a real image, never marker-managed.
+const (
+	stockFstab = "# /etc/fstab: static file system information.\n" +
+		"UUID=00000000-0000-0000-0000-000000000000 / ext4 errors=remount-ro 0 1\n"
+	stockHostsTail = "\n::1 localhost ip6-localhost ip6-loopback\n" +
+		"ff02::1 ip6-allnodes\nff02::2 ip6-allrouters\n"
+)
 
 // populateInstalled marks packages installed, units up and tools present. Under
 // runtime-stale the units are up but flagged as needing a reload, which is the
@@ -481,7 +568,90 @@ func populateInstalled(h *fakeHost, s *config.Server, profile string) {
 				mode: "700", kind: "directory", mtimeUnix: 1500000000}
 		}
 	}
-	h.swapRows = "NAME TYPE SIZE USED PRIO\n/swapfile file 2G 0B -2\n"
+}
+
+// populateSystemArtifacts models the state behind the system step's opt-in
+// knobs (swap, sysctl, timezone, hostname). Only what the CONFIG declares is
+// modelled — a knob-off variant's removal branches read the stock base files
+// instead, exactly like a real host berth never touched there.
+func populateSystemArtifacts(h *fakeHost, s *config.Server, profile string) {
+	if s.System.Swap != "" {
+		wantBytes, err := config.ParseSwapBytes(s.System.Swap)
+		if err != nil {
+			panic("parse the fixture system.swap: " + err.Error())
+		}
+		// /etc/fstab is appended-to, never rendered, so the step's own
+		// fstabSwapLine const IS the written form and the fixture uses it
+		// (the rendered-bytes rule, applied to a composed line). foreign
+		// carries an operator swap line WITHOUT the trailing marker — the
+		// ownership state checkSwap's conflict guard means to refuse; a
+		// drifted config models a resized swap (the size-mismatch branch).
+		line, size := fstabSwapLine, wantBytes
+		switch profile {
+		case "foreign":
+			line = swapfilePath + " none swap sw 0 0"
+		case "drifted":
+			size = wantBytes / 2
+		}
+		h.files[fstabPath] = fakeFile{content: stockFstab + line + "\n",
+			owner: "root", group: "root", mode: "644", kind: "regular file",
+			mtimeUnix: 1500000000}
+		h.files[swapfilePath] = fakeFile{owner: "root", group: "root",
+			mode: "600", kind: "regular file", mtimeUnix: 1500000000, size: size}
+		// The swap area is ACTIVE on every provisioned profile — the exact
+		// `--show=NAME --noheadings` output: bare paths, no header line.
+		h.swapRows = swapfilePath + "\n"
+		body, err := renderSwapSysctl()
+		if err != nil {
+			panic("render sysctl_swap.conf.tmpl: " + err.Error())
+		}
+		h.putManaged(swapSysctlPath, body, profile)
+		// The pre-berth swappiness baseline applySwap records before its
+		// first drop-in write; a real capture on a stock image holds the
+		// kernel default 60.
+		h.files[swappinessStatePath] = fakeFile{content: "60\n",
+			owner: "root", group: "root", mode: "644", kind: "regular file",
+			mtimeUnix: 1500000000}
+		// The LIVE vm.swappiness follows the drop-in only where the reload
+		// happened: runtime-stale keeps the kernel default — the crash-
+		// between-write-and-reload state whose "+ sysctl -p" change branch
+		// that profile exists to walk.
+		if profile != "runtime-stale" {
+			f := h.files[swappinessProcPath]
+			f.content = swappinessValue + "\n"
+			h.files[swappinessProcPath] = f
+		}
+	}
+	if s.System.Sysctl {
+		body, err := renderSysctl()
+		if err != nil {
+			panic("render sysctl_berth.conf.tmpl: " + err.Error())
+		}
+		h.putManaged(sysctlPath, body, profile)
+		// Running values follow the drop-in only under converged; runtime-
+		// stale keeps the stock base values, so checkSysctl honestly reads
+		// "running values stale" there. drifted/foreign/fresh never get past
+		// the file classify to the `sysctl -n` read-backs.
+		if profile == "converged" {
+			for _, kv := range sysctlKeys {
+				h.sysctlValues[kv.Key] = kv.Value
+			}
+		}
+	}
+	// Timezone and hostname are plain system state with no removal branch:
+	// the provisioned-and-reloaded profiles hold the configured values, the
+	// rest keep the image's own — an honest not-yet-applied state, never a
+	// refusal (the 127.0.1.1 alias is replaced without --force by design).
+	if s.System.Timezone != "" && (profile == "converged" || profile == "runtime-stale") {
+		h.timezone = s.System.Timezone
+	}
+	if s.System.Hostname != "" && (profile == "converged" || profile == "runtime-stale") {
+		h.hostname = s.System.Hostname
+		h.files[hostsPath] = fakeFile{
+			content: "127.0.0.1 localhost\n" + hostsHostnameLine(s.System.Hostname) + "\n" + stockHostsTail,
+			owner:   "root", group: "root", mode: "644", kind: "regular file",
+			mtimeUnix: 1500000000}
+	}
 }
 
 // setMeta adjusts the probed metadata of an existing modelled file. putManaged

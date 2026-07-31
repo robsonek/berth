@@ -379,6 +379,19 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 		}
 		return bssh.Result{ExitCode: 1}, true
 
+	// swapfileSize's probe (system.go), keyed to the pasted literal in
+	// auditedScripts and answered from the modelled file size — the only
+	// consumer of fakeFile.size. A missing swapfile answers exit 1 with the
+	// diagnostic already discarded by the probe's own 2>/dev/null. This case
+	// must sit ABOVE the generic stat case: the Fields-parse there would
+	// take "2>/dev/null" for the path and answer from the wrong entry.
+	case cmd == swapfileSizeProbePasted:
+		file, ok := r.h.files[swapfilePath]
+		if !ok {
+			return bssh.Result{ExitCode: 1}, true
+		}
+		return bssh.Result{Stdout: strconv.FormatInt(file.size, 10) + "\n"}, true
+
 	case f[0] == "stat":
 		file, ok := r.h.files[unq(f[len(f)-1])]
 		if !ok {
@@ -500,12 +513,29 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 
 	case f[0] == "df":
 		return bssh.Result{Stdout: r.h.dfRows}, true
-	case f[0] == "swapon":
+
+	// The three system-knob queries, each pinned to the ONE argv its Check
+	// issues (swapActive / checkTimezone / checkHostname, system.go) because
+	// each PARSES the answer: swapActive scans for a line that IS the bare
+	// path (the --show=NAME --noheadings format — no header, no columns),
+	// the other two TrimSpace a single value. Answering a different spelling
+	// in these formats would hand a production drift the wrong shape, so it
+	// falls to unanswered.
+	case cmd == "swapon --show=NAME --noheadings":
 		return bssh.Result{Stdout: r.h.swapRows}, true
-	case f[0] == "timedatectl":
+	case cmd == "timedatectl show -p Timezone --value":
 		return bssh.Result{Stdout: r.h.timezone + "\n"}, true
-	case f[0] == "hostnamectl":
+	case cmd == "hostnamectl --static":
 		return bssh.Result{Stdout: r.h.hostname + "\n"}, true
+
+	// checkSysctl's read-back of the RUNNING kernel values (string-compared,
+	// one bare value line). Answered only for modelled keys: an unmodelled
+	// key is a modelling gap, not blank success.
+	case f[0] == "sysctl" && len(f) == 3 && f[1] == "-n":
+		if v, ok := r.h.sysctlValues[f[2]]; ok {
+			return bssh.Result{Stdout: v + "\n"}, true
+		}
+		return bssh.Result{}, false
 
 	case f[0] == "gpg":
 		// Only the EXACT argv KeyringHoldsExactly issues (apt.go) is answered;
