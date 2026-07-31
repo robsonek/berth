@@ -318,9 +318,14 @@ func variantServer(t *testing.T, variant string) *config.Server {
 		}
 		// A repository reaches accounts.Check's deploy-key completeness
 		// probes and the git host's known_hosts lookup (the redirection-
-		// bearing ssh-keygen -F). scp-like SSH form, the shape validGitURL
-		// accepts; the default port keeps the token the bare hostname.
-		srv.Sites[0].Repository = "git@git.example.com:app/app.git"
+		// bearing ssh-keygen -F). ssh:// form with a NON-DEFAULT port on
+		// purpose: known_hosts stores such endpoints under the
+		// "[host]:port" token (GitEndpoint), so this exercises the token-
+		// composition branch the scp-like default-port form skips — the
+		// bare-hostname token stays pinned as a policy row and registry
+		// entry in cmdclass_test.go (both forms come from the same
+		// composition; the data differs, the code path is a superset here).
+		srv.Sites[0].Repository = "ssh://git@git.example.com:2222/app/app.git"
 	case "postgres":
 		srv.ID = "contract-postgres"
 		// The engine variant: postgres source debian (a valid pairing per
@@ -840,9 +845,17 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 		if st.Repository == "" {
 			continue
 		}
-		host, _, err := config.GitEndpoint(st.Repository)
+		host, port, err := config.GitEndpoint(st.Repository)
 		if err != nil {
 			panic("parse the fixture repository: " + err.Error())
+		}
+		// known_hosts stores non-22 endpoints under the "[host]:port" token —
+		// the same composition accounts.Check runs, and the exact format
+		// ssh-keyscan -p emits, so the modelled line matches what a real heal
+		// would have written.
+		token := host
+		if port != "" {
+			token = "[" + host + "]:" + port
 		}
 		u := s.SiteUser(st)
 		key := deployKeyPath(u)
@@ -854,7 +867,7 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 			owner: u, group: u, uid: 1001, gid: 1001, mode: "644",
 			kind: "regular file", mtimeUnix: 1500000000}
 		h.files["/home/"+u+"/.ssh/known_hosts"] = fakeFile{
-			content: host + " ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKey0000000000000000000000000\n",
+			content: token + " ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKey0000000000000000000000000\n",
 			owner:   u, group: u, uid: 1001, gid: 1001, mode: "644",
 			kind: "regular file", mtimeUnix: 1500000000}
 	}

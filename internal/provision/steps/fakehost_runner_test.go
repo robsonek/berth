@@ -624,8 +624,8 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 	// modelled file (the caller reads ONLY the exit code — both streams aim
 	// at the null device): 0 iff some line's host field carries the token,
 	// 1 on a present file without it, 255 when the file itself is missing.
-	case cmd == sshKnownHostProbeCmd(fixtureGitHost, fixtureKnownHostsPath):
-		return r.answerKnownHostLookup(fixtureGitHost, fixtureKnownHostsPath), true
+	case cmd == sshKnownHostProbeCmd(fixtureGitKnownHost, fixtureKnownHostsPath):
+		return r.answerKnownHostLookup(fixtureGitKnownHost, fixtureKnownHostsPath), true
 
 	// sshdOptsGuard PARSES the file body for the last SSHD_OPTS assignment;
 	// keyed to the production const so the model tracks the issued shape. A
@@ -891,10 +891,12 @@ const (
 	// step's cache preflight loudly, so the shape is self-checking.
 	fixtureAppKey = "base64:Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1C="
 
-	// The fixture repository's endpoint pieces (maximal variant): the git
-	// host GitEndpoint parses out of sites[0].repository, and the site
-	// user's known_hosts path accounts.Check composes for the -F lookup.
-	fixtureGitHost        = "git.example.com"
+	// The fixture repository's endpoint pieces (maximal variant): the
+	// "[host]:port" known-hosts token accounts.Check composes for the
+	// fixture's non-default-port endpoint (GitEndpoint over
+	// sites[0].repository), and the site user's known_hosts path it aims
+	// the -F lookup at.
+	fixtureGitKnownHost   = "[git.example.com]:2222"
 	fixtureKnownHostsPath = "/home/appuser/.ssh/known_hosts"
 
 	// Wave 4: the offsite secret trio, seeded into the cache AND rendered

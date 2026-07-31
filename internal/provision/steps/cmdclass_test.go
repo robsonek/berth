@@ -345,6 +345,11 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		// covered — and ssh-keygen has NO table entry, so a redirection-free
 		// respelling rejects as an unknown verb rather than by accident.
 		{`ssh-keygen -F 'git.example.com' -f '/home/appuser/.ssh/known_hosts' >/dev/null 2>&1`, cmdAudited},
+		// The non-default-port endpoint's "[host]:port" token — the other
+		// branch of the same composition — and proof the registry is exact on
+		// the port: a token nobody audited rejects.
+		{`ssh-keygen -F '[git.example.com]:2222' -f '/home/appuser/.ssh/known_hosts' >/dev/null 2>&1`, cmdAudited},
+		{`ssh-keygen -F '[git.example.com]:2200' -f '/home/appuser/.ssh/known_hosts' >/dev/null 2>&1`, cmdRejected},
 		{`ssh-keygen -R 'git.example.com' -f '/home/appuser/.ssh/known_hosts' >/dev/null 2>&1`, cmdRejected},
 		{`ssh-keygen -H -f '/home/appuser/.ssh/known_hosts' >/dev/null 2>&1`, cmdRejected},
 		{`ssh-keygen -F 'git.example.com' -f '/etc/ssh/ssh_known_hosts' >/dev/null 2>&1`, cmdRejected},
@@ -662,8 +667,14 @@ var auditedScripts = map[string]string{
 	// which stay unregistered; both streams aim at the null device and only
 	// the exit code answers. Nothing writes — note Apply's healing sibling
 	// (`ssh-keygen -F … || ssh-keyscan …>>…`) is a DIFFERENT text and never
-	// rides this entry.
-	sshKnownHostProbeCmd("git.example.com", "/home/appuser/.ssh/known_hosts"): "accounts.Check's known-host lookup (accounts.go): ssh-keygen -F find mode over the site user's known_hosts, output discarded — reads only",
+	// rides this entry. TWO tokens, one per branch of the composition:
+	// known_hosts stores a non-22 endpoint under "[host]:port", a default-
+	// port one under the bare hostname. The fixture repository carries a
+	// non-default port, so the port-bearing form is the exercised one; the
+	// bare form stays registered as the default-port sibling of the same
+	// composition, held by its policy row.
+	sshKnownHostProbeCmd("git.example.com", "/home/appuser/.ssh/known_hosts"):        "accounts.Check's known-host lookup (accounts.go), default-port token: ssh-keygen -F find mode over the site user's known_hosts, output discarded — reads only",
+	sshKnownHostProbeCmd("[git.example.com]:2222", "/home/appuser/.ssh/known_hosts"): "accounts.Check's known-host lookup (accounts.go), the [host]:port token of the fixture's non-default-port endpoint: same find-mode read as the bare form",
 }
 
 // phpPoolConflictProbe84 is the EXACT text phpPoolConflictProbeCmd("8.4")
