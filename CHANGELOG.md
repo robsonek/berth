@@ -3,6 +3,19 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Changed
+
+- **`github/codeql-action` pinned to v4.37.4, and dependabot now groups that
+  action so its two halves always move in one PR.** `codeql-action/init` and
+  `codeql-action/analyze` are separate dependencies to dependabot but a single
+  unit to CodeQL, which aborts the scan when the pair straddles two releases
+  (`Loaded a configuration file for version X, but running version Y`).
+  Ungrouped, one upstream release therefore arrived as two pin bumps that were
+  each red on their own and could only go green once both had landed — with
+  `main` red in between. CI-only; no change to what berth does on a host.
+
 ## [0.30.0] — 2026-07-31
 
 ### Added
