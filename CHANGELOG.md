@@ -7,6 +7,15 @@ Notable changes to berth. Older releases are documented on the
 
 ### Changed
 
+- **Go toolchain bumped to 1.26.6**, which fixes the four standard-library
+  vulnerabilities the weekly scan flagged as reachable from berth code
+  (GO-2026-6218 `net/url`, GO-2026-6090 `crypto/tls`, GO-2026-5972
+  `encoding/asn1`, GO-2026-5026 `net/http`/idna). All workflows now resolve
+  the Go version from `go.mod` (`go-version-file`) instead of a floating
+  `"1.26"` spec, so a stale patch release cached on the runner can no longer
+  be silently used — after a bump, CI either downloads the declared version
+  or fails loudly. `govulncheck` reports zero vulnerabilities affecting
+  berth code again.
 - **`github/codeql-action` pinned to v4.37.4, and dependabot now groups that
   action so its two halves always move in one PR.** `codeql-action/init` and
   `codeql-action/analyze` are separate dependencies to dependabot but a single
