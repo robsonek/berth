@@ -3,6 +3,24 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Changed
+
+- **`golang.org/x/crypto` bumped to v0.56.0**, which fixes the two
+  `x/crypto/ssh` denial-of-service vulnerabilities the weekly scan flagged as
+  reachable from berth code (GO-2026-6354, a deadlocked undecided channel, and
+  GO-2026-6355, a deadlocked established channel — both reached through
+  `ssh.Dial` in `internal/ssh`). Each is an exposure to a malicious peer on the
+  other end of the connection, so the practical risk to a client dialling its
+  own fingerprint-pinned host was low, but `govulncheck` is a binary gate and
+  failed on every weekly run. `golang.org/x/text` moves to v0.41.0 as
+  x/crypto's own requirement; no other module changes, and berth's behaviour on
+  a host is untouched. `govulncheck` reports zero vulnerabilities affecting
+  berth code again — the single remaining module-level finding (GO-2026-5932,
+  the unmaintained `x/crypto/openpgp` package) has no fixed version, is not
+  imported by berth, and does not fail the scan.
+
 ## [0.30.1] — 2026-08-17
 
 ### Changed
