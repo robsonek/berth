@@ -78,9 +78,11 @@ linters:
         - G306
     revive:
       # A bare `rules` list REPLACES revive's default rule set (verified on
-      # v2.12.2: only-disabled entries left zero active rules). This flag
-      # re-adds the defaults around the explicit entries, so the two
-      # disabled rules below genuinely subtract from the default set.
+      # v2.12.2, re-verified on v2.13.2: only-disabled entries left zero
+      # active rules, and dropping this flag still silences var-naming on a
+      # deliberately misnamed probe file). This flag re-adds the defaults
+      # around the explicit entries, so the two disabled rules below
+      # genuinely subtract from the default set.
       enable-default-rules: true
       rules:
         # The whole codebase lives under internal/ and cmd/ — there is no
