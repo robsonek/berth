@@ -20,6 +20,26 @@ Notable changes to berth. Older releases are documented on the
   berth code again — the single remaining module-level finding (GO-2026-5932,
   the unmaintained `x/crypto/openpgp` package) has no fixed version, is not
   imported by berth, and does not fail the scan.
+- **CI pins and the Go patch release moved forward: `github/codeql-action`
+  v4.37.6 → v4.37.9, golangci-lint v2.12.2 → v2.13.2 (all four pins — both
+  passes in `ci.yml` and both in `release.yml`), Go 1.26.6 → 1.26.8.** None of
+  this is a security bump: 1.26.7 fixed `net/http` and 1.26.8 cgo, the
+  compiler, the runtime and `debug/elf`/`os`, all plain fix rounds rather than
+  the security release 1.26.6 itself was, and `govulncheck` is clean on both.
+  The codeql-action bump only carries CodeQL bundle 2.26.3 and 2.26.4 (4.37.8
+  had no user-facing changes); it supersedes a dependabot PR that had been
+  open since 18 August proposing the now two-releases-stale v4.37.7. The
+  linter bump was verified to leave the tree at zero issues in both passes,
+  and revive's `enable-default-rules` was re-probed on v2.13.2 — a bare
+  `rules` list still replaces the default rule set, so that flag stays
+  load-bearing and its annotation now records both verifications.
+- **`charm.land/bubbletea/v2` bumped to v2.0.9 and `charm.land/lipgloss/v2` to
+  v2.0.6**, pulling `charmbracelet/ultraviolet`, `x/ansi` and `go-colorful`
+  forward as their own requirements. TUI-only: nothing berth writes to a host
+  changes. The `internal/ui` tests pass, but they assert that rendered output
+  *contains* the expected cells rather than matching it byte for byte, so a
+  purely cosmetic spacing or ANSI change from lipgloss would not be caught
+  there.
 
 ## [0.30.1] — 2026-08-17
 
