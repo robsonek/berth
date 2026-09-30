@@ -21,6 +21,9 @@ func (Postgres) Name() string { return "postgres" }
 // ServerPackage is the Debian/PGDG metapackage (the repo decides the major).
 func (Postgres) ServerPackage() string { return "postgresql" }
 
+// ServerPackageTracksMajor is true: PGDG repoints postgresql at each new major.
+func (Postgres) ServerPackageTracksMajor() bool { return true }
+
 // UpstreamRepo is the official PostgreSQL Global Development Group repository.
 func (Postgres) UpstreamRepo() (apt.Repo, bool) { return apt.PostgresPGDG(), true }
 

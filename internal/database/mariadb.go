@@ -18,6 +18,10 @@ func (MariaDB) Name() string { return "mariadb" }
 // ServerPackage is the Debian/mariadb.org server package.
 func (MariaDB) ServerPackage() string { return "mariadb-server" }
 
+// ServerPackageTracksMajor is false: the repo URI pins the series, and a
+// debian -> mariadb source switch relies on the install upgrading the package.
+func (MariaDB) ServerPackageTracksMajor() bool { return false }
+
 // UpstreamRepo is mariadb.org's 12.3 LTS repository.
 func (MariaDB) UpstreamRepo() (apt.Repo, bool) { return apt.MariaDBOrg(), true }
 

@@ -544,7 +544,14 @@ func (d database) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serv
 			return fmt.Errorf("remove lingering %s repo: %w", repo.Name, err)
 		}
 	}
-	if err := aptInstall(ctx, r, eng.ServerPackage()); err != nil {
+	// A default-major metapackage (PGDG's postgresql) is installed, never
+	// upgraded: once the repo repoints it at the next major, an upgrade here
+	// would install that major beside the running cluster.
+	install := aptInstall
+	if eng.ServerPackageTracksMajor() {
+		install = aptInstallNoUpgrade
+	}
+	if err := install(ctx, r, eng.ServerPackage()); err != nil {
 		return fmt.Errorf("install %s: %w", eng.ServerPackage(), err)
 	}
 

@@ -436,3 +436,12 @@ func (m *Manager) EnsurePackages(ctx context.Context, _ *Repo, pkgs ...string) e
 	cmd := "DEBIAN_FRONTEND=noninteractive apt-get install -y " + strings.Join(pkgs, " ")
 	return m.runAptWaitingForLock(ctx, cmd, "apt-get install "+strings.Join(pkgs, " "))
 }
+
+// EnsurePackagesNoUpgrade installs pkgs that are missing and never upgrades one
+// that is already installed (apt-get --no-upgrade). For unversioned
+// metapackages that track a repo's DEFAULT major, where an upgrade would
+// install a second major beside the running one.
+func (m *Manager) EnsurePackagesNoUpgrade(ctx context.Context, pkgs ...string) error {
+	cmd := "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-upgrade " + strings.Join(pkgs, " ")
+	return m.runAptWaitingForLock(ctx, cmd, "apt-get install --no-upgrade "+strings.Join(pkgs, " "))
+}
