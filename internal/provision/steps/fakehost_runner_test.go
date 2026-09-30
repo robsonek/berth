@@ -94,11 +94,19 @@ func TestRecordingRunnerRecordsWritesWithoutPerformingThem(t *testing.T) {
 // gpgKeys is populated for ALL profiles including fresh, which has no keyring
 // on disk. The gpg answer must therefore be gated on the keyring file actually
 // existing in the model, or a fresh host would look keyring-converged and
-// KeyringHoldsExactly's absent-keyring branch would go unexercised.
+// KeyringHoldsExactly's absent-keyring branch would go unexercised. The key
+// material is per keyring, keyed by the path the step's own repo constructor
+// derives (userRepo: the berth- prefix), so each probe is served the key its
+// repo pins and a keyring no repo derives answers like an unreadable one.
 func TestRecordingRunnerGatesGpgOnKeyringPresence(t *testing.T) {
-	const probe = "gpg --no-options --no-keyring --trust-model always --show-keys --with-colons /usr/share/keyrings/example.gpg"
+	const keyring = "/usr/share/keyrings/berth-example.gpg"
+	const probe = "gpg --no-options --no-keyring --trust-model always --show-keys --with-colons " + keyring
 
-	fresh := newFakeHost(t, "fresh", contractServer(t))
+	s := contractServer(t)
+	if got := userRepo(s.Apt.Repos[0]).KeyringPath(); got != keyring {
+		t.Fatalf("the fixture repo's keyring is %q, want %q — the probe below would test a path no Check issues", got, keyring)
+	}
+	fresh := newFakeHost(t, "fresh", s)
 	r := newRecordingRunner(fresh)
 	res, err := r.Run(context.Background(), probe, nil)
 	if err != nil {
@@ -108,21 +116,33 @@ func TestRecordingRunnerGatesGpgOnKeyringPresence(t *testing.T) {
 		t.Errorf("absent keyring = %+v, want exit!=0 and no key output", res)
 	}
 
-	// With the keyring present, the model's key material is the answer.
-	fresh.files["/usr/share/keyrings/example.gpg"] = fakeFile{
+	// With the keyring present, the model's key material is the answer — the
+	// fingerprint that repo pins, not some other repo's.
+	fresh.files[keyring] = fakeFile{
 		owner: "root", group: "root", mode: "644", kind: "regular file"}
 	if res, err = r.Run(context.Background(), probe, nil); err != nil || res.ExitCode != 0 {
 		t.Fatalf("present keyring = (%+v, %v), want the modelled keys at exit 0", res, err)
 	}
-	if !strings.Contains(res.Stdout, "fpr:") {
-		t.Errorf("present keyring stdout = %q, want the colon output KeyringHoldsExactly parses", res.Stdout)
+	if want := "fpr:::::::::" + strings.Repeat("A", 40) + ":"; !strings.Contains(res.Stdout, want) {
+		t.Errorf("present keyring stdout = %q, want the colon output KeyringHoldsExactly parses carrying %q", res.Stdout, want)
+	}
+
+	// A keyring FILE the model holds but no repo derives has no key material:
+	// it answers the unreadable result, never another keyring's keys.
+	const stray = "/usr/share/keyrings/berth-stray.gpg"
+	fresh.files[stray] = fakeFile{
+		owner: "root", group: "root", mode: "644", kind: "regular file"}
+	res, err = r.Run(context.Background(),
+		"gpg --no-options --no-keyring --trust-model always --show-keys --with-colons "+stray, nil)
+	if err != nil || res.ExitCode == 0 || res.Stdout != "" {
+		t.Errorf("keyring without modelled keys = (%+v, %v), want exit!=0 and no key output", res, err)
 	}
 
 	// Only the EXACT production argv is answered. A drifted spelling —
 	// dropping --with-colons changes the output format the probe parses —
 	// must fall to unanswered, not ride the colon-formatted answer.
 	if _, err := r.Run(context.Background(),
-		"gpg --no-options --no-keyring --trust-model always --show-keys /usr/share/keyrings/example.gpg", nil); err == nil {
+		"gpg --no-options --no-keyring --trust-model always --show-keys "+keyring, nil); err == nil {
 		t.Error("a gpg spelling other than KeyringHoldsExactly's exact argv must be unanswered — answering it would mask a production format drift")
 	}
 }
@@ -582,11 +602,19 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 		// mask KeyringHoldsExactly's absent-keyring branch. The keyring path is
 		// the probe's last argument; when it is not in the model, answer the
 		// way real gpg does — a non-zero exit, which the probe reads as "not
-		// converged" data, never a Go error.
+		// converged" data, never a Go error. The key material is per keyring
+		// (each repo pins its own fingerprint); a keyring FILE the model holds
+		// but no repo derives has no key material to serve, so it answers the
+		// same unreadable result rather than borrowing another repo's key.
+		const unreadable = "gpg: can't open: No such file or directory"
 		if _, ok := r.h.files[unq(f[7])]; !ok {
-			return bssh.Result{ExitCode: 2, Stderr: "gpg: can't open: No such file or directory"}, true
+			return bssh.Result{ExitCode: 2, Stderr: unreadable}, true
 		}
-		return bssh.Result{Stdout: r.h.gpgKeys}, true
+		keys, ok := r.h.gpgKeys[unq(f[7])]
+		if !ok {
+			return bssh.Result{ExitCode: 2, Stderr: unreadable}, true
+		}
+		return bssh.Result{Stdout: keys}, true
 
 	// The generated read scripts wave 2 audited, each keyed to the exact text
 	// the fixture produces (the same test-local generators the registry uses)
@@ -746,6 +774,22 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 		return r.answerEnvValueMatch(fixtureSharedEnv, "DB_PASSWORD", stdin), true
 	case cmd == envValueMatchProbeCmd(fixtureSharedEnv, "APP_KEY"):
 		return r.answerEnvValueMatch(fixtureSharedEnv, "APP_KEY", stdin), true
+
+	// nginxRunsAsWWWData reads ONLY the exit code of its grep -qE over
+	// nginx.conf (reached under nginx.source=nginx). Real grep semantics over
+	// the modelled file, line-wise like grep: 0 when some line matches the
+	// worker-user ERE, 1 when none does, 2 when the file itself is missing.
+	case cmd == nginxWorkerUserProbePasted:
+		file, ok := r.h.files[nginxConfPath]
+		if !ok {
+			return bssh.Result{ExitCode: 2, Stderr: "grep: " + nginxConfPath + ": No such file or directory"}, true
+		}
+		for _, line := range strings.Split(file.content, "\n") {
+			if reNginxWorkerUser.MatchString(line) {
+				return bssh.Result{}, true
+			}
+		}
+		return bssh.Result{ExitCode: 1}, true
 
 	// envDBConnection PARSES the first KEY= line of grep's stdout (and
 	// Apply's passwordFromEnv/appKeyFromEnv share the shape). Real grep
@@ -916,6 +960,10 @@ var (
 	accountsAncestry = []string{"/", "/home"}
 	appdirsAncestry  = []string{"/", "/var", "/var/www", "/var/www/berth-acme"}
 )
+
+// reNginxWorkerUser mirrors nginxRunsAsWWWData's ERE (nginx.go) in Go regexp
+// form — a copy on purpose, applied per line the way grep applies it.
+var reNginxWorkerUser = regexp.MustCompile(`^[[:space:]]*user[[:space:]]+www-data;`)
 
 // rePoolListen mirrors the listen-directive match inside
 // phpPoolConflictProbeCmd's grep -Eq, in Go regexp form.
