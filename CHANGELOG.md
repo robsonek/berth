@@ -10,8 +10,8 @@ Notable changes to berth. Older releases are documented on the
 - **Automatic security updates now cover berth's upstream repositories.**
   berth enabled `unattended-upgrades` but never extended its allowed
   origins, so packages from Surý, nginx.org, MariaDB and PGDG were never
-  updated automatically — a host on PHP 8.5 missed the 11-CVE 8.5.11
-  release indefinitely. `base` now writes the managed
+  updated automatically — a host on PHP 8.5 would have missed the 11-CVE
+  8.5.11 release indefinitely. `base` now writes the managed
   `/etc/apt/apt.conf.d/52berth-unattended-upgrades` with one
   `origin,codename,site` pattern per upstream repository the config uses
   (and removes berth's file when none is), validating the bytes with
@@ -20,8 +20,8 @@ Notable changes to berth. Older releases are documented on the
   install, and their services restart, in the host's APT periodic runs, as
   Debian packages already did. Surý and PGDG default-major metapackages are
   blacklisted so they cannot pull a second PHP branch or PostgreSQL major;
-  the README lists the exact rules, the precise scope of that guarantee and
-  the few non-metapackages that consequently stay manual.
+  the README describes the exact rules, the precise scope of that guarantee
+  and the few non-metapackages that consequently stay manual.
 - **A provision run no longer bumps the PostgreSQL metapackage.** The
   database step installed `postgresql` with a plain `apt-get install -y`, so
   once PGDG repointed it at the next major any run in which the database
@@ -29,11 +29,14 @@ Notable changes to berth. Older releases are documented on the
   cluster beside the running one. It now installs with `--no-upgrade`.
   Consequently, switching `database.source` from `debian` to `pgdg` on an
   existing Debian PostgreSQL host no longer upgrades the metapackage in that
-  run; the versioned server package follows through regular or unattended
-  upgrades.
-- **Note for `--only` users:** the first run after upgrading must be a full
-  provision or `--only base`; until then `--only php|nginx|database`
-  refuses with `unmet prerequisites: [base]`.
+  run; the versioned server package follows through unattended upgrades (or
+  `apt-get upgrade`). A manual `apt upgrade`/`apt full-upgrade` is not
+  constrained by the blacklist and would install PGDG's default major beside
+  the running cluster — use `apt-get upgrade` or `apt-mark hold postgresql`.
+- **Note for `--only` users:** the first run after upgrading, on a host that
+  uses an upstream repository, must be a full provision or `--only base`;
+  until then `--only` of any step that requires `base` refuses with
+  `unmet prerequisites: [base]`.
 
 ## [0.31.0] — 2026-09-30
 
