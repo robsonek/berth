@@ -448,3 +448,35 @@ func TestFPMPoolIsolatesTempDirs(t *testing.T) {
 		}
 	}
 }
+
+// unattendedOriginsGoldenData mirrors steps.unattendedOriginsData (field names
+// are what the template reads).
+type unattendedOriginsGoldenData struct {
+	Patterns  []string
+	Blacklist []string
+}
+
+func TestRenderUnattendedOriginsGolden(t *testing.T) {
+	const (
+		sury   = "origin=deb.sury.org,codename=trixie,site=packages.sury.org"
+		nginx  = "origin=nginx,codename=trixie,site=nginx.org"
+		maria  = "origin=MariaDB,codename=trixie,site=dlm.mariadb.com"
+		pgdg   = "origin=apt.postgresql.org,codename=trixie-pgdg,site=apt.postgresql.org"
+		phpRx  = `php(?![0-9])(?!.*common)(-.+)?$`
+		modPHP = `libapache2-mod-php$`
+		embed  = `libphp-embed$`
+		pgRx   = `postgresql(?!.*common)(?!.*-[0-9][0-9.]*(-|$))(-.+)?$`
+	)
+	cases := map[string]unattendedOriginsGoldenData{
+		"apt_unattended_origins_sury.golden":               {Patterns: []string{sury}, Blacklist: []string{phpRx, modPHP, embed}},
+		"apt_unattended_origins_sury_nginx_mariadb.golden": {Patterns: []string{sury, nginx, maria}, Blacklist: []string{phpRx, modPHP, embed}},
+		"apt_unattended_origins_sury_nginx_pgdg.golden":    {Patterns: []string{sury, nginx, pgdg}, Blacklist: []string{phpRx, modPHP, embed, pgRx}},
+		"apt_unattended_origins_nginx.golden":              {Patterns: []string{nginx}},
+		"apt_unattended_origins_pgdg.golden":               {Patterns: []string{pgdg}, Blacklist: []string{pgRx}},
+	}
+	for golden, data := range cases {
+		t.Run(golden, func(t *testing.T) {
+			checkGolden(t, "apt_unattended_origins.conf.tmpl", golden, data)
+		})
+	}
+}

@@ -1,0 +1,12 @@
+Unattended-Upgrade::Origins-Pattern {
+{{- range .Patterns}}
+        "{{.}}";
+{{- end}}
+};
+{{- if .Blacklist}}
+Unattended-Upgrade::Package-Blacklist {
+{{- range .Blacklist}}
+        "{{.}}";
+{{- end}}
+};
+{{- end}}

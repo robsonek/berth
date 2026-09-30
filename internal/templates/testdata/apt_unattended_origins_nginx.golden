@@ -1,0 +1,4 @@
+# managed by berth
+Unattended-Upgrade::Origins-Pattern {
+        "origin=nginx,codename=trixie,site=nginx.org";
+};

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/robsonek/berth/internal/apt"
 	"github.com/robsonek/berth/internal/config"
 )
 
@@ -96,5 +97,57 @@ func TestOwnRepoConstructorsAreSingleSourced(t *testing.T) {
 				t.Errorf("%s calls %s directly — go through phpUpstream/nginxUpstream/databaseUpstream in autoupdates.go", f, needle)
 			}
 		}
+	}
+}
+
+func TestRenderUnattendedOrigins(t *testing.T) {
+	got, err := renderUnattendedOrigins([]apt.Repo{apt.Sury(), apt.NginxOrg(), apt.PostgresPGDG()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `# managed by berth
+Unattended-Upgrade::Origins-Pattern {
+        "origin=deb.sury.org,codename=trixie,site=packages.sury.org";
+        "origin=nginx,codename=trixie,site=nginx.org";
+        "origin=apt.postgresql.org,codename=trixie-pgdg,site=apt.postgresql.org";
+};
+Unattended-Upgrade::Package-Blacklist {
+        "php(?![0-9])(?!.*common)(-.+)?$";
+        "libapache2-mod-php$";
+        "libphp-embed$";
+        "postgresql(?!.*common)(?!.*-[0-9][0-9.]*(-|$))(-.+)?$";
+};
+`
+	if string(got) != want {
+		t.Errorf("rendered drop-in:\n%s\nwant:\n%s", got, want)
+	}
+
+	maria, err := renderUnattendedOrigins([]apt.Repo{apt.MariaDBOrg()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(maria), "Package-Blacklist") {
+		t.Errorf("MariaDB must not get a blacklist:\n%s", maria)
+	}
+
+	none, err := renderUnattendedOrigins(nil)
+	if err != nil || none != nil {
+		t.Errorf("empty set = (%q, %v), want (nil, nil)", none, err)
+	}
+
+	if _, err := renderUnattendedOrigins([]apt.Repo{{Name: "berth-example", URI: "https://apt.example.com/x", Suite: "trixie"}}); err == nil {
+		t.Error("a repo without a pinned Origin must be refused, not rendered as an unmatchable pattern")
+	}
+}
+
+// TestUnattendedOriginsPath pins the drop-in's on-host path: base (and every
+// host it provisioned) owns exactly this file, and it must sort after the
+// stock 50unattended-upgrades it extends.
+func TestUnattendedOriginsPath(t *testing.T) {
+	if unattendedOriginsPath != "/etc/apt/apt.conf.d/52berth-unattended-upgrades" {
+		t.Errorf("unattendedOriginsPath = %q", unattendedOriginsPath)
+	}
+	if base := filepath.Base(unattendedOriginsPath); base <= "50unattended-upgrades" {
+		t.Errorf("%s must sort after the stock 50unattended-upgrades", base)
 	}
 }

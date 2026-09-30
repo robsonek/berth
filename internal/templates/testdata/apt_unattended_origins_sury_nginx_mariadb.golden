@@ -1,0 +1,11 @@
+# managed by berth
+Unattended-Upgrade::Origins-Pattern {
+        "origin=deb.sury.org,codename=trixie,site=packages.sury.org";
+        "origin=nginx,codename=trixie,site=nginx.org";
+        "origin=MariaDB,codename=trixie,site=dlm.mariadb.com";
+};
+Unattended-Upgrade::Package-Blacklist {
+        "php(?![0-9])(?!.*common)(-.+)?$";
+        "libapache2-mod-php$";
+        "libphp-embed$";
+};

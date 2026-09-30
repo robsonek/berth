@@ -1,9 +1,12 @@
 package steps
 
 import (
+	"fmt"
+
 	"github.com/robsonek/berth/internal/apt"
 	"github.com/robsonek/berth/internal/config"
 	dbpkg "github.com/robsonek/berth/internal/database"
+	"github.com/robsonek/berth/internal/templates"
 )
 
 // phpUpstream returns the Surý repo and whether this config installs PHP from
@@ -52,4 +55,52 @@ func upstreamRepos(s *config.Server) ([]apt.Repo, error) {
 		repos = append(repos, repo)
 	}
 	return repos, nil
+}
+
+// unattendedOriginsPath is base's drop-in extending unattended-upgrades to the
+// upstream repos the config uses. It sorts after the stock
+// 50unattended-upgrades; apt.conf list values accumulate across files, so the
+// stock Debian patterns stay in force.
+const unattendedOriginsPath = "/etc/apt/apt.conf.d/52berth-unattended-upgrades"
+
+// upstreamBlacklist holds the Package-Blacklist entries a repo's
+// default-tracking metapackages need (Python regexes, matched by
+// unattended-upgrades with re.match). Unversioned names in Sury and PGDG
+// follow the repo's DEFAULT major; upgrading one would install a second PHP
+// branch / PostgreSQL major beside the running one. MariaDB (series-pinned
+// URI) and nginx.org (a single package) need none. Verified against the
+// 2026-09-30 indexes — see the spec before touching these.
+var upstreamBlacklist = map[string][]string{
+	"sury-php": {`php(?![0-9])(?!.*common)(-.+)?$`, `libapache2-mod-php$`, `libphp-embed$`},
+	"pgdg":     {`postgresql(?!.*common)(?!.*-[0-9][0-9.]*(-|$))(-.+)?$`},
+}
+
+// unattendedOriginsData is the apt_unattended_origins.conf.tmpl input.
+type unattendedOriginsData struct {
+	Patterns  []string
+	Blacklist []string
+}
+
+// originPattern is the Origins-Pattern entry for one upstream repo: its signed
+// Release's Origin, its codename (Suite) and its site (URI host).
+func originPattern(r apt.Repo) string {
+	return "origin=" + r.Origin + ",codename=" + r.Suite + ",site=" + r.Site()
+}
+
+// renderUnattendedOrigins renders the drop-in for repos; nil, nil for an empty
+// set (berth then keeps no file). A repo without a pinned Origin or a parsable
+// site is refused: its pattern would match nothing, silently.
+func renderUnattendedOrigins(repos []apt.Repo) ([]byte, error) {
+	if len(repos) == 0 {
+		return nil, nil
+	}
+	var d unattendedOriginsData
+	for _, r := range repos {
+		if r.Origin == "" || r.Site() == "" {
+			return nil, fmt.Errorf("repo %s has no pinned Origin or site; refusing to render an unmatchable unattended-upgrades pattern", r.Name)
+		}
+		d.Patterns = append(d.Patterns, originPattern(r))
+		d.Blacklist = append(d.Blacklist, upstreamBlacklist[r.Name]...)
+	}
+	return templates.Render("apt_unattended_origins.conf.tmpl", d)
 }
