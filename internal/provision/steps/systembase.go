@@ -52,7 +52,7 @@ func SystemBase() provision.Step { return systembase{} }
 func (systembase) Name() string       { return "base" }
 func (systembase) Requires() []string { return []string{"preflight"} }
 
-func (systembase) Check(ctx context.Context, rc provision.RunCtx, _ *config.Server, r bssh.Runner) (provision.CheckResult, error) {
+func (systembase) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
 	var missing []string
 	for _, pkg := range basePackages {
 		ok, err := pkgInstalled(ctx, r, pkg)
@@ -78,7 +78,14 @@ func (systembase) Check(ctx context.Context, rc provision.RunCtx, _ *config.Serv
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
+	originsOK, originsChange, err := checkUnattendedOrigins(ctx, r, s, rc.Force)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
 	changes := []string{"enable unattended-upgrades", "write 20auto-upgrades periodic config"}
+	if originsChange != "" {
+		changes = append(changes, originsChange)
+	}
 	if len(missing) > 0 {
 		return provision.CheckResult{
 			Satisfied: false,
@@ -89,10 +96,13 @@ func (systembase) Check(ctx context.Context, rc provision.RunCtx, _ *config.Serv
 	if !fileOK {
 		return provision.CheckResult{Satisfied: false, Reason: "auto-upgrades periodic config not up to date (a stock image file is adopted automatically)", Changes: changes}, nil
 	}
+	if !originsOK {
+		return provision.CheckResult{Satisfied: false, Reason: "unattended-upgrades upstream origins drop-in not up to date", Changes: changes}, nil
+	}
 	return provision.CheckResult{Satisfied: true, Reason: "base packages installed; auto-upgrades enabled"}, nil
 }
 
-func (systembase) Apply(ctx context.Context, _ provision.RunCtx, _ *config.Server, r bssh.Runner) error {
+func (systembase) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
 	m := apt.New(r)
 	if err := m.EnsurePackages(ctx, nil, basePackages...); err != nil {
 		return fmt.Errorf("install base packages: %w", err)
@@ -117,5 +127,7 @@ func (systembase) Apply(ctx context.Context, _ provision.RunCtx, _ *config.Serve
 			return fmt.Errorf("base %q: %s", cmd, res.Stderr)
 		}
 	}
-	return nil
+	// Upstream repos the config uses join unattended-upgrades' allowed origins
+	// (the package is installed and enabled by now).
+	return applyUnattendedOrigins(ctx, r, s, rc.Force)
 }

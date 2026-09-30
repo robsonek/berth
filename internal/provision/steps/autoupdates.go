@@ -1,11 +1,14 @@
 package steps
 
 import (
+	"context"
 	"fmt"
+	"strings"
 
 	"github.com/robsonek/berth/internal/apt"
 	"github.com/robsonek/berth/internal/config"
 	dbpkg "github.com/robsonek/berth/internal/database"
+	bssh "github.com/robsonek/berth/internal/ssh"
 	"github.com/robsonek/berth/internal/templates"
 )
 
@@ -103,4 +106,93 @@ func renderUnattendedOrigins(repos []apt.Repo) ([]byte, error) {
 		d.Blacklist = append(d.Blacklist, upstreamBlacklist[r.Name]...)
 	}
 	return templates.Render("apt_unattended_origins.conf.tmpl", d)
+}
+
+// checkUnattendedOrigins classifies base's origins drop-in against the config.
+// Read-only: the only probe is `cat` of the path. The string is the plan line
+// when the file needs work, "" when satisfied. With no upstream repo in use, a
+// berth-managed file is due for removal while an absent or FOREIGN file is
+// fine — in that branch a foreign file is never berth's to touch, not even
+// with --force.
+func checkUnattendedOrigins(ctx context.Context, r bssh.Runner, s *config.Server, force bool) (bool, string, error) {
+	repos, err := upstreamRepos(s)
+	if err != nil {
+		return false, "", err
+	}
+	want, err := renderUnattendedOrigins(repos)
+	if err != nil {
+		return false, "", err
+	}
+	if want == nil {
+		present, err := managedFilePresent(ctx, r, unattendedOriginsPath)
+		if err != nil {
+			return false, "", err
+		}
+		if present {
+			return false, "remove " + unattendedOriginsPath + " (no upstream repo in use)", nil
+		}
+		return true, "", nil
+	}
+	state, err := checkManagedFile(ctx, r, unattendedOriginsPath, want)
+	if err != nil {
+		return false, "", err
+	}
+	ok, err := managedFileSatisfied(state, unattendedOriginsPath, force)
+	if err != nil || ok {
+		return ok, "", err
+	}
+	names := make([]string, 0, len(repos))
+	for _, repo := range repos {
+		names = append(names, repo.Name)
+	}
+	return false, "write " + unattendedOriginsPath + " (unattended-upgrades origins: " + strings.Join(names, ", ") + ")", nil
+}
+
+// aptConfigValidateCmd proves candidate drop-in bytes (on stdin) parse with
+// apt's own configuration parser — the one every apt invocation uses — before
+// they are published. It is ONE remote shell: the candidate lands in a unique
+// mktemp file inside berth's root-owned state dir (outside every apt parts
+// directory, so no concurrent apt run can read it), and the trap removes it on
+// every exit path, including a dropped SSH session (HUP) or an interrupt. Only
+// a host that dies mid-command can leave the candidate behind, and nothing
+// ever reads it there.
+var aptConfigValidateCmd = "install -d -o root -g root -m 0755 " + berthStateDir +
+	` && t=$(mktemp ` + berthStateDir + `/unattended-upgrades.XXXXXX) && trap 'rm -f "$t"' EXIT HUP INT TERM && cat > "$t" && apt-config -c "$t" dump >/dev/null`
+
+// applyUnattendedOrigins reconciles base's origins drop-in. A syntax error in
+// apt.conf.d breaks EVERY apt operation — including the next run's preflight
+// `apt-get update`, which runs before base could repair it — so the bytes are
+// validated first and only then published through the normal atomic managed
+// write. On any failure the previous file stays exactly as it was.
+func applyUnattendedOrigins(ctx context.Context, r bssh.Runner, s *config.Server, force bool) error {
+	repos, err := upstreamRepos(s)
+	if err != nil {
+		return err
+	}
+	want, err := renderUnattendedOrigins(repos)
+	if err != nil {
+		return err
+	}
+	if want == nil {
+		present, err := managedFilePresent(ctx, r, unattendedOriginsPath)
+		if err != nil || !present {
+			return err
+		}
+		return runOK(ctx, r, "rm -f "+shQuote(unattendedOriginsPath))
+	}
+	// Refuse a foreign target BEFORE validating anything (writeManagedFile
+	// re-checks at publish time — the Apply-reclassifies doctrine).
+	if err := assertManagedWritable(ctx, r, force, unattendedOriginsPath); err != nil {
+		return err
+	}
+	res, err := r.Run(ctx, aptConfigValidateCmd, want)
+	if err != nil {
+		return fmt.Errorf("validate %s (not published; the previous file is untouched): %w", unattendedOriginsPath, err)
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("apt-config rejected the rendered %s (not published; the previous file is untouched): %s", unattendedOriginsPath, strings.TrimSpace(res.Stderr))
+	}
+	return writeManagedFile(ctx, r, force, bssh.FileSpec{
+		Path: unattendedOriginsPath, Content: want, Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
+	})
 }
