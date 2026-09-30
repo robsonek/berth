@@ -329,14 +329,12 @@ func (d database) Check(ctx context.Context, rc provision.RunCtx, s *config.Serv
 	// (drift re-triggers Apply — a URI change now propagates); the debian
 	// source must not leave a berth-owned upstream list lingering (E1).
 	sourceOK, sweepOK := true, true
-	if s.Database.Source != "debian" {
-		if repo, ok := eng.UpstreamRepo(); ok {
-			sourceOK, err = ownRepoUpToDate(ctx, r, repo, rc.Force)
-			if err != nil {
-				return provision.CheckResult{}, err
-			}
+	if repo, has, used := databaseUpstream(eng, s); used {
+		sourceOK, err = ownRepoUpToDate(ctx, r, repo, rc.Force)
+		if err != nil {
+			return provision.CheckResult{}, err
 		}
-	} else if repo, ok := eng.UpstreamRepo(); ok {
+	} else if has {
 		lingers, err := ownRepoLingers(ctx, r, repo)
 		if err != nil {
 			return provision.CheckResult{}, err
@@ -537,13 +535,11 @@ func (d database) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serv
 		}
 	}
 	// Install the server once (optionally from its producer repo).
-	if s.Database.Source != "debian" {
-		if repo, ok := eng.UpstreamRepo(); ok {
-			if err := ensureOwnRepo(ctx, rc, r, repo); err != nil {
-				return fmt.Errorf("add %s repo: %w", repo.Name, err)
-			}
+	if repo, has, used := databaseUpstream(eng, s); used {
+		if err := ensureOwnRepo(ctx, rc, r, repo); err != nil {
+			return fmt.Errorf("add %s repo: %w", repo.Name, err)
 		}
-	} else if repo, ok := eng.UpstreamRepo(); ok {
+	} else if has {
 		if err := removeOwnRepo(ctx, rc, r, repo); err != nil {
 			return fmt.Errorf("remove lingering %s repo: %w", repo.Name, err)
 		}

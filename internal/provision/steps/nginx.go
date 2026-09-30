@@ -48,13 +48,14 @@ func nginxBridgeContent() []byte {
 // a removed path can never be newer than the stamp.
 func nginxOwnedConfigFiles(s *config.Server) []string {
 	files := []string{nginxConfPath}
-	if s.Nginx.Source == "nginx" {
+	if _, useOrg := nginxUpstream(s); useOrg {
 		files = append(files, nginxBridgePath)
 	}
 	return files
 }
 
 func (n nginx) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
+	nginxRepo, useOrg := nginxUpstream(s)
 	installed, err := pkgInstalled(ctx, r, "nginx")
 	if err != nil {
 		return provision.CheckResult{}, err
@@ -68,8 +69,8 @@ func (n nginx) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 	// repo drift re-triggers Apply) and its worker user must be reconciled to
 	// www-data (so berth's www-data-based permission model holds).
 	sourceOK, userOK, bridgeOK, sweepOK := true, true, true, true
-	if s.Nginx.Source == "nginx" {
-		sourceOK, err = ownRepoUpToDate(ctx, r, apt.NginxOrg(), rc.Force)
+	if useOrg {
+		sourceOK, err = ownRepoUpToDate(ctx, r, nginxRepo, rc.Force)
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
@@ -91,7 +92,7 @@ func (n nginx) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 	} else {
 		// Stock source: a berth-owned nginx.org list lingering from an earlier
 		// upstream provision is drift; Apply removes it (E1).
-		lingers, err := ownRepoLingers(ctx, r, apt.NginxOrg())
+		lingers, err := ownRepoLingers(ctx, r, nginxRepo)
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
@@ -131,7 +132,7 @@ func (n nginx) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 
 func (nginx) changes(s *config.Server) []string {
 	out := []string{"install nginx (" + s.Nginx.Source + ")", "run workers as www-data", "disable stock default site(s)", "systemctl enable nginx, then start or reload once nginx -t passes"}
-	if s.Nginx.Source != "nginx" {
+	if _, useOrg := nginxUpstream(s); !useOrg {
 		out = append(out, "remove lingering nginx.org repo if berth-owned")
 	}
 	return out
@@ -162,15 +163,16 @@ func stockDefaultsDisabled(ctx context.Context, r bssh.Runner) (bool, error) {
 }
 
 func (nginx) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
+	nginxRepo, useOrg := nginxUpstream(s)
 	m := apt.New(r)
 	// The write path re-classifies via ensureOwnRepo (never a bare EnsureRepo:
 	// Apply often runs for unrelated drift, and the raw call would overwrite a
 	// foreign list without --force).
-	if s.Nginx.Source == "nginx" {
-		if err := ensureOwnRepo(ctx, rc, r, apt.NginxOrg()); err != nil {
+	if useOrg {
+		if err := ensureOwnRepo(ctx, rc, r, nginxRepo); err != nil {
 			return fmt.Errorf("add nginx.org repo: %w", err)
 		}
-	} else if err := removeOwnRepo(ctx, rc, r, apt.NginxOrg()); err != nil {
+	} else if err := removeOwnRepo(ctx, rc, r, nginxRepo); err != nil {
 		return fmt.Errorf("remove lingering nginx.org repo: %w", err)
 	}
 	// Invalidate nginx's reload stamp before the package transaction, not just
@@ -185,7 +187,7 @@ func (nginx) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r
 	if err := m.EnsurePackages(ctx, nil, "nginx"); err != nil {
 		return fmt.Errorf("install nginx: %w", err)
 	}
-	if s.Nginx.Source == "nginx" {
+	if useOrg {
 		if err := bridgeNginxSitesLayout(ctx, r, rc.Force); err != nil {
 			return err
 		}

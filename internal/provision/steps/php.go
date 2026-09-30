@@ -181,13 +181,13 @@ func (php) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 	// load-bearing: on a fresh host (php-fpm absent) a FOREIGN sury list must
 	// hit the abort-unless---force error here, or Check would report plain
 	// unsatisfied and Apply would overwrite the operator's file.
-	sury, err := useSury(s.PHP)
+	suryRepo, sury, err := phpUpstream(s)
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
 	if sury {
-		changes = append(changes, "register sury repo ("+apt.Sury().URI+")")
-		repoOK, err := ownRepoUpToDate(ctx, r, apt.Sury(), rc.Force)
+		changes = append(changes, "register sury repo ("+suryRepo.URI+")")
+		repoOK, err := ownRepoUpToDate(ctx, r, suryRepo, rc.Force)
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
@@ -195,7 +195,7 @@ func (php) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 			return provision.CheckResult{Satisfied: false, Reason: "sury repo not registered, its source list not up to date, or its keyring not the pinned key", Changes: changes}, nil
 		}
 	} else {
-		lingers, err := ownRepoLingers(ctx, r, apt.Sury())
+		lingers, err := ownRepoLingers(ctx, r, suryRepo)
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
@@ -291,7 +291,7 @@ func (php) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 	if err := assertPHPVersionExclusive(ctx, r, s); err != nil {
 		return err
 	}
-	sury, err := useSury(s.PHP)
+	suryRepo, sury, err := phpUpstream(s)
 	if err != nil {
 		return err
 	}
@@ -301,10 +301,10 @@ func (php) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 	// foreign list without --force); the stock path sweeps a lingering
 	// berth-owned sury list (removeOwnRepo re-probes ownership itself).
 	if sury {
-		if err := ensureOwnRepo(ctx, rc, r, apt.Sury()); err != nil {
+		if err := ensureOwnRepo(ctx, rc, r, suryRepo); err != nil {
 			return err
 		}
-	} else if err := removeOwnRepo(ctx, rc, r, apt.Sury()); err != nil {
+	} else if err := removeOwnRepo(ctx, rc, r, suryRepo); err != nil {
 		return fmt.Errorf("remove lingering sury repo: %w", err)
 	}
 	v := s.PHP.Version
