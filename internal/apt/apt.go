@@ -4,6 +4,7 @@ package apt
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -74,11 +75,27 @@ type Repo struct {
 	Components  []string
 	KeyURL      string
 	Fingerprint string // pinned; EnsureRepo aborts on mismatch
+	// Origin is the pinned "Origin:" field of the repo's signed Release. The
+	// base step's unattended-upgrades drop-in matches on it (together with
+	// Suite as the codename and Site()). Empty for user-declared repos, which
+	// are never auto-upgraded.
+	Origin string
 }
 
 // SourceListPath is the apt source file EnsureRepo writes this repo to; steps
 // probe its presence to know the configured upstream source is in effect.
 func (r Repo) SourceListPath() string { return "/etc/apt/sources.list.d/" + r.Name + ".list" }
+
+// Site is the hostname of the repo URI (no port — apt records a Release's
+// site that way) — the "site" field unattended-upgrades matches an
+// Origins-Pattern entry against. Empty when the URI does not parse.
+func (r Repo) Site() string {
+	u, err := url.Parse(r.URI)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
 
 // KeyringPath is the dearmored, pinned keyring EnsureRepo installs for this
 // repo — the signed-by anchor of its source line.
@@ -137,6 +154,7 @@ func Sury() Repo {
 		Components:  []string{"main"},
 		KeyURL:      "https://packages.sury.org/php/apt.gpg",
 		Fingerprint: "15058500A0235D97F5D10063B188E2B695BD4743",
+		Origin:      "deb.sury.org",
 	}
 }
 
@@ -151,6 +169,7 @@ func NginxOrg() Repo {
 		Components:  []string{"nginx"},
 		KeyURL:      "https://nginx.org/keys/nginx_signing.key",
 		Fingerprint: "8540A6F18833A80E9C1653A42FD21310B49F6B46",
+		Origin:      "nginx",
 	}
 }
 
@@ -165,6 +184,7 @@ func PostgresPGDG() Repo {
 		Components:  []string{"main"},
 		KeyURL:      "https://www.postgresql.org/media/keys/ACCC4CF8.asc",
 		Fingerprint: "B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8",
+		Origin:      "apt.postgresql.org",
 	}
 }
 
@@ -185,6 +205,7 @@ func MariaDBOrg() Repo {
 		Components:  []string{"main"},
 		KeyURL:      "https://mariadb.org/mariadb_release_signing_key.asc",
 		Fingerprint: "177F4010FE56CA3336300305F1656F24C74CD1D8",
+		Origin:      "MariaDB",
 	}
 }
 

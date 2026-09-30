@@ -74,3 +74,39 @@ func TestRepoIdentifiersAreFrozen(t *testing.T) {
 		}
 	}
 }
+
+// TestUpstreamOriginsAreFrozen pins the unattended-upgrades identity of berth's
+// four upstream repos: the Origin field of each repo's signed Release, the
+// site (URI host) and the codename (Suite). base's 52berth-unattended-upgrades
+// drop-in matches on exactly these three; changing one silently disables
+// automatic updates for that repo on every provisioned host.
+func TestUpstreamOriginsAreFrozen(t *testing.T) {
+	cases := []struct {
+		repo                   Repo
+		origin, site, codename string
+	}{
+		{Sury(), "deb.sury.org", "packages.sury.org", "trixie"},
+		{NginxOrg(), "nginx", "nginx.org", "trixie"},
+		{MariaDBOrg(), "MariaDB", "dlm.mariadb.com", "trixie"},
+		{PostgresPGDG(), "apt.postgresql.org", "apt.postgresql.org", "trixie-pgdg"},
+	}
+	for _, c := range cases {
+		if c.repo.Origin != c.origin {
+			t.Errorf("%s: Origin = %q, want %q", c.repo.Name, c.repo.Origin, c.origin)
+		}
+		if got := c.repo.Site(); got != c.site {
+			t.Errorf("%s: Site() = %q, want %q", c.repo.Name, got, c.site)
+		}
+		if c.repo.Suite != c.codename {
+			t.Errorf("%s: Suite = %q, want codename %q", c.repo.Name, c.repo.Suite, c.codename)
+		}
+	}
+	if got := (Repo{URI: "://bad"}).Site(); got != "" {
+		t.Errorf("Site() of an unparsable URI = %q, want empty", got)
+	}
+	// apt records a Release's site as the URI HOSTNAME, without the port, so
+	// a port-bearing URI must not leak ":8765" into the pattern.
+	if got := (Repo{URI: "http://127.0.0.1:8765/debian/"}).Site(); got != "127.0.0.1" {
+		t.Errorf("Site() of a port-bearing URI = %q, want 127.0.0.1", got)
+	}
+}
