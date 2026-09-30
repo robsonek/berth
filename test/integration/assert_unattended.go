@@ -30,19 +30,22 @@ var stockDebianPatterns = []string{
 // expected site, and whether each name is blacklisted. The local dpkg-status
 // origin ("now", empty site) is allowed by unattended-upgrades by default, so
 // the site filter is what makes the origin check meaningful on a host where
-// the installed version IS the candidate.
+// the installed version IS the candidate. The probe runs as root, so it writes
+// nothing: `python3 -B` keeps exec_module from caching bytecode under
+// /usr/bin/__pycache__, and the apt cache is built in memory only. `import apt`
+// already initialises the configuration (a second apt_pkg.init() would read
+// apt.conf.d again and duplicate every list entry).
 const uuProbeScript = `import json, sys, importlib.util, importlib.machinery
 loader = importlib.machinery.SourceFileLoader("uu", "/usr/bin/unattended-upgrade")
 spec = importlib.util.spec_from_loader("uu", loader)
 uu = importlib.util.module_from_spec(spec)
 loader.exec_module(uu)
 import apt, apt_pkg
-apt_pkg.init()
 req = json.loads(sys.argv[1])
 patterns = apt_pkg.config.value_list("Unattended-Upgrade::Origins-Pattern")
 blacklist = apt_pkg.config.value_list("Unattended-Upgrade::Package-Blacklist")
 allowed = uu.get_allowed_origins()
-cache = apt.Cache()
+cache = apt.Cache(memonly=True)
 out = {"patterns": patterns, "blacklist": blacklist, "allowed": {}, "blacklisted": {}}
 for item in req.get("origins") or []:
     ok = False
@@ -92,12 +95,8 @@ func assertUnattendedOrigins(ctx context.Context, t *testing.T, c *bssh.Client, 
 	var wantPatterns, wantBlacklist, mustBlock, mustPass []string
 	for _, ck := range checks {
 		wantPatterns = append(wantPatterns, "origin="+ck.repo.Origin+",codename="+ck.repo.Suite+",site="+ck.repo.Site())
-		pkg := ck.pkg
 		switch ck.repo.Name {
 		case "pgdg":
-			// the postgresql metapackage is blacklisted by design; probe the
-			// origin with a package PGDG ships that is NOT.
-			pkg = "postgresql-common"
 			wantBlacklist = append(wantBlacklist, pgdgBlacklist...)
 			mustBlock = append(mustBlock, "postgresql", "postgresql-client", "postgresql-postgis")
 			mustPass = append(mustPass, "postgresql-18", "postgresql-client-18", "postgresql-common", "postgresql-client-common")
@@ -106,7 +105,7 @@ func assertUnattendedOrigins(ctx context.Context, t *testing.T, c *bssh.Client, 
 			mustBlock = append(mustBlock, "php", "php-fpm", "php-bz2", "libapache2-mod-php", "libphp-embed")
 			mustPass = append(mustPass, "php"+srv.PHP.Version+"-fpm", "php-common", "libapache2-mod-php"+srv.PHP.Version)
 		}
-		req.Origins = append(req.Origins, uuOriginProbe{Pkg: pkg, Site: repoHost(ck.repo.URI)})
+		req.Origins = append(req.Origins, uuOriginProbe{Pkg: ck.pkg, Site: repoHost(ck.repo.URI)})
 	}
 	req.Names = append(append(req.Names, mustBlock...), mustPass...)
 
@@ -125,7 +124,7 @@ func assertUnattendedOrigins(ctx context.Context, t *testing.T, c *bssh.Client, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := c.Run(ctx, "python3 - "+shQuote(string(arg)), []byte(uuProbeScript))
+	res, err := c.Run(ctx, "python3 -B - "+shQuote(string(arg)), []byte(uuProbeScript))
 	if err != nil {
 		t.Fatalf("unattended-upgrades probe: %v", err)
 	}

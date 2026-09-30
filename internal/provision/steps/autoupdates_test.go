@@ -72,20 +72,30 @@ func TestUserReposCarryNoOrigin(t *testing.T) {
 // nginxUpstream / databaseUpstream could install from a repo the drop-in does
 // not name.
 func TestOwnRepoConstructorsAreSingleSourced(t *testing.T) {
-	forbidden := []string{"apt.Sury()", "apt.NginxOrg()", "apt.MariaDBOrg()", "apt.PostgresPGDG()", ".UpstreamRepo()", "useSury(", `Nginx.Source == "nginx"`, `Nginx.Source != "nginx"`}
+	calls := []string{"apt.Sury()", "apt.NginxOrg()", "apt.MariaDBOrg()", "apt.PostgresPGDG()", ".UpstreamRepo()", "useSury("}
+	// Source comparisons that decide an upstream question on their own.
+	decisions := []string{
+		`Nginx.Source == "nginx"`, `Nginx.Source != "nginx"`,
+		`Database.Source != "debian"`, `Database.Source == "debian"`,
+		`PHP.Source == "sury"`, `PHP.Source != "sury"`,
+	}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The guard must not pass vacuously: the installing steps' files have to be
+	// among the ones scanned.
+	scanned := map[string]bool{}
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") || f == "autoupdates.go" {
 			continue
 		}
+		scanned[f] = true
 		b, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, needle := range forbidden {
+		for _, needle := range calls {
 			if needle == "useSury(" && f == "php.go" {
 				// php.go DEFINES useSury; only its definition may mention it.
 				if strings.Count(string(b), "useSury(") != 1 || !strings.Contains(string(b), "func useSury(") {
@@ -96,6 +106,16 @@ func TestOwnRepoConstructorsAreSingleSourced(t *testing.T) {
 			if strings.Contains(string(b), needle) {
 				t.Errorf("%s calls %s directly — go through phpUpstream/nginxUpstream/databaseUpstream in autoupdates.go", f, needle)
 			}
+		}
+		for _, needle := range decisions {
+			if strings.Contains(string(b), needle) {
+				t.Errorf("%s decides %s directly — go through phpUpstream/nginxUpstream/databaseUpstream in autoupdates.go", f, needle)
+			}
+		}
+	}
+	for _, f := range []string{"php.go", "nginx.go", "database.go"} {
+		if !scanned[f] {
+			t.Errorf("%s was not scanned (glob matched %v); the guard would pass vacuously", f, files)
 		}
 	}
 }

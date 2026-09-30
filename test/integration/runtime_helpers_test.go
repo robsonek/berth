@@ -19,12 +19,16 @@ func TestAptProvenanceChecks(t *testing.T) {
 	}
 	// php source "auto" + non-stock version still uses Surý (wizard default).
 	autoNonStock := &config.Server{PHP: config.PHP{Version: "8.5", Source: "auto"}, Database: config.Database{Source: "pgdg"}}
-	names := map[string]bool{}
+	names := map[string]string{}
 	for _, c := range aptProvenanceChecks(autoNonStock) {
-		names[c.repo.Name] = true
+		names[c.repo.Name] = c.pkg
 	}
-	if !names["sury-php"] || !names["pgdg"] {
+	if names["sury-php"] == "" || names["pgdg"] == "" {
 		t.Errorf("auto+8.5+pgdg should check sury+pgdg; got %v", names)
+	}
+	// PGDG's witness is never the (never-upgraded) postgresql metapackage.
+	if names["pgdg"] != "postgresql-common" {
+		t.Errorf("pgdg provenance witness = %q, want postgresql-common", names["pgdg"])
 	}
 	// auto + Debian-stock 8.4 does NOT use Surý; all-debian => no checks.
 	stock := &config.Server{PHP: config.PHP{Version: "8.4", Source: "auto"}, Nginx: config.Nginx{Source: "debian"}, Database: config.Database{Source: "debian"}}

@@ -18,7 +18,11 @@ Notable changes to berth. Older releases are documented on the
   `apt-config` before they are published. **Behaviour change:** all updates
   from those repositories — including new nginx mainline releases — now
   install, and their services restart, in the host's APT periodic runs, as
-  Debian packages already did. Surý and PGDG default-major metapackages are
+  Debian packages already did. On a long-lived host the first APT periodic
+  run after upgrading berth applies the whole accumulated backlog at once
+  (possibly several nginx mainline releases plus database and PHP-FPM
+  restarts); consider a supervised `sudo unattended-upgrade -d` right after
+  the first provision. Surý and PGDG default-major metapackages are
   blacklisted so they cannot pull a second PHP branch or PostgreSQL major;
   the README describes the exact rules, the precise scope of that guarantee
   and the few non-metapackages that consequently stay manual.
@@ -35,8 +39,8 @@ Notable changes to berth. Older releases are documented on the
   the running cluster — use `apt-get upgrade` or `apt-mark hold postgresql`.
 - **Note for `--only` users:** the first run after upgrading, on a host that
   uses an upstream repository, must be a full provision or `--only base`;
-  until then `--only` of any step that requires `base` refuses with
-  `unmet prerequisites: [base]`.
+  until then `--only` of any step that requires `base` refuses with `base`
+  among the unmet prerequisites.
 
 ## [0.31.0] — 2026-09-30
 

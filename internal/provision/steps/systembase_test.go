@@ -377,7 +377,10 @@ func TestSystemBaseApplyRejectedOriginsAreNotPublished(t *testing.T) {
 	}{
 		{"apt-config rejects", func(o *orderedRunner) {
 			o.On(aptConfigValidateCmd, bssh.Result{ExitCode: 100, Stderr: "E: Syntax error /var/lib/berth/unattended-upgrades.x:3: Extra junk"})
-		}, "Syntax error"},
+		}, "failed (exit 100; not published, the previous file is untouched): E: Syntax error"},
+		{"validation fails without stderr", func(o *orderedRunner) {
+			o.On(aptConfigValidateCmd, bssh.Result{ExitCode: 1})
+		}, "failed (exit 1; not published, the previous file is untouched)"},
 		{"transport fails", func(o *orderedRunner) {
 			o.OnError(aptConfigValidateCmd, context.Canceled)
 		}, context.Canceled.Error()},
@@ -389,6 +392,9 @@ func TestSystemBaseApplyRejectedOriginsAreNotPublished(t *testing.T) {
 			err := SystemBase().Apply(context.Background(), provision.RunCtx{}, upstreamServer(), o)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("err = %v, want one containing %q", err, tc.wantErr)
+			}
+			if strings.HasSuffix(err.Error(), ": ") {
+				t.Errorf("err = %q ends with a dangling \": \"", err)
 			}
 			for _, e := range o.events {
 				if e == "write:"+unattendedOriginsPath || strings.HasPrefix(e, "run:rm ") {

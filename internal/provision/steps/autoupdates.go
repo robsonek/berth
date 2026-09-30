@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -190,7 +191,14 @@ func applyUnattendedOrigins(ctx context.Context, r bssh.Runner, s *config.Server
 		return fmt.Errorf("validate %s (not published; the previous file is untouched): %w", unattendedOriginsPath, err)
 	}
 	if res.ExitCode != 0 {
-		return fmt.Errorf("apt-config rejected the rendered %s (not published; the previous file is untouched): %s", unattendedOriginsPath, strings.TrimSpace(res.Stderr))
+		// Neutral wording: any stage of the one-shell command can fail (install
+		// -d, mktemp, cat, a signal), and `apt-config -c` parses the whole
+		// config, so a broken foreign fragment elsewhere fails it too.
+		msg := fmt.Sprintf("validation of the rendered %s failed (exit %d; not published, the previous file is untouched)", unattendedOriginsPath, res.ExitCode)
+		if stderr := strings.TrimSpace(res.Stderr); stderr != "" {
+			msg += ": " + stderr
+		}
+		return errors.New(msg)
 	}
 	return writeManagedFile(ctx, r, force, bssh.FileSpec{
 		Path: unattendedOriginsPath, Content: want, Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
