@@ -3,6 +3,38 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Fixed
+
+- **Automatic security updates now cover berth's upstream repositories.**
+  berth enabled `unattended-upgrades` but never extended its allowed
+  origins, so packages from Surý, nginx.org, MariaDB and PGDG were never
+  updated automatically — a host on PHP 8.5 missed the 11-CVE 8.5.11
+  release indefinitely. `base` now writes the managed
+  `/etc/apt/apt.conf.d/52berth-unattended-upgrades` with one
+  `origin,codename,site` pattern per upstream repository the config uses
+  (and removes berth's file when none is), validating the bytes with
+  `apt-config` before they are published. **Behaviour change:** all updates
+  from those repositories — including new nginx mainline releases — now
+  install, and their services restart, in the host's APT periodic runs, as
+  Debian packages already did. Surý and PGDG default-major metapackages are
+  blacklisted so they cannot pull a second PHP branch or PostgreSQL major;
+  the README lists the exact rules, the precise scope of that guarantee and
+  the few non-metapackages that consequently stay manual.
+- **A provision run no longer bumps the PostgreSQL metapackage.** The
+  database step installed `postgresql` with a plain `apt-get install -y`, so
+  once PGDG repointed it at the next major any run in which the database
+  step applied (e.g. adding a site) installed that major and a second
+  cluster beside the running one. It now installs with `--no-upgrade`.
+  Consequently, switching `database.source` from `debian` to `pgdg` on an
+  existing Debian PostgreSQL host no longer upgrades the metapackage in that
+  run; the versioned server package follows through regular or unattended
+  upgrades.
+- **Note for `--only` users:** the first run after upgrading must be a full
+  provision or `--only base`; until then `--only php|nginx|database`
+  refuses with `unmet prerequisites: [base]`.
+
 ## [0.31.0] — 2026-09-30
 
 ### Changed
