@@ -3,6 +3,44 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Changed
+
+- **Go 1.26.8 → 1.27.1.** Nothing in the 1.27 release notes reaches what
+  berth does: it sets no GODEBUG (so the settings 1.27 removes —
+  `asynctimerchan`, `tlsrsakex`, `tls3des` and friends — cannot bite), its
+  only local HTTP client is the composer installer-signature fetch, which the
+  `net/http` changes leave alone, and the `net.UnixConn` EOF change sits below
+  `x/crypto/ssh/agent`, which berth only dials. The one user-visible effect is
+  a platform floor: **Go 1.27 requires macOS 13 Ventura or later, so the
+  darwin release binaries no longer start on macOS 12.** Linux and Windows
+  targets are unchanged. The unit suite passes under 1.27.1 with `-race
+  -shuffle=on`, all five release targets cross-build, and `go mod tidy`
+  (GoReleaser's before-hook) leaves `go.mod` untouched, so the pre-listed
+  Charm v2 modules stay put.
+- **golangci-lint v2.13.2 → v2.14.0** (all four pins — both passes in
+  `ci.yml` and both in `release.yml`). A Go minor bump needs a linter built
+  with that minor; the official v2.14.0 binaries are built with go1.27.0 and
+  lint the tree at zero issues in both passes. revive's `enable-default-rules`
+  was re-probed on v2.14.0 and is still load-bearing (a misnamed probe `var`
+  is caught with the flag and missed without it).
+- **`github/codeql-action` v4.37.9 → v4.38.2**, which supersedes dependabot's
+  #89 (proposing v4.38.0, already two releases stale). Contents are CI-only:
+  CodeQL bundles 2.27.0 and 2.27.1, native linux-arm64 bundles, toolcache
+  cleanup and experimental per-language bundles.
+- **govulncheck v1.6.0 → v1.8.0** in both the CI gate and the weekly scan.
+  Still zero vulnerabilities affecting berth code; the lone module-level
+  finding (GO-2026-5932, the unmaintained `x/crypto/openpgp` package) has no
+  fixed version and is not imported by berth.
+- **`golang.org/x/crypto` v0.57.0, `golang.org/x/term` v0.46.0,
+  `charm.land/bubbletea/v2` v2.0.10**, pulling `x/sync`, `x/sys` and `x/text`
+  forward as their requirements. Maintenance releases, not security fixes:
+  x/crypto only moves its own x/ dependencies, x/term now processes bytes
+  returned together with a read error, and bubbletea stops sending terminal
+  capability queries when input is disabled (they could leak raw escape
+  sequences). Nothing berth writes to a host changes.
+
 ## [0.30.2] — 2026-09-08
 
 ### Changed
