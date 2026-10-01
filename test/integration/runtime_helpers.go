@@ -91,7 +91,7 @@ var buildMarkers = map[string]*regexp.Regexp{
 	"sury-php":    regexp.MustCompile(`\+0~[0-9]+\.[0-9]+\+debian13~`),
 	"nginx-org":   regexp.MustCompile(`~trixie$`),
 	"mariadb-org": regexp.MustCompile(`\+maria~deb13$`),
-	"pgdg":        regexp.MustCompile(`\.pgdg13\+[0-9]+$`),
+	"pgdg":        regexp.MustCompile(`\.pgdg130?\+[0-9]+$`), // early trixie builds used pgdg130
 }
 
 // installedProvenance classifies the INSTALLED version of an `apt-cache policy`
@@ -113,22 +113,33 @@ func installedProvenance(policy, host string, marker *regexp.Regexp) (fromHost, 
 			continue
 		}
 		version = f[1]
-		onlyDpkgStatus := true
+		sawStatus, onlyDpkgStatus := false, true
 		for _, src := range lines[i+1:] {
 			sf := strings.Fields(src)
-			if len(sf) < 2 || !isAllDigits(sf[0]) {
+			if !isPolicySourceLine(sf) {
 				break // next version row / end
 			}
 			if strings.Contains(sf[1], host) {
 				return true, false, version
 			}
-			if sf[1] != "/var/lib/dpkg/status" {
+			if sf[1] == "/var/lib/dpkg/status" {
+				sawStatus = true
+			} else {
 				onlyDpkgStatus = false
 			}
 		}
-		return false, onlyDpkgStatus && marker != nil && marker.MatchString(version), version
+		return false, sawStatus && onlyDpkgStatus && marker != nil && marker.MatchString(version), version
 	}
 	return false, false, ""
+}
+
+// isPolicySourceLine reports whether the fields of a version-table line form a
+// source line — `<priority> <uri-or-absolute-path> …` — rather than a version row
+// (`<version> <priority>`). The first field alone cannot tell them apart: Debian's
+// postgresql-common version is a bare integer ("278"), so the second field
+// decides — a URI (`https://…`, `mirror+file:…`) or a path (`/var/lib/dpkg/status`).
+func isPolicySourceLine(f []string) bool {
+	return len(f) >= 2 && isAllDigits(f[0]) && (strings.HasPrefix(f[1], "/") || strings.Contains(f[1], ":"))
 }
 
 // installedFromHost reports whether the installed version of an `apt-cache policy`

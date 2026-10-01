@@ -169,14 +169,46 @@ func TestInstalledProvenance(t *testing.T) {
         500 https://packages.sury.org/php trixie/main amd64 Packages
  *** 8.5.10-1+0~20260828.25+debian13~1.gbpfea0b8 100
         100 /var/lib/dpkg/status`, "packages.sury.org", "sury-php", false, true},
-		{"superseded pgdg build", `postgresql-common:
+		// The full listing, WITH Debian's lower row: Debian's postgresql-common
+		// version is a bare integer ("278"), which a parser keyed on "first
+		// field is numeric" mistakes for a source line.
+		{"superseded pgdg build, debian row below", `postgresql-common:
   Installed: 293.pgdg13+1
   Candidate: 294.pgdg13+1
   Version table:
      294.pgdg13+1 500
         500 https://apt.postgresql.org/pub/repos/apt trixie-pgdg/main amd64 Packages
  *** 293.pgdg13+1 100
-        100 /var/lib/dpkg/status`, "apt.postgresql.org", "pgdg", false, true},
+        100 /var/lib/dpkg/status
+     278 500
+        500 mirror+file:/etc/apt/mirrors/debian.list trixie/main amd64 Packages`, "apt.postgresql.org", "pgdg", false, true},
+		// PGDG's early trixie builds used the pgdg130 suffix.
+		{"superseded historical pgdg130 build", `postgresql-common:
+  Installed: 278.pgdg130+1
+  Candidate: 294.pgdg13+1
+  Version table:
+     294.pgdg13+1 500
+        500 https://apt.postgresql.org/pub/repos/apt trixie-pgdg/main amd64 Packages
+ *** 278.pgdg130+1 100
+        100 /var/lib/dpkg/status
+     278 500
+        500 mirror+file:/etc/apt/mirrors/debian.list trixie/main amd64 Packages`, "apt.postgresql.org", "pgdg", false, true},
+		{"current pgdg build, debian row below", `postgresql-common:
+  Installed: 294.pgdg13+1
+  Candidate: 294.pgdg13+1
+  Version table:
+ *** 294.pgdg13+1 500
+        500 https://apt.postgresql.org/pub/repos/apt trixie-pgdg/main amd64 Packages
+        100 /var/lib/dpkg/status
+     278 500
+        500 mirror+file:/etc/apt/mirrors/debian.list trixie/main amd64 Packages`, "apt.postgresql.org", "pgdg", true, false},
+		// No source line at all under the installed row is not evidence of
+		// anything — never "superseded".
+		{"installed row without any source line", `postgresql-common:
+  Installed: 293.pgdg13+1
+  Candidate: 293.pgdg13+1
+  Version table:
+ *** 293.pgdg13+1 100`, "apt.postgresql.org", "pgdg", false, false},
 		// The silent-fallback class (MariaDB mirror bug): Debian's build installed.
 		{"debian build installed instead of upstream", `mariadb-server:
   Installed: 1:11.8.6-0+deb13u1
@@ -213,9 +245,11 @@ func TestBuildMarkersMatchOnlyUpstream(t *testing.T) {
 		"sury-php":    {"8.5.11-1+0~20260924.26+debian13~1.gbpbcb504", "8.4.16-1+0~20260101.3+debian13~1.gbp0123ab"},
 		"nginx-org":   {"1.31.6-1~trixie", "1.27.4-1~trixie"},
 		"mariadb-org": {"1:12.3.3+maria~deb13"},
-		"pgdg":        {"293.pgdg13+1", "18.6-1.pgdg13+2"},
+		"pgdg":        {"293.pgdg13+1", "18.6-1.pgdg13+2", "278.pgdg130+1"},
 	}
-	debian := []string{"1:11.8.6-0+deb13u1", "1.26.3-3+deb13u1", "278", "17.6-0+deb13u1", "8.4.16-1~deb13u1", "3.5.7-1~deb13u3"}
+	debian := []string{"1:11.8.6-0+deb13u1", "1.26.3-3+deb13u1", "278", "17.6-0+deb13u1", "8.4.16-1~deb13u1", "3.5.7-1~deb13u3",
+		// other releases' upstream builds must not pass as trixie ones either
+		"293.pgdg120+1", "1.31.6-1~bookworm", "1:12.3.3+maria~deb12"}
 	for name, versions := range upstream {
 		m := buildMarkers[name]
 		if m == nil {

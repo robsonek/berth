@@ -107,13 +107,16 @@ func TestOwnRepoConstructorsAreSingleSourced(t *testing.T) {
 var ownRepoConstructors = map[string]bool{"Sury": true, "NginxOrg": true, "MariaDBOrg": true, "PostgresPGDG": true}
 
 // singleSourceViolations parses one Go file and reports every place that builds
-// an own upstream repo or decides an upstream question itself: a call to an
-// own-repo constructor, to an engine's UpstreamRepo or to useSury, and any
-// ==/!= comparison or switch on <x>.Nginx.Source, <x>.Database.Source or
-// <x>.PHP.Source. Working on the syntax tree catches reversed operands and
-// switches, and never trips on the same text inside comments or strings.
-// (useSury's own `switch p.Source` reads a parameter, not <x>.PHP.Source, so
-// its definition in php.go is not a violation.)
+// an own upstream repo or decides an upstream question itself: any reference —
+// call, function value or method value — to an own-repo constructor of the apt
+// package (under whatever name the file imports it), to an engine's
+// UpstreamRepo or to useSury (outside its own declaration); and any ==/!=
+// comparison, switch tag or switch initialiser that reads <x>.Nginx.Source,
+// <x>.Database.Source or <x>.PHP.Source anywhere in its operands (so
+// parentheses and concatenation do not hide it). Working on the syntax tree
+// never trips on the same text inside comments or strings. useSury's own
+// `switch p.Source` reads a parameter, not <x>.PHP.Source, so its definition in
+// php.go is not a violation.
 func singleSourceViolations(t *testing.T, filename string, src []byte) []string {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -121,42 +124,66 @@ func singleSourceViolations(t *testing.T, filename string, src []byte) []string 
 	if err != nil {
 		t.Fatalf("parse %s: %v", filename, err)
 	}
+	aptName := ""
+	for _, imp := range file.Imports {
+		if imp.Path.Value == `"github.com/robsonek/berth/internal/apt"` {
+			aptName = "apt"
+			if imp.Name != nil {
+				aptName = imp.Name.Name
+			}
+		}
+	}
+	declared := map[*ast.Ident]bool{} // function names in their own declarations
+	for _, d := range file.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok {
+			declared[fd.Name] = true
+		}
+	}
 	var out []string
 	report := func(n ast.Node, what string) {
 		out = append(out, fmt.Sprintf("%s: %s", fset.Position(n.Pos()), what))
 	}
 	ast.Inspect(file, func(n ast.Node) bool {
 		switch n := n.(type) {
-		case *ast.CallExpr:
-			switch fn := n.Fun.(type) {
-			case *ast.SelectorExpr:
-				if pkg, ok := fn.X.(*ast.Ident); ok && pkg.Name == "apt" && ownRepoConstructors[fn.Sel.Name] {
-					report(n, "calls apt."+fn.Sel.Name+"() directly")
-				}
-				if fn.Sel.Name == "UpstreamRepo" {
-					report(n, "calls .UpstreamRepo() directly")
-				}
-			case *ast.Ident:
-				if fn.Name == "useSury" {
-					report(n, "calls useSury() directly")
-				}
+		case *ast.SelectorExpr:
+			if pkg, ok := n.X.(*ast.Ident); ok && aptName != "" && pkg.Name == aptName && ownRepoConstructors[n.Sel.Name] {
+				report(n, "uses apt."+n.Sel.Name+" directly")
+			}
+			if n.Sel.Name == "UpstreamRepo" {
+				report(n, "uses .UpstreamRepo directly")
+			}
+		case *ast.Ident:
+			if n.Name == "useSury" && !declared[n] {
+				report(n, "uses useSury directly")
 			}
 		case *ast.BinaryExpr:
-			if n.Op == token.EQL || n.Op == token.NEQ {
-				for _, side := range []ast.Expr{n.X, n.Y} {
-					if c := sourceComponent(side); c != "" {
-						report(n, "decides on "+c+".Source directly")
-					}
-				}
+			if (n.Op == token.EQL || n.Op == token.NEQ) && (readsSource(n.X) || readsSource(n.Y)) {
+				report(n, "decides on a Source field directly")
 			}
 		case *ast.SwitchStmt:
-			if c := sourceComponent(n.Tag); c != "" {
-				report(n, "switches on "+c+".Source directly")
+			if readsSource(n.Tag) || readsSource(n.Init) {
+				report(n, "switches on a Source field directly")
 			}
 		}
 		return true
 	})
 	return out
+}
+
+// readsSource reports whether the subtree n reads <x>.Nginx.Source,
+// <x>.Database.Source or <x>.PHP.Source.
+func readsSource(n ast.Node) bool {
+	if n == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(n, func(m ast.Node) bool {
+		if e, ok := m.(ast.Expr); ok && sourceComponent(e) != "" {
+			found = true
+		}
+		return !found
+	})
+	return found
 }
 
 // sourceComponent returns "Nginx", "Database" or "PHP" when e is
@@ -177,38 +204,64 @@ func sourceComponent(e ast.Expr) string {
 	return ""
 }
 
-// TestSingleSourceGuardCatchesEveryShape proves the guard sees every forbidden
-// shape — including a reversed comparison and a switch, which a plain string
-// match misses — and ignores the same text inside comments and strings.
-func TestSingleSourceGuardCatchesEveryShape(t *testing.T) {
-	src := `package steps
-
-func bad(s *config.Server, eng dbpkg.Engine) {
-	_ = apt.Sury()
-	_ = apt.NginxOrg()
-	_ = apt.MariaDBOrg()
-	_ = apt.PostgresPGDG()
-	_, _ = eng.UpstreamRepo()
-	_, _ = useSury(s.PHP)
-	_ = s.Nginx.Source == "nginx"
-	_ = "debian" != s.Database.Source
+// TestSingleSourceGuardShapes pins, one snippet at a time, exactly how many
+// reports the guard makes: every forbidden shape (including reversed,
+// parenthesised and concatenated comparisons, switch tags and initialisers,
+// tagless-switch cases, function and method values, and an aliased apt import)
+// is reported once, and legitimate code — comments, strings, diagnostic
+// concatenation, useSury's own definition — is not. Dataflow through a local
+// variable (`src := s.PHP.Source; if src == …`) is deliberately out of scope:
+// this is a regression check on how the steps are written, not a security
+// boundary.
+func TestSingleSourceGuardShapes(t *testing.T) {
+	const aptImport = `"github.com/robsonek/berth/internal/apt"`
+	cases := []struct {
+		name, imports, body string
+		want                int
+	}{
+		{"comment and string mentions", aptImport, `func f() string {
+	// apt.Sury() and s.Nginx.Source == "nginx" in a comment are not code.
+	return "apt.Sury() useSury( .UpstreamRepo()"
+}`, 0},
+		{"diagnostic concatenation", aptImport, `func f(s *config.Server) string { return "source " + s.Nginx.Source }`, 0},
+		{"useSury's own definition", aptImport, `func useSury(p config.PHP) (bool, error) {
+	switch p.Source {
+	}
+	return false, nil
+}`, 0},
+		{"constructor call", aptImport, `func f() { _ = apt.Sury() }`, 1},
+		{"constructor value", aptImport, `func f() { mk := apt.NginxOrg; _ = mk }`, 1},
+		{"aliased apt import", `repos "github.com/robsonek/berth/internal/apt"`, `func f() { _ = repos.MariaDBOrg() }`, 1},
+		{"UpstreamRepo call", aptImport, `func f(eng dbpkg.Engine) { _, _ = eng.UpstreamRepo() }`, 1},
+		{"UpstreamRepo method value", aptImport, `func f(eng dbpkg.Engine) { mk := eng.UpstreamRepo; _ = mk }`, 1},
+		{"useSury call", aptImport, `func f(s *config.Server) { _, _ = useSury(s.PHP) }`, 1},
+		{"useSury function value", aptImport, `func f() { fn := useSury; _ = fn }`, 1},
+		{"comparison", aptImport, `func f(s *config.Server) bool { return s.Nginx.Source == "nginx" }`, 1},
+		{"reversed comparison", aptImport, `func f(s *config.Server) bool { return "debian" != s.Database.Source }`, 1},
+		{"parenthesised comparison", aptImport, `func f(s *config.Server) bool { return (s.PHP.Source) == "sury" }`, 1},
+		{"concatenated comparison", aptImport, `func f(s *config.Server) bool { return "" + s.Nginx.Source == "nginx" }`, 1},
+		{"switch tag", aptImport, `func f(s *config.Server) {
 	switch s.PHP.Source {
 	}
-}
-
-func fine(s *config.Server) string {
-	// apt.Sury() and s.Nginx.Source == "nginx" in a comment are not code.
-	return "apt.Sury() useSury(" + s.Nginx.Source
-}
-`
-	got := singleSourceViolations(t, "probe.go", []byte(src))
-	if len(got) != 9 {
-		t.Fatalf("got %d violations, want 9 (one per line of bad):\n%s", len(got), strings.Join(got, "\n"))
+}`, 1},
+		{"switch initialiser", aptImport, `func f(s *config.Server) {
+	switch src := s.PHP.Source; src {
 	}
-	for _, v := range got {
-		if !strings.Contains(v, "probe.go:") || strings.Contains(v, "probe.go:17") || strings.Contains(v, "probe.go:18") {
-			t.Errorf("violation outside bad(): %s", v)
-		}
+}`, 1},
+		{"tagless switch case", aptImport, `func f(s *config.Server) {
+	switch {
+	case s.Database.Source == "debian":
+	}
+}`, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			src := "package steps\n\nimport (\n\t" + c.imports + "\n)\n\n" + c.body + "\n"
+			got := singleSourceViolations(t, "probe.go", []byte(src))
+			if len(got) != c.want {
+				t.Errorf("got %d reports, want %d:\n%s", len(got), c.want, strings.Join(got, "\n"))
+			}
+		})
 	}
 }
 
