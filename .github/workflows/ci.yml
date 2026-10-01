@@ -26,6 +26,13 @@ jobs:
           args: --build-tags integration ./test/integration/...
       - name: actionlint
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - name: Release notes script (newest CHANGELOG section)
+        # release.yml builds the GitHub release body with this script; running
+        # it here on the newest released section surfaces a broken script (or
+        # a malformed CHANGELOG) on an ordinary PR instead of at tag time.
+        run: |
+          v=$(sed -n 's/^## \[\([0-9][^]]*\)\].*/\1/p' CHANGELOG.md | head -1)
+          .github/scripts/release-notes.sh "v$v" > /dev/null
       - name: Cross-build all release targets
         run: |
           for pair in windows/amd64 darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
