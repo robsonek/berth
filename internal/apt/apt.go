@@ -88,7 +88,8 @@ func (r Repo) SourceListPath() string { return "/etc/apt/sources.list.d/" + r.Na
 
 // Site is the hostname of the repo URI (no port — apt records a Release's
 // site that way) — the "site" field unattended-upgrades matches an
-// Origins-Pattern entry against. Empty when the URI does not parse.
+// Origins-Pattern entry against. Empty when the URI does not parse or has no
+// host (e.g. a scheme-less or file: URI).
 func (r Repo) Site() string {
 	u, err := url.Parse(r.URI)
 	if err != nil {

@@ -19,6 +19,7 @@ func TestEnsurePackagesFromDebianStock(t *testing.T) {
 	if err := m.EnsurePackages(context.Background(), nil, "nginx"); err != nil {
 		t.Fatalf("EnsurePackages() error = %v", err)
 	}
+	assertOnlyCall(t, f, "DEBIAN_FRONTEND=noninteractive apt-get install -y nginx")
 }
 
 func TestEnsurePackagesNoUpgrade(t *testing.T) {
@@ -26,6 +27,18 @@ func TestEnsurePackagesNoUpgrade(t *testing.T) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y --no-upgrade postgresql", bssh.Result{})
 	if err := New(f).EnsurePackagesNoUpgrade(context.Background(), "postgresql"); err != nil {
 		t.Fatalf("EnsurePackagesNoUpgrade: %v", err)
+	}
+	assertOnlyCall(t, f, "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-upgrade postgresql")
+}
+
+// assertOnlyCall fails unless want is the one command the runner saw — an
+// implementation that returned nil without running anything would otherwise
+// pass, since an unused stub fails nothing.
+func assertOnlyCall(t *testing.T, f *bssh.FakeRunner, want string) {
+	t.Helper()
+	calls := f.Calls()
+	if len(calls) != 1 || calls[0].Cmd != want {
+		t.Errorf("calls = %+v, want exactly [%q]", calls, want)
 	}
 }
 
