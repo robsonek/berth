@@ -171,7 +171,7 @@ type fakeHost struct {
 	hostname string
 	swapRows string
 	dfRows   string
-	gpgKeys  string // `gpg --show-keys --with-colons` colon output
+	gpgKeys  map[string]string // keyring path -> `gpg --show-keys --with-colons` colon output
 	// memTotalKB backs tuning's /proc/meminfo probe on EVERY profile — the
 	// buffer-pool RAM guard runs before any managed-file classify, fresh
 	// included, and /proc/meminfo exists on any host berth can reach.
@@ -228,7 +228,11 @@ var fakeHostProfiles = []string{"fresh", "converged", "drifted", "foreign", "run
 // ALONE, so a violation there is engine-attributable on sight — the knob and
 // repository branches are engine-independent and already contracted by
 // maximal, and a fourth all-on variant would re-run them for no new edge.
-var contractVariants = []string{"baseline", "maximal", "postgres"}
+// upstream exists because every other variant selects Debian sources: it is
+// the only one that installs php, nginx and the database from their producer
+// repos, so base's unattended-upgrades origins drop-in is written (not
+// absent) and the php/nginx/database own-repo Check branches are walked.
+var contractVariants = []string{"baseline", "maximal", "postgres", "upstream"}
 
 // contractServer is the baseline fixture — see variantServer for the set.
 func contractServer(t *testing.T) *config.Server {
@@ -334,6 +338,16 @@ func variantServer(t *testing.T, variant string) *config.Server {
 		// database.Check's engine probes go through peer-auth psql instead
 		// of the mysql client.
 		srv.Database = config.Database{Engine: "postgres", Source: "debian"}
+	case "upstream":
+		srv.ID = "contract-upstream"
+		// Every component from its producer repo — the only variant that
+		// reaches base's origins write/drift branch and the php/nginx/
+		// database own-repo Checks. PHP stays 8.4 (explicit source: sury)
+		// so the per-version scripts are the ones baseline already audits;
+		// only the repo choice differs.
+		srv.PHP = config.PHP{Version: "8.4", Source: "sury"}
+		srv.Nginx = config.Nginx{Source: "nginx"}
+		srv.Database = config.Database{Engine: "mariadb", Source: "mariadb"}
 	default:
 		panic("unknown contract variant: " + variant)
 	}
@@ -404,6 +418,25 @@ func newFakeHost(t *testing.T, profile string, s *config.Server) *fakeHost {
 	if !slices.Contains(fakeHostProfiles, profile) {
 		panic("unknown fake-host profile: " + profile)
 	}
+	// The colon output KeyringHoldsExactly parses, per keyring: a pub record
+	// followed by the fpr whose field 10 is that repo's pinned fingerprint.
+	// Built from the SAME constructors the steps use (userRepo for the
+	// declared repos, upstreamRepos for berth's own), so every keyring a
+	// Check probes answers with the key its repo pins — and a path no repo
+	// derives has no entry, which the gpg answer treats as unreadable.
+	gpg := map[string]string{}
+	colons := func(fp string) string { return "pub:u:255:22:0000000000000000:::::::::\nfpr:::::::::" + fp + ":\n" }
+	for _, cfg := range s.Apt.Repos {
+		repo := userRepo(cfg)
+		gpg[repo.KeyringPath()] = colons(repo.Fingerprint)
+	}
+	upstream, err := upstreamRepos(s)
+	if err != nil {
+		panic("upstream repos of the fixture: " + err.Error())
+	}
+	for _, repo := range upstream {
+		gpg[repo.KeyringPath()] = colons(repo.Fingerprint)
+	}
 	h := &fakeHost{
 		profile:   profile,
 		files:     map[string]fakeFile{},
@@ -432,9 +465,7 @@ func newFakeHost(t *testing.T, profile string, s *config.Server) *fakeHost {
 		memTotalKB: 3986812,
 		dfRows: "Filesystem 1B-blocks Used Available Capacity Mounted on\n" +
 			"/dev/vda1 41000000000 16000000000 22000000000 41% /\n",
-		// The colon output KeyringHoldsExactly parses: a pub record followed by
-		// the fpr whose field 10 is the pinned fingerprint.
-		gpgKeys: "pub:u:255:22:0000000000000000:::::::::\nfpr:::::::::" + strings.Repeat("A", 40) + ":\n",
+		gpgKeys: gpg,
 	}
 	// The base filesystem every Debian host has, fresh included: the ancestry
 	// probes (accounts' /home/x pattern, appdirs' deploy-path chain) PARSE
@@ -573,7 +604,9 @@ func populateInstalled(h *fakeHost, s *config.Server, profile string) {
 		mode: "755", kind: "regular file", mtimeUnix: 1400000000}
 	// nginx's package-shipped core config. nginx.Check keys its reload stamp
 	// on this file's MTIME (reloadedSince); the content is only ever grepped
-	// under nginx.source=nginx, which the fixture does not select.
+	// under nginx.source=nginx (the upstream variant), where nginx.org ships
+	// `user nginx;` and Apply's worker-user sed leaves exactly the www-data
+	// line modelled here — Debian's package ships it that way already.
 	h.files["/etc/nginx/nginx.conf"] = fakeFile{
 		content: "user www-data;\nworker_processes auto;\n",
 		owner:   "root", group: "root", mode: "644", kind: "regular file",
@@ -788,6 +821,26 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 	}
 	h.putManaged(autoUpgradesPath, autoUp, profile)
 
+	// base's unattended-upgrades origins drop-in, rendered by the same
+	// function base.Check compares against. With no upstream repo in use
+	// berth keeps no file; the foreign profile plants an operator file there
+	// to walk the "foreign is left alone" branch. (Under foreign base still
+	// refuses FIRST on the foreign 20auto-upgrades — the drop-in's own
+	// refusal branch is covered by systembase_test.go.)
+	repos, err := upstreamRepos(s)
+	if err != nil {
+		panic("upstream repos of the fixture: " + err.Error())
+	}
+	origins, err := renderUnattendedOrigins(repos)
+	if err != nil {
+		panic("render apt_unattended_origins.conf.tmpl: " + err.Error())
+	}
+	if origins != nil {
+		h.putManaged(unattendedOriginsPath, origins, profile)
+	} else if profile == "foreign" {
+		h.putManaged(unattendedOriginsPath, nil, profile)
+	}
+
 	// The declared apt repos: the source list is rendered by the same
 	// SourceContent the step compares against. The pinned keyring exists only
 	// where the list reads up-to-date (converged/runtime-stale) — those are
@@ -804,6 +857,28 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 			h.files[repo.KeyringPath()] = fakeFile{owner: "root", group: "root",
 				mode: "644", kind: "regular file", mtimeUnix: 1500000000}
 		}
+	}
+	// berth's OWN upstream repos (sury / nginx.org / the engine's producer
+	// repo — only the ones this config installs from), same discipline as the
+	// declared repos above: the list rendered by the SourceContent the owning
+	// step compares against, the pinned keyring present exactly where the
+	// list reads up-to-date.
+	for _, repo := range repos {
+		src, err := repo.SourceContent()
+		if err != nil {
+			panic("render apt source list for " + repo.Name + ": " + err.Error())
+		}
+		h.putManaged(repo.SourceListPath(), src, profile)
+		if profile == "converged" || profile == "runtime-stale" {
+			h.files[repo.KeyringPath()] = fakeFile{owner: "root", group: "root",
+				mode: "644", kind: "regular file", mtimeUnix: 1500000000}
+		}
+	}
+	// nginx.org lays down the conf.d bridge (rendered by the step's own
+	// function) and has its stock conf.d/default.conf renamed away; Check
+	// requires default.conf ABSENT (the .disabled copy is not probed).
+	if _, useOrg := nginxUpstream(s); useOrg {
+		h.putManaged(nginxBridgePath, nginxBridgeContent(), profile)
 	}
 	// accounts' artifacts. The sudoers bodies come from the same sources the
 	// step compares against: the berth grant is the step's own const, the site

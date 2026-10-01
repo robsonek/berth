@@ -47,6 +47,12 @@ func aptInstall(ctx context.Context, r bssh.Runner, pkgs ...string) error {
 	return apt.New(r).EnsurePackages(ctx, nil, pkgs...)
 }
 
+// aptInstallNoUpgrade installs missing packages without upgrading installed
+// ones (see apt.Manager.EnsurePackagesNoUpgrade).
+func aptInstallNoUpgrade(ctx context.Context, r bssh.Runner, pkgs ...string) error {
+	return apt.New(r).EnsurePackagesNoUpgrade(ctx, pkgs...)
+}
+
 // pkgInstalled reports whether a Debian package is actually installed.
 // dpkg -s exits 0 for a package that was REMOVED but not purged (state "rc":
 // only conffiles remain), so the Status line decides. Its format is

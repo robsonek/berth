@@ -16,6 +16,11 @@ type Engine interface {
 	Name() string
 	// ServerPackage is the apt package that installs the server.
 	ServerPackage() string
+	// ServerPackageTracksMajor reports whether ServerPackage is an unversioned
+	// metapackage that follows its repo's DEFAULT major (PGDG's postgresql).
+	// berth then installs it with --no-upgrade, so a later run never pulls a
+	// second major beside the running one.
+	ServerPackageTracksMajor() bool
 	// UpstreamRepo returns the engine's producer apt repository and true, or a
 	// zero Repo and false if the engine has no trusted upstream.
 	UpstreamRepo() (apt.Repo, bool)

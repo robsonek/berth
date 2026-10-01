@@ -1146,7 +1146,7 @@ func TestDatabaseApplyPostgresFromPGDG(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	stubEngineRepoAbsent(f, repo) // list absent -> ensureOwnRepo runs the full EnsureRepo chain
 	stubEnsureRepoChain(f, repo)
-	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql", bssh.Result{})
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y --no-upgrade postgresql", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
 	f.On("sudo -u postgres psql -X -v ON_ERROR_STOP=1", bssh.Result{})
 
@@ -1917,7 +1917,7 @@ func TestDatabaseApplyPostgresSeedsPgpass(t *testing.T) {
 	s.Database.Engine = "postgres"
 	f := bssh.NewFakeRunner()
 	stubEngineRepoAbsent(f, apt.PostgresPGDG())
-	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql", bssh.Result{})
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y --no-upgrade postgresql", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})   // fresh box: no .env yet
 	f.On("test -e '/home/deploy/.pgpass'", bssh.Result{ExitCode: 1}) // fresh box: no client creds yet
 	stubEnvSeed(f, s)

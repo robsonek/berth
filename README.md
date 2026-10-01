@@ -473,7 +473,71 @@ scope):
 
 - **Automatic security updates** — the APT periodic config is written so
   `unattended-upgrades` actually applies updates (the package alone is inert
-  without it).
+  without it), and berth extends its allowed origins to the upstream
+  repositories the config uses — Surý (PHP other than 8.4, or
+  `php.source: sury`), nginx.org (`nginx.source: nginx`), MariaDB
+  (`database.source: mariadb`) and PGDG (`database.source: pgdg`) — through
+  the managed `/etc/apt/apt.conf.d/52berth-unattended-upgrades`. Upstream
+  repositories do not separate security fixes from other updates, so all
+  updates from them are applied, not only security fixes — patch releases of
+  the pinned PHP branch, MariaDB series and PostgreSQL major, and, for
+  nginx.org (the mainline repository), new mainline releases too — except as
+  noted below. Updates, and the service restarts their packages trigger,
+  happen in the host's APT periodic runs (on stock Debian
+  `apt-daily-upgrade.timer`: around 06:00 with up to an hour's randomized
+  delay, caught up after downtime); berth does not set the window. Details:
+  - **Metapackages are blacklisted.** Surý and PGDG packages named
+    `php`/`php-*` (plus `libapache2-mod-php` and `libphp-embed`) or
+    `postgresql`/`postgresql-*` whose names carry no version (`php`,
+    `php-fpm`, `php-bz2`, `postgresql`, `postgresql-client`, …) follow the
+    repository's DEFAULT major; upgrading one would install a second PHP
+    branch or PostgreSQL cluster beside the running one, so
+    unattended-upgrades never upgrades them. Versioned packages (`php8.5-*`,
+    `postgresql-18`) and `*-common` are updated. This stops the
+    default-tracking metapackages only — a new major could still arrive if
+    another installed package's new version hard-depended on it (none did in
+    these repositories' indexes as of the 2026-09-30 audit).
+  - **Side effect:** the blacklist works by package NAME, regardless of the
+    repository, so while Surý or PGDG is in use a few non-metapackages
+    sharing the pattern (`php-pear`, `php-phalcon`, `postgresql-filedump`) —
+    and their Debian namesakes — stay on manual `apt-get upgrade`, as does
+    any upgrade that needs a newer blacklisted package.
+  - berth itself never upgrades the installed `postgresql` metapackage
+    either (`apt-get install --no-upgrade`); moving to a new PostgreSQL major
+    is a deliberate, manual migration. Switching `database.source` from
+    `debian` to `pgdg` on a host that already runs Debian's PostgreSQL
+    therefore keeps the installed metapackage in that run; the versioned
+    `postgresql-NN` package moves to the PGDG build through the next
+    unattended upgrade (or `apt-get upgrade`). A manual `apt upgrade` or
+    `apt full-upgrade` is NOT constrained by the blacklist: there — and on
+    any PGDG host once PGDG moves its default major — it upgrades the
+    metapackage and installs the new major beside the running cluster. Use
+    `apt-get upgrade`, which keeps such an upgrade back, or
+    `apt-mark hold postgresql`. Hold the metapackage rather than removing
+    it: the database step's Check is unsatisfied whenever the `postgresql`
+    metapackage is missing, so the next provision that runs the database
+    step always reinstalls it — and if PGDG's default major has moved, that
+    installs the new major and a second cluster beside the running one.
+  - Patterns match repository METADATA (Origin, codename, host), not
+    ownership: a repository you add under `apt.repos` from the same host with
+    the same Origin and codename is matched too. berth adds no pattern for
+    `apt.repos` repositories (a stock Debian pattern or one you add yourself
+    can still match them).
+  - With `nginx.source: nginx`, berth edits nginx.org's stock
+    `/etc/nginx/nginx.conf` (the worker user). If nginx.org ships a changed
+    stock file, dpkg would ask about it: with Debian's default
+    unattended-upgrades settings nginx is then held back until a manual
+    `apt-get upgrade`, which asks about the file interactively; if you
+    configured `--force-confnew` the package's file replaces berth's edit,
+    and the reverted worker user breaks every site
+    (workers running as `nginx` cannot reach the site trees or the FPM
+    sockets) until the next provision re-applies the edit; `--force-confold`
+    keeps berth's edit.
+  - After upgrading berth to a version that changes this drop-in, or after
+    changing a php/nginx/database source, run a full provision or
+    `--only base` first: `--only` of any step that requires `base` (php,
+    nginx, database, site, tls, …) refuses with `base` among the unmet
+    prerequisites while `base` is unsatisfied.
 - **fail2ban** — a managed jail bans SSH brute-forcers (bound to your configured
   SSH port) and repeat offenders (`recidive`). berth writes it as
   `/etc/fail2ban/jail.d/99-berth.conf`, leaving `jail.local` — which loads

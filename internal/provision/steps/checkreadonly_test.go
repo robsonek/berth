@@ -110,6 +110,30 @@ func refusalsFor(variant string) map[string]string {
 		// there is no Check to refuse — keeping the entry would be exactly
 		// the dead allowance guard 4c exists to reject.
 		delete(m, "tuning")
+	case "upstream":
+		// nginx: with nginx.source=nginx, a foreign file at nginx.org's
+		// source-list path aborts unless --force (ownRepoUpToDate, aptrepo.go
+		// — the standard managed-file policy over berth's own repo). Guard
+		// order verified: pkgInstalled and serviceUp are data-only; the
+		// nginx.org list classify is the first guard that can refuse, ahead
+		// of the worker-user grep and the sites-bridge classify.
+		m["nginx"] = "not managed by berth"
+		// database: with database.source=mariadb, a foreign file at the
+		// MariaDB repo's source-list path aborts unless --force (the same
+		// ownRepoUpToDate). Guard order verified: the cache preflight is
+		// local and healthy, assertEnvEngineMatch finds no .env under
+		// foreign (none is modelled there), pkgInstalled is data-only — so
+		// the list classify is the first refusal, BEFORE the "credential not
+		// yet persisted" verdict that keeps baseline's database entry-less.
+		m["database"] = "not managed by berth"
+		// php: same substring as baseline, a different guard — with
+		// php.source=sury the Surý source-list classify (ownRepoUpToDate)
+		// runs BEFORE the installed early-return and the OPcache drop-in
+		// (php.go: ordering load-bearing, so a foreign list refuses even on
+		// a fresh host), so under foreign it is the sury list that refuses.
+		// Guard order verified: the version-exclusivity probe reads clean
+		// (no foreign pools modelled).
+		m["php"] = "not managed by berth"
 	}
 	return m
 }

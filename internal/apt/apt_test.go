@@ -21,6 +21,14 @@ func TestEnsurePackagesFromDebianStock(t *testing.T) {
 	}
 }
 
+func TestEnsurePackagesNoUpgrade(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y --no-upgrade postgresql", bssh.Result{})
+	if err := New(f).EnsurePackagesNoUpgrade(context.Background(), "postgresql"); err != nil {
+		t.Fatalf("EnsurePackagesNoUpgrade: %v", err)
+	}
+}
+
 func TestSourceContentCarriesMarker(t *testing.T) {
 	b, err := NginxOrg().SourceContent()
 	if err != nil {

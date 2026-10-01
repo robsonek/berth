@@ -520,6 +520,21 @@ var auditedScripts = map[string]string{
 	reloadedSinceCmd("nginx", "/etc/nginx/nginx.conf"): "reloadedSince (reloadstamp.go) for nginx vs its core config: [ -e ] + [ -nt ] — reads only",
 	reloadedSinceCmd("php8.4-fpm", "/etc/php/8.4/fpm/conf.d/99-berth-opcache.ini", "/etc/php/8.4/fpm/conf.d/99-berth-tuning.ini"): "reloadedSince (reloadstamp.go) for php8.4-fpm vs the two managed drop-ins: [ -e ] + [ -nt ] — reads only",
 
+	// The same comparison over nginx.org's owned set (nginxOwnedConfigFiles,
+	// nginx.go): with nginx.source=nginx (the upstream variant) the managed
+	// conf.d sites bridge joins the core config. Audited: one more
+	// `[ ! … -nt … ]` mtime comparison in the same && chain — reads only.
+	reloadedSinceCmd("nginx", "/etc/nginx/nginx.conf", "/etc/nginx/conf.d/berth-sites.conf"): "reloadedSince (reloadstamp.go) for nginx vs its core config + the nginx.org sites bridge: [ -e ] + [ -nt ] — reads only",
+
+	// nginxRunsAsWWWData's worker-user probe (nginx.go), reached only under
+	// nginx.source=nginx (the upstream variant), pasted literally — the
+	// production composition is a fixed pattern plus the const nginxConfPath,
+	// so the literal IS the issued text. Audited: `grep -qE` over one fixed
+	// file prints nothing (-q) and answers by exit code; the brackets, star
+	// and semicolon sit inside single quotes, so they reach grep as its ERE
+	// and never reach the shell as a glob or separator. Nothing writes.
+	nginxWorkerUserProbePasted: "nginxRunsAsWWWData (nginx.go): grep -qE over nginx.conf for the www-data worker user, exit-code verdict — reads only",
+
 	// valkey's instance-unit discovery (valkeyListUnitsCmd, valkey.go), a
 	// production const pasted literally. Audited: `ls -1` over a fixed glob
 	// prints matching paths (reads directory entries only); `2>/dev/null`
@@ -768,6 +783,11 @@ const (
 func commandVProbeCmd(bin string) string {
 	return "command -v " + bin + " >/dev/null 2>&1"
 }
+
+// nginxWorkerUserProbePasted is the EXACT text nginxRunsAsWWWData (nginx.go)
+// issues — a fixed pattern over the const nginxConfPath, pasted as a literal
+// (see aptUserListsPasted for why never the production helper).
+const nginxWorkerUserProbePasted = `grep -qE '^[[:space:]]*user[[:space:]]+www-data;' /etc/nginx/nginx.conf`
 
 // aptUserListsPasted is the EXACT text of the production const
 // aptUserListsCmd (aptextras.go), pasted as a literal — never referencing the

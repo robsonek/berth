@@ -59,6 +59,10 @@ type provCheck struct {
 
 // aptProvenanceChecks returns the (upstream repo, package) pairs to verify, based on
 // which sources select an upstream repo (Debian-sourced components add no check).
+// PGDG's witness is postgresql-common, not the postgresql metapackage: berth never
+// upgrades the metapackage (Package-Blacklist + `apt-get install --no-upgrade`), so on
+// a long-lived PGDG host or after a debian→pgdg switch it can legitimately stay at a
+// Debian build, while postgresql-common is kept current by unattended-upgrades.
 func aptProvenanceChecks(srv *config.Server) []provCheck {
 	var checks []provCheck
 	if usesSury(srv.PHP) {
@@ -71,7 +75,7 @@ func aptProvenanceChecks(srv *config.Server) []provCheck {
 	case "mariadb":
 		checks = append(checks, provCheck{apt.MariaDBOrg(), "mariadb-server"})
 	case "pgdg":
-		checks = append(checks, provCheck{apt.PostgresPGDG(), "postgresql"})
+		checks = append(checks, provCheck{apt.PostgresPGDG(), "postgresql-common"})
 	}
 	return checks
 }

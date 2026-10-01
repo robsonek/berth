@@ -65,6 +65,13 @@ already-provisioned host:
 - **The name-derivation functions** — OS user, FPM pool, socket, supervisor
   program, database names. Never re-derive these ad hoc; call the helpers.
 - **The on-host default values.**
+- **The upstream repos' unattended-upgrades identity** — each built-in
+  repo's pinned `Origin`, codename (`Suite`) and site (URI host), which
+  `base`'s `52berth-unattended-upgrades` matches on. The Sury/PGDG
+  `Package-Blacklist` regexes use lookaheads Go's RE2 cannot compile: they
+  are verified with Python on a host, never with `regexp` in a unit test.
+  Never widen a pattern to `origin=` alone — `site` is what binds it to the
+  host berth pins.
 
 Always write managed files through `templates.Render` / `RenderINI` so the
 marker is prepended for you.
