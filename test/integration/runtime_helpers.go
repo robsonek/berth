@@ -138,8 +138,9 @@ func installedProvenance(policy, host string, marker *regexp.Regexp) (fromHost, 
 // (`<version> <priority>`). The first field alone cannot tell them apart: Debian's
 // postgresql-common version is a bare integer ("278"), so the second field
 // decides — a URI (`https://…`, `mirror+file:…`) or a path (`/var/lib/dpkg/status`).
+// Priorities are signed: apt_preferences pins may set a negative one ("-10").
 func isPolicySourceLine(f []string) bool {
-	return len(f) >= 2 && isAllDigits(f[0]) && (strings.HasPrefix(f[1], "/") || strings.Contains(f[1], ":"))
+	return len(f) >= 2 && isAllDigits(strings.TrimPrefix(f[0], "-")) && (strings.HasPrefix(f[1], "/") || strings.Contains(f[1], ":"))
 }
 
 // installedFromHost reports whether the installed version of an `apt-cache policy`

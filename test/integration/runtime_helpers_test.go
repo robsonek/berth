@@ -202,6 +202,24 @@ func TestInstalledProvenance(t *testing.T) {
         100 /var/lib/dpkg/status
      278 500
         500 mirror+file:/etc/apt/mirrors/debian.list trixie/main amd64 Packages`, "apt.postgresql.org", "pgdg", true, false},
+		// apt priorities may be negative (apt_preferences pins); a "-10 <uri>"
+		// row is still a source line, and must not end the installed block early.
+		{"negative-priority source line before dpkg status", `postgresql-common:
+  Installed: 293.pgdg13+1
+  Candidate: 294.pgdg13+1
+  Version table:
+     294.pgdg13+1 500
+        500 https://apt.postgresql.org/pub/repos/apt trixie-pgdg/main amd64 Packages
+ *** 293.pgdg13+1 100
+        -10 https://example.com/pgdg trixie-pgdg/main amd64 Packages
+        100 /var/lib/dpkg/status`, "apt.postgresql.org", "pgdg", false, false},
+		{"negative-priority source line from the repo", `nginx:
+  Installed: 1.31.6-1~trixie
+  Candidate: 1.31.6-1~trixie
+  Version table:
+ *** 1.31.6-1~trixie -10
+        -10 https://nginx.org/packages/mainline/debian trixie/nginx amd64 Packages
+        100 /var/lib/dpkg/status`, "nginx.org", "nginx-org", true, false},
 		// No source line at all under the installed row is not evidence of
 		// anything — never "superseded".
 		{"installed row without any source line", `postgresql-common:
