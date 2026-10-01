@@ -605,8 +605,9 @@ func populateInstalled(h *fakeHost, s *config.Server, profile string) {
 	// nginx's package-shipped core config. nginx.Check keys its reload stamp
 	// on this file's MTIME (reloadedSince); the content is only ever grepped
 	// under nginx.source=nginx (the upstream variant), where nginx.org ships
-	// `user nginx;` and Apply's worker-user sed leaves exactly the www-data
-	// line modelled here — Debian's package ships it that way already.
+	// `user nginx;` and Apply's worker-user sed rewrites it to `user  www-data;`
+	// (two spaces). The single-space line modelled here is Debian's stock form;
+	// both satisfy the worker-user grep, which allows any whitespace run.
 	h.files["/etc/nginx/nginx.conf"] = fakeFile{
 		content: "user www-data;\nworker_processes auto;\n",
 		owner:   "root", group: "root", mode: "644", kind: "regular file",
