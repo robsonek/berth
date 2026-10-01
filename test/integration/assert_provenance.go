@@ -15,7 +15,9 @@ import (
 // assertAptProvenance verifies, per configured upstream source: (1) the on-disk signing
 // keyring carries the pinned 40-hex fingerprint (apt trust core), (2) the source list
 // binds that keyring via signed-by and uses the upstream URI, and (3) the INSTALLED
-// package version originates from the upstream repo (not Debian).
+// package version originates from the upstream repo (not Debian) — either listed by
+// the repo's index, or (on a long-lived host) no longer listed but carrying the repo's
+// build signature (installedProvenance).
 func assertAptProvenance(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server) {
 	t.Helper()
 	for _, ck := range aptProvenanceChecks(srv) {
@@ -37,11 +39,19 @@ func assertAptProvenance(ctx context.Context, t *testing.T, c *bssh.Client, srv 
 				t.Errorf("%s: source list %s does not use upstream URI %s", ck.repo.Name, listFile, ck.repo.URI)
 			}
 		}
-		// Installed version originates from the upstream repo.
+		// Installed version originates from the upstream repo — or is a build of
+		// that repo which has since dropped out of its index (stale host).
 		host := repoHost(ck.repo.URI)
-		if pol, err := c.Run(ctx, "apt-cache policy "+ck.pkg, nil); err != nil {
+		pol, err := c.Run(ctx, "apt-cache policy "+ck.pkg, nil)
+		if err != nil {
 			t.Fatalf("%s: apt-cache policy %s: %v", ck.repo.Name, ck.pkg, err)
-		} else if !installedFromHost(pol.Stdout, host) {
+		}
+		fromHost, superseded, version := installedProvenance(pol.Stdout, host, buildMarkers[ck.repo.Name])
+		switch {
+		case fromHost:
+		case superseded:
+			t.Logf("%s: installed %s %s is no longer in %s's index but carries its build signature — a superseded upstream build, accepted", ck.repo.Name, ck.pkg, version, host)
+		default:
 			t.Errorf("%s: installed %s did not originate from %s; apt-cache policy:\n%s", ck.repo.Name, ck.pkg, host, pol.Stdout)
 		}
 	}

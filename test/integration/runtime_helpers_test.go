@@ -140,3 +140,96 @@ func TestInsecureHTTPSProbes(t *testing.T) {
 		})
 	}
 }
+
+// TestInstalledProvenance pins the stale-host rule: Sury and PGDG keep only
+// recent builds, so on a long-lived host the INSTALLED version can drop out of
+// the index and `apt-cache policy` lists it under /var/lib/dpkg/status alone.
+// Such a version still came from the repo when its string carries the repo's
+// build signature; a Debian build — current or stale — never does.
+func TestInstalledProvenance(t *testing.T) {
+	cases := []struct {
+		name               string
+		policy, host       string
+		marker             string // a buildMarkers key
+		fromHost, superset bool
+	}{
+		{"current sury build, listed by the repo", `php8.5-fpm:
+  Installed: 8.5.11-1+0~20260924.26+debian13~1.gbpbcb504
+  Candidate: 8.5.11-1+0~20260924.26+debian13~1.gbpbcb504
+  Version table:
+ *** 8.5.11-1+0~20260924.26+debian13~1.gbpbcb504 500
+        500 https://packages.sury.org/php trixie/main amd64 Packages
+        100 /var/lib/dpkg/status`, "packages.sury.org", "sury-php", true, false},
+		// The exact listing that false-failed the suite on 2026-09-30.
+		{"superseded sury build, gone from the index", `php8.5-fpm:
+  Installed: 8.5.10-1+0~20260828.25+debian13~1.gbpfea0b8
+  Candidate: 8.5.11-1+0~20260924.26+debian13~1.gbpbcb504
+  Version table:
+     8.5.11-1+0~20260924.26+debian13~1.gbpbcb504 500
+        500 https://packages.sury.org/php trixie/main amd64 Packages
+ *** 8.5.10-1+0~20260828.25+debian13~1.gbpfea0b8 100
+        100 /var/lib/dpkg/status`, "packages.sury.org", "sury-php", false, true},
+		{"superseded pgdg build", `postgresql-common:
+  Installed: 293.pgdg13+1
+  Candidate: 294.pgdg13+1
+  Version table:
+     294.pgdg13+1 500
+        500 https://apt.postgresql.org/pub/repos/apt trixie-pgdg/main amd64 Packages
+ *** 293.pgdg13+1 100
+        100 /var/lib/dpkg/status`, "apt.postgresql.org", "pgdg", false, true},
+		// The silent-fallback class (MariaDB mirror bug): Debian's build installed.
+		{"debian build installed instead of upstream", `mariadb-server:
+  Installed: 1:11.8.6-0+deb13u1
+  Candidate: 1:11.8.6-0+deb13u1
+  Version table:
+ *** 1:11.8.6-0+deb13u1 500
+        500 mirror+file:/etc/apt/mirrors/debian.list trixie/main amd64 Packages
+        100 /var/lib/dpkg/status`, "dlm.mariadb.com", "mariadb-org", false, false},
+		// A stale Debian build is ALSO listed under dpkg status alone — only the
+		// missing build signature tells it apart from a superseded upstream one.
+		{"stale debian build, gone from the index", `mariadb-server:
+  Installed: 1:11.8.5-0+deb13u1
+  Candidate: 1:11.8.6-0+deb13u1
+  Version table:
+     1:11.8.6-0+deb13u1 500
+        500 mirror+file:/etc/apt/mirrors/debian.list trixie/main amd64 Packages
+ *** 1:11.8.5-0+deb13u1 100
+        100 /var/lib/dpkg/status`, "dlm.mariadb.com", "mariadb-org", false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fromHost, superseded, _ := installedProvenance(c.policy, c.host, buildMarkers[c.marker])
+			if fromHost != c.fromHost || superseded != c.superset {
+				t.Errorf("fromHost=%v superseded=%v, want %v/%v", fromHost, superseded, c.fromHost, c.superset)
+			}
+		})
+	}
+}
+
+// TestBuildMarkersMatchOnlyUpstream: each repo's build signature matches that
+// repo's real version strings and none of Debian's.
+func TestBuildMarkersMatchOnlyUpstream(t *testing.T) {
+	upstream := map[string][]string{
+		"sury-php":    {"8.5.11-1+0~20260924.26+debian13~1.gbpbcb504", "8.4.16-1+0~20260101.3+debian13~1.gbp0123ab"},
+		"nginx-org":   {"1.31.6-1~trixie", "1.27.4-1~trixie"},
+		"mariadb-org": {"1:12.3.3+maria~deb13"},
+		"pgdg":        {"293.pgdg13+1", "18.6-1.pgdg13+2"},
+	}
+	debian := []string{"1:11.8.6-0+deb13u1", "1.26.3-3+deb13u1", "278", "17.6-0+deb13u1", "8.4.16-1~deb13u1", "3.5.7-1~deb13u3"}
+	for name, versions := range upstream {
+		m := buildMarkers[name]
+		if m == nil {
+			t.Fatalf("no build marker for %s", name)
+		}
+		for _, v := range versions {
+			if !m.MatchString(v) {
+				t.Errorf("%s marker misses its own build %q", name, v)
+			}
+		}
+		for _, v := range debian {
+			if m.MatchString(v) {
+				t.Errorf("%s marker matches Debian build %q", name, v)
+			}
+		}
+	}
+}
