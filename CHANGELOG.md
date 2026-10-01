@@ -3,6 +3,19 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Changed
+
+- **GitHub release notes now come from this file.** The release body used to
+  be GoReleaser's list of commit titles, so a release's behaviour changes
+  (e.g. 0.32.0's nightly upstream upgrades) were visible on GitHub only as a
+  PR title. `release.yml` now publishes the tag's `CHANGELOG.md` section plus
+  a compare link to the previous tag (`.github/scripts/release-notes.sh`), and
+  fails before building or publishing anything when that section is missing
+  or empty. CI runs the script on the newest section on every PR. The 0.31.0
+  and 0.32.0 release pages were updated by hand to the same form.
+
 ## [0.32.0] — 2026-10-01
 
 ### Fixed

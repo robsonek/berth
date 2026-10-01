@@ -42,6 +42,11 @@ use. Add dependencies with `go get`.
 linter objects, the code changes, not the linter. `golangci-lint` runs in two
 passes: the default tree, then with `--build-tags integration`.
 
+**Write the CHANGELOG section before tagging.** The GitHub release body is the
+tag's `CHANGELOG.md` section (`.github/scripts/release-notes.sh`), and
+`release.yml` fails — before anything is published — when that section is
+missing or empty. Rename `[Unreleased]` to `[X.Y.Z] — <date>` first, then tag.
+
 **A non-zero `Result.ExitCode` is data, not a Go error.** Many probes read
 "absent" from a non-zero exit. Check both the error and the code; returning a Go
 error where a real host would return exit 1 sends a step down a path it never
