@@ -15,6 +15,14 @@ Notable changes to berth. Older releases are documented on the
   fails before building or publishing anything when that section is missing
   or empty. CI runs the script on the newest section on every PR. The 0.31.0
   and 0.32.0 release pages were updated by hand to the same form.
+- **`github/codeql-action` v4.38.2 → v4.39.1**, which supersedes dependabot's
+  #94 (proposing v4.38.3, already two releases stale). Dependabot could not
+  refresh #94 itself: its three PR slots (`open-pull-requests-limit: 3`) were
+  held by PRs kept red by the advisories below. The changes affect CI only:
+  CodeQL bundles 2.27.2 and 2.27.3, a raised minimum bundle (2.20.7; berth
+  uses the default bundle), and a new `checkout_path` check in `analyze`,
+  which does not apply because berth checks out at the workspace root and
+  does not set the input.
 
 ### Fixed
 
