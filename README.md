@@ -186,7 +186,8 @@ backups:                       # optional opt-in local backups — off by defaul
   retention_days: 7            # prune dumps older than N days (default 7; 1–3650)
   schedule: "30 3 * * *"       # 5-field cron, run as root (default 03:30 daily)
 
-apt:                           # optional extra third-party apt repos & packages
+apt:                           # optional extra third-party apt repos & packages,
+                               # and the upstream update policy
   repos:                       # (see "Extra apt repositories & packages" below)
     - name: signal-cli         # ^[a-z0-9][a-z0-9-]{0,31}$ — lands on the host as
                                # /etc/apt/sources.list.d/berth-<name>.list + keyring
@@ -198,6 +199,9 @@ apt:                           # optional extra third-party apt repos & packages
                                # 40-hex signing-key fingerprint, verified on fetch
   packages: [signal-cli-native, htop]   # extra packages — install-only, berth
                                # never uninstalls a name you remove from the list
+  upstream_updates: auto       # auto (default) | manual — manual keeps berth's own
+                               # upstream repos (Surý, nginx.org, MariaDB, PGDG) out
+                               # of unattended-upgrades (see "Controlled upstream update")
 
 sites:                         # one or more
   - domain: app.example.com            # required
@@ -538,6 +542,22 @@ scope):
     `--only base` first: `--only` of any step that requires `base` (php,
     nginx, database, site, tls, …) refuses with `base` among the unmet
     prerequisites while `base` is unsatisfied.
+  - **`apt.upstream_updates: manual`** keeps the upstream repositories out
+    of unattended-upgrades: berth removes its `52berth-unattended-upgrades`
+    drop-in, metapackage blacklist included (a file there that berth did not
+    write is left alone, even with `--force`), so unattended-upgrades no
+    longer installs updates from Surý, nginx.org, MariaDB or PGDG. The
+    repositories stay configured, and updates from Debian's own repositories
+    (the stock unattended-upgrades origins) are still applied automatically —
+    including to a package Debian also ships (PHP 8.4 from Surý, PostgreSQL
+    17 from PGDG) once Debian publishes a newer version than the installed
+    one, which then replaces it with Debian's build. You choose when the
+    upstream packages move — see
+    [Controlled upstream update](#controlled-upstream-update). A
+    `berth provision` run is one such moment: when the php, nginx or MariaDB
+    database step has work to do, its `apt-get install` also upgrades that
+    step's installed packages to the repository's current version. The
+    default is `auto` (leaving the key out is the same).
 - **fail2ban** — a managed jail bans SSH brute-forcers (bound to your configured
   SSH port) and repeat offenders (`recidive`). berth writes it as
   `/etc/fail2ban/jail.d/99-berth.conf`, leaving `jail.local` — which loads
@@ -569,6 +589,49 @@ scope):
   tracked via the cache entry, and locking removes the cached plaintext); a
   password berth did not set is left alone, and an existing usable password
   is reused, never rotated.
+
+### Controlled upstream update
+
+With `apt.upstream_updates: manual`, upgrade the upstream packages yourself, in
+a maintenance window you choose:
+
+1. Stop every berth Supervisor program on the host — per site, the queue worker
+   `berth-<pool>` and each daemon `berth-<pool>-<name>`, where `<pool>` is the
+   site's domain with dots replaced by underscores:
+
+   ```sh
+   sudo supervisorctl stop 'berth-<pool>:*'          # the queue worker
+   sudo supervisorctl stop 'berth-<pool>-<name>:*'   # each daemon
+   ```
+
+2. Upgrade:
+
+   ```sh
+   sudo apt-get update && sudo apt-get upgrade
+   ```
+
+   Use `apt-get upgrade`, not `apt upgrade` or `apt full-upgrade`: those two
+   can install a new PHP or PostgreSQL major beside the running one (the
+   PostgreSQL note under "Automatic security updates" in
+   [Security & hardening](#security--hardening) explains why). A package
+   `apt-get upgrade` keeps back needs a new dependency; upgrade it by name only
+   after checking what it pulls in.
+
+3. Check both configurations; each must report that it is OK:
+
+   ```sh
+   sudo nginx -t
+   sudo php-fpm<ver> -t      # e.g. php-fpm8.5 -t
+   ```
+
+4. Start the programs again:
+
+   ```sh
+   sudo supervisorctl start 'berth-<pool>:*'
+   sudo supervisorctl start 'berth-<pool>-<name>:*'
+   ```
+
+   or, with `workers: running`, run `berth provision`, which starts them.
 
 ### Cloudflare origin lockdown (`cloudflare_only:`)
 

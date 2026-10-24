@@ -3,6 +3,21 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Added
+
+- **`apt.upstream_updates: manual`** keeps berth's upstream repositories
+  (Surý, nginx.org, MariaDB, PGDG) out of unattended-upgrades. Since 0.32.0
+  the APT periodic run updates their packages and restarts the services they
+  ship; with `manual` the operator picks the moment instead. `base` then
+  removes its `/etc/apt/apt.conf.d/52berth-unattended-upgrades` drop-in (a
+  file there that berth did not write is left alone, even with `--force`).
+  The repositories stay configured, and updates from Debian's own
+  repositories are still applied automatically. The README gains a
+  "Controlled upstream update" procedure for the maintenance window. The
+  default (`auto`, or no key) keeps today's behaviour, so no host drifts.
+
 ## [0.32.1] — 2026-10-24
 
 ### Changed

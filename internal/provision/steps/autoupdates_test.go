@@ -1,17 +1,21 @@
 package steps
 
 import (
+	"context"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/robsonek/berth/internal/apt"
 	"github.com/robsonek/berth/internal/config"
+	"github.com/robsonek/berth/internal/provision"
+	bssh "github.com/robsonek/berth/internal/ssh"
 )
 
 func TestUpstreamRepos(t *testing.T) {
@@ -320,5 +324,134 @@ func TestUnattendedOriginsPath(t *testing.T) {
 	}
 	if base := filepath.Base(unattendedOriginsPath); base <= "50unattended-upgrades" {
 		t.Errorf("%s must sort after the stock 50unattended-upgrades", base)
+	}
+}
+
+// manualUpstreamServer installs php, nginx and the database from their
+// producer repos (upstreamServer's mix) but sets apt.upstream_updates: manual,
+// so unattended-upgrades must not be extended to those repos.
+func manualUpstreamServer() *config.Server {
+	s := upstreamServer()
+	s.Apt.UpstreamUpdates = "manual"
+	return s
+}
+
+// manualRemoveReason is base's plan line for berth's drop-in under manual.
+const manualRemoveReason = "remove /etc/apt/apt.conf.d/52berth-unattended-upgrades (apt.upstream_updates: manual)"
+
+// baseCheckWithOrigins runs base.Check with every base package installed and
+// 20auto-upgrades up to date, so the verdict is the origins drop-in's alone.
+func baseCheckWithOrigins(t *testing.T, s *config.Server, origins bssh.Result, force bool) provision.CheckResult {
+	t.Helper()
+	f := bssh.NewFakeRunner()
+	for _, pkg := range basePackages {
+		f.On("dpkg -s "+pkg, bssh.Result{Stdout: "Status: install ok installed\n"})
+	}
+	auto, err := renderAutoUpgrades()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.On("cat "+shQuote(autoUpgradesPath), bssh.Result{Stdout: string(auto)})
+	f.On(originsCat, origins)
+	cr, err := SystemBase().Check(context.Background(), provision.RunCtx{Force: force}, s, f)
+	if err != nil {
+		t.Fatalf("Check (force=%v): %v", force, err)
+	}
+	return cr
+}
+
+// assertOriginsUntouched fails if base.Apply did anything to the drop-in
+// beyond reading it: no validation, no write, no removal.
+func assertOriginsUntouched(t *testing.T, o *orderedRunner, label string) {
+	t.Helper()
+	for _, e := range o.events {
+		if e == "run:"+aptConfigValidateCmd || (strings.Contains(e, unattendedOriginsPath) && e != "run:"+originsCat) {
+			t.Errorf("%s: the drop-in was touched: %q", label, e)
+		}
+	}
+}
+
+func TestUnattendedRepos(t *testing.T) {
+	for _, mode := range []string{"", "auto", "manual"} {
+		s := upstreamServer()
+		s.Apt.UpstreamUpdates = mode
+		got, err := unattendedRepos(s)
+		if err != nil {
+			t.Fatalf("%q: %v", mode, err)
+		}
+		var names []string
+		for _, r := range got {
+			names = append(names, r.Name)
+		}
+		want := "sury-php,nginx-org,mariadb-org"
+		if mode == "manual" {
+			want = ""
+		}
+		if strings.Join(names, ",") != want {
+			t.Errorf("upstream_updates %q: repos = %v, want %q", mode, names, want)
+		}
+	}
+}
+
+// A host provisioned under the default keeps berth's drop-in listing every
+// upstream repo; switching to manual removes it.
+func TestUnattendedOriginsManualRemovesBerthFile(t *testing.T) {
+	berthFile := bssh.Result{Stdout: string(upstreamDropIn(t))}
+	cr := baseCheckWithOrigins(t, manualUpstreamServer(), berthFile, false)
+	if cr.Satisfied {
+		t.Errorf("Check satisfied with berth's drop-in present under manual: %+v", cr)
+	}
+	if !slices.Contains(cr.Changes, manualRemoveReason) {
+		t.Errorf("Changes = %q, want an entry exactly %q", cr.Changes, manualRemoveReason)
+	}
+
+	o := baseApplyRunner()
+	o.On(originsCat, berthFile)
+	o.On("rm -f '/etc/apt/apt.conf.d/52berth-unattended-upgrades'", bssh.Result{})
+	if err := SystemBase().Apply(context.Background(), provision.RunCtx{}, manualUpstreamServer(), o); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if eventIndex(o.events, "run:rm -f '/etc/apt/apt.conf.d/52berth-unattended-upgrades'") < 0 {
+		t.Errorf("berth's drop-in was not removed; events:\n%s", strings.Join(o.events, "\n"))
+	}
+	for _, e := range o.events {
+		if e == "run:"+aptConfigValidateCmd || e == "write:"+unattendedOriginsPath {
+			t.Errorf("manual must not validate or write the drop-in: %q", e)
+		}
+	}
+}
+
+// A foreign file at the path is the operator's: manual leaves it alone, also
+// with --force.
+func TestUnattendedOriginsManualLeavesForeignFile(t *testing.T) {
+	foreign := bssh.Result{Stdout: "// operator file\n"}
+	for _, force := range []bool{false, true} {
+		if cr := baseCheckWithOrigins(t, manualUpstreamServer(), foreign, force); !cr.Satisfied {
+			t.Errorf("force=%v: Check unsatisfied on a foreign drop-in under manual: %+v", force, cr)
+		}
+		o := baseApplyRunner()
+		o.On(originsCat, foreign)
+		if err := SystemBase().Apply(context.Background(), provision.RunCtx{Force: force}, manualUpstreamServer(), o); err != nil {
+			t.Fatalf("force=%v: Apply: %v", force, err)
+		}
+		assertOriginsUntouched(t, o, fmt.Sprintf("force=%v", force))
+	}
+}
+
+func TestUnattendedOriginsManualAbsentIsSatisfied(t *testing.T) {
+	absent := bssh.Result{ExitCode: 1}
+	if cr := baseCheckWithOrigins(t, manualUpstreamServer(), absent, false); !cr.Satisfied {
+		t.Errorf("Check unsatisfied with no drop-in under manual: %+v", cr)
+	}
+	o := baseApplyRunner()
+	o.On(originsCat, absent)
+	if err := SystemBase().Apply(context.Background(), provision.RunCtx{}, manualUpstreamServer(), o); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	assertOriginsUntouched(t, o, "absent")
+	for _, w := range o.Writes() {
+		if w.Path != autoUpgradesPath {
+			t.Errorf("unexpected write under manual with no drop-in: %s", w.Path)
+		}
 	}
 }

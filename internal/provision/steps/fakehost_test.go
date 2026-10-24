@@ -221,13 +221,14 @@ var fakeHostProfiles = []string{"fresh", "converged", "drifted", "foreign", "run
 // fixture never enables would pass every guard. baseline is the ORIGINAL
 // fixture, preserved unchanged so today's coverage cannot shrink; maximal
 // turns on every system knob (swap + swappiness, the kernel sysctl drop-in,
-// timezone, static hostname — all opt-in and all off in baseline) and gives
-// the site a repository (the deploy-key and known-host probes); postgres
-// swaps the database engine, whose Check probes are engine-specific code the
-// mariadb variants never reach. postgres differs from baseline in the engine
-// ALONE, so a violation there is engine-attributable on sight — the knob and
-// repository branches are engine-independent and already contracted by
-// maximal, and a fourth all-on variant would re-run them for no new edge.
+// timezone, static hostname — all opt-in and all off in baseline), gives the
+// site a repository (the deploy-key and known-host probes) and sets
+// apt.upstream_updates: manual; postgres swaps the database engine, whose
+// Check probes are engine-specific code the mariadb variants never reach.
+// postgres differs from baseline in the engine ALONE, so a violation there is
+// engine-attributable on sight — the knob and repository branches are
+// engine-independent and already contracted by maximal, and a fourth all-on
+// variant would re-run them for no new edge.
 // upstream exists because every other variant selects Debian sources: it is
 // the only one that installs php, nginx and the database from their producer
 // repos, so base's unattended-upgrades origins drop-in is written (not
@@ -330,6 +331,11 @@ func variantServer(t *testing.T, variant string) *config.Server {
 		// entry in cmdclass_test.go (both forms come from the same
 		// composition; the data differs, the code path is a superset here).
 		srv.Sites[0].Repository = "ssh://git@git.example.com:2222/app/app.git"
+		// apt.upstream_updates: manual takes base's origins drop-in through
+		// unattendedRepos' manual short-circuit. maximal installs from
+		// Debian only, so its probe set is unchanged (the one `cat`); the
+		// manual branches themselves are pinned in autoupdates_test.go.
+		srv.Apt.UpstreamUpdates = "manual"
 	case "postgres":
 		srv.ID = "contract-postgres"
 		// The engine variant: postgres source debian (a valid pairing per
@@ -823,12 +829,13 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 	h.putManaged(autoUpgradesPath, autoUp, profile)
 
 	// base's unattended-upgrades origins drop-in, rendered by the same
-	// function base.Check compares against. With no upstream repo in use
-	// berth keeps no file; the foreign profile plants an operator file there
-	// to walk the "foreign is left alone" branch. (Under foreign base still
-	// refuses FIRST on the foreign 20auto-upgrades — the drop-in's own
-	// refusal branch is covered by systembase_test.go.)
-	repos, err := upstreamRepos(s)
+	// functions base.Check compares against. With no repo to list (none in
+	// use, or apt.upstream_updates: manual) berth keeps no file; the foreign
+	// profile plants an operator file there to walk the "foreign is left
+	// alone" branch. (Under foreign base still refuses FIRST on the foreign
+	// 20auto-upgrades — the drop-in's own refusal branch is covered by
+	// systembase_test.go.)
+	repos, err := unattendedRepos(s)
 	if err != nil {
 		panic("upstream repos of the fixture: " + err.Error())
 	}
