@@ -283,6 +283,16 @@ func TestRecordingRunnerDerivesWave3AnswersFromState(t *testing.T) {
 	if res, err := conv.Run(ctx, envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PASSWORD"), []byte(redisPasswordUnsetStdin)); err != nil || res.ExitCode != 3 {
 		t.Errorf("absent REDIS_PASSWORD = (%+v, %v), want exit 3", res, err)
 	}
+	// The override keys: the seed writes REDIS_CLIENT=phpredis (accepted)
+	// and neither URL (absent, exit 3).
+	if res, err := conv.Run(ctx, envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_CLIENT"), []byte(envValueFormsStdin("REDIS_CLIENT", "phpredis"))); err != nil || res.ExitCode != 0 {
+		t.Errorf("seeded REDIS_CLIENT = (%+v, %v), want exit 0", res, err)
+	}
+	for _, key := range []string{"DB_URL", "REDIS_URL"} {
+		if res, err := conv.Run(ctx, envLineInSetProbeCmd(fixtureSharedEnv, key), []byte(envUnsetStdin(key))); err != nil || res.ExitCode != 3 {
+			t.Errorf("absent %s = (%+v, %v), want exit 3", key, res, err)
+		}
+	}
 	// A duplicated key is its own verdict, even when the first line agrees.
 	env := convHost.files[fixtureSharedEnv]
 	env.content += "REDIS_HOST=127.0.0.1\n"
@@ -1513,7 +1523,7 @@ func (r *recordingRunner) answerEnvValueMatch(path, key string, stdin []byte) bs
 // envLineInSetScript probe for one of the keys berthOwnedEnv lists, aimed
 // at the fixture site's shared/.env; "" otherwise.
 func envLineInSetFixtureKey(cmd string) string {
-	for _, key := range []string{"DB_DATABASE", "DB_USERNAME", "REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD"} {
+	for _, key := range []string{"DB_DATABASE", "DB_USERNAME", "DB_URL", "REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD", "REDIS_URL", "REDIS_CLIENT"} {
 		if cmd == envLineInSetProbeCmd(fixtureSharedEnv, key) {
 			return key
 		}

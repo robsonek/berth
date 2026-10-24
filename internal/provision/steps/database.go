@@ -317,31 +317,48 @@ func envValueForms(key, value string) envExpectation {
 	}}
 }
 
+// envUnsetForms is the expectation for a key that must be absent or empty:
+// an empty value in each quoting, and the two spellings phpdotenv/Laravel
+// read as null. The bare `KEY=` comes first: it is the line an error prints.
+func envUnsetForms(key string) envExpectation {
+	return envExpectation{Key: key, AbsentOK: true, Accept: []string{
+		key + "=",
+		key + `=""`,
+		key + "=''",
+		key + "=null",
+		key + "=(null)",
+	}}
+}
+
 // berthOwnedEnv lists, in probe and report order, the shared/.env keys a
 // site's app must agree on with what berth provisions: the database and role
 // the database step creates and, when Valkey is on, the site's own instance
 // socket (REDIS_PORT=0 is how phpredis takes a path-shaped host as a unix
 // socket). REDIS_PASSWORD must be unset or empty: the per-site instance has
 // no password (isolation is the 0700 socket directory), and phpredis sends
-// AUTH for any non-empty value, which an instance without one rejects. The
-// values are config-derived and validated (no CR/LF); envLineInSet re-checks
-// anyway before any of them reaches a probe.
+// AUTH for any non-empty value, which an instance without one rejects.
+// DB_URL and REDIS_URL must be unset or empty too: Laravel parses a URL into
+// the connection settings and lets it win over the separate keys, so a set
+// URL would point the app elsewhere while every key above reads correct.
+// REDIS_CLIENT may be absent (Laravel defaults to phpredis) or phpredis, the
+// client that takes berth's socket host with REDIS_PORT=0. The values are
+// config-derived and validated (no CR/LF); envLineInSet re-checks anyway
+// before any of them reaches a probe.
 func berthOwnedEnv(s *config.Server, site config.Site) []envExpectation {
 	exp := []envExpectation{
 		envValueForms("DB_DATABASE", s.SiteDBName(site)),
 		envValueForms("DB_USERNAME", s.SiteDBUser(site)),
+		envUnsetForms("DB_URL"),
 	}
 	if s.Valkey {
+		client := envValueForms("REDIS_CLIENT", "phpredis")
+		client.AbsentOK = true
 		exp = append(exp,
 			envValueForms("REDIS_HOST", valkeySocketPath(site.Domain)),
 			envValueForms("REDIS_PORT", "0"),
-			envExpectation{Key: "REDIS_PASSWORD", AbsentOK: true, Accept: []string{
-				"REDIS_PASSWORD=",
-				`REDIS_PASSWORD=""`,
-				"REDIS_PASSWORD=''",
-				"REDIS_PASSWORD=null",
-				"REDIS_PASSWORD=(null)",
-			}},
+			envUnsetForms("REDIS_PASSWORD"),
+			envUnsetForms("REDIS_URL"),
+			client,
 		)
 	}
 	return exp

@@ -53,11 +53,15 @@ Notable changes to berth. Older releases are documented on the
   cache berth never set up while every run reported green. On every run, in
   Check and before Apply changes anything on the host, an existing `.env`
   must now carry `DB_DATABASE` and `DB_USERNAME` matching the site's
-  `database` block and, with `valkey: true`, `REDIS_HOST` set to the site's
-  own socket (`/run/berth-valkey/<pool>/valkey.sock`), `REDIS_PORT=0` and an
-  absent or empty `REDIS_PASSWORD` (`REDIS_PASSWORD=`, `""`, `''`, `null` or
-  `(null)`). Values may be unquoted, double-quoted or single-quoted, and
-  trailing whitespace is ignored. Each of these keys must appear on at most
+  `database` block and an absent or empty `DB_URL` and, with `valkey: true`,
+  `REDIS_HOST` set to the site's own socket
+  (`/run/berth-valkey/<pool>/valkey.sock`), `REDIS_PORT=0`, an absent or
+  empty `REDIS_PASSWORD` and `REDIS_URL` (`KEY=`, `""`, `''`, `null` or
+  `(null)`), and an absent or `phpredis` `REDIS_CLIENT`. A set `DB_URL` or
+  `REDIS_URL` would override the other keys in Laravel, and only phpredis
+  reads the socket host with port `0` the way berth seeds it. Values may be
+  unquoted, double-quoted or single-quoted, and trailing whitespace is
+  ignored. Each of these keys must appear on at most
   one line: a duplicated key is refused whatever the values
   (`<KEY> appears <N> times in <path>; keep exactly one line`), since a
   correct line must not vouch for a duplicate the app may read instead. The

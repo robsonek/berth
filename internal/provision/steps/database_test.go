@@ -2130,6 +2130,20 @@ func TestEnvLineInSetScriptRealShell(t *testing.T) {
 		{"redis-password-set", "REDIS_PASSWORD", "REDIS_PASSWORD=hunter2\n", 1},
 		{"redis-host-socket", "REDIS_HOST", "REDIS_HOST=" + valkeySocketPath("app.example.com") + "\n", 0},
 		{"redis-host-tcp", "REDIS_HOST", "REDIS_HOST=127.0.0.1\n", 1},
+		// The override keys: empty (any accepted spelling) or absent passes,
+		// a value is refused, a duplicate is refused whatever the values.
+		{"db-url-empty", "DB_URL", "DB_URL=\n", 0},
+		{"db-url-empty-double-quotes", "DB_URL", "DB_URL=\"\"\n", 0},
+		{"db-url-null", "DB_URL", "DB_URL=null\n", 0},
+		{"db-url-set", "DB_URL", "DB_URL=mysql://other:pw@127.0.0.1/other\n", 1},
+		{"db-url-absent", "DB_URL", "DB_DATABASE=myapp\n", 3},
+		{"db-url-duplicate", "DB_URL", "DB_URL=\nDB_URL=mysql://other@127.0.0.1/other\n", 4},
+		{"redis-url-empty-single-quotes", "REDIS_URL", "REDIS_URL=''\n", 0},
+		{"redis-url-set", "REDIS_URL", "REDIS_URL=redis://127.0.0.1:6379\n", 1},
+		{"redis-client-phpredis", "REDIS_CLIENT", "REDIS_CLIENT=phpredis\n", 0},
+		{"redis-client-quoted", "REDIS_CLIENT", "REDIS_CLIENT=\"phpredis\"\n", 0},
+		{"redis-client-predis", "REDIS_CLIENT", "REDIS_CLIENT=predis\n", 1},
+		{"redis-client-empty", "REDIS_CLIENT", "REDIS_CLIENT=\n", 1},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -2214,7 +2228,15 @@ func TestBerthOwnedEnvKeysAndForms(t *testing.T) {
 		{Key: "REDIS_HOST", Accept: []string{"REDIS_HOST=" + sock, `REDIS_HOST="` + sock + `"`, "REDIS_HOST='" + sock + "'"}},
 		{Key: "REDIS_PORT", Accept: []string{"REDIS_PORT=0", `REDIS_PORT="0"`, "REDIS_PORT='0'"}},
 		{Key: "REDIS_PASSWORD", AbsentOK: true, Accept: []string{"REDIS_PASSWORD=", `REDIS_PASSWORD=""`, "REDIS_PASSWORD=''", "REDIS_PASSWORD=null", "REDIS_PASSWORD=(null)"}},
+		// Override keys: a non-empty DB_URL / REDIS_URL wins over every
+		// key above in Laravel's config, and a non-phpredis client cannot
+		// take the socket host the way berth seeds it.
+		{Key: "REDIS_URL", AbsentOK: true, Accept: []string{"REDIS_URL=", `REDIS_URL=""`, "REDIS_URL=''", "REDIS_URL=null", "REDIS_URL=(null)"}},
+		{Key: "REDIS_CLIENT", AbsentOK: true, Accept: []string{"REDIS_CLIENT=phpredis", `REDIS_CLIENT="phpredis"`, "REDIS_CLIENT='phpredis'"}},
 	}
+	want = append(want[:2], append([]envExpectation{
+		{Key: "DB_URL", AbsentOK: true, Accept: []string{"DB_URL=", `DB_URL=""`, "DB_URL=''", "DB_URL=null", "DB_URL=(null)"}},
+	}, want[2:]...)...)
 	if len(got) != len(want) {
 		t.Fatalf("berthOwnedEnv = %+v, want %+v", got, want)
 	}
@@ -2446,10 +2468,79 @@ func TestAssertEnvBerthKeysSkipsRedisWithoutValkey(t *testing.T) {
 	if err := assertEnvBerthKeys(context.Background(), f, s, s.Sites[0]); err != nil {
 		t.Fatalf("got %v, want nil", err)
 	}
+	sawDBURL := false
 	for _, c := range f.Calls() {
 		if strings.Contains(c.Cmd, "REDIS_") {
 			t.Errorf("valkey: false must not probe redis keys; ran %q", c.Cmd)
 		}
+		if c.Cmd == envLineInSetScript(envPath(s), "DB_URL") {
+			sawDBURL = true
+		}
+	}
+	if !sawDBURL {
+		t.Error("DB_URL is probed whatever valkey says: it overrides the database keys")
+	}
+}
+
+// TestAssertEnvBerthKeysRefusesOverrideKeys: DB_URL and REDIS_URL override
+// every per-key setting berth checks (Laravel's config reads the URL first),
+// and only phpredis takes the socket host berth seeds — so a set URL or
+// another client is refused like a mismatched key, listing the expected
+// line and never the current value. Absence passes for all three.
+func TestAssertEnvBerthKeysRefusesOverrideKeys(t *testing.T) {
+	s := berthKeysServer()
+	site := s.Sites[0]
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	stubBerthEnvKeys(f, s)
+	for _, key := range []string{"DB_URL", "REDIS_URL", "REDIS_CLIENT"} {
+		f.On(envLineInSetScript(envPath(s), key), bssh.Result{ExitCode: 3}) // no line
+	}
+	if err := assertEnvBerthKeys(context.Background(), f, s, site); err != nil {
+		t.Fatalf("absent DB_URL/REDIS_URL/REDIS_CLIENT: got %v, want nil", err)
+	}
+
+	leak := bssh.Result{ExitCode: 1, Stdout: "LEAKCHECK\n", Stderr: "LEAKCHECK"}
+	for _, key := range []string{"DB_URL", "REDIS_URL", "REDIS_CLIENT"} {
+		f.On(envLineInSetScript(envPath(s), key), leak)
+	}
+	f.On(envLineInSetScript(envPath(s), "REDIS_URL"), bssh.Result{ExitCode: 4, Stdout: "2\n", Stderr: "LEAKCHECK"})
+	err := assertEnvBerthKeys(context.Background(), f, s, site)
+	if err == nil {
+		t.Fatal("want an error naming DB_URL, REDIS_URL and REDIS_CLIENT")
+	}
+	for _, want := range []string{
+		"DB_URL= (or no DB_URL line)",
+		"REDIS_URL appears 2 times in " + envPath(s) + "; keep exactly one line",
+		"REDIS_CLIENT=phpredis (or no REDIS_CLIENT line)",
+		"--force does not override this check",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should contain %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "LEAKCHECK") {
+		t.Errorf("error leaks a current .env value: %q", err)
+	}
+}
+
+// TestDatabaseRefusesDBURLOverrideEvenWithForce: the override refusal rides
+// the same path as every berth-key mismatch — Check and Apply, --force or not.
+func TestDatabaseRefusesDBURLOverrideEvenWithForce(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
+	f.On(envLineInSetScript(envPath(s), "DB_URL"), bssh.Result{ExitCode: 1})
+	const want = "DB_URL= (or no DB_URL line)"
+	if _, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{Force: true}, s, f); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Check() = %v, want the DB_URL refusal under --force", err)
+	}
+	// NOTE: apt install is deliberately NOT stubbed — Apply must refuse first.
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{Force: true}, s, f); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Apply() = %v, want the DB_URL refusal under --force", err)
 	}
 }
 

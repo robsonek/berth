@@ -989,9 +989,12 @@ what berth provisions for the site, and stops the run when it does not:
 | --- | --- |
 | `DB_DATABASE` | the site's `database.name` |
 | `DB_USERNAME` | the site's `database.user` |
+| `DB_URL` | absent or empty (`DB_URL=`, `""`, `''`, `null` or `(null)`) — Laravel lets a URL override the keys above |
 | `REDIS_HOST` (with `valkey: true`) | the site's own socket, `/run/berth-valkey/<pool>/valkey.sock` (`<pool>` is the domain with `.` replaced by `_`) |
 | `REDIS_PORT` (with `valkey: true`) | `0` |
 | `REDIS_PASSWORD` (with `valkey: true`) | absent or empty: `REDIS_PASSWORD=`, `REDIS_PASSWORD=""`, `REDIS_PASSWORD=''`, `REDIS_PASSWORD=null` or `REDIS_PASSWORD=(null)` — the per-site instance has no password |
+| `REDIS_URL` (with `valkey: true`) | absent or empty, as for `DB_URL` — a URL would override the socket above |
+| `REDIS_CLIENT` (with `valkey: true`) | absent or `phpredis` — the client that takes the socket path with port `0` |
 
 A value may be written unquoted, in double quotes or in single quotes
 (`DB_USERNAME=appuser`, `DB_USERNAME="appuser"` and `DB_USERNAME='appuser'`
@@ -999,8 +1002,9 @@ all match). Each of these keys must appear on at most one line: a key that
 appears more than once is refused whatever the values, because a correct
 line must not vouch for a duplicate the application may read instead (the
 error says `<KEY> appears <N> times in <path>; keep exactly one line`).
-Trailing whitespace is ignored, and a key other than `REDIS_PASSWORD` that is
-missing counts as a mismatch. The error lists every problem at once — each
+Trailing whitespace is ignored. `DB_URL`, `REDIS_PASSWORD`, `REDIS_URL` and
+`REDIS_CLIENT` may be missing; any other key that is missing counts as a
+mismatch. The error lists every problem at once — each
 duplicated key, and each disagreeing key with the line berth expects — and
 never prints the file's current values. `--force` does not override this
 check: edit the file and run again.

@@ -622,6 +622,9 @@ var auditedScripts = map[string]string{
 	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_HOST"):     "envLineInSetScript (database.go), REDIS_HOST: locale pin + grep -c count (+ count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
 	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PORT"):     "envLineInSetScript (database.go), REDIS_PORT: locale pin + grep -c count (+ count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
 	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PASSWORD"): "envLineInSetScript (database.go), REDIS_PASSWORD: locale pin + grep -c count (+ count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "DB_URL"):         "envLineInSetScript (database.go), DB_URL: locale pin + grep -c count (+ count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_URL"):      "envLineInSetScript (database.go), REDIS_URL: locale pin + grep -c count (+ count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_CLIENT"):   "envLineInSetScript (database.go), REDIS_CLIENT: locale pin + grep -c count (+ count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
 
 	// Wave 4 (site, tls, backups, offsite), same discipline: pasted literals
 	// for production consts and const-composed commands, test-local mirror
@@ -919,6 +922,14 @@ const fixtureValkeySocket = "/run/berth-valkey/app_example_com/valkey.sock"
 // sends (berthOwnedEnv, database.go), pasted literally.
 const redisPasswordUnsetStdin = "REDIS_PASSWORD=\n" + `REDIS_PASSWORD=""` + "\n" + "REDIS_PASSWORD=''\n" + "REDIS_PASSWORD=null\n" + "REDIS_PASSWORD=(null)\n"
 
+// envUnsetStdin mirrors the stdin envLineInSet sends for an absent-or-empty
+// key (envUnsetForms + envAcceptStdin, database.go): the empty value in each
+// quoting plus null and (null), each newline-terminated — a copy on purpose,
+// like envValueFormsStdin.
+func envUnsetStdin(key string) string {
+	return key + "=\n" + key + `=""` + "\n" + key + "=''\n" + key + "=null\n" + key + "=(null)\n"
+}
+
 // classifyCommand judges one (command, stdin) pair. The detail string names the
 // reason, so a contract failure is actionable rather than a riddle.
 func classifyCommand(cmd string, stdin []byte) (cmdVerdict, string) {
@@ -973,6 +984,9 @@ var auditedStdin = map[stdinKey]string{
 	{cmd: envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_HOST"), stdin: envValueFormsStdin("REDIS_HOST", fixtureValkeySocket)}: "envLineInSetScript (database.go), REDIS_HOST accept set: stdin lines are read into a variable and string-compared — data, not a program",
 	{cmd: envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PORT"), stdin: envValueFormsStdin("REDIS_PORT", "0")}:                 "envLineInSetScript (database.go), REDIS_PORT accept set: stdin lines are read into a variable and string-compared — data, not a program",
 	{cmd: envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PASSWORD"), stdin: redisPasswordUnsetStdin}:                           "envLineInSetScript (database.go), REDIS_PASSWORD unset/empty accept set: stdin lines are read into a variable and string-compared — data, not a program",
+	{cmd: envLineInSetProbeCmd(fixtureSharedEnv, "DB_URL"), stdin: envUnsetStdin("DB_URL")}:                                   "envLineInSetScript (database.go), DB_URL unset/empty accept set: stdin lines are read into a variable and string-compared — data, not a program",
+	{cmd: envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_URL"), stdin: envUnsetStdin("REDIS_URL")}:                             "envLineInSetScript (database.go), REDIS_URL unset/empty accept set: stdin lines are read into a variable and string-compared — data, not a program",
+	{cmd: envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_CLIENT"), stdin: envValueFormsStdin("REDIS_CLIENT", "phpredis")}:      "envLineInSetScript (database.go), REDIS_CLIENT accept set: stdin lines are read into a variable and string-compared — data, not a program",
 }
 
 // simpleShape is an exact predicate for one metacharacter-free command shape.
