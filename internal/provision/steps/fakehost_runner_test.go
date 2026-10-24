@@ -872,12 +872,15 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 		cmd == "[ "+shQuote(unq(f[1]))+" -ef "+shQuote(unq(f[3]))+" ]":
 		return r.answerSameFile(unq(f[1]), unq(f[3])), true
 
-	// site.Check PARSES supervisorctl's stdout+stderr for "no such" only —
-	// the loaded/not-loaded distinction is the whole verdict. Loaded derives
-	// from the model: the program's conf file exists and supervisord runs.
-	// No profile models the on-disk-but-never-reread state, so that branch
-	// stays unexercised (same documented limit as the valkey stale-binary
-	// branch). A loaded-but-dormant worker answers STOPPED at exit 3 —
+	// site.Check PARSES supervisorctl's stdout+stderr for "no such" (the
+	// loaded verdict) and the second column of every line (the workers:
+	// running verdict). Loaded derives from the model: the program's conf
+	// file exists and supervisord runs. No profile models the on-disk-but-
+	// never-reread state, so that branch stays unexercised (same documented
+	// limit as the valkey stale-binary branch). The process state derives
+	// from the conf supervisord loaded, one line per numprocs: autostart=true
+	// means supervisord started it (RUNNING, exit 0 — a healthy program), a
+	// dormant autostart=false conf answers STOPPED at exit 3 —
 	// supervisorctl's real exit for a non-RUNNING program, which the Check
 	// ignores.
 	case len(f) == 3 && f[0] == "supervisorctl" && f[1] == "status" &&
@@ -886,10 +889,27 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 		prog := strings.TrimSuffix(unq(f[2]), ":*")
 		conf, ok := r.h.files["/etc/supervisor/conf.d/"+prog+".conf"]
 		sup, supOK := r.h.unit("supervisor")
-		if ok && conf.kind == "regular file" && supOK && sup.active {
-			return bssh.Result{ExitCode: 3, Stdout: prog + ":" + prog + "_00" + strings.Repeat(" ", 8) + "STOPPED   Not started\n"}, true
+		if !ok || conf.kind != "regular file" || !supOK || !sup.active {
+			return bssh.Result{ExitCode: 4, Stdout: unq(f[2]) + ": ERROR (no such group)\n"}, true
 		}
-		return bssh.Result{ExitCode: 4, Stdout: unq(f[2]) + ": ERROR (no such group)\n"}, true
+		lines := strings.Split(conf.content, "\n")
+		state, tail, exit := "STOPPED", "Not started", 3
+		if slices.Contains(lines, "autostart=true") {
+			state, tail, exit = "RUNNING", "pid 4242, uptime 1:00:00", 0
+		}
+		n := 1
+		for _, l := range lines {
+			if v, found := strings.CutPrefix(l, "numprocs="); found {
+				if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+					n = parsed
+				}
+			}
+		}
+		var out strings.Builder
+		for i := range n {
+			fmt.Fprintf(&out, "%s:%s_%02d%s%s   %s\n", prog, prog, i, strings.Repeat(" ", 8), state, tail)
+		}
+		return bssh.Result{ExitCode: exit, Stdout: out.String()}, true
 
 	// Validators just need to succeed so the Check continues. Whether ISSUING
 	// them is allowed is the classifier's judgement, not the model's. Only the

@@ -139,6 +139,9 @@ database:
 
 valkey: false                  # one Valkey instance per site (cache/session/queue)
 queue: false                   # server-wide default: a queue:work worker on every site
+workers: dormant               # dormant (default) | running — berth starts the
+                               # Supervisor programs and they come back after a
+                               # reboot (per site; see "Running programs")
 scheduler: true                # install the Laravel scheduler cron (per site)
 cloudflare_only: false         # opt-in: refuse non-Cloudflare requests (per site)
 
@@ -218,6 +221,7 @@ sites:                         # one or more
     ssl_email: admin@example.com       # required with letsencrypt
     http3: false                       # requires ssl: true + nginx.source: nginx
     scheduler: true                    # per-site override of the server default
+    workers: running                   # per-site override of the server default
     cloudflare_only: true              # per-site override of the server default
     backups: false                     # per-site override of the server default
                                        # (nil/absent = inherit backups.enabled)
@@ -678,8 +682,9 @@ schedule:run` every minute as the site's own user. It is **on by default**; set
 `scheduler: false` server-wide, or `scheduler: false` on an individual site, to
 skip it (disabling it on a re-run removes the cron).
 
-With `queue: true` berth installs a dormant Supervisor `queue:work` program per
-site. Tune that worker — or replace it with **Horizon** — and add arbitrary
+With `queue: true` berth installs a Supervisor `queue:work` program per site
+(dormant by default, see [Running programs](#running-programs-workers)). Tune
+that worker — or replace it with **Horizon** — and add arbitrary
 long-running processes, per site:
 
 ```yaml
@@ -700,16 +705,60 @@ sites:
       - { name: reverb, command: php artisan reverb:start }
 ```
 
-Every program is installed **dormant** (`autostart=false`) — your deployer starts
-and restarts them; berth never runs them. `queue: horizon` emits an `artisan
-horizon` program instead of `queue:work` (Horizon runs single-process and manages
-its own workers, so the `queue:work` knobs don't apply; configure it in your app's
-`config/horizon.php`, and note it needs the Redis/Valkey queue driver).
+By default every program is installed **dormant** (`autostart=false`) — your
+deployer starts and restarts them; berth never runs them. `queue: horizon` emits
+an `artisan horizon` program instead of `queue:work` (Horizon runs
+single-process and manages its own workers, so the `queue:work` knobs don't
+apply; configure it in your app's `config/horizon.php`, and note it needs the
+Redis/Valkey queue driver).
 `queue: none` opts a single site out of the server-wide worker — the only
 per-site off switch under `queue: true` (a shorthand like `horizon`; combining
 it with the other worker knobs is rejected). Each site
 user gets **narrow sudoers** to control only its own programs, and Supervisor is
 installed whenever any site declares a worker or a daemon.
+
+### Running programs (`workers:`)
+
+`workers:` decides who starts a site's Supervisor programs — the queue worker
+and every daemon. Set it server-wide, or per site (the site value wins, like
+`scheduler`):
+
+```yaml
+workers: dormant             # server-wide default: dormant | running
+sites:
+  - domain: app.example.com
+    deploy_path: /var/www/app
+    workers: running         # per-site override of the server default
+```
+
+- **`dormant`** (the default, also when the key is absent): the programs are
+  installed with `autostart=false`. berth never starts them, and none starts by
+  itself after a reboot; your deployer starts and restarts them.
+- **`running`**: the programs are installed with `autostart=true`. A
+  provisioning run starts every program that is not RUNNING, and from then on
+  Supervisor starts them by itself after a server (or supervisord) restart,
+  without a provisioning run. The target is declarative: a later run that
+  finds a program stopped reports it as drift and starts it again. A program
+  that does not reach RUNNING fails the run with its name and its log,
+  `/var/log/supervisor/<program>.log`. Your deployer keeps its narrow
+  `restart` grant, so restart the programs after each deploy to load the new
+  release.
+- **No release yet:** until `<deploy_path>/current` exists there is no code to
+  run, so with `running` the programs stay dormant and the run warns
+  (`workers: running is set, but <deploy_path>/current does not exist yet`).
+  Provision again after the first deploy to start them.
+- **Rewriting a dormant program's conf stops it.** `supervisorctl update`
+  removes and re-adds a program whose conf changed; with `autostart=false` the
+  re-added program stays STOPPED. When a run is about to change the conf of a
+  dormant program that is running — after switching from `running` back to
+  `dormant`, or after a berth upgrade that changes the conf — it warns
+  (`supervisorctl update leaves <program> STOPPED`). Start the program again
+  with your deployer.
+
+**Cutover pattern:** while a new server is not live yet, keep its background
+work off (`scheduler: false`, `workers: dormant`). To go live, flip both
+together — `scheduler: true` and `workers: running` — and run one provisioning:
+the scheduler cron and the programs start in the same run.
 
 ## Backups (opt-in)
 

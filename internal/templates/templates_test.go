@@ -149,6 +149,7 @@ func TestRenderSupervisorGolden(t *testing.T) {
 	checkGolden(t, "supervisor.conf.tmpl", "supervisor.golden", struct {
 		ProgramName, Command, DeployPath, User string
 		Numprocs                               int
+		Autostart                              bool
 	}{
 		ProgramName: "berth-app_example_com",
 		Command:     "php /home/deploy/myapp/current/artisan queue:work --sleep=3 --tries=3 --max-time=3600",
@@ -156,10 +157,26 @@ func TestRenderSupervisorGolden(t *testing.T) {
 	})
 }
 
+// TestRenderSupervisorRunningGolden pins the workers: running variant: the
+// same program with autostart=true, so supervisord starts it on load and at
+// every boot. The dormant goldens above stay autostart=false byte-for-byte.
+func TestRenderSupervisorRunningGolden(t *testing.T) {
+	checkGolden(t, "supervisor.conf.tmpl", "supervisor_running.golden", struct {
+		ProgramName, Command, DeployPath, User string
+		Numprocs                               int
+		Autostart                              bool
+	}{
+		ProgramName: "berth-app_example_com",
+		Command:     "php /home/deploy/myapp/current/artisan queue:work --sleep=3 --tries=3 --max-time=3600",
+		DeployPath:  "/home/deploy/myapp", User: "webuser", Numprocs: 1, Autostart: true,
+	})
+}
+
 func TestRenderSupervisorHorizonGolden(t *testing.T) {
 	checkGolden(t, "supervisor.conf.tmpl", "supervisor_horizon.golden", struct {
 		ProgramName, Command, DeployPath, User string
 		Numprocs                               int
+		Autostart                              bool
 	}{
 		ProgramName: "berth-app_example_com",
 		Command:     "php /home/deploy/myapp/current/artisan horizon",
@@ -171,6 +188,7 @@ func TestRenderSupervisorDaemonGolden(t *testing.T) {
 	checkGolden(t, "supervisor.conf.tmpl", "supervisor_daemon.golden", struct {
 		ProgramName, Command, DeployPath, User string
 		Numprocs                               int
+		Autostart                              bool
 	}{
 		ProgramName: "berth-app_example_com-reverb",
 		Command:     "php /home/deploy/myapp/current/artisan reverb:start",

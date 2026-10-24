@@ -178,14 +178,26 @@ func managedFileSatisfied(state managedFileState, path string, force bool) (sati
 // by writeManagedFile (root writes) and writeManagedFileAsUser (account
 // writes), so both mechanisms obey exactly one policy.
 func assertManagedWritable(ctx context.Context, r bssh.Runner, force bool, path string) error {
+	_, _, err := readManagedForWrite(ctx, r, force, path)
+	return err
+}
+
+// readManagedForWrite is assertManagedWritable for a caller that also needs
+// the bytes it is about to replace (whether the write CHANGES the file): one
+// read serves both, and the policy is the same single one. exists is false
+// for an absent path.
+func readManagedForWrite(ctx context.Context, r bssh.Runner, force bool, path string) (prior string, exists bool, err error) {
 	res, err := r.Run(ctx, "cat "+shQuote(path), nil)
 	if err != nil {
-		return err
+		return "", false, err
 	}
-	if res.ExitCode == 0 && !hasManagedMarker(res.Stdout) && !force {
-		return fmt.Errorf("%s exists but is not managed by berth; re-run with --force to overwrite", path)
+	if res.ExitCode != 0 {
+		return "", false, nil
 	}
-	return nil
+	if !hasManagedMarker(res.Stdout) && !force {
+		return "", true, fmt.Errorf("%s exists but is not managed by berth; re-run with --force to overwrite", path)
+	}
+	return res.Stdout, true, nil
 }
 
 // writeFileAsUser atomically writes content to path AS user.

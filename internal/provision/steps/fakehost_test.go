@@ -223,7 +223,8 @@ var fakeHostProfiles = []string{"fresh", "converged", "drifted", "foreign", "run
 // turns on every system knob (swap + swappiness, the kernel sysctl drop-in,
 // timezone, static hostname — all opt-in and all off in baseline), gives the
 // site a repository (the deploy-key and known-host probes) and sets
-// apt.upstream_updates: manual; postgres swaps the database engine, whose
+// apt.upstream_updates: manual and workers: running (the release probe and
+// the running verdict); postgres swaps the database engine, whose
 // Check probes are engine-specific code the mariadb variants never reach.
 // postgres differs from baseline in the engine ALONE, so a violation there is
 // engine-attributable on sight — the knob and repository branches are
@@ -336,6 +337,12 @@ func variantServer(t *testing.T, variant string) *config.Server {
 		// Debian only, so its probe set is unchanged (the one `cat`); the
 		// manual branches themselves are pinned in autoupdates_test.go.
 		srv.Apt.UpstreamUpdates = "manual"
+		// workers: running takes site.Check through programsAutostart's
+		// release probe (test -e <deploy_path>/current) and the running
+		// verdict over the parsed supervisorctl states; every provisioned
+		// profile models a deployed release, so the worker renders
+		// autostart=true and converged answers it RUNNING.
+		srv.Workers = "running"
 	case "postgres":
 		srv.ID = "contract-postgres"
 		// The engine variant: postgres source debian (a valid pairing per
@@ -795,6 +802,16 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 	// host and is what the appdirs ancestry probe reports.
 	h.files[site.DeployPath+"/shared/tmp"] = fakeFile{owner: owner, group: owner, uid: uid, gid: uid,
 		mode: "700", kind: "directory", mtimeUnix: 1500000000}
+	// The deployer's release pointer: every provisioned profile models a
+	// once-deployed site, current -> releases/1 (both the tenant's own, like
+	// the rest of the tree). Only workers: running probes it (test -e, which
+	// follows the link), and its presence is what lets that mode render
+	// autostart=true.
+	h.files[site.DeployPath+"/releases/1"] = fakeFile{owner: owner, group: owner, uid: uid, gid: uid,
+		mode: "755", kind: "directory", mtimeUnix: 1500000000}
+	h.files[currentReleasePath(site)] = fakeFile{owner: owner, group: owner, uid: uid, gid: uid,
+		mode: "777", kind: "symbolic link", mtimeUnix: 1500000000,
+		linkTarget: site.DeployPath + "/releases/1"}
 	for _, d := range []string{"/var/www", acmeWebrootBase, acmeWebroot(site.Domain)} {
 		h.files[d] = fakeFile{owner: "root", group: "root", uid: 0, gid: 0,
 			mode: "755", kind: "directory", mtimeUnix: 1500000000}
@@ -1091,7 +1108,9 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 		panic("render fpm_pool.conf.tmpl: " + err.Error())
 	}
 	h.putManaged(fpmPoolPath(s.PHP.Version, site.Domain), pool, profile)
-	worker, err := renderSupervisorProgram(programName(site.Domain), queueCommand(s, site), queueNumprocs(site), s.SiteUser(site), site.DeployPath)
+	// autostart follows programsAutostart over THIS model: the release is
+	// modelled on every provisioned profile, so it reduces to the knob.
+	worker, err := renderSupervisorProgram(programName(site.Domain), queueCommand(s, site), queueNumprocs(site), s.SiteUser(site), site.DeployPath, s.WorkersRunning(site))
 	if err != nil {
 		panic("render supervisor.conf.tmpl: " + err.Error())
 	}

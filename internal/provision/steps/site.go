@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
@@ -87,6 +88,13 @@ type siteFile struct {
 	path    string
 	content []byte
 	remove  bool
+	// program names the Supervisor program a program-conf entry renders, and
+	// autostart records that it was rendered with autostart=true (workers:
+	// running with a release in place): Check then requires every process of
+	// that program RUNNING. One probe of <deploy_path>/current per site feeds
+	// both the bytes and that verdict, so the two can never disagree.
+	program   string
+	autostart bool
 }
 
 // managedSiteFiles returns every config file the site step owns for every site,
@@ -106,19 +114,25 @@ func managedSiteFiles(ctx context.Context, r bssh.Runner, s *config.Server) ([]s
 			return nil, err
 		}
 		files = append(files, siteFile{path: fpmPoolPath(s.PHP.Version, site.Domain), content: pool})
+		autostart, err := programsAutostart(ctx, r, s, site)
+		if err != nil {
+			return nil, err
+		}
 		if s.QueueEnabled(site) {
-			worker, err := renderSupervisorProgram(programName(site.Domain), queueCommand(s, site), queueNumprocs(site), s.SiteUser(site), site.DeployPath)
+			prog := programName(site.Domain)
+			worker, err := renderSupervisorProgram(prog, queueCommand(s, site), queueNumprocs(site), s.SiteUser(site), site.DeployPath, autostart)
 			if err != nil {
 				return nil, err
 			}
-			files = append(files, siteFile{path: supervisorProgramPath(site.Domain), content: worker})
+			files = append(files, siteFile{path: supervisorProgramPath(site.Domain), content: worker, program: prog, autostart: autostart})
 		}
 		for _, d := range site.Daemons {
-			body, err := renderSupervisorProgram(daemonProgramName(site.Domain, d.Name), d.Command, daemonNumprocs(d), s.SiteUser(site), site.DeployPath)
+			prog := daemonProgramName(site.Domain, d.Name)
+			body, err := renderSupervisorProgram(prog, d.Command, daemonNumprocs(d), s.SiteUser(site), site.DeployPath, autostart)
 			if err != nil {
 				return nil, err
 			}
-			files = append(files, siteFile{path: daemonProgramPath(site.Domain, d.Name), content: body})
+			files = append(files, siteFile{path: daemonProgramPath(site.Domain, d.Name), content: body, program: prog, autostart: autostart})
 		}
 		if s.SchedulerEnabled(site) {
 			cron, err := renderCron(s, site)
@@ -343,11 +357,174 @@ func daemonNumprocs(d config.Daemon) int {
 }
 
 // renderSupervisorProgram renders one Supervisor program (worker or daemon).
-func renderSupervisorProgram(programName, command string, numprocs int, user, deployPath string) ([]byte, error) {
+// autostart=false is the dormant default and renders byte-for-byte what every
+// host carried before workers: running existed; autostart=true makes
+// supervisord start the program whenever it loads it — at `update` and at
+// every boot.
+func renderSupervisorProgram(programName, command string, numprocs int, user, deployPath string, autostart bool) ([]byte, error) {
 	return templates.Render("supervisor.conf.tmpl", struct {
 		ProgramName, Command, DeployPath, User string
 		Numprocs                               int
-	}{ProgramName: programName, Command: command, DeployPath: deployPath, User: user, Numprocs: numprocs})
+		Autostart                              bool
+	}{ProgramName: programName, Command: command, DeployPath: deployPath, User: user, Numprocs: numprocs, Autostart: autostart})
+}
+
+// currentReleasePath is the deployer's pointer to the active release — the
+// directory every program runs in (the template's directory=) and the
+// artisan path the worker command composes.
+func currentReleasePath(site config.Site) string { return site.DeployPath + "/current" }
+
+// programsAutostart is THE autostart decision for a site's Supervisor
+// programs, shared by Check (the rendered bytes and the running verdict) and
+// Apply (the write and the start): workers: running AND a release in place.
+// Without current/ there is no code to run — autostart=true would only
+// spin the program into FATAL — so the programs stay dormant until the first
+// deploy. The dormant default and a site without programs return before any
+// probe, so every existing host issues exactly the commands it did before.
+func programsAutostart(ctx context.Context, r bssh.Runner, s *config.Server, site config.Site) (bool, error) {
+	if !s.WorkersRunning(site) || len(s.SiteProgramNames(site)) == 0 {
+		return false, nil
+	}
+	return fileExists(ctx, r, currentReleasePath(site))
+}
+
+// supervisorStatusCmd is the per-program state query. The group glob is
+// shell-quoted so the sudo `/bin/sh -c` wrapper passes "<prog>:*" to
+// supervisorctl literally instead of pathname-expanding it.
+func supervisorStatusCmd(prog string) string { return "supervisorctl status " + shQuote(prog+":*") }
+
+// parseProgramStates returns the second column (the process state) of every
+// non-blank line of `supervisorctl status` output.
+func parseProgramStates(out string) []string {
+	var states []string
+	for _, line := range strings.Split(out, "\n") {
+		if f := strings.Fields(line); len(f) >= 2 {
+			states = append(states, f[1])
+		}
+	}
+	return states
+}
+
+// programStates reads the state of every process of one program. The exit
+// code of `supervisorctl status` is ignored on purpose: it is 3 whenever a
+// process is not RUNNING, so it carries no information the states do not.
+// A transport error still propagates.
+func programStates(ctx context.Context, r bssh.Runner, prog string) ([]string, error) {
+	res, err := r.Run(ctx, supervisorStatusCmd(prog), nil)
+	if err != nil {
+		return nil, err
+	}
+	return parseProgramStates(res.Stdout), nil
+}
+
+// allRunning reports whether a program has processes and every one of them
+// is RUNNING. STARTING is not converged yet: supervisord promotes it only
+// after startsecs, and a crashing program passes through it on its way to
+// FATAL.
+func allRunning(states []string) bool {
+	if len(states) == 0 {
+		return false
+	}
+	for _, st := range states {
+		if st != "RUNNING" {
+			return false
+		}
+	}
+	return true
+}
+
+// anyActive reports whether any process is running or on its way there —
+// the states supervisorctl update ends when it re-adds a changed group.
+func anyActive(states []string) bool {
+	for _, st := range states {
+		if st == "RUNNING" || st == "STARTING" || st == "BACKOFF" {
+			return true
+		}
+	}
+	return false
+}
+
+// inTransition reports whether any process is still settling: STARTING
+// (waiting out startsecs) or BACKOFF (between supervisord's start retries).
+func inTransition(states []string) bool {
+	for _, st := range states {
+		if st == "STARTING" || st == "BACKOFF" {
+			return true
+		}
+	}
+	return false
+}
+
+// programSettleSleep is the pause between state re-reads while a program is
+// in transition; a package var so tests stub it to return immediately.
+var programSettleSleep = func() { time.Sleep(time.Second) }
+
+// programSettleAttempts bounds that wait (~30 s at one second each): enough
+// for supervisord's default startsecs (1 s) plus its whole default retry
+// schedule (startretries=3, backing off 1+2+3 s) to end in RUNNING or FATAL.
+const programSettleAttempts = 30
+
+// ensureProgramRunning brings one workers: running program to RUNNING and
+// proves it, or fails naming the program and its log. supervisorctl update
+// starts an autostart=true group asynchronously, and `supervisorctl start
+// '<prog>:*'` skips processes already STARTING or in BACKOFF, so after the
+// start the states are re-read until they leave the transition states. The
+// start's exit code is not the verdict either — the states are.
+func ensureProgramRunning(ctx context.Context, r bssh.Runner, prog string) error {
+	states, err := programStates(ctx, r, prog)
+	if err != nil {
+		return err
+	}
+	if allRunning(states) {
+		return nil
+	}
+	start, err := r.Run(ctx, "supervisorctl start "+shQuote(prog+":*"), nil)
+	if err != nil {
+		return err
+	}
+	if states, err = programStates(ctx, r, prog); err != nil {
+		return err
+	}
+	for i := 0; i < programSettleAttempts && inTransition(states); i++ {
+		programSettleSleep()
+		if states, err = programStates(ctx, r, prog); err != nil {
+			return err
+		}
+	}
+	if allRunning(states) {
+		return nil
+	}
+	said := ""
+	if out := strings.TrimSpace(start.Stdout + start.Stderr); out != "" {
+		said = "; supervisorctl start said: " + out
+	}
+	return fmt.Errorf("%s did not reach RUNNING (workers: running; states: %s%s) — see /var/log/supervisor/%s.log for why it does not stay up",
+		prog, strings.Join(states, " "), said, prog)
+}
+
+// writeSupervisorProgram writes one program conf under the managed-file
+// policy, reading the path once for both the policy and the change test. A
+// conf rendered with autostart=false that REPLACES different bytes has its
+// processes probed first: supervisorctl update removes and re-adds a changed
+// group, and with autostart=false the re-added group stays STOPPED — so a
+// program the deployer started would silently stop. Only an existing conf
+// that is about to change is probed (never an absent or unchanged one), so a
+// fresh or converged dormant host issues exactly the commands it did before.
+func writeSupervisorProgram(ctx context.Context, rc provision.RunCtx, r bssh.Runner, domain, prog, path string, body []byte, autostart bool) error {
+	prior, exists, err := readManagedForWrite(ctx, r, rc.Force, path)
+	if err != nil {
+		return err
+	}
+	if exists && !autostart && prior != string(body) {
+		states, err := programStates(ctx, r, prog)
+		if err != nil {
+			return err
+		}
+		if anyActive(states) {
+			rc.Warnf("%s: %s is running and its conf changes — supervisorctl update leaves %s STOPPED (the new conf has autostart=false); start it again with your deployer", domain, prog, prog)
+		}
+	}
+	return r.WriteFile(ctx, bssh.FileSpec{Path: path, Content: body, Owner: "root", Group: "root", Mode: 0o644, Sudo: true})
 }
 
 // daemonProgramName / daemonProgramPath name a site's daemon program file.
@@ -484,7 +661,8 @@ func orphanSiteFiles(ctx context.Context, r bssh.Runner, s *config.Server) ([]si
 
 // supervisorReload registers berth's program set with the running supervisord
 // (reread then update). update does NOT start an autostart=false program, so
-// workers stay STOPPED (dormant); this is what makes the deployer's
+// dormant workers stay STOPPED; an autostart=true (workers: running) group
+// is started by supervisord itself. This is what makes the deployer's
 // `supervisorctl start/restart berth-<pool>:*` work — otherwise the conf is on
 // disk but supervisord never loaded it ("no such process").
 func supervisorReload(ctx context.Context, r bssh.Runner) error {
@@ -507,8 +685,9 @@ func renderCron(s *config.Server, site config.Site) ([]byte, error) {
 type site struct{}
 
 // Site renders and installs, per site, the web server block (validated before any
-// reload), the FPM pool (own user + socket), the dormant Supervisor worker, and
-// the guarded scheduler cron (design §6.4).
+// reload), the FPM pool (own user + socket), the Supervisor worker and daemons
+// (dormant by default; started and kept up under workers: running), and the
+// guarded scheduler cron (design §6.4).
 func Site() provision.Step { return site{} }
 
 func (site) Name() string       { return "site" }
@@ -651,17 +830,28 @@ func (st site) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 	// disk), or the deployer's start/restart fails. A box whose conf predates this
 	// enforcement reports "no such" here -> unsatisfied -> Apply reread/updates it.
 	if s.NeedsSupervisor() {
+		// One status query per program serves both verdicts: loaded here,
+		// and running below (the parsed states are kept for it).
+		states := map[string][]string{}
 		for _, site := range s.Sites {
 			for _, prog := range s.SiteProgramNames(site) {
-				// Quote the group glob so the sudo `/bin/sh -c` wrapper passes
-				// "<prog>:*" to supervisorctl literally instead of pathname-expanding it.
-				res, err := r.Run(ctx, "supervisorctl status "+shQuote(prog+":*"), nil)
+				res, err := r.Run(ctx, supervisorStatusCmd(prog), nil)
 				if err != nil {
 					return provision.CheckResult{}, err
 				}
 				if strings.Contains(res.Stdout+res.Stderr, "no such") {
 					return provision.CheckResult{Satisfied: false, Reason: prog + " not loaded in supervisord", Changes: st.changes()}, nil
 				}
+				states[prog] = parseProgramStates(res.Stdout)
+			}
+		}
+		// workers: running is declarative: a program rendered with
+		// autostart=true must have every process RUNNING (STARTING is not
+		// converged yet), or Apply starts it. A dormant program's state is
+		// the deployer's business and never drift.
+		for _, mf := range mfs {
+			if mf.autostart && !allRunning(states[mf.program]) {
+				return provision.CheckResult{Satisfied: false, Reason: mf.program + " not running (workers: running)", Changes: st.changes()}, nil
 			}
 		}
 	}
@@ -694,6 +884,7 @@ func (site) changes() []string {
 		"write per-site nginx server block + enable it",
 		"write per-site FPM pool (own user + socket)",
 		"write per-site supervisor programs (worker + daemons) and remove orphans",
+		"start workers: running programs that are not RUNNING",
 		"reconcile per-site scheduler cron (install or remove)",
 		"remove orphan vhosts/pools/scheduler crons of sites no longer in the config",
 		"write global logrotate fragment",
@@ -886,29 +1077,37 @@ func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server,
 	}
 
 	// 5) Per-site Supervisor worker (iff queue enabled) + daemons, then
-	//    6) guarded scheduler cron.
+	//    6) guarded scheduler cron. startProgs collects the workers: running
+	//    programs Apply must see RUNNING once supervisord has loaded them.
+	var startProgs []string
 	for _, site := range s.Sites {
+		autostart, err := programsAutostart(ctx, r, s, site)
+		if err != nil {
+			return err
+		}
+		if s.WorkersRunning(site) && len(s.SiteProgramNames(site)) > 0 && !autostart {
+			rc.Warnf("%s: workers: running is set, but %s/current does not exist yet — programs stay dormant; run provision again after the first deploy", site.Domain, site.DeployPath)
+		}
+		if autostart {
+			startProgs = append(startProgs, s.SiteProgramNames(site)...)
+		}
 		if s.QueueEnabled(site) {
-			worker, err := renderSupervisorProgram(programName(site.Domain), queueCommand(s, site), queueNumprocs(site), s.SiteUser(site), site.DeployPath)
+			prog := programName(site.Domain)
+			worker, err := renderSupervisorProgram(prog, queueCommand(s, site), queueNumprocs(site), s.SiteUser(site), site.DeployPath, autostart)
 			if err != nil {
 				return fmt.Errorf("render supervisor worker for %s: %w", site.Domain, err)
 			}
-			if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
-				Path: supervisorProgramPath(site.Domain), Content: worker,
-				Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
-			}); err != nil {
+			if err := writeSupervisorProgram(ctx, rc, r, site.Domain, prog, supervisorProgramPath(site.Domain), worker, autostart); err != nil {
 				return fmt.Errorf("write supervisor worker for %s: %w", site.Domain, err)
 			}
 		}
 		for _, d := range site.Daemons {
-			body, err := renderSupervisorProgram(daemonProgramName(site.Domain, d.Name), d.Command, daemonNumprocs(d), s.SiteUser(site), site.DeployPath)
+			prog := daemonProgramName(site.Domain, d.Name)
+			body, err := renderSupervisorProgram(prog, d.Command, daemonNumprocs(d), s.SiteUser(site), site.DeployPath, autostart)
 			if err != nil {
 				return fmt.Errorf("render daemon %s for %s: %w", d.Name, site.Domain, err)
 			}
-			if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
-				Path: daemonProgramPath(site.Domain, d.Name), Content: body,
-				Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
-			}); err != nil {
+			if err := writeSupervisorProgram(ctx, rc, r, site.Domain, prog, daemonProgramPath(site.Domain, d.Name), body, autostart); err != nil {
 				return fmt.Errorf("write daemon %s for %s: %w", d.Name, site.Domain, err)
 			}
 		}
@@ -980,7 +1179,8 @@ func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server,
 
 	// Register/refresh the program set with the running supervisord so the deployer
 	// can drive it (start/restart). Without this the conf is on disk but supervisord
-	// never loaded it; update leaves autostart=false workers STOPPED, never started.
+	// never loaded it; update leaves autostart=false workers STOPPED, never started
+	// (workers: running programs are brought up at the end of Apply).
 	if s.NeedsSupervisor() {
 		// No presence guard here (unlike the orphan branch below): when programs are
 		// desired, the supervisor step runs before site on a full pipeline and has
@@ -1022,6 +1222,16 @@ func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server,
 		return err
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("logrotate -d failed for %s: %s", logrotatePath, res.Stderr)
+	}
+
+	// 8) workers: running — every program supervisord loaded with
+	//    autostart=true above must be RUNNING. Last on purpose: whether it
+	//    stays up depends on the deployed application, so every file this
+	//    step owns has converged before a broken release can fail the step.
+	for _, prog := range startProgs {
+		if err := ensureProgramRunning(ctx, r, prog); err != nil {
+			return err
+		}
 	}
 	return nil
 }

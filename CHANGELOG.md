@@ -20,6 +20,21 @@ Notable changes to berth. Older releases are documented on the
   as berth already installs the PostgreSQL server package. The README gains a
   "Controlled upstream update" procedure for the maintenance window. The
   default (`auto`, or no key) keeps today's behaviour, so no host drifts.
+- **`workers: running`** has berth start each site's Supervisor programs (the
+  queue worker and every daemon) and keeps them up across reboots. It is set
+  server-wide or per site (`sites[].workers` wins). The default, `dormant`
+  (or no key), keeps today's behaviour byte for byte: `autostart=false`, and
+  berth starts nothing, so no host drifts. With `running` the `site` step
+  renders `autostart=true`, so Supervisor starts the programs by itself after
+  a reboot. After `supervisorctl update` it starts every program that is not
+  RUNNING, and fails, naming the program and
+  `/var/log/supervisor/<program>.log`, when one does not reach RUNNING. Its
+  Check reports a stopped program as drift, so the next run starts it again.
+  Until `<deploy_path>/current` exists the programs stay dormant and the run
+  warns; provision again after the first deploy. In dormant mode, a run that
+  is about to rewrite the conf of a running program warns that `supervisorctl
+  update` leaves it STOPPED. The README documents the cutover: flip
+  `scheduler` and `workers` together and run one provisioning.
 
 ### Changed
 

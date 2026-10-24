@@ -3,6 +3,8 @@ package steps
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -2212,5 +2214,479 @@ func TestFindDirectoriesErrorsOnFindFailure(t *testing.T) {
 		bssh.Result{ExitCode: 1, Stderr: "find: permission denied"})
 	if _, err := findDirectories(context.Background(), f, "/etc/ssl/berth"); err == nil {
 		t.Fatal("a failing find must be an error, not an empty result")
+	}
+}
+
+// ---- workers: running ----
+
+const (
+	workerProg      = "berth-app_example_com"
+	workerStatusCmd = "supervisorctl status 'berth-app_example_com:*'"
+	workerStartCmd  = "supervisorctl start 'berth-app_example_com:*'"
+)
+
+// workerStatus is one `supervisorctl status` line for the fixture worker's
+// first process, in supervisorctl's own column layout.
+func workerStatus(state, tail string) string {
+	return workerProg + ":" + workerProg + "_00   " + state + "   " + tail + "\n"
+}
+
+// workersRunningServer is siteServer with a queue worker and workers: running.
+func workersRunningServer() *config.Server {
+	s := siteServer()
+	s.Queue = true
+	s.Workers = "running"
+	return s
+}
+
+// stubSiteApply stubs every command a single-site Apply success path issues
+// outside the supervisor programs: the vhost link, nginx validate+reload and
+// the FPM/logrotate/supervisord tail (stubFPMApply).
+func stubSiteApply(s *config.Server, f *bssh.FakeRunner) {
+	f.On("ln -sfn '/etc/nginx/sites-available/app.example.com' '/etc/nginx/sites-enabled/app.example.com'", bssh.Result{})
+	f.On("nginx -t", bssh.Result{})
+	f.On("systemctl reload nginx", bssh.Result{})
+	stubFPMApply(s, f)
+}
+
+// warnCollector returns a RunCtx whose warnings land in the returned slice.
+func warnCollector() (provision.RunCtx, *[]string) {
+	var warns []string
+	return provision.RunCtx{Warn: func(m string) { warns = append(warns, m) }}, &warns
+}
+
+// countCalls counts the exact command among the runner's calls.
+func countCalls(f *bssh.FakeRunner, cmd string) int {
+	n := 0
+	for _, c := range f.Calls() {
+		if c.Cmd == cmd {
+			n++
+		}
+	}
+	return n
+}
+
+// callIndex is the position of the first exact cmd among the calls (-1 if absent).
+func callIndex(f *bssh.FakeRunner, cmd string) int {
+	for i, c := range f.Calls() {
+		if c.Cmd == cmd {
+			return i
+		}
+	}
+	return -1
+}
+
+// stubNoSettleSleep makes programSettleSleep return immediately and counts
+// how often it was called.
+func stubNoSettleSleep(t *testing.T) *int {
+	t.Helper()
+	n := 0
+	prev := programSettleSleep
+	programSettleSleep = func() { n++ }
+	t.Cleanup(func() { programSettleSleep = prev })
+	return &n
+}
+
+// TestSupervisorProgramDormantBytesUnchanged pins the default rendering to the
+// bytes every provisioned host already carries: a dormant program that changed
+// by one byte would read drifted on every host, and its rewrite would let
+// supervisorctl update stop a program the deployer runs. The literal is
+// internal/templates/testdata/supervisor.golden as it stood before workers:
+// running existed; it is kept here as a literal on purpose, so refreshing the
+// golden with -update cannot move it. The golden itself must still agree.
+func TestSupervisorProgramDormantBytesUnchanged(t *testing.T) {
+	const want = "# managed by berth\n" +
+		"[program:berth-app_example_com]\n" +
+		"process_name=%(program_name)s_%(process_num)02d\n" +
+		"command=php /home/deploy/myapp/current/artisan queue:work --sleep=3 --tries=3 --max-time=3600\n" +
+		"directory=/home/deploy/myapp/current\n" +
+		"user=webuser\n" +
+		"numprocs=1\n" +
+		"autostart=false\n" +
+		"autorestart=true\n" +
+		"stopwaitsecs=3600\n" +
+		"redirect_stderr=true\n" +
+		"stdout_logfile=/var/log/supervisor/berth-app_example_com.log\n" +
+		"stopasgroup=true\n" +
+		"killasgroup=true\n"
+	got, err := renderSupervisorProgram("berth-app_example_com",
+		"php /home/deploy/myapp/current/artisan queue:work --sleep=3 --tries=3 --max-time=3600",
+		1, "webuser", "/home/deploy/myapp", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Errorf("dormant program bytes changed:\n got %q\nwant %q", got, want)
+	}
+	golden, err := os.ReadFile(filepath.Join("..", "..", "templates", "testdata", "supervisor.golden"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(golden) != want {
+		t.Errorf("supervisor.golden no longer holds the dormant bytes:\n got %q\nwant %q", golden, want)
+	}
+}
+
+// TestProgramsAutostart pins the single source of the autostart decision:
+// only workers: running WITH a release in place starts programs, the dormant
+// default issues no probe at all (zero new commands on every existing host),
+// and a site without programs is never probed either.
+func TestProgramsAutostart(t *testing.T) {
+	const probe = "test -e '/var/www/myapp/current'"
+	cases := []struct {
+		name          string
+		server, site  string
+		programs      bool
+		current       bool
+		want, probing bool
+	}{
+		{"dormant default", "", "", true, true, false, false},
+		{"server running, release present", "running", "", true, true, true, true},
+		{"server running, no release yet", "running", "", true, false, false, true},
+		{"site overrides server to dormant", "running", "dormant", true, true, false, false},
+		{"site opts into running", "", "running", true, true, true, true},
+		{"running without programs", "running", "", false, true, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := siteServer()
+			s.Queue = tc.programs
+			s.Workers = tc.server
+			s.Sites[0].Workers = tc.site
+			f := bssh.NewFakeRunner()
+			if tc.current {
+				f.On(probe, bssh.Result{})
+			} else {
+				f.On(probe, bssh.Result{ExitCode: 1})
+			}
+			got, err := programsAutostart(context.Background(), f, s, s.Sites[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("programsAutostart = %v, want %v", got, tc.want)
+			}
+			if probed := countCalls(f, probe) > 0; probed != tc.probing {
+				t.Errorf("probed %s = %v, want %v (calls: %v)", probe, probed, tc.probing, f.Calls())
+			}
+		})
+	}
+}
+
+// TestProgramStatesParsesSecondColumn: the state is the second column of
+// every line, and supervisorctl's exit code (3 for any non-RUNNING process)
+// is not the verdict.
+func TestProgramStatesParsesSecondColumn(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On(workerStatusCmd, bssh.Result{ExitCode: 3, Stdout: workerProg + ":" + workerProg + "_00   RUNNING   pid 41, uptime 0:01:00\n" +
+		workerProg + ":" + workerProg + "_01   FATAL     Exited too quickly (process log may have details)\n\n"})
+	got, err := programStates(context.Background(), f, workerProg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"RUNNING", "FATAL"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("programStates = %v, want %v", got, want)
+	}
+}
+
+// TestWorkersRunningWithoutReleaseStaysDormantAndWarns: workers: running
+// before the first deploy must not start anything (no restart loop, no silent
+// FATAL on a missing current/): the conf stays dormant and the operator is
+// told why. The conf is absent, so nothing is probed for the dormant-rewrite
+// warning either — an unstubbed supervisorctl status would fail the Apply.
+func TestWorkersRunningWithoutReleaseStaysDormantAndWarns(t *testing.T) {
+	s := workersRunningServer()
+	f := bssh.NewFakeRunner()
+	stubSiteApply(s, f)
+	f.On("test -e '/var/www/myapp/current'", bssh.Result{ExitCode: 1}) // no deploy yet
+	rc, warns := warnCollector()
+
+	if err := Site().Apply(context.Background(), rc, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	conf := string(writtenContent(f, supervisorProgramPath("app.example.com")))
+	if !strings.Contains(conf, "autostart=false\n") {
+		t.Errorf("without a release the program must stay dormant (autostart=false):\n%s", conf)
+	}
+	for _, c := range f.Calls() {
+		if strings.HasPrefix(c.Cmd, "supervisorctl start ") || strings.HasPrefix(c.Cmd, "supervisorctl status ") {
+			t.Errorf("nothing may be started or probed without a release; saw %q", c.Cmd)
+		}
+	}
+	want := "workers: running is set, but /var/www/myapp/current does not exist yet"
+	if !strings.Contains(strings.Join(*warns, "\n"), want) {
+		t.Errorf("warnings = %q, want one containing %q", *warns, want)
+	}
+}
+
+// TestWorkersRunningStartsStoppedProgram: with a release in place the conf
+// gets autostart=true (so supervisord restarts it after a reboot) and a
+// program that is not RUNNING is started once, after supervisord loaded the
+// new conf.
+func TestWorkersRunningStartsStoppedProgram(t *testing.T) {
+	s := workersRunningServer()
+	f := bssh.NewFakeRunner()
+	stubSiteApply(s, f)
+	f.On("test -e '/var/www/myapp/current'", bssh.Result{})
+	f.OnSeq(workerStatusCmd,
+		bssh.Result{ExitCode: 3, Stdout: workerStatus("STOPPED", "Not started")},
+		bssh.Result{Stdout: workerStatus("RUNNING", "pid 4242, uptime 0:00:02")})
+	f.On(workerStartCmd, bssh.Result{Stdout: workerProg + ":" + workerProg + "_00: started\n"})
+	rc, warns := warnCollector()
+
+	if err := Site().Apply(context.Background(), rc, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if n := countCalls(f, workerStartCmd); n != 1 {
+		t.Errorf("supervisorctl start called %d times, want exactly 1", n)
+	}
+	if callIndex(f, workerStartCmd) < callIndex(f, "supervisorctl update") {
+		t.Error("the program must be started only after supervisorctl update loaded its conf")
+	}
+	if conf := string(writtenContent(f, supervisorProgramPath("app.example.com"))); !strings.Contains(conf, "autostart=true\n") {
+		t.Errorf("workers: running with a release must render autostart=true:\n%s", conf)
+	}
+	if len(*warns) != 0 {
+		t.Errorf("a healthy start must not warn; got %q", *warns)
+	}
+}
+
+// TestWorkersRunningStartsDaemons: the knob covers every program of the site,
+// daemons included, not just the queue worker.
+func TestWorkersRunningStartsDaemons(t *testing.T) {
+	s := siteServer()
+	s.Workers = "running"
+	s.Sites[0].Daemons = []config.Daemon{{Name: "reverb", Command: "php artisan reverb:start"}}
+	const status = "supervisorctl status 'berth-app_example_com-reverb:*'"
+	const start = "supervisorctl start 'berth-app_example_com-reverb:*'"
+	f := bssh.NewFakeRunner()
+	stubSiteApply(s, f)
+	f.On("test -e '/var/www/myapp/current'", bssh.Result{})
+	f.OnSeq(status,
+		bssh.Result{ExitCode: 3, Stdout: "berth-app_example_com-reverb:berth-app_example_com-reverb_00   STOPPED   Not started\n"},
+		bssh.Result{Stdout: "berth-app_example_com-reverb:berth-app_example_com-reverb_00   RUNNING   pid 7, uptime 0:00:02\n"})
+	f.On(start, bssh.Result{})
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if n := countCalls(f, start); n != 1 {
+		t.Errorf("daemon start called %d times, want 1", n)
+	}
+	if conf := string(writtenContent(f, daemonProgramPath("app.example.com", "reverb"))); !strings.Contains(conf, "autostart=true\n") {
+		t.Errorf("daemon conf must render autostart=true:\n%s", conf)
+	}
+}
+
+// TestWorkersRunningWaitsOutStartingState: supervisorctl update starts an
+// autostart=true group asynchronously, and `supervisorctl start '<prog>:*'`
+// skips processes already STARTING — so right after the start the state can
+// still be STARTING. Apply re-reads until it settles instead of failing a
+// healthy program.
+func TestWorkersRunningWaitsOutStartingState(t *testing.T) {
+	sleeps := stubNoSettleSleep(t)
+	s := workersRunningServer()
+	f := bssh.NewFakeRunner()
+	stubSiteApply(s, f)
+	f.On("test -e '/var/www/myapp/current'", bssh.Result{})
+	f.OnSeq(workerStatusCmd,
+		bssh.Result{ExitCode: 3, Stdout: workerStatus("STARTING", "")},
+		bssh.Result{ExitCode: 3, Stdout: workerStatus("STARTING", "")},
+		bssh.Result{Stdout: workerStatus("RUNNING", "pid 4242, uptime 0:00:01")})
+	f.On(workerStartCmd, bssh.Result{})
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if n := countCalls(f, workerStartCmd); n != 1 {
+		t.Errorf("supervisorctl start called %d times, want exactly 1", n)
+	}
+	if *sleeps != 1 {
+		t.Errorf("settle sleeps = %d, want 1", *sleeps)
+	}
+}
+
+// TestWorkersRunningGivesUpOnEndlessTransition: a program that never leaves
+// STARTING/BACKOFF fails loudly after the bounded wait, never hangs.
+func TestWorkersRunningGivesUpOnEndlessTransition(t *testing.T) {
+	sleeps := stubNoSettleSleep(t)
+	s := workersRunningServer()
+	f := bssh.NewFakeRunner()
+	stubSiteApply(s, f)
+	f.On("test -e '/var/www/myapp/current'", bssh.Result{})
+	f.On(workerStatusCmd, bssh.Result{ExitCode: 3, Stdout: workerStatus("BACKOFF", "Exited too quickly (process log may have details)")})
+	f.On(workerStartCmd, bssh.Result{})
+
+	err := Site().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "/var/log/supervisor/berth-app_example_com.log") {
+		t.Fatalf("Apply() error = %v, want the program's log path", err)
+	}
+	if *sleeps != programSettleAttempts {
+		t.Errorf("settle sleeps = %d, want the bound %d", *sleeps, programSettleAttempts)
+	}
+}
+
+// TestWorkersRunningStartFailureIsLoud: a program that does not come up is an
+// Apply error naming the program and its log, never a silent FATAL.
+func TestWorkersRunningStartFailureIsLoud(t *testing.T) {
+	s := workersRunningServer()
+	f := bssh.NewFakeRunner()
+	stubSiteApply(s, f)
+	f.On("test -e '/var/www/myapp/current'", bssh.Result{})
+	f.OnSeq(workerStatusCmd,
+		bssh.Result{ExitCode: 3, Stdout: workerStatus("STOPPED", "Not started")},
+		bssh.Result{ExitCode: 3, Stdout: workerStatus("FATAL", "Exited too quickly (process log may have details)")})
+	f.On(workerStartCmd, bssh.Result{ExitCode: 7, Stdout: workerProg + ":" + workerProg + "_00: ERROR (spawn error)\n"})
+
+	err := Site().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil {
+		t.Fatal("Apply() must fail when the program does not reach RUNNING")
+	}
+	for _, want := range []string{"berth-app_example_com", "/var/log/supervisor/berth-app_example_com.log"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q must contain %q", err, want)
+		}
+	}
+}
+
+// stubWorkersCheck stubs a converged single-site host for site.Check under
+// workers: running with a release in place; the caller stubs the status.
+func stubWorkersCheck(t *testing.T, s *config.Server, f *bssh.FakeRunner) {
+	t.Helper()
+	f.On("test -e '/var/www/myapp/current'", bssh.Result{})
+	stubManagedSiteFiles(t, s, f)
+	f.On("nginx -t", bssh.Result{})
+	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{})
+	stubSiteConvergedProbes(s, f)
+}
+
+// TestWorkersRunningCheckReportsStoppedProgram: the target is declarative —
+// a conf that matches but a program that is not running is drift, so the
+// next provision starts it.
+func TestWorkersRunningCheckReportsStoppedProgram(t *testing.T) {
+	s := workersRunningServer()
+	f := bssh.NewFakeRunner()
+	stubWorkersCheck(t, s, f)
+	f.On(workerStatusCmd, bssh.Result{ExitCode: 3, Stdout: workerStatus("STOPPED", "Jan 01 00:00 AM")})
+
+	cr, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied || cr.Reason != "berth-app_example_com not running (workers: running)" {
+		t.Errorf("Check = (satisfied=%v, %q), want unsatisfied with the not-running reason", cr.Satisfied, cr.Reason)
+	}
+	if len(f.Writes()) != 0 {
+		t.Error("Check must never write")
+	}
+}
+
+// TestWorkersRunningCheckVerdicts: every process must be RUNNING; STARTING
+// (and any other state) is not converged yet.
+func TestWorkersRunningCheckVerdicts(t *testing.T) {
+	cases := []struct {
+		name   string
+		stdout string
+		want   bool
+	}{
+		{"all running", workerProg + ":" + workerProg + "_00   RUNNING   pid 1, uptime 1:00:00\n" + workerProg + ":" + workerProg + "_01   RUNNING   pid 2, uptime 1:00:00\n", true},
+		{"one stopped", workerProg + ":" + workerProg + "_00   RUNNING   pid 1, uptime 1:00:00\n" + workerProg + ":" + workerProg + "_01   STOPPED   Not started\n", false},
+		{"starting", workerStatus("STARTING", ""), false},
+		{"fatal", workerStatus("FATAL", "Exited too quickly (process log may have details)"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := workersRunningServer()
+			f := bssh.NewFakeRunner()
+			stubWorkersCheck(t, s, f)
+			f.On(workerStatusCmd, bssh.Result{Stdout: tc.stdout})
+			cr, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cr.Satisfied != tc.want {
+				t.Errorf("Check satisfied = %v (%q), want %v", cr.Satisfied, cr.Reason, tc.want)
+			}
+		})
+	}
+}
+
+// TestWorkersRunningWithoutReleaseCheckIsSatisfied: before the first deploy
+// the dormant conf IS the converged state for workers: running — no endless
+// drift, no attempt to start a program that has no code to run.
+func TestWorkersRunningWithoutReleaseCheckIsSatisfied(t *testing.T) {
+	s := workersRunningServer()
+	f := bssh.NewFakeRunner()
+	f.On("test -e '/var/www/myapp/current'", bssh.Result{ExitCode: 1})
+	stubManagedSiteFiles(t, s, f)
+	f.On("nginx -t", bssh.Result{})
+	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{})
+	stubSiteConvergedProbes(s, f)
+	f.On(workerStatusCmd, bssh.Result{ExitCode: 3, Stdout: workerStatus("STOPPED", "Not started")})
+
+	cr, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("Check = %q, want satisfied (dormant until the first deploy)", cr.Reason)
+	}
+}
+
+// TestDormantRewriteOfRunningProgramWarns: supervisorctl update removes and
+// re-adds a CHANGED group, and with autostart=false the re-added group stays
+// STOPPED — rewriting the conf of a program the deployer started stops it.
+// The operator is told, before it happens.
+func TestDormantRewriteOfRunningProgramWarns(t *testing.T) {
+	s := siteServer()
+	s.Queue = true // workers: dormant (the default)
+	site := s.Sites[0]
+	f := bssh.NewFakeRunner()
+	stubSiteApply(s, f)
+	// The host holds a DIFFERENT berth rendering (left by workers: running).
+	old, err := renderSupervisorProgram(programName(site.Domain), queueCommand(s, site), queueNumprocs(site), s.SiteUser(site), site.DeployPath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.On("cat "+shQuote(supervisorProgramPath(site.Domain)), bssh.Result{Stdout: string(old)})
+	f.On(workerStatusCmd, bssh.Result{Stdout: workerStatus("RUNNING", "pid 4242, uptime 3:00:00")})
+	rc, warns := warnCollector()
+
+	if err := Site().Apply(context.Background(), rc, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	want := "supervisorctl update leaves berth-app_example_com STOPPED"
+	if !strings.Contains(strings.Join(*warns, "\n"), want) {
+		t.Errorf("warnings = %q, want one containing %q", *warns, want)
+	}
+	if countCalls(f, workerStartCmd) != 0 {
+		t.Error("dormant mode must never start a program")
+	}
+	if idx := callIndex(f, workerStatusCmd); idx < 0 || idx > callIndex(f, "supervisorctl update") {
+		t.Error("the program state must be read before supervisorctl update stops it")
+	}
+}
+
+// TestDormantUnchangedProgramIsNotProbed (ruling R4): an existing conf whose
+// bytes do not change is not probed — supervisorctl update leaves an
+// unchanged group alone, so there is nothing to warn about, and an
+// up-to-date host issues exactly the commands it did before workers existed.
+func TestDormantUnchangedProgramIsNotProbed(t *testing.T) {
+	s := siteServer()
+	s.Queue = true
+	site := s.Sites[0]
+	f := bssh.NewFakeRunner()
+	stubSiteApply(s, f)
+	cur, err := renderSupervisorProgram(programName(site.Domain), queueCommand(s, site), queueNumprocs(site), s.SiteUser(site), site.DeployPath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.On("cat "+shQuote(supervisorProgramPath(site.Domain)), bssh.Result{Stdout: string(cur)})
+
+	if err := Site().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v (an unstubbed status probe would surface here)", err)
+	}
+	if n := countCalls(f, workerStatusCmd); n != 0 {
+		t.Errorf("an unchanged dormant conf was probed %d times, want 0", n)
 	}
 }
