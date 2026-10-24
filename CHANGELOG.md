@@ -16,6 +16,26 @@ Notable changes to berth. Older releases are documented on the
   or empty. CI runs the script on the newest section on every PR. The 0.31.0
   and 0.32.0 release pages were updated by hand to the same form.
 
+### Fixed
+
+- **Go 1.27.1 → 1.27.3, clearing eight standard-library advisories.** Since
+  2026-10-12 govulncheck (the `vuln` CI job and the weekly scan) has failed
+  on GO-2026-6603, -6605, -6608, -6610, -6611, -6613 and -6617 (`net/http`
+  HTTP/1 and HTTP/2, `net/textproto`/`mime/multipart`) and GO-2026-6607
+  (`crypto/tls` ECH), all fixed in 1.27.2; 1.27.3 is the current patch
+  release. Exposure was low: most of them need an HTTP or TLS server, which
+  berth does not run, and berth's own code uses `net/http` only for the
+  composer installer-signature fetch. Still, every release binary up to and
+  including 0.32.0 was built with the affected toolchain, so this is a
+  toolchain change only, with no code change. Under 1.27.3 govulncheck v1.8.0
+  reports no reachable vulnerability. The one module-level advisory it still
+  lists (GO-2026-5932, the unmaintained `x/crypto/openpgp`) has no fix, and
+  berth does not import that package. Because this is a patch bump inside the
+  1.27 minor, golangci-lint stays at v2.14.0, which lints both passes at zero
+  issues. The unit suite passes with `-race -shuffle=on`, all five release
+  targets cross-build, and `go mod tidy` (GoReleaser's before-hook) leaves
+  `go.mod` untouched.
+
 ## [0.32.0] — 2026-10-01
 
 ### Fixed
