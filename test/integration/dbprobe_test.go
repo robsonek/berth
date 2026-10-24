@@ -16,7 +16,7 @@ func TestParseEnv(t *testing.T) {
 // shapes the drill actually feeds it.
 func TestDBProbeStdinCmdMariaDBSocket(t *testing.T) {
 	got := dbProbeStdinCmd("mysql", "localhost", "3306", "/run/mysqld/mysqld.sock", "b_app_1234abcd", "app_db", "SELECT 1")
-	want := `IFS= read -r pw; MYSQL_PWD="$pw" mysql --socket='/run/mysqld/mysqld.sock' -u'b_app_1234abcd' 'app_db' -e 'SELECT 1'`
+	want := `IFS= read -r pw; MYSQL_PWD="$pw" mariadb --socket='/run/mysqld/mysqld.sock' -u'b_app_1234abcd' 'app_db' -e 'SELECT 1'`
 	if got != want {
 		t.Errorf("got  %q\nwant %q", got, want)
 	}
@@ -24,7 +24,7 @@ func TestDBProbeStdinCmdMariaDBSocket(t *testing.T) {
 
 func TestDBProbeStdinCmdMySQLTCP(t *testing.T) {
 	got := dbProbeStdinCmd("mysql", "127.0.0.1", "3306", "", "b_app_1234abcd", "app_db", "SELECT 1")
-	want := `IFS= read -r pw; MYSQL_PWD="$pw" mysql -h'127.0.0.1' -P'3306' -u'b_app_1234abcd' 'app_db' -e 'SELECT 1'`
+	want := `IFS= read -r pw; MYSQL_PWD="$pw" mariadb -h'127.0.0.1' -P'3306' -u'b_app_1234abcd' 'app_db' -e 'SELECT 1'`
 	if got != want {
 		t.Errorf("got  %q\nwant %q", got, want)
 	}

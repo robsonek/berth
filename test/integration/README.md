@@ -15,7 +15,7 @@ exercised separately), the test connects to the target and checks:
 - `systemctl is-active` reports `active` for `nginx`, `php<version>-fpm`,
   `mariadb`, and `valkey-server` (the last only when `valkey: true`).
 - `nginx -t` exits `0` (valid generated config).
-- `mysql --protocol=socket -e 'SELECT 1'` exits `0` (socket-auth DB reachable).
+- `mariadb --protocol=socket -e 'SELECT 1'` exits `0` (socket-auth DB reachable).
 - `GET http://<host>/` returns a response. A `502 Bad Gateway` is acceptable:
   nginx and PHP-FPM are up but no application is deployed yet.
 

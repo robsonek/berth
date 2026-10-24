@@ -752,7 +752,7 @@ operation (below).
 
 ```bash
 # MariaDB
-gunzip -c /var/backups/berth/<pool>/<db>-<ts>.sql.gz | mysql <db>
+gunzip -c /var/backups/berth/<pool>/<db>-<ts>.sql.gz | mariadb <db>
 # PostgreSQL (plain-SQL dump — psql, not pg_restore)
 gunzip -c /var/backups/berth/<pool>/<db>-<ts>.sql.gz | sudo -u postgres psql <db>
 # Files

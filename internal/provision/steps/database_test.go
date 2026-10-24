@@ -106,7 +106,7 @@ func TestDatabaseApplyGeneratesPersistsAndEnsures(t *testing.T) {
 	stubClientAuthAbsent(f, s, ".my.cnf")
 	stubEnvSeed(f, s)
 	stubClientAuthSeed(f, s, ".my.cnf")
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 
 	if err := Database(red).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -142,7 +142,7 @@ func TestDatabaseApplyGeneratesPersistsAndEnsures(t *testing.T) {
 	// The password must reach the SQL via stdin, never the command string.
 	var sawCreateDB, sawCreateUser bool
 	for _, c := range f.Calls() {
-		if strings.HasPrefix(c.Cmd, "mysql") {
+		if strings.HasPrefix(c.Cmd, "mariadb ") {
 			if strings.Contains(string(c.Stdin), "CREATE DATABASE IF NOT EXISTS") {
 				sawCreateDB = true
 			}
@@ -177,7 +177,7 @@ func TestDatabaseApplyOnlyTenantMutatesSharedEnv(t *testing.T) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
 	stubClientAuthAbsent(f, s, ".my.cnf")
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 	f.On(writeAsUserCmd("deploy", envPath(s)), bssh.Result{})
 	f.On(writeAsUserCmd("deploy", clientAuthPath(s, s.Sites[0], ".my.cnf")), bssh.Result{})
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -200,7 +200,7 @@ func TestDatabaseApplySeedsRedisWhenValkey(t *testing.T) {
 	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 
 	stubClientAuthAbsent(f, s, ".my.cnf")
 	stubEnvSeed(f, s)
@@ -234,7 +234,7 @@ func TestDatabaseApplyKeepsDatabaseDriverWithoutValkey(t *testing.T) {
 	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 
 	stubClientAuthAbsent(f, s, ".my.cnf")
 	stubEnvSeed(f, s)
@@ -262,7 +262,7 @@ func TestDatabaseApplyHealsFromExistingEnvWithoutRewriting(t *testing.T) {
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Reused123\n"})
 	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // absent -> not backfilled
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 
 	stubClientAuthAbsent(f, s, ".my.cnf")
 	stubClientAuthSeed(f, s, ".my.cnf")
@@ -274,7 +274,7 @@ func TestDatabaseApplyHealsFromExistingEnvWithoutRewriting(t *testing.T) {
 	}
 	var sawEnsureUser bool
 	for _, c := range f.Calls() {
-		if strings.HasPrefix(c.Cmd, "mysql") && strings.Contains(string(c.Stdin), "Reused123") {
+		if strings.HasPrefix(c.Cmd, "mariadb ") && strings.Contains(string(c.Stdin), "Reused123") {
 			sawEnsureUser = true
 		}
 	}
@@ -297,7 +297,7 @@ func TestDatabaseApplyFailsWhenExistingEnvLacksPassword(t *testing.T) {
 		t.Fatalf("err = %v, want the pointed no-DB_PASSWORD error", err)
 	}
 	for _, c := range f.Calls() {
-		if strings.HasPrefix(c.Cmd, "mysql") {
+		if strings.HasPrefix(c.Cmd, "mariadb ") {
 			t.Fatal("no SQL may run when the existing .env cannot supply the password")
 		}
 	}
@@ -332,8 +332,8 @@ func TestDatabaseCheckSatisfiedDoesNotReseedExistingEnv(t *testing.T) {
 }
 
 const (
-	mariadbDBProbe    = `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='myapp'"`
-	mariadbGrantProbe = `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='myapp' AND GRANTEE='''myapp''@''localhost''' LIMIT 1"`
+	mariadbDBProbe    = `mariadb --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='myapp'"`
+	mariadbGrantProbe = `mariadb --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='myapp' AND GRANTEE='''myapp''@''localhost''' LIMIT 1"`
 )
 
 // stubGreenRemote stubs every REMOTE probe of a fully provisioned single-site
@@ -858,7 +858,7 @@ func TestDatabaseApplyCachesSecretsBeforeSeedingEnv(t *testing.T) {
 	stubClientAuthAbsent(f, s, ".my.cnf")
 	stubEnvSeed(f, s)
 	stubClientAuthSeed(f, s, ".my.cnf")
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 	spy := &envWriteSpy{FakeRunner: f, host: s.Host, dbUser: s.SiteDBUser(s.Sites[0]), envPath: envPath(s)}
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, spy); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -954,7 +954,7 @@ func TestDatabaseCheckUnsatisfiedWhenEnvLacksValidPassword(t *testing.T) {
 		t.Errorf("Reason = %q", cr.Reason)
 	}
 	for _, c := range f.Calls() {
-		if strings.Contains(c.Cmd, "mysql") {
+		if strings.HasPrefix(c.Cmd, "mariadb ") {
 			t.Fatalf("no DB probe may run once the credential is missing; saw %q", c.Cmd)
 		}
 	}
@@ -975,7 +975,7 @@ func TestDatabaseCheckSkipsProbesWhenNotInstalled(t *testing.T) {
 		t.Fatal("missing server package must be unsatisfied")
 	}
 	for _, c := range f.Calls() {
-		if strings.Contains(c.Cmd, "mysql") {
+		if strings.HasPrefix(c.Cmd, "mariadb ") {
 			t.Fatalf("no probe may run without an installed server; saw %q", c.Cmd)
 		}
 	}
@@ -1074,7 +1074,7 @@ func TestDatabaseApplyDebianSourceRemovesLingeringRepo(t *testing.T) {
 	f.On("rm -f "+repo.SourceListPath()+" "+repo.KeyringPath(), bssh.Result{ExitCode: 0})
 	f.On("apt-get update", bssh.Result{ExitCode: 0})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 	stubClientAuthAbsent(f, s, ".my.cnf")
 	stubEnvSeed(f, s)
 	stubClientAuthSeed(f, s, ".my.cnf")
@@ -1110,7 +1110,7 @@ func TestDatabaseApplySourceMariaDBAddsRepo(t *testing.T) {
 	stubEnsureRepoChain(f, repo)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 
 	stubClientAuthAbsent(f, s, ".my.cnf")
 	stubEnvSeed(f, s)
@@ -1214,7 +1214,7 @@ func TestDatabaseApplyRejectsLeadingSpacePassword(t *testing.T) {
 		t.Fatalf("err = %v, want the charset refusal for a leading-space value", err)
 	}
 	for _, c := range f.Calls() {
-		if strings.HasPrefix(c.Cmd, "mysql") {
+		if strings.HasPrefix(c.Cmd, "mariadb ") {
 			t.Fatal("no SQL may run when the reused password is rejected")
 		}
 	}
@@ -1237,7 +1237,7 @@ func TestDatabaseApplyRejectsTrailingUnicodeSpacePassword(t *testing.T) {
 		t.Fatalf("err = %v, want the charset refusal for a trailing-NBSP value", err)
 	}
 	for _, c := range f.Calls() {
-		if strings.HasPrefix(c.Cmd, "mysql") {
+		if strings.HasPrefix(c.Cmd, "mariadb ") {
 			t.Fatal("no SQL may run when the reused password is rejected")
 		}
 	}
@@ -1255,7 +1255,7 @@ func TestDatabaseApplyAcceptsTrailingASCIIWhitespacePassword(t *testing.T) {
 	// set), so Apply must trim it the same way and reuse the value.
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Good123\v\n"})
 	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // absent -> not backfilled
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 	stubClientAuthAbsent(f, s, ".my.cnf")
 	stubClientAuthSeed(f, s, ".my.cnf")
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -1263,7 +1263,7 @@ func TestDatabaseApplyAcceptsTrailingASCIIWhitespacePassword(t *testing.T) {
 	}
 	var sawEnsureUser bool
 	for _, c := range f.Calls() {
-		if strings.HasPrefix(c.Cmd, "mysql") && strings.Contains(string(c.Stdin), "Good123") {
+		if strings.HasPrefix(c.Cmd, "mariadb ") && strings.Contains(string(c.Stdin), "Good123") {
 			sawEnsureUser = true
 		}
 	}
@@ -1362,7 +1362,7 @@ func TestDatabaseApplySeedsClientAuthFile(t *testing.T) {
 	f.On("test -e '/home/deploy/.my.cnf'", bssh.Result{ExitCode: 1}) // fresh box: no client creds yet
 	stubEnvSeed(f, s)
 	stubClientAuthSeed(f, s, ".my.cnf")
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -1409,7 +1409,7 @@ func TestDatabaseApplyClientAuthFileNeverRewritten(t *testing.T) {
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Reused123\n"})
 	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // absent -> not backfilled
 	f.On("test -e '/home/deploy/.my.cnf'", bssh.Result{ExitCode: 0})            // already seeded (possibly operator-customized)
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -1435,7 +1435,7 @@ func stubDivergedEnv(f *bssh.FakeRunner, s *config.Server, newPW string) {
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=" + newPW + "\n"})
 	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "APP_KEY=" + divergedAppKey + "\n"})
 	f.On("test -e "+shQuote("/home/deploy/.my.cnf"), bssh.Result{ExitCode: 0})
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 }
 
 // Divergence heals end to end: Check flags it (pinned above), Apply ALTERs
@@ -1457,7 +1457,7 @@ func TestDatabaseApplyReconcilesRoleAndCacheTowardEnv(t *testing.T) {
 	// The role reconciles toward the live .env, and no secret rides argv.
 	var sawEnsureUser bool
 	for _, c := range f.Calls() {
-		if strings.HasPrefix(c.Cmd, "mysql") && strings.Contains(string(c.Stdin), "NewPass2") {
+		if strings.HasPrefix(c.Cmd, "mariadb ") && strings.Contains(string(c.Stdin), "NewPass2") {
 			sawEnsureUser = true
 		}
 		if c.Cmd == clientAuthContainsScript("/home/deploy/.my.cnf") {
@@ -1706,7 +1706,7 @@ func TestDatabaseApplyFailsOnEngineEnvConflictBeforeMutating(t *testing.T) {
 		t.Fatalf("Apply() = %v, want the engine/env conflict error", err)
 	}
 	for _, c := range f.Calls() {
-		if strings.Contains(c.Cmd, "apt-get") || strings.HasPrefix(c.Cmd, "mysql") {
+		if strings.Contains(c.Cmd, "apt-get") || strings.HasPrefix(c.Cmd, "mariadb ") {
 			t.Errorf("Apply must not install or mutate anything after detecting the conflict; ran %q", c.Cmd)
 		}
 	}
@@ -1734,7 +1734,7 @@ func TestDatabaseApplyPreScansAllSitesBeforeMutating(t *testing.T) {
 		t.Fatalf("Apply() = %v, want the conflict error naming the second site", err)
 	}
 	for _, c := range f.Calls() {
-		if strings.Contains(c.Cmd, "apt-get") || strings.HasPrefix(c.Cmd, "mysql") {
+		if strings.Contains(c.Cmd, "apt-get") || strings.HasPrefix(c.Cmd, "mariadb ") {
 			t.Errorf("no site may be installed or mutated when a later site conflicts; ran %q", c.Cmd)
 		}
 	}
@@ -1806,7 +1806,7 @@ func TestDatabaseApplyRecoversAppKeyFromCache(t *testing.T) {
 	stubClientAuthAbsent(f, s, ".my.cnf")
 	stubEnvSeed(f, s)
 	stubClientAuthSeed(f, s, ".my.cnf")
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
@@ -1827,7 +1827,7 @@ func TestDatabaseApplyCachesGeneratedAppKey(t *testing.T) {
 	stubClientAuthAbsent(f, s, ".my.cnf")
 	stubEnvSeed(f, s)
 	stubClientAuthSeed(f, s, ".my.cnf")
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
@@ -1852,7 +1852,7 @@ func TestDatabaseApplyBackfillsAppKeyFromExistingEnv(t *testing.T) {
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=existingpw\n"})
 	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "APP_KEY=" + envKey + "\n"})
 	f.On("test -e "+shQuote("/home/deploy/.my.cnf"), bssh.Result{ExitCode: 0}) // client creds present
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
@@ -1882,7 +1882,7 @@ func TestDatabaseApplySkipsNonBerthEnvAppKey(t *testing.T) {
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=existingpw\n"})
 	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "APP_KEY=base64:short\n"})
 	f.On("test -e "+shQuote("/home/deploy/.my.cnf"), bssh.Result{ExitCode: 0})
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() = %v; a non-berth APP_KEY must not brick Apply", err)
 	}
@@ -2015,7 +2015,7 @@ func runMariaDBApplyInstall(t *testing.T, source, updates, wantInstall string) {
 	}
 	f.On(wantInstall, bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 	stubClientAuthAbsent(f, s, ".my.cnf")
 	stubEnvSeed(f, s)
 	stubClientAuthSeed(f, s, ".my.cnf")

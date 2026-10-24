@@ -46,7 +46,7 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{"php-fpm -t", cmdRejected},
 		{"php-fpm8 -t", cmdRejected},
 		// Every other certbot subcommand drives issuance/renewal state and
-		// must reject — pinned the way mysql's and setpriv's mutating
+		// must reject — pinned the way mariadb's and setpriv's mutating
 		// siblings were. Extra arguments on the listing reject too: only the
 		// bare inventory was measured.
 		{"certbot certonly --webroot -w /var/www/berth-acme/app.example.com -d app.example.com", cmdRejected},
@@ -195,14 +195,18 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		// DDL/DML, a second ;-separated statement, INTO OUTFILE (which
 		// writes files as the server), an extra option smuggling its own
 		// statement — must reject.
-		{`mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app'"`, cmdReadOnly},
-		{`mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='app' AND GRANTEE='''app''@''localhost''' LIMIT 1"`, cmdReadOnly},
-		{`mysql --protocol=socket -N -e "DROP DATABASE app"`, cmdRejected},
-		{`mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app' INTO OUTFILE '/tmp/x'"`, cmdRejected},
-		{`mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA; DROP DATABASE app"`, cmdRejected},
-		{`mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app'" --init-command="DROP DATABASE app"`, cmdRejected},
-		{`mysql --protocol=socket`, cmdRejected},
-		{`mysql -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app'"`, cmdRejected},
+		{`mariadb --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app'"`, cmdReadOnly},
+		{`mariadb --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='app' AND GRANTEE='''app''@''localhost''' LIMIT 1"`, cmdReadOnly},
+		{`mariadb --protocol=socket -N -e "DROP DATABASE app"`, cmdRejected},
+		{`mariadb --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app' INTO OUTFILE '/tmp/x'"`, cmdRejected},
+		{`mariadb --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA; DROP DATABASE app"`, cmdRejected},
+		{`mariadb --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app'" --init-command="DROP DATABASE app"`, cmdRejected},
+		{`mariadb --protocol=socket`, cmdRejected},
+		{`mariadb -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app'"`, cmdRejected},
+		// The deprecated compatibility name is no longer the client berth
+		// issues, so it is no longer table-judged at all: even the probe
+		// shape rejects as an unknown verb.
+		{`mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app'"`, cmdRejected},
 
 		// The postgres engine's catalog probes (probePSQL,
 		// internal/database/postgres.go): sudo is THE privilege wrapper, so
@@ -598,10 +602,10 @@ var auditedScripts = map[string]string{
 	// binary. Audited: `command -v` resolves a name against PATH without
 	// executing anything; both redirections aim at the null device and the
 	// caller reads only the exit code. Nothing writes. One entry per engine
-	// binary the variants reach (dumpClientBinary: mariadb → mysqldump,
+	// binary the variants reach (dumpClientBinary: mariadb → mariadb-dump,
 	// postgres → pg_dump).
-	commandVProbeCmd("mysqldump"): "commandExists (backups.go) for the mariadb dump client: command -v with output discarded — reads only",
-	commandVProbeCmd("pg_dump"):   "commandExists (backups.go) for the postgres dump client: command -v with output discarded — reads only",
+	commandVProbeCmd("mariadb-dump"): "commandExists (backups.go) for the mariadb dump client: command -v with output discarded — reads only",
+	commandVProbeCmd("pg_dump"):      "commandExists (backups.go) for the postgres dump client: command -v with output discarded — reads only",
 
 	// findRegularFiles' guarded listings (site.go), issued by orphanSiteFiles
 	// over the three orphan namespaces. Audited: `[ -d ]` existence test
@@ -1044,7 +1048,7 @@ var simpleShapes = []simpleShape{
 		why: "pinned to the two x509 reads tls.go issues; -out and -writerand create files even under -noout, and every respelling falls out by not matching"},
 	{verb: "gpg", allow: gpgIsReadOnly, verdict: cmdReadOnly,
 		why: "pinned to KeyringHoldsExactly's exact argv (apt.go)"},
-	{verb: "mysql", allow: mysqlIsReadOnlyProbe, verdict: cmdReadOnly,
+	{verb: "mariadb", allow: mariadbIsReadOnlyProbe, verdict: cmdReadOnly,
 		why: "only probeSQL's -N -e information_schema SELECT reads; any other statement, a ;-chain, INTO OUTFILE or an extra option mutates"},
 	// sudo is THE privilege wrapper — everything behind it is arbitrary code
 	// as another uid unless the whole argv is pinned. The one shape a Check
@@ -1185,8 +1189,8 @@ func sudoIsPostgresCatalogProbe(args []string) bool {
 	return false
 }
 
-// mysqlIsReadOnlyProbe allows only probeSQL's shape
-// (internal/database/mariadb.go): `mysql --protocol=socket -N -e
+// mariadbIsReadOnlyProbe allows only probeSQL's shape
+// (internal/database/mariadb.go): `mariadb --protocol=socket -N -e
 // "SELECT 1 FROM information_schema.…"`. Every pin is load-bearing:
 // --protocol=socket keeps the probe on the local server, -N -e is the exact
 // spelling probeSQL composes, and the statement must be a single SELECT
@@ -1197,7 +1201,7 @@ func sudoIsPostgresCatalogProbe(args []string) bool {
 // mutation, but nothing berth issues needs it), and any extra double quote
 // (exactly one opening and one closing), so a trailing option such as
 // --init-command="…" cannot smuggle its own statement past the prefix check.
-func mysqlIsReadOnlyProbe(args []string) bool {
+func mariadbIsReadOnlyProbe(args []string) bool {
 	if len(args) < 4 || args[0] != "--protocol=socket" || args[1] != "-N" || args[2] != "-e" {
 		return false
 	}

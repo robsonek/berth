@@ -342,7 +342,7 @@ func variantServer(t *testing.T, variant string) *config.Server {
 		// config.Validate — the engine's one upstream would be pgdg). The
 		// pipeline registers NO tuning step for it (registry.go), and
 		// database.Check's engine probes go through peer-auth psql instead
-		// of the mysql client.
+		// of the mariadb client.
 		srv.Database = config.Database{Engine: "postgres", Source: "debian"}
 	case "upstream":
 		srv.ID = "contract-upstream"

@@ -747,11 +747,11 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 
 	// probeSQL PARSES stdout (trimmed "1") and the exit code. Answered from
 	// the modelled database/grant sets; an empty result set is exit 0 with no
-	// output, exactly what mysql -N -e prints.
+	// output, exactly what mariadb -N -e prints.
 	case cmd == mariadbDBExistsProbe("app"):
-		return r.answerMySQLScalar(r.h.databases["app"]), true
+		return r.answerMariaDBScalar(r.h.databases["app"]), true
 	case cmd == mariadbUserGrantedProbe("app", "app"):
-		return r.answerMySQLScalar(r.h.dbGrants["app:app"]), true
+		return r.answerMariaDBScalar(r.h.dbGrants["app:app"]), true
 
 	// probePSQL, the postgres twin (the postgres variant): PARSES stdout
 	// (trimmed "1") and the exit code, answered from the same modelled sets
@@ -1059,11 +1059,11 @@ func (r *recordingRunner) answerKnownHostLookup(token, path string) bssh.Result 
 // — copies on purpose, so a production probe change makes the answer fall
 // away loudly instead of feeding the new shape a stale reply.
 func mariadbDBExistsProbe(db string) string {
-	return `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='` + db + `'"`
+	return `mariadb --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='` + db + `'"`
 }
 
 func mariadbUserGrantedProbe(user, db string) string {
-	return `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='` + db + `' AND GRANTEE='''` + user + `''@''localhost''' LIMIT 1"`
+	return `mariadb --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='` + db + `' AND GRANTEE='''` + user + `''@''localhost''' LIMIT 1"`
 }
 
 // valkeyPingProbeCmd mirrors valkeyPingCmd's composition (valkey.go) — a copy
@@ -1074,13 +1074,13 @@ func valkeyPingProbeCmd(user, pool string) string {
 		shQuote("/run/berth-valkey/"+pool+"/valkey.sock") + " ping"
 }
 
-// answerMySQLScalar evaluates a probeSQL query whose modelled truth is hit:
-// mysql prints "1" for a matching row, nothing for an empty result set, both
+// answerMariaDBScalar evaluates a probeSQL query whose modelled truth is hit:
+// mariadb prints "1" for a matching row, nothing for an empty result set, both
 // at exit 0 — but only while the server package is present and the daemon
 // runs; a stopped daemon answers the client's connect error.
-func (r *recordingRunner) answerMySQLScalar(hit bool) bssh.Result {
+func (r *recordingRunner) answerMariaDBScalar(hit bool) bssh.Result {
 	if _, ok := r.h.packages["mariadb-server"]; !ok {
-		return bssh.Result{ExitCode: 127, Stderr: "sh: 1: mysql: not found"}
+		return bssh.Result{ExitCode: 127, Stderr: "sh: 1: mariadb: not found"}
 	}
 	if u, ok := r.h.unit("mariadb.service"); !ok || !u.active {
 		return bssh.Result{ExitCode: 1, Stderr: "ERROR 2002 (HY000): Can't connect to local server"}
@@ -1107,7 +1107,7 @@ func pgUserGrantedProbe(user, db string) string {
 	return pgProbeCmd("SELECT 1 FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE d.datname='" + db + "' AND r.rolname='" + user + "'")
 }
 
-// answerPSQLScalar is answerMySQLScalar's postgres twin: psql -tA prints the
+// answerPSQLScalar is answerMariaDBScalar's postgres twin: psql -tA prints the
 // bare value for a matching row and nothing for an empty result set, both at
 // exit 0. Without the server package there is no postgres account for sudo
 // to become (its own exit 1); a stopped daemon answers psql's connect

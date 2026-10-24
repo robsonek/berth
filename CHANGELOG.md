@@ -21,6 +21,19 @@ Notable changes to berth. Older releases are documented on the
   "Controlled upstream update" procedure for the maintenance window. The
   default (`auto`, or no key) keeps today's behaviour, so no host drifts.
 
+### Changed
+
+- **The MariaDB client is called as `mariadb` and `mariadb-dump`.** MariaDB
+  12.3 marks the `mysql*` program names as deprecated and prints a warning
+  naming the replacement. Debian 13's MariaDB 11.8 and mariadb.org's 12.3
+  both ship the new names, so berth now uses them everywhere: the `database`
+  step's SQL and its read-only `information_schema` probes, the dump in the
+  per-site backup script, and the `backups` step's prerequisite check
+  (`command -v mariadb-dump`). The backup script
+  (`/usr/local/sbin/berth-backup-<pool>`) changes bytes, so the first run
+  after upgrading re-applies it once. The README's restore command now pipes
+  into `mariadb`. PostgreSQL (`psql`, `pg_dump`) is unchanged.
+
 ## [0.32.1] — 2026-10-24
 
 ### Changed

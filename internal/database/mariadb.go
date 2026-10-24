@@ -32,12 +32,12 @@ func (MariaDB) EnvConnection() (driver, host, port, socket string) {
 
 // runSQL pipes a statement to the local socket as root (unix_socket auth on Debian).
 func runSQL(ctx context.Context, r bssh.Runner, sql string) error {
-	res, err := r.Run(ctx, "mysql --protocol=socket", []byte(sql))
+	res, err := r.Run(ctx, "mariadb --protocol=socket", []byte(sql))
 	if err != nil {
 		return err
 	}
 	if res.ExitCode != 0 {
-		return fmt.Errorf("mysql: %s", res.Stderr)
+		return fmt.Errorf("mariadb: %s", res.Stderr)
 	}
 	return nil
 }
@@ -51,7 +51,7 @@ func (MariaDB) EnsureDatabase(ctx context.Context, r bssh.Runner, name string) e
 // probeSQL runs a read-only scalar query inline (no secrets involved) and
 // reports whether it returned "1". A non-zero exit is false, nil.
 func probeSQL(ctx context.Context, r bssh.Runner, query string) (bool, error) {
-	res, err := r.Run(ctx, `mysql --protocol=socket -N -e "`+query+`"`, nil)
+	res, err := r.Run(ctx, `mariadb --protocol=socket -N -e "`+query+`"`, nil)
 	if err != nil {
 		return false, err
 	}
@@ -93,7 +93,7 @@ func (MariaDB) EnsureUser(ctx context.Context, r bssh.Runner, user, password, da
 // (Quoting cannot neutralize a LEADING DASH — only reSQLIdent blocks option
 // injection; the quote hardens the primitive, it does not replace validation.)
 func (MariaDB) DumpCommand(database string) string {
-	return "mysqldump --protocol=socket --single-transaction --no-tablespaces --routines --events " + shQuote(database)
+	return "mariadb-dump --protocol=socket --single-transaction --no-tablespaces --routines --events " + shQuote(database)
 }
 
 // ClientAuthFileName is the MariaDB per-user option file.
