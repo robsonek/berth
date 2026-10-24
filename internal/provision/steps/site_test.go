@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -2753,5 +2754,28 @@ func TestDormantUnchangedProgramIsNotProbed(t *testing.T) {
 	}
 	if n := countCalls(f, workerStatusCmd); n != 0 {
 		t.Errorf("an unchanged dormant conf was probed %d times, want 0", n)
+	}
+}
+
+// TestSiteChangesListStartWorkersOnlyWhenRunning: the dry-run plan names
+// starting programs only when some site resolves to workers: running — on a
+// dormant (default) host berth never starts anything, so listing it lied.
+func TestSiteChangesListStartWorkersOnlyWhenRunning(t *testing.T) {
+	const start = "start workers: running programs that are not RUNNING"
+	dormant := siteServer()
+	dormant.Queue = true
+	if got := (site{}).changes(dormant); slices.Contains(got, start) {
+		t.Errorf("dormant changes = %q, must not list %q", got, start)
+	}
+	running := workersRunningServer()
+	if got := (site{}).changes(running); !slices.Contains(got, start) {
+		t.Errorf("running changes = %q, want %q", got, start)
+	}
+	perSite := siteServer()
+	perSite.Queue = true
+	perSite.Workers = "running"
+	perSite.Sites[0].Workers = "dormant" // the site override wins
+	if got := (site{}).changes(perSite); slices.Contains(got, start) {
+		t.Errorf("site-overridden-to-dormant changes = %q, must not list %q", got, start)
 	}
 }

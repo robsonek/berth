@@ -809,18 +809,18 @@ func (st site) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
-		return provision.CheckResult{Satisfied: false, Reason: reason, Changes: append(removals, st.changes()...)}, nil
+		return provision.CheckResult{Satisfied: false, Reason: reason, Changes: append(removals, st.changes(s)...)}, nil
 	}
 	// The active nginx and PHP-FPM configurations must validate.
 	if res, err := r.Run(ctx, "nginx -t", nil); err != nil {
 		return provision.CheckResult{}, err
 	} else if res.ExitCode != 0 {
-		return provision.CheckResult{Satisfied: false, Reason: "nginx -t fails", Changes: st.changes()}, nil
+		return provision.CheckResult{Satisfied: false, Reason: "nginx -t fails", Changes: st.changes(s)}, nil
 	}
 	if res, err := r.Run(ctx, "php-fpm"+s.PHP.Version+" -t", nil); err != nil {
 		return provision.CheckResult{}, err
 	} else if res.ExitCode != 0 {
-		return provision.CheckResult{Satisfied: false, Reason: "php-fpm -t fails", Changes: st.changes()}, nil
+		return provision.CheckResult{Satisfied: false, Reason: "php-fpm -t fails", Changes: st.changes(s)}, nil
 	}
 	// The RUNNING nginx/FPM must postdate every managed vhost/pool: a crash
 	// between a write and its reload otherwise serves the old config forever
@@ -840,7 +840,7 @@ func (st site) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 			return provision.CheckResult{}, err
 		}
 		if res.ExitCode != 0 {
-			return provision.CheckResult{Satisfied: false, Reason: "site " + site.Domain + " not enabled (sites-enabled link missing or wrong)", Changes: st.changes()}, nil
+			return provision.CheckResult{Satisfied: false, Reason: "site " + site.Domain + " not enabled (sites-enabled link missing or wrong)", Changes: st.changes(s)}, nil
 		}
 	}
 	// The governing directories join the probes: a directory newer than the
@@ -854,7 +854,7 @@ func (st site) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 		return provision.CheckResult{}, err
 	}
 	if stock {
-		return provision.CheckResult{Satisfied: false, Reason: "stock FPM pool present (must be disabled)", Changes: st.changes()}, nil
+		return provision.CheckResult{Satisfied: false, Reason: "stock FPM pool present (must be disabled)", Changes: st.changes(s)}, nil
 	}
 	// Liveness for these units lives in the nginx and php steps (site's
 	// Requires()), whose serviceUp/serviceActive probes satisfy the
@@ -864,14 +864,14 @@ func (st site) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 		return provision.CheckResult{}, err
 	}
 	if !nginxLoaded {
-		return provision.CheckResult{Satisfied: false, Reason: "running nginx predates a managed vhost (reload pending)", Changes: st.changes()}, nil
+		return provision.CheckResult{Satisfied: false, Reason: "running nginx predates a managed vhost (reload pending)", Changes: st.changes(s)}, nil
 	}
 	fpmLoaded, err := reloadedSince(ctx, r, fpmService(s), pools...)
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
 	if !fpmLoaded {
-		return provision.CheckResult{Satisfied: false, Reason: "running php-fpm predates a managed pool (reload pending)", Changes: st.changes()}, nil
+		return provision.CheckResult{Satisfied: false, Reason: "running php-fpm predates a managed pool (reload pending)", Changes: st.changes(s)}, nil
 	}
 	// /etc/cron.d drop-ins are inert without a running cron daemon; the
 	// scheduler promise depends on it, so probe it (Apply heals via ensureCron).
@@ -881,7 +881,7 @@ func (st site) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 			return provision.CheckResult{}, err
 		}
 		if !cronUp {
-			return provision.CheckResult{Satisfied: false, Reason: "cron daemon not active/enabled (scheduler crons are inert)", Changes: st.changes()}, nil
+			return provision.CheckResult{Satisfied: false, Reason: "cron daemon not active/enabled (scheduler crons are inert)", Changes: st.changes(s)}, nil
 		}
 	}
 	// Every desired supervisor program must be LOADED in supervisord (not just on
@@ -898,7 +898,7 @@ func (st site) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 					return provision.CheckResult{}, err
 				}
 				if strings.Contains(res.Stdout+res.Stderr, "no such") {
-					return provision.CheckResult{Satisfied: false, Reason: prog + " not loaded in supervisord", Changes: st.changes()}, nil
+					return provision.CheckResult{Satisfied: false, Reason: prog + " not loaded in supervisord", Changes: st.changes(s)}, nil
 				}
 				states[prog] = parseProgramStates(res.Stdout)
 			}
@@ -909,7 +909,7 @@ func (st site) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 		// the deployer's business and never drift.
 		for _, mf := range mfs {
 			if mf.autostart && !allRunning(states[mf.program]) {
-				return provision.CheckResult{Satisfied: false, Reason: mf.program + " not running (workers: running)", Changes: st.changes()}, nil
+				return provision.CheckResult{Satisfied: false, Reason: mf.program + " not running (workers: running)", Changes: st.changes(s)}, nil
 			}
 		}
 	}
@@ -937,17 +937,25 @@ func plannedRemovals(ctx context.Context, r bssh.Runner, mfs []siteFile) ([]stri
 	return out, nil
 }
 
-func (site) changes() []string {
-	return []string{
+// changes is the plan site.Check reports when unsatisfied. Starting
+// programs is listed only when some site resolves to workers: running — on
+// a dormant host berth never starts one, so the line would misdescribe the
+// run.
+func (site) changes(s *config.Server) []string {
+	out := []string{
 		"write per-site nginx server block + enable it",
 		"write per-site FPM pool (own user + socket)",
 		"write per-site supervisor programs (worker + daemons) and remove orphans",
-		"start workers: running programs that are not RUNNING",
+	}
+	if s.AnyWorkersRunning() {
+		out = append(out, "start workers: running programs that are not RUNNING")
+	}
+	return append(out,
 		"reconcile per-site scheduler cron (install or remove)",
 		"remove orphan vhosts/pools/scheduler crons of sites no longer in the config",
 		"write global logrotate fragment",
 		"reconcile the global Cloudflare origin-lockdown snippet (write or remove)",
-	}
+	)
 }
 
 func (st site) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
