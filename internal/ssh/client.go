@@ -261,7 +261,10 @@ func (c *Client) exec(ctx context.Context, cmd string, stdin []byte) (Result, er
 				_ = sess.Close()
 			}()
 			select {
-			case <-done: // session unwound: connection stays usable
+			case runErr := <-done:
+				// Session unwound: connection stays usable. Its Run error is
+				// moot — the caller already has ctx.Err().
+				_ = runErr
 			case <-time.After(execTeardownBudget):
 				_ = c.conn.Close() // wedged transport: force-unblock everything, incl. the writes above
 			}

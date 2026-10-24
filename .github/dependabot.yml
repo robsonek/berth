@@ -8,7 +8,10 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 3
+    # Room for every pinned action at once. At 3, three PRs held red by an
+    # unrelated Go standard-library advisory took every slot, and dependabot
+    # could not refresh one of them that had gone two releases stale.
+    open-pull-requests-limit: 10
     # codeql-action/init and codeql-action/analyze are two dependencies to
     # dependabot but one unit to CodeQL, which aborts the scan when the pair
     # straddles two releases ("Loaded a configuration file for version X, but
