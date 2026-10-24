@@ -970,21 +970,75 @@ func hasControlChars(s string) bool {
 // program's directory=, so "scripts/x.sh" is never found: the program goes
 // FATAL without forking and its log stays empty. A bare name is looked up in
 // PATH (php, bash, sleep) and stays valid, and so does an interpreter
-// running a relative script, which resolves it after the chdir. Runs after
-// Site.validate, so the command is known non-blank and single-line.
+// running a relative script, which resolves it after the chdir. The token
+// is the one supervisord execs — the first shell-like word, unquoted
+// (supervisordArgv0) — so "/usr/bin/php" in quotes is absolute and
+// 'scripts/x.sh' in quotes is still relative. Runs after Site.validate, so
+// the command is known non-blank and single-line.
 func validateDaemonCommandPaths(siteIdx int, daemons []Daemon) error {
 	for j, d := range daemons {
-		fields := strings.Fields(d.Command)
-		if len(fields) == 0 {
-			continue
-		}
-		tok := fields[0]
+		tok := supervisordArgv0(d.Command)
 		if strings.Contains(tok, "/") && !strings.HasPrefix(tok, "/") {
 			return fmt.Errorf("sites[%d].daemons[%d].command: %q is a relative path; supervisord cannot find it from directory= — use an absolute path or run it through an interpreter, e.g. %q",
-				siteIdx, j, tok, "bash "+tok)
+				siteIdx, j, tok, "bash "+shellWordForSuggestion(tok))
 		}
 	}
 	return nil
+}
+
+// supervisordArgv0 returns the first word of command as supervisord splits
+// it: shlex.split in POSIX mode (supervisor's get_execv_args), whose first
+// word is the program it stats or looks up in PATH. Words end at an unquoted
+// space or tab; a '…' run is literal; a "…" run is literal except that a
+// backslash escapes '"' or '\'; outside quotes a backslash escapes the next
+// character; quoted and unquoted runs touching each other join into one
+// word, all with the quotes removed. An unterminated quote (shlex refuses
+// the line; supervisord then marks the program FATAL) runs to the end of the
+// input, so the word is still judged by what it encloses.
+func supervisordArgv0(command string) string {
+	var b strings.Builder
+	i := 0
+	for i < len(command) && (command[i] == ' ' || command[i] == '\t') {
+		i++
+	}
+	for ; i < len(command); i++ {
+		switch c := command[i]; {
+		case c == ' ' || c == '\t':
+			return b.String()
+		case c == '\'':
+			end := strings.IndexByte(command[i+1:], '\'')
+			if end < 0 {
+				b.WriteString(command[i+1:])
+				return b.String()
+			}
+			b.WriteString(command[i+1 : i+1+end])
+			i += end + 1
+		case c == '"':
+			for i++; i < len(command) && command[i] != '"'; i++ {
+				if command[i] == '\\' && i+1 < len(command) && (command[i+1] == '"' || command[i+1] == '\\') {
+					i++
+				}
+				b.WriteByte(command[i])
+			}
+		case c == '\\' && i+1 < len(command):
+			i++
+			b.WriteByte(command[i])
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// shellWordForSuggestion returns word as it must be written to stay ONE word
+// on a supervisord command line: unchanged when it holds no space, tab,
+// quote or backslash, else single-quoted, an embedded single quote written
+// as close-quote, backslash-quote, reopen-quote.
+func shellWordForSuggestion(word string) string {
+	if !strings.ContainsAny(word, " \t'\"\\") {
+		return word
+	}
+	return "'" + strings.ReplaceAll(word, "'", `'\''`) + "'"
 }
 
 func (st *Site) validateQueueDaemons() error {

@@ -123,7 +123,10 @@ Notable changes to berth. Older releases are documented on the
   be absolute (`sites[i].daemons[j].command: "<path>" is a relative path; …`);
   run a relative script through an interpreter instead, for example
   `bash scripts/run.sh`. A bare name looked up in `PATH` (`php`, `bash`) is
-  still accepted. Such a config never worked, so no working host changes.
+  still accepted. The first word is read the way supervisord splits the
+  line, quotes removed, so a quoted absolute path such as
+  `"/usr/bin/php" artisan reverb:start` is accepted. Such a config never
+  worked, so no working host changes.
 
 ## [0.32.1] — 2026-10-24
 

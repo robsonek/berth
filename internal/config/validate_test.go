@@ -415,6 +415,20 @@ func TestValidateDaemonCommandPath(t *testing.T) {
 		{"interpreter with relative script", "bash scripts/x.sh", ""},
 		{"php artisan", "php artisan reverb:start", ""},
 		{"bare name from PATH", "sleep infinity", ""},
+		// supervisord shlex-splits the command (POSIX mode), so the token it
+		// stats is the UNQUOTED first word: quotes are judged by what they
+		// enclose, and the error shows the token without them.
+		{"double-quoted absolute path", `"/usr/bin/php" artisan x`, ""},
+		{"single-quoted absolute path", `'/opt/x/run.sh'`, ""},
+		{"quoted and unquoted runs join into one absolute word", `"/usr"/bin/php artisan x`, ""},
+		{"quoted bare name from PATH", `"php" artisan x`, ""},
+		{"escaped quote inside double quotes stays in the word", `"/opt/a\"b/run" x`, ""},
+		{"double-quoted relative path", `"scripts/x.sh"`, `sites[0].daemons[1].command: "scripts/x.sh" is a relative path; supervisord cannot find it from directory= — use an absolute path or run it through an interpreter, e.g. "bash scripts/x.sh"`},
+		{"single-quoted dot-slash relative path", `'./run.sh'`, `sites[0].daemons[1].command: "./run.sh" is a relative path; supervisord cannot find it from directory= — use an absolute path or run it through an interpreter, e.g. "bash ./run.sh"`},
+		{"quoted run joined to a relative tail", `"bin"/worker --once`, `sites[0].daemons[1].command: "bin/worker" is a relative path; supervisord cannot find it from directory= — use an absolute path or run it through an interpreter, e.g. "bash bin/worker"`},
+		// A word that needs quoting keeps it in the suggestion, so the
+		// suggested command still names ONE script.
+		{"quoted space does not end the word", `'my scripts/x.sh' a`, `sites[0].daemons[1].command: "my scripts/x.sh" is a relative path; supervisord cannot find it from directory= — use an absolute path or run it through an interpreter, e.g. "bash 'my scripts/x.sh'"`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -434,6 +448,34 @@ func TestValidateDaemonCommandPath(t *testing.T) {
 				t.Fatalf("got error %v\nwant %s", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestSupervisordArgv0 pins the first word against Python's shlex.split
+// (POSIX mode), which is what supervisord's get_execv_args runs; every want
+// below was checked against shlex.split(command)[0].
+func TestSupervisordArgv0(t *testing.T) {
+	for _, tc := range []struct{ command, want string }{
+		{"php artisan x", "php"},
+		{"  bin/worker --once", "bin/worker"},
+		{`"/usr/bin/php" artisan x`, "/usr/bin/php"},
+		{`'/opt/x/run.sh'`, "/opt/x/run.sh"},
+		{`"/usr"/bin/php x`, "/usr/bin/php"},
+		{`/usr/'local bin'/w x`, "/usr/local bin/w"},
+		{`"a\"b" c`, `a"b`},
+		{`"a\\b" c`, `a\b`},
+		{`"a\nb" c`, `a\nb`},
+		{`'a\"b' c`, `a\"b`},
+		{`\/usr/bin/php x`, "/usr/bin/php"},
+		{`a\ b c`, "a b"},
+		{`"" x`, ""},
+		{`'scripts/x.sh`, "scripts/x.sh"},
+		{`"scripts/x.sh`, "scripts/x.sh"},
+		{"#/x.sh", "#/x.sh"},
+	} {
+		if got := supervisordArgv0(tc.command); got != tc.want {
+			t.Errorf("supervisordArgv0(%q) = %q, want %q", tc.command, got, tc.want)
+		}
 	}
 }
 
