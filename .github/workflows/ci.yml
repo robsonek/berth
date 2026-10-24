@@ -33,6 +33,18 @@ jobs:
         run: |
           v=$(sed -n 's/^## \[\([0-9][^]]*\)\].*/\1/p' CHANGELOG.md | head -1)
           .github/scripts/release-notes.sh "v$v" > /dev/null
+      - name: GoReleaser config check
+        # release.yml deliberately runs the newest GoReleaser v2 (`~> v2`, not
+        # pinned). This check uses the same range on every PR, so a new v2.x
+        # release that rejects .goreleaser.yaml fails here first instead of at
+        # tag time. The check is stricter than a release: it also fails when a
+        # property is merely deprecated. A release would only warn and still
+        # build, so a red check here means the config needs a migration soon,
+        # not that releasing is blocked.
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          version: "~> v2"
+          args: check
       - name: Cross-build all release targets
         run: |
           for pair in windows/amd64 darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do

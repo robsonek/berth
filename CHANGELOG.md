@@ -57,6 +57,13 @@ Notable changes to berth. Older releases are documented on the
   value to a name, because the bare `_ = <-ch` form trips staticcheck S1005.
   revive's `enable-default-rules` was re-probed on v2.15.0 and is still
   required.
+- **CI now runs `goreleaser check`**, using the same unpinned `~> v2` range as
+  `release.yml`. A new GoReleaser release that rejects `.goreleaser.yaml`, or
+  deprecates a property it uses, now shows up on an ordinary PR instead of at
+  tag time. The check fails on deprecations too, even though a release would
+  only warn. Releases stay on the newest v2 on purpose: the range never
+  crosses into v3, and dependabot does not bump this input, so a pin would go
+  stale.
 
 ### Fixed
 
