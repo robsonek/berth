@@ -2113,7 +2113,13 @@ func TestEnvLineInSetScriptRealShell(t *testing.T) {
 		{"other-value", "DB_USERNAME", "DB_USERNAME=other\n", 1},
 		{"mismatched-quotes", "DB_USERNAME", "DB_USERNAME=\"appuser'\n", 1},
 		{"value-prefix", "DB_USERNAME", "DB_USERNAME=appuser2\n", 1},
-		{"first-line-wins", "DB_USERNAME", "DB_USERNAME=other\nDB_USERNAME=appuser\n", 1},
+		// A berth-owned key on more than one line is refused whatever the
+		// values (exit 4): which line the app reads is not berth's to guess.
+		{"duplicate-correct-then-wrong", "DB_USERNAME", "DB_USERNAME=appuser\nDB_USERNAME=other\n", 4},
+		{"duplicate-wrong-then-correct", "DB_USERNAME", "DB_USERNAME=other\nDB_USERNAME=appuser\n", 4},
+		{"duplicate-both-correct", "DB_USERNAME", "DB_USERNAME=appuser\nDB_USERNAME='appuser'\n", 4},
+		{"duplicate-absent-ok-key", "REDIS_PASSWORD", "REDIS_PASSWORD=\nREDIS_PASSWORD=hunter2\n", 4},
+		{"longer-key-is-not-a-duplicate", "DB_USERNAME", "DB_USERNAME_OLD=other\nDB_USERNAME=appuser\n", 0},
 		{"unicode-ws-not-trimmed", "DB_USERNAME", "DB_USERNAME=appuser \n", 1},
 		{"longer-key-is-not-the-key", "DB_USERNAME", "DB_USERNAME_OLD=appuser\n", 3},
 		{"missing-line", "DB_USERNAME", "APP_ENV=production\n", 3},
@@ -2148,6 +2154,54 @@ func TestEnvLineInSetScriptRealShell(t *testing.T) {
 			t.Fatalf("exit = %d, want 2 (I/O error, never silent absence)", got)
 		}
 	})
+	// The duplicate verdict carries the line COUNT on stdout — and nothing
+	// else: no value of any line may leave the host.
+	t.Run("duplicate-prints-only-the-count", func(t *testing.T) {
+		if err := os.WriteFile(env, []byte("DB_USERNAME=LEAKCHECK\nAPP_ENV=production\nDB_USERNAME=appuser\nDB_USERNAME=other\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stdin, err := envAcceptStdin(accept["DB_USERNAME"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		exit, stdout := shellRun(t, envLineInSetScript(env, "DB_USERNAME"), string(stdin))
+		if exit != 4 || stdout != "3\n" {
+			t.Fatalf("got exit %d stdout %q, want exit 4 and exactly the count \"3\\n\"", exit, stdout)
+		}
+	})
+	// Every other verdict prints nothing at all.
+	t.Run("single-line-prints-nothing", func(t *testing.T) {
+		if err := os.WriteFile(env, []byte("DB_USERNAME=LEAKCHECK\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stdin, err := envAcceptStdin(accept["DB_USERNAME"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exit, stdout := shellRun(t, envLineInSetScript(env, "DB_USERNAME"), string(stdin)); exit != 1 || stdout != "" {
+			t.Fatalf("got exit %d stdout %q, want exit 1 and no output", exit, stdout)
+		}
+	})
+}
+
+// shellRun is shellExit that also returns the script's stdout, for the
+// verdicts whose stdout is part of the contract.
+func shellRun(t *testing.T, script, stdin string) (int, string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell required")
+	}
+	cmd := exec.Command("/bin/sh", "-c", script)
+	cmd.Stdin = strings.NewReader(stdin)
+	out, err := cmd.Output()
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode(), string(out)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return 0, string(out)
 }
 
 func TestBerthOwnedEnvKeysAndForms(t *testing.T) {
@@ -2205,6 +2259,86 @@ func TestEnvLineInSetExitMap(t *testing.T) {
 		match, present, err := envLineInSet(context.Background(), f, site, "DB_USERNAME", []string{"DB_USERNAME=appuser"})
 		if (err != nil) != c.wantErr || match != c.match || present != c.present {
 			t.Errorf("exit %d: got (%v, %v, %v), want (%v, %v, err=%v)", c.exit, match, present, err, c.match, c.present, c.wantErr)
+		}
+	}
+
+	// Exit 4: the key is duplicated; stdout is the line count, surfaced as
+	// the dedicated duplicate error (key, count, path — never a value).
+	f := bssh.NewFakeRunner()
+	f.On(cmd, bssh.Result{ExitCode: 4, Stdout: "3\n", Stderr: "LEAKCHECK"})
+	_, _, err := envLineInSet(context.Background(), f, site, "DB_USERNAME", []string{"DB_USERNAME=appuser"})
+	var dup *envDuplicateKeyError
+	if !errors.As(err, &dup) || dup.Key != "DB_USERNAME" || dup.Count != 3 || dup.Path != sharedEnvPath(site) {
+		t.Fatalf("exit 4: err = %#v, want an envDuplicateKeyError{DB_USERNAME, 3, %s}", err, sharedEnvPath(site))
+	}
+	if want := "DB_USERNAME appears 3 times in " + sharedEnvPath(site) + "; keep exactly one line"; err.Error() != want {
+		t.Errorf("duplicate error = %q, want %q", err, want)
+	}
+	// A count the script cannot have printed is a hard probe error — not a
+	// duplicate verdict, and its stdout is never echoed.
+	for _, out := range []string{"LEAKCHECK\n", "1\n", ""} {
+		f := bssh.NewFakeRunner()
+		f.On(cmd, bssh.Result{ExitCode: 4, Stdout: out})
+		_, _, err := envLineInSet(context.Background(), f, site, "DB_USERNAME", []string{"DB_USERNAME=appuser"})
+		if err == nil || errors.As(err, &dup) || strings.Contains(err.Error(), "LEAKCHECK") {
+			t.Errorf("exit 4 with stdout %q: err = %v, want a hard probe error that echoes nothing", out, err)
+		}
+	}
+}
+
+func TestAssertEnvBerthKeysRefusesDuplicatedKey(t *testing.T) {
+	s := berthKeysServer()
+	site := s.Sites[0]
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	stubBerthEnvKeys(f, s)
+	// DB_USERNAME duplicated, REDIS_PASSWORD (an AbsentOK key) duplicated,
+	// REDIS_HOST plainly mismatched: all three land in ONE error.
+	f.On(envLineInSetScript(envPath(s), "DB_USERNAME"), bssh.Result{ExitCode: 4, Stdout: "2\n", Stderr: "LEAKCHECK"})
+	f.On(envLineInSetScript(envPath(s), "REDIS_PASSWORD"), bssh.Result{ExitCode: 4, Stdout: "3\n"})
+	f.On(envLineInSetScript(envPath(s), "REDIS_HOST"), bssh.Result{ExitCode: 1, Stdout: "REDIS_HOST=LEAKCHECK\n", Stderr: "LEAKCHECK"})
+	err := assertEnvBerthKeys(context.Background(), f, s, site)
+	if err == nil {
+		t.Fatal("want an error naming both duplicated keys and the mismatch")
+	}
+	for _, want := range []string{
+		"DB_USERNAME appears 2 times in " + envPath(s) + "; keep exactly one line",
+		"REDIS_PASSWORD appears 3 times in " + envPath(s) + "; keep exactly one line",
+		"REDIS_HOST=" + valkeySocketPath(site.Domain),
+		"berth never rewrites an existing shared/.env",
+		"--force does not override this check",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should contain %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "LEAKCHECK") {
+		t.Errorf("error leaks a current .env value: %q", err)
+	}
+	if strings.Contains(err.Error(), "DB_USERNAME=") {
+		t.Errorf("a duplicated key must be reported as a duplicate, not as a mismatch line: %q", err)
+	}
+}
+
+func TestDatabaseRefusesDuplicatedEnvKeyEvenWithForce(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
+	f.On(envLineInSetScript(envPath(s), "DB_DATABASE"), bssh.Result{ExitCode: 4, Stdout: "2\n"})
+	want := "DB_DATABASE appears 2 times in " + envPath(s) + "; keep exactly one line"
+	if _, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{Force: true}, s, f); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Check() = %v, want the duplicate refusal under --force", err)
+	}
+	// NOTE: apt install is deliberately NOT stubbed — Apply must refuse first.
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{Force: true}, s, f); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Apply() = %v, want the duplicate refusal under --force", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "apt-get") || strings.HasPrefix(c.Cmd, "mariadb ") {
+			t.Errorf("nothing may be installed or mutated after the refusal; ran %q", c.Cmd)
 		}
 	}
 }

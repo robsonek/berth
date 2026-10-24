@@ -281,6 +281,13 @@ func TestRecordingRunnerDerivesWave3AnswersFromState(t *testing.T) {
 	if res, err := conv.Run(ctx, envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PASSWORD"), []byte(redisPasswordUnsetStdin)); err != nil || res.ExitCode != 3 {
 		t.Errorf("absent REDIS_PASSWORD = (%+v, %v), want exit 3", res, err)
 	}
+	// A duplicated key is its own verdict, even when the first line agrees.
+	env := convHost.files[fixtureSharedEnv]
+	env.content += "REDIS_HOST=127.0.0.1\n"
+	convHost.files[fixtureSharedEnv] = env
+	if res, err := conv.Run(ctx, redisHost, []byte(envValueFormsStdin("REDIS_HOST", fixtureValkeySocket))); err != nil || res.ExitCode != 4 || res.Stdout != "2\n" {
+		t.Errorf("duplicated REDIS_HOST = (%+v, %v), want exit 4 with the count 2", res, err)
+	}
 }
 
 // The postgres scalar answers must derive from modelled state exactly like
@@ -1459,16 +1466,26 @@ func envLineInSetFixtureKey(cmd string) string {
 	return ""
 }
 
-// answerEnvLineInSet evaluates envLineInSetScript: every stdin line is an
-// accepted KEY=value line (`while IFS= read -r want` reads only
-// newline-terminated lines), the first KEY= line of the modelled .env is
-// trimmed of trailing ASCII whitespace, and the verdict is string equality
-// against any of them. Exit map: 0 match, 1 none matches, 3 no KEY= line,
-// 2 unreadable file.
+// answerEnvLineInSet evaluates envLineInSetScript: the KEY= lines of the
+// modelled .env are counted first (more than one: exit 4 with the count as
+// the only stdout), then every stdin line is an accepted KEY=value line
+// (`while IFS= read -r want` reads only newline-terminated lines), the one
+// KEY= line is trimmed of trailing ASCII whitespace, and the verdict is
+// string equality against any of them. Exit map: 0 match, 1 none matches,
+// 2 unreadable file, 3 no KEY= line, 4 duplicated key.
 func (r *recordingRunner) answerEnvLineInSet(path, key string, stdin []byte) bssh.Result {
 	file, ok := r.h.files[path]
 	if !ok {
 		return bssh.Result{ExitCode: 2}
+	}
+	n := 0
+	for _, l := range strings.Split(file.content, "\n") {
+		if strings.HasPrefix(l, key+"=") {
+			n++
+		}
+	}
+	if n > 1 {
+		return bssh.Result{ExitCode: 4, Stdout: strconv.Itoa(n) + "\n"}
 	}
 	line, found := firstEnvLine(file.content, key)
 	if !found {

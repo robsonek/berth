@@ -2,8 +2,10 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/robsonek/berth/internal/config"
@@ -345,22 +347,44 @@ func berthOwnedEnv(s *config.Server, site config.Site) []envExpectation {
 	return exp
 }
 
-// envLineInSetScript builds the exact shell script envLineInSet runs: the
-// FIRST <key>= line is captured with an explicit grep exit mapping, trimmed
-// of trailing whitespace exactly as envValueMatchScript trims it (the
-// C-locale pin keeps the trim ASCII-only), then compared against every
-// accepted line read from stdin — `while IFS= read -r want` takes one line
-// per iteration, and the comparison is plain quoted shell string equality:
-// no grep pattern semantics over the accepted lines, no `-f -`, no
-// pattern-file/input fd sharing (grep reads only its file operand). Exit map:
-// 0 = the line is one of the accepted lines; 1 = present but none of them;
-// 3 = no <key>= line; 2 = I/O error. Shared with the real-shell test in
-// database_test.go so the tested bytes are the production bytes.
+// envLineInSetScript builds the exact shell script envLineInSet runs. It
+// first COUNTS the <key>= lines (`grep -c`, the same anchor, under the
+// C-locale pin, explicit exit mapping): a key on more than one line is a
+// verdict of its own whatever the values, because which line the app reads
+// is phpdotenv's business (a later line can override an earlier one), and a
+// correct first line must never vouch for a wrong later one. With exactly
+// one line, that line is captured, trimmed of trailing whitespace exactly as
+// envValueMatchScript trims it (the pin keeps the trim ASCII-only), then
+// compared against every accepted line read from stdin — `while IFS= read
+// -r want` takes one line per iteration, and the comparison is plain quoted
+// shell string equality: no grep pattern semantics over the accepted lines,
+// no `-f -`, no pattern-file/input fd sharing (grep reads only its file
+// operand). Exit map: 0 = the line is one of the accepted lines; 1 = one
+// line, none of them; 2 = I/O error (also when the line vanishes between the
+// count and the capture); 3 = no <key>= line; 4 = more than one <key>= line,
+// with the line COUNT — never a value — as the only stdout. Every other
+// verdict prints nothing. Shared with the real-shell test in database_test.go
+// so the tested bytes are the production bytes.
 func envLineInSetScript(path, key string) string {
-	return cLocalePin + "line=$(grep -m1 '^" + key + "=' " + shQuote(path) + "); s=$?; " +
+	return cLocalePin + "n=$(grep -c '^" + key + "=' " + shQuote(path) + "); s=$?; " +
 		"if [ $s -eq 1 ]; then exit 3; elif [ $s -ne 0 ]; then exit 2; fi; " +
+		`if [ "$n" -gt 1 ]; then printf '%s\n' "$n"; exit 4; fi; ` +
+		"line=$(grep -m1 '^" + key + "=' " + shQuote(path) + ") || exit 2; " +
 		`line=$(printf '%s' "$line" | sed 's/[[:space:]]*$//'); ` +
 		`while IFS= read -r want; do [ "$line" = "$want" ] && exit 0; done; exit 1`
+}
+
+// envDuplicateKeyError reports a berth-owned key that appears on more than
+// one line of a shared/.env. It names the key, the line count and the path —
+// never a value.
+type envDuplicateKeyError struct {
+	Key   string
+	Count int
+	Path  string
+}
+
+func (e *envDuplicateKeyError) Error() string {
+	return fmt.Sprintf("%s appears %d times in %s; keep exactly one line", e.Key, e.Count, e.Path)
 }
 
 // envAcceptStdin serializes an accept set into envLineInSetScript's stdin:
@@ -379,12 +403,14 @@ func envAcceptStdin(accept []string) ([]byte, error) {
 	return []byte(b.String()), nil
 }
 
-// envLineInSet reports whether the FIRST <key>= line of a site's live
+// envLineInSet reports whether the ONLY <key>= line of a site's live
 // shared/.env is one of the accepted lines (modulo trailing ASCII
-// whitespace). present is false only when the file has no <key>= line. The
-// accepted lines travel via STDIN, the live line never leaves the host (the
-// verdict is the exit code; nothing is printed), and a probe failure (grep
-// exit 2, unreadable file) is a hard error rather than silent agreement.
+// whitespace). present is false only when the file has no <key>= line; a key
+// on more than one line returns an *envDuplicateKeyError (whatever the
+// values). The accepted lines travel via STDIN, the live line never leaves
+// the host (the verdict is the exit code; the only stdout is the duplicate
+// count), and a probe failure (grep exit 2, unreadable file, a duplicate
+// verdict without a sane count) is a hard error rather than silent agreement.
 func envLineInSet(ctx context.Context, r bssh.Runner, site config.Site, key string, accept []string) (match, present bool, err error) {
 	stdin, err := envAcceptStdin(accept)
 	if err != nil {
@@ -401,6 +427,14 @@ func envLineInSet(ctx context.Context, r bssh.Runner, site config.Site, key stri
 		return false, true, nil
 	case 3:
 		return false, false, nil
+	case 4:
+		// The stdout is the script's own count; a malformed one is never
+		// echoed (whatever produced it is not the audited script's output).
+		n, perr := strconv.Atoi(strings.TrimSpace(res.Stdout))
+		if perr != nil || n < 2 {
+			return false, true, fmt.Errorf("probe %s in %s: duplicate verdict without a valid line count", key, sharedEnvPath(site))
+		}
+		return false, true, &envDuplicateKeyError{Key: key, Count: n, Path: sharedEnvPath(site)}
 	default:
 		return false, false, fmt.Errorf("probe %s in %s: %s", key, sharedEnvPath(site), res.Stderr)
 	}
@@ -411,11 +445,14 @@ func envLineInSet(ctx context.Context, r bssh.Runner, site config.Site, key stri
 // seed-if-absent and never rewritten, so a mismatch — an operator-preseeded
 // env, or one written for a different config (REDIS_HOST=127.0.0.1 under
 // valkey: true) — would otherwise leave the app on a database, role or cache
-// berth never set up while every run reports green. A fresh box (no .env) is
-// fine: the seed will be consistent. Every mismatch is collected before
-// failing, so one run names them all; the error prints only the canonical
-// lines (Accept[0]), never the current values. Deliberately NOT overridable
-// by --force, like assertEnvEngineMatch: the fix is the operator's edit.
+// berth never set up while every run reports green. A key on more than one
+// line is refused whatever the values — a correct line must never vouch for
+// a duplicate the app may read instead. A fresh box (no .env) is fine: the
+// seed will be consistent. Every problem (duplicates and mismatches) is
+// collected before failing, so one run names them all; the error prints only
+// key names, line counts and the canonical lines (Accept[0]), never the
+// current values. Deliberately NOT overridable by --force, like
+// assertEnvEngineMatch: the fix is the operator's edit.
 func assertEnvBerthKeys(ctx context.Context, r bssh.Runner, s *config.Server, site config.Site) error {
 	exists, err := fileExists(ctx, r, sharedEnvPath(site))
 	if err != nil {
@@ -424,9 +461,14 @@ func assertEnvBerthKeys(ctx context.Context, r bssh.Runner, s *config.Server, si
 	if !exists {
 		return nil
 	}
-	var want []string
+	var problems, want []string
 	for _, e := range berthOwnedEnv(s, site) {
 		match, present, err := envLineInSet(ctx, r, site, e.Key, e.Accept)
+		var dup *envDuplicateKeyError
+		if errors.As(err, &dup) {
+			problems = append(problems, dup.Error())
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -439,11 +481,14 @@ func assertEnvBerthKeys(ctx context.Context, r bssh.Runner, s *config.Server, si
 		}
 		want = append(want, line)
 	}
-	if len(want) == 0 {
+	if len(want) > 0 {
+		problems = append(problems, "expected "+strings.Join(want, ", "))
+	}
+	if len(problems) == 0 {
 		return nil
 	}
-	return fmt.Errorf("shared/.env for %s disagrees with what berth provisions for this site; expected %s. berth never rewrites an existing shared/.env, so the app would keep using values berth never set up: edit %s (KEY=value, KEY=\"value\" and KEY='value' are accepted) and re-run (--force does not override this check)",
-		site.Domain, strings.Join(want, ", "), sharedEnvPath(site))
+	return fmt.Errorf("shared/.env for %s disagrees with what berth provisions for this site: %s. berth never rewrites an existing shared/.env, so the app would keep using values berth never set up: edit %s (exactly one line per key; KEY=value, KEY=\"value\" and KEY='value' are accepted) and re-run (--force does not override this check)",
+		site.Domain, strings.Join(problems, "; "), sharedEnvPath(site))
 }
 
 func (d database) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {

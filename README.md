@@ -944,10 +944,14 @@ what berth provisions for the site, and stops the run when it does not:
 
 A value may be written unquoted, in double quotes or in single quotes
 (`DB_USERNAME=appuser`, `DB_USERNAME="appuser"` and `DB_USERNAME='appuser'`
-all match). Only the first line for a key counts, trailing whitespace is
-ignored, and a key other than `REDIS_PASSWORD` that is missing counts as a
-mismatch. The error lists every disagreeing key with the line berth expects
-and never prints the file's current values. `--force` does not override this
+all match). Each of these keys must appear on at most one line: a key that
+appears more than once is refused whatever the values, because a correct
+line must not vouch for a duplicate the application may read instead (the
+error says `<KEY> appears <N> times in <path>; keep exactly one line`).
+Trailing whitespace is ignored, and a key other than `REDIS_PASSWORD` that is
+missing counts as a mismatch. The error lists every problem at once — each
+duplicated key, and each disagreeing key with the line berth expects — and
+never prints the file's current values. `--force` does not override this
 check: edit the file and run again.
 
 Each TLS site uses Let's Encrypt by default; set `ssl_mode: selfsigned` on a site

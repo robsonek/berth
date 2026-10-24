@@ -44,11 +44,14 @@ Notable changes to berth. Older releases are documented on the
   `database` block and, with `valkey: true`, `REDIS_HOST` set to the site's
   own socket (`/run/berth-valkey/<pool>/valkey.sock`), `REDIS_PORT=0` and an
   absent or empty `REDIS_PASSWORD` (`REDIS_PASSWORD=`, `""`, `''`, `null` or
-  `(null)`). Values may be unquoted, double-quoted or single-quoted; only the
-  first line for a key counts and trailing whitespace is ignored. The error
-  lists every disagreeing key with the expected line and never prints the
-  current value. Like the existing `DB_CONNECTION` check, `--force` does not
-  override it.
+  `(null)`). Values may be unquoted, double-quoted or single-quoted, and
+  trailing whitespace is ignored. Each of these keys must appear on at most
+  one line: a duplicated key is refused whatever the values
+  (`<KEY> appears <N> times in <path>; keep exactly one line`), since a
+  correct line must not vouch for a duplicate the app may read instead. The
+  error lists every duplicated or disagreeing key at once, with the expected
+  line for each mismatch, and never prints the current value. Like the
+  existing `DB_CONNECTION` check, `--force` does not override it.
   **Behaviour change:** a host whose `.env` disagrees (for example
   `REDIS_HOST=127.0.0.1` under `valkey: true`, left over from a seed without
   Valkey) now stops provisioning at the `database` step instead of running

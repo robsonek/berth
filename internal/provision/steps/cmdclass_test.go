@@ -591,20 +591,22 @@ var auditedScripts = map[string]string{
 	// assertEnvBerthKeys' per-key probe (envLineInSetScript, database.go),
 	// one per key berthOwnedEnv lists for the fixture site (Valkey on: the
 	// DB pair plus the redis trio). Audited command by command: the C-locale
-	// pin (assignment + export, process-local); `grep -m1` captures the first
-	// KEY= line from its file operand with an explicit exit mapping; a
-	// printf|sed trailing-whitespace trim (s///, no w, no e); a
-	// `while IFS= read -r want` loop over stdin whose only body is a quoted
-	// [ "$line" = "$want" ] string equality — no eval, no sh, no `-f -`, no
-	// grep over the accepted lines. Verdicts travel as exit codes; nothing is
-	// printed. Registered here on its own text (a stdin-less run would read
-	// no accepted line and exit 1); the payloads it is actually issued with
-	// are bound pair by pair in auditedStdin.
-	envLineInSetProbeCmd(fixtureSharedEnv, "DB_DATABASE"):    "envLineInSetScript (database.go), DB_DATABASE: locale pin + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
-	envLineInSetProbeCmd(fixtureSharedEnv, "DB_USERNAME"):    "envLineInSetScript (database.go), DB_USERNAME: locale pin + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
-	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_HOST"):     "envLineInSetScript (database.go), REDIS_HOST: locale pin + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
-	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PORT"):     "envLineInSetScript (database.go), REDIS_PORT: locale pin + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
-	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PASSWORD"): "envLineInSetScript (database.go), REDIS_PASSWORD: locale pin + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	// pin (assignment + export, process-local); `grep -c` counts the KEY=
+	// lines of its file operand (reads; explicit exit mapping); a numeric
+	// `[ -gt ]` test and, for a duplicated key, `printf` of that COUNT to
+	// stdout (a number, never a value) before exit 4; `grep -m1` captures
+	// the single KEY= line; a printf|sed trailing-whitespace trim (s///, no
+	// w, no e); a `while IFS= read -r want` loop over stdin whose only body
+	// is a quoted [ "$line" = "$want" ] string equality — no eval, no sh, no
+	// `-f -`, no grep over the accepted lines. Verdicts travel as exit codes;
+	// no line content is printed. Registered here on its own text (a
+	// stdin-less run would read no accepted line and exit 1); the payloads it
+	// is actually issued with are bound pair by pair in auditedStdin.
+	envLineInSetProbeCmd(fixtureSharedEnv, "DB_DATABASE"):    "envLineInSetScript (database.go), DB_DATABASE: locale pin + grep -c count (+ count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "DB_USERNAME"):    "envLineInSetScript (database.go), DB_USERNAME: locale pin + grep -c count (+ count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_HOST"):     "envLineInSetScript (database.go), REDIS_HOST: locale pin + grep -c count (+ count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PORT"):     "envLineInSetScript (database.go), REDIS_PORT: locale pin + grep -c count (+ count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PASSWORD"): "envLineInSetScript (database.go), REDIS_PASSWORD: locale pin + grep -c count (+ count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
 
 	// Wave 4 (site, tls, backups, offsite), same discipline: pasted literals
 	// for production consts and const-composed commands, test-local mirror
@@ -877,8 +879,10 @@ func envValueMatchProbeCmd(path, key string) string {
 // envLineInSetProbeCmd mirrors envLineInSetScript's composition
 // (database.go) — a copy on purpose (see auditedScripts and auditedStdin).
 func envLineInSetProbeCmd(path, key string) string {
-	return "LC_ALL=C; export LC_ALL; line=$(grep -m1 '^" + key + "=' " + shQuote(path) + "); s=$?; " +
+	return "LC_ALL=C; export LC_ALL; n=$(grep -c '^" + key + "=' " + shQuote(path) + "); s=$?; " +
 		"if [ $s -eq 1 ]; then exit 3; elif [ $s -ne 0 ]; then exit 2; fi; " +
+		`if [ "$n" -gt 1 ]; then printf '%s\n' "$n"; exit 4; fi; ` +
+		"line=$(grep -m1 '^" + key + "=' " + shQuote(path) + ") || exit 2; " +
 		`line=$(printf '%s' "$line" | sed 's/[[:space:]]*$//'); ` +
 		`while IFS= read -r want; do [ "$line" = "$want" ] && exit 0; done; exit 1`
 }
@@ -948,7 +952,7 @@ var auditedStdin = map[stdinKey]string{
 	// right-hand side of a quoted [ "$line" = "$want" ] string equality —
 	// data, never a program (no eval, no sh, no `-f -`, no grep pattern).
 	// The values are config-derived and non-secret; the verdict is the exit
-	// code.
+	// code (the duplicate verdict also prints the line count, a number).
 	{cmd: envLineInSetProbeCmd(fixtureSharedEnv, "DB_DATABASE"), stdin: envValueFormsStdin("DB_DATABASE", "app")}:             "envLineInSetScript (database.go), DB_DATABASE accept set: stdin lines are read into a variable and string-compared — data, not a program",
 	{cmd: envLineInSetProbeCmd(fixtureSharedEnv, "DB_USERNAME"), stdin: envValueFormsStdin("DB_USERNAME", "app")}:             "envLineInSetScript (database.go), DB_USERNAME accept set: stdin lines are read into a variable and string-compared — data, not a program",
 	{cmd: envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_HOST"), stdin: envValueFormsStdin("REDIS_HOST", fixtureValkeySocket)}: "envLineInSetScript (database.go), REDIS_HOST accept set: stdin lines are read into a variable and string-compared — data, not a program",
