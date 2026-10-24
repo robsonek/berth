@@ -737,6 +737,13 @@ sites:
       - { name: reverb, command: php artisan reverb:start }
 ```
 
+A daemon's `command` runs in `<deploy_path>/current`, but supervisord looks up
+its first word **before** it changes into that directory. A bare name (`php`,
+`bash`) is found in `PATH` and an absolute path works as is. A relative path
+such as `scripts/run.sh` is never found, so validation rejects it: write
+`bash scripts/run.sh` (the interpreter resolves the script after the
+directory change) or use an absolute path.
+
 By default every program is installed **dormant** (`autostart=false`) — your
 deployer starts and restarts them; berth never runs them. `queue: horizon` emits
 an `artisan horizon` program instead of `queue:work` (Horizon runs

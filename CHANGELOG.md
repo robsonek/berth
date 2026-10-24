@@ -90,6 +90,18 @@ Notable changes to berth. Older releases are documented on the
   after upgrading re-applies it once. The README's restore command now pipes
   into `mariadb`. PostgreSQL (`psql`, `pg_dump`) is unchanged.
 
+### Fixed
+
+- **A daemon `command` that starts with a relative path is refused at
+  load.** supervisord looks up a command's first word from its own working
+  directory (`/` under systemd) before it changes into `directory=`, so
+  `command: scripts/run.sh` was never found: the program went FATAL without
+  starting and its log stayed empty. A first word that contains `/` must now
+  be absolute (`sites[i].daemons[j].command: "<path>" is a relative path; …`);
+  run a relative script through an interpreter instead, for example
+  `bash scripts/run.sh`. A bare name looked up in `PATH` (`php`, `bash`) is
+  still accepted. Such a config never worked, so no working host changes.
+
 ## [0.32.1] — 2026-10-24
 
 ### Changed

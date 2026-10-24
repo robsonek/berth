@@ -374,6 +374,9 @@ func (s *Server) Validate() error {
 		if site.RepositoryKey != "" && site.Repository == "" {
 			return fmt.Errorf("sites[%d].repository_key requires sites[%d].repository", i, i)
 		}
+		if err := validateDaemonCommandPaths(i, site.Daemons); err != nil {
+			return err
+		}
 		// Per-site database identity: every site carries its own block. Checked
 		// before the SQL-identifier tests so the message names the real problem
 		// instead of rejecting "" as an invalid identifier.
@@ -959,6 +962,29 @@ func hasControlChars(s string) bool {
 		}
 	}
 	return false
+}
+
+// validateDaemonCommandPaths refuses a daemon command whose program token is
+// a relative path containing '/'. supervisord resolves that token against
+// its OWN working directory (/ under systemd) before it chdirs to the
+// program's directory=, so "scripts/x.sh" is never found: the program goes
+// FATAL without forking and its log stays empty. A bare name is looked up in
+// PATH (php, bash, sleep) and stays valid, and so does an interpreter
+// running a relative script, which resolves it after the chdir. Runs after
+// Site.validate, so the command is known non-blank and single-line.
+func validateDaemonCommandPaths(siteIdx int, daemons []Daemon) error {
+	for j, d := range daemons {
+		fields := strings.Fields(d.Command)
+		if len(fields) == 0 {
+			continue
+		}
+		tok := fields[0]
+		if strings.Contains(tok, "/") && !strings.HasPrefix(tok, "/") {
+			return fmt.Errorf("sites[%d].daemons[%d].command: %q is a relative path; supervisord cannot find it from directory= — use an absolute path or run it through an interpreter, e.g. %q",
+				siteIdx, j, tok, "bash "+tok)
+		}
+	}
+	return nil
 }
 
 func (st *Site) validateQueueDaemons() error {

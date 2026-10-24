@@ -397,6 +397,46 @@ func TestValidateFirstDeployKnobs(t *testing.T) {
 	}
 }
 
+// TestValidateDaemonCommandPath: supervisord resolves a command's first token
+// against ITS OWN cwd (/ under systemd) before it chdirs to directory=, so a
+// relative path containing '/' can never be found and the program goes FATAL
+// without forking. Such a token is refused at load; a bare name (looked up in
+// PATH) and an interpreter running a relative script stay valid.
+func TestValidateDaemonCommandPath(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		wantErr string // "" = valid; otherwise the exact error
+	}{
+		{"relative path with slash", "scripts/x.sh --flag", `sites[0].daemons[1].command: "scripts/x.sh" is a relative path; supervisord cannot find it from directory= — use an absolute path or run it through an interpreter, e.g. "bash scripts/x.sh"`},
+		{"dot-slash relative path", "./run.sh", `sites[0].daemons[1].command: "./run.sh" is a relative path; supervisord cannot find it from directory= — use an absolute path or run it through an interpreter, e.g. "bash ./run.sh"`},
+		{"leading whitespace relative path", "  bin/worker", `sites[0].daemons[1].command: "bin/worker" is a relative path; supervisord cannot find it from directory= — use an absolute path or run it through an interpreter, e.g. "bash bin/worker"`},
+		{"absolute path", "/usr/local/bin/worker --once", ""},
+		{"interpreter with relative script", "bash scripts/x.sh", ""},
+		{"php artisan", "php artisan reverb:start", ""},
+		{"bare name from PATH", "sleep infinity", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := base()
+			s.Sites[0].Daemons = []Daemon{
+				{Name: "first", Command: "php artisan pulse:check"},
+				{Name: "second", Command: tc.command},
+			}
+			err := s.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want valid, got %v", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tc.wantErr {
+				t.Fatalf("got error %v\nwant %s", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func validQueueServer() *Server {
 	return &Server{
 		ID:   "test-machine-0001",
