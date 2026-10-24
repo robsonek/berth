@@ -250,17 +250,21 @@ func TestDeployKeyFromFileMismatchRefusesWithoutForce(t *testing.T) {
 }
 
 // assertDeployKeyMismatchError pins the refusal: both fingerprints and the
-// --force remedy, never key material.
+// remedy, led by the NARROW override (--only accounts --force, which also
+// lets that step overwrite a foreign authorized_keys), never key material.
 func assertDeployKeyMismatchError(t *testing.T, who string, err error, local, host testDeployKey) {
 	t.Helper()
 	if err == nil {
 		t.Fatalf("%s: expected a refusal for a host key that differs from repository_key", who)
 	}
 	msg := err.Error()
-	for _, want := range []string{host.fingerprint, local.fingerprint, "--force"} {
+	for _, want := range []string{host.fingerprint, local.fingerprint, "re-run with --only accounts --force", "authorized_keys"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("%s: error must contain %q; got %v", who, want, err)
 		}
+	}
+	if narrow, bare := strings.Index(msg, "--only accounts --force"), strings.Index(msg, "bare --force"); bare >= 0 && bare < narrow {
+		t.Errorf("%s: the remedy must lead with --only accounts --force, not a bare --force; got %v", who, err)
 	}
 	for _, leak := range []string{"PRIVATE KEY", keyBlob(local.authorizedKey), keyBlob(host.authorizedKey)} {
 		if strings.Contains(msg, leak) {

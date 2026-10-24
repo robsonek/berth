@@ -17,7 +17,11 @@ Notable changes to berth. Older releases are documented on the
   repositories are still applied automatically. Provisioning still installs
   missing upstream packages but never upgrades installed ones: the php,
   nginx and database steps install them with `apt-get install --no-upgrade`,
-  as berth already installs the PostgreSQL server package. The README gains a
+  as berth already installs the PostgreSQL server package. A missing package
+  can still pull in newer dependencies: Surý's `php<ver>-*` packages require
+  the exact version of `php<ver>-common`, so installing a missing one (a new
+  PHP extension, say) can upgrade `php<ver>-common` and with it every
+  installed `php<ver>-*` package. The README gains a
   "Controlled upstream update" procedure for the maintenance window. The
   default (`auto`, or no key) keeps today's behaviour, so no host drifts.
 - **`workers: running`** has berth start each site's Supervisor programs (the
@@ -86,13 +90,15 @@ Notable changes to berth. Older releases are documented on the
   added, since OpenSSH refuses to load a key file in either form. When the
   host already holds that key the step is satisfied (a missing `.pub` is
   restored). When it holds a different key, berth refuses and names both
-  SHA256 fingerprints;
-  `--force` replaces it. The Check compares keys with a read-only
+  SHA256 fingerprints; `--only accounts --force` replaces it (and, like any
+  `--force` of that step, also lets it overwrite an `authorized_keys` berth
+  did not write). The Check compares keys with a read-only
   `ssh-keygen -y -f <key>`. Without `repository_key` nothing changes: berth
   generates a key when there is none and never replaces one.
 - **`berth init` sets the new knobs:** `apt.upstream_updates` and `workers`
   in the advanced server options, a site's `workers` override in its advanced
-  options, and `repository_key` right after a non-empty `repository`.
+  options, and `repository_key` in a separate form after the core site form,
+  asked only when the site has a `repository`.
 
 ### Changed
 

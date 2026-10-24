@@ -295,16 +295,21 @@ installs it:
 
 - The key is read and parsed on your machine before berth probes the host.
   A missing file, a file that is not a private key, or a passphrase-protected
-  key stops the run (a deploy key must work unattended).
+  key stops the run (a deploy key must work unattended). So the file must
+  exist at that path on **every** workstation that provisions this server or
+  runs `berth status --drift` against it, not only on the one that first
+  installed the key.
 - When the site user has no key yet, berth writes the private key (mode
   0600) and its `.pub` (0644, with the `<user>@<git-host>` comment a generated
   key gets) as the site user. The key travels on stdin, never on a command
   line, and is never logged.
 - When the host already holds the same key, the step is satisfied. When it
-  holds a different key, berth refuses and names both SHA256 fingerprints;
-  re-run with `--force` to replace it (`--only accounts --force` keeps the
-  override to this step). The replaced key stops working wherever it is
-  registered.
+  holds a different key, berth refuses and names both SHA256 fingerprints. To
+  replace it, re-run with `--only accounts --force`. `--force` applies to the
+  whole step, so this also lets `accounts` overwrite its other files that
+  berth did not write, such as an operator's `authorized_keys`; a bare
+  `--force` extends that to every step. The replaced key stops working
+  wherever it is registered.
 - Without `repository_key`, nothing changes: berth generates a key when there
   is none and never replaces one.
 
@@ -593,8 +598,15 @@ scope):
     still installs missing upstream packages but never upgrades installed
     ones (`apt-get install --no-upgrade` in the php, nginx and database
     steps), though a newly installed package can still pull in newer
-    versions of the packages it depends on. The default is `auto` (leaving
-    the key out is the same).
+    versions of the packages it depends on. For example, Surý's
+    `php<ver>-*` packages require the exact version of `php<ver>-common`, so
+    adding a missing PHP extension can upgrade `php<ver>-common` and with it
+    every installed `php<ver>-*` package. Two installs do not pass
+    `--no-upgrade` at all: the extra packages under `apt.packages` and the
+    database dump client the `backups` step installs when its binary is
+    missing (`mariadb-client` or `postgresql-client`) use a plain
+    `apt-get install`, which can likewise upgrade upstream packages they
+    depend on. The default is `auto` (leaving the key out is the same).
 - **fail2ban** — a managed jail bans SSH brute-forcers (bound to your configured
   SSH port) and repeat offenders (`recidive`). berth writes it as
   `/etc/fail2ban/jail.d/99-berth.conf`, leaving `jail.local` — which loads
@@ -653,6 +665,11 @@ a maintenance window you choose:
    [Security & hardening](#security--hardening) explains why). A package
    `apt-get upgrade` keeps back needs a new dependency; upgrade it by name only
    after checking what it pulls in.
+
+   With `nginx.source: nginx`, an nginx.org update can ask what to do about
+   the modified `/etc/nginx/nginx.conf`. Keep the currently-installed version
+   (`N`, the default): berth edits that file's `user` line, and the package
+   maintainer's version would undo the edit.
 
 3. Check both configurations; each must report that it is OK:
 

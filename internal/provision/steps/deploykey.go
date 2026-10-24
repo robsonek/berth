@@ -114,13 +114,17 @@ func hostDeployKey(ctx context.Context, r bssh.Runner, user string) (authorizedK
 // deployKeyMismatch is the refusal for a host key that is not the site's
 // repository_key. Both sides are named by fingerprint only; replacing the
 // key is the operator's call, because the key on the host may be the one
-// registered at the git host.
+// registered at the git host. The remedy leads with the narrow override:
+// --force is step-wide, so even scoped to accounts it also lets that step
+// overwrite its other managed files that berth did not write (an operator's
+// authorized_keys, say) — said up front, since a bare --force would widen
+// that to every step.
 func deployKeyMismatch(site config.Site, keyPath, hostKey string, key *localDeployKey) error {
 	held := "a key ssh-keygen -y cannot read"
 	if pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(hostKey)); err == nil {
 		held = ssh.FingerprintSHA256(pub)
 	}
-	return fmt.Errorf("deploy key %s for %s does not match repository_key %s: the host holds %s, repository_key is %s; re-run with --force to replace the key on the host (--only accounts --force limits the override to this step; the replaced key stops working wherever it is registered)",
+	return fmt.Errorf("deploy key %s for %s does not match repository_key %s: the host holds %s, repository_key is %s; to replace the key on the host, re-run with --only accounts --force (this also lets the accounts step overwrite other files it manages that berth did not write, such as an authorized_keys; a bare --force extends the override to every step). The replaced key stops working wherever it is registered",
 		keyPath, site.Domain, site.RepositoryKey, held, key.Fingerprint)
 }
 
