@@ -91,9 +91,10 @@ Notable changes to berth. Older releases are documented on the
   stdin, never on a command line or in a log. Every carriage return is
   removed (CRLF line endings become LF) and a missing final newline is
   added, since OpenSSH refuses to load a key file in either form. When the
-  host already holds that key the step is satisfied (a missing `.pub` is
-  restored). When it holds a different key, berth refuses and names both
-  SHA256 fingerprints; `--only accounts --force` replaces it (and, like any
+  host already holds that key the step is satisfied (a missing `.pub`, or
+  one that carries another key, is rewritten). When it holds a different
+  key, berth refuses and names both SHA256 fingerprints;
+  `--only accounts --force` replaces it (and, like any
   `--force` of that step, also lets it overwrite an `authorized_keys` berth
   did not write). The Check compares keys with a read-only
   `ssh-keygen -y -f <key>`. Without `repository_key` nothing changes: berth

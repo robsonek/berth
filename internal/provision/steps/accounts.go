@@ -300,7 +300,10 @@ func (a accounts) Check(ctx context.Context, rc provision.RunCtx, s *config.Serv
 	// private key must also BE that key: ssh-keygen -y derives the host
 	// key's public half (a read; it prints nothing secret) and a different
 	// key is refused unless --force — it may be the one registered at the
-	// git host, so replacing it is the operator's call.
+	// git host, so replacing it is the operator's call. Its .pub must then
+	// carry the same key material too (hostDeployPub): a stale .pub is what
+	// `berth site key` would print, so it is drift Apply rewrites, never a
+	// refusal (the .pub is derived data, not a registered key).
 	for _, site := range s.Sites {
 		if site.Repository == "" {
 			continue
@@ -327,7 +330,22 @@ func (a accounts) Check(ctx context.Context, rc provision.RunCtx, s *config.Serv
 				return provision.CheckResult{Satisfied: false, Reason: "deploy key for " + site.Domain + " differs from repository_key (--force replaces it)",
 					Changes: []string{"replace " + keyPath + " (and its .pub) with repository_key " + site.RepositoryKey}}, nil
 			}
-			material = material[1:] // the private key is present and is the configured one
+			// The private key is present and is the configured one; the .pub
+			// is compared by key material rather than probed for presence.
+			pubPath := keyPath + ".pub"
+			pub, pubPresent, err := hostDeployPub(ctx, r, user)
+			if err != nil {
+				return provision.CheckResult{}, err
+			}
+			if !pubPresent {
+				return provision.CheckResult{Satisfied: false, Reason: "deploy key material for " + site.Domain + " incomplete (" + pubPath + " missing)",
+					Changes: []string{"restore " + pubPath + " from repository_key " + site.RepositoryKey}}, nil
+			}
+			if pub != key.AuthorizedKey {
+				return provision.CheckResult{Satisfied: false, Reason: "deploy key " + pubPath + " for " + site.Domain + " does not carry repository_key's public key",
+					Changes: []string{"rewrite " + pubPath + " from repository_key " + site.RepositoryKey}}, nil
+			}
+			material = nil
 		}
 		for _, p := range material {
 			ok, err := fileExists(ctx, r, p)

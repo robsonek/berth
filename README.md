@@ -303,7 +303,9 @@ installs it:
   0600) and its `.pub` (0644, with the `<user>@<git-host>` comment a generated
   key gets) as the site user. The key travels on stdin, never on a command
   line, and is never logged.
-- When the host already holds the same key, the step is satisfied. When it
+- When the host already holds the same key, the step is satisfied once its
+  `.pub` carries that key too; a missing `.pub`, or one left holding another
+  key, is rewritten (the private key is not touched). When it
   holds a different key, berth refuses and names both SHA256 fingerprints. To
   replace it, re-run with `--only accounts --force`. `--force` applies to the
   whole step, so this also lets `accounts` overwrite its other files that

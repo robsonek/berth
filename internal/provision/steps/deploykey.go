@@ -111,6 +111,32 @@ func hostDeployKey(ctx context.Context, r bssh.Runner, user string) (authorizedK
 	return fields[0] + " " + fields[1], true, nil
 }
 
+// hostDeployPub reports the key material ("<type> <base64>", the first two
+// fields) of the site user's deploy .pub, read with a plain cat — it is a
+// public key, and only the material leaves this function (no caller prints
+// it). present is false when the file cannot be read (missing, or not a
+// readable file); a file that does not start with a type and a key comes
+// back present with EMPTY material, which matches no repository_key. Under
+// repository_key the .pub is compared by material, not mere presence: a
+// forced replacement writes the private key first and the .pub second, so a
+// failed second write leaves the replaced key's .pub behind, and `berth
+// site key` would print a key that no longer matches. The comment is not
+// compared, so an operator's comment is never drift.
+func hostDeployPub(ctx context.Context, r bssh.Runner, user string) (material string, present bool, err error) {
+	res, err := r.Run(ctx, "cat "+shQuote(deployKeyPath(user)+".pub"), nil)
+	if err != nil {
+		return "", false, err
+	}
+	if res.ExitCode != 0 {
+		return "", false, nil
+	}
+	fields := strings.Fields(res.Stdout)
+	if len(fields) < 2 {
+		return "", true, nil
+	}
+	return fields[0] + " " + fields[1], true, nil
+}
+
 // deployKeyMismatch is the refusal for a host key that is not the site's
 // repository_key. Both sides are named by fingerprint only; replacing the
 // key is the operator's call, because the key on the host may be the one
@@ -130,8 +156,10 @@ func deployKeyMismatch(site config.Site, keyPath, hostKey string, key *localDepl
 
 // installRepositoryKey makes the site user's deploy key the repository_key
 // pair. An absent key is installed; a different one (or one ssh-keygen
-// cannot read) is refused unless force; an identical one only gets a missing
-// .pub restored. Both files are written AS the account — ~/.ssh is tenant
+// cannot read) is refused unless force; an identical one only gets its .pub
+// rewritten, and only when that .pub is missing or carries other key
+// material (hostDeployPub) — the private key is never rewritten then. Both
+// files are written AS the account — ~/.ssh is tenant
 // territory (see writeFileAsUser) — and the private key rides stdin, never a
 // command line. The .pub carries the <user>@<git-host> comment a generated
 // key gets, so `berth site key` prints the same shape either way.
@@ -144,8 +172,8 @@ func installRepositoryKey(ctx context.Context, r bssh.Runner, force bool, site c
 		return err
 	}
 	if present && hostKey == key.AuthorizedKey {
-		pubOK, err := fileExists(ctx, r, pubPath)
-		if err != nil || pubOK {
+		pub, pubPresent, err := hostDeployPub(ctx, r, user)
+		if err != nil || (pubPresent && pub == key.AuthorizedKey) {
 			return err
 		}
 		return writeFileAsUser(ctx, r, user, pubPath, 0o644, pubBody)
@@ -154,7 +182,7 @@ func installRepositoryKey(ctx context.Context, r bssh.Runner, force bool, site c
 		return deployKeyMismatch(site, keyPath, hostKey, key)
 	}
 	// Private half first: a run interrupted between the two writes leaves the
-	// right key with a missing .pub, which the next run restores.
+	// right key with a missing or stale .pub, which the next run rewrites.
 	if err := writeFileAsUser(ctx, r, user, keyPath, 0o600, key.Private); err != nil {
 		return err
 	}

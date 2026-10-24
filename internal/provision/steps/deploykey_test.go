@@ -87,6 +87,10 @@ func deployKeyServer(t *testing.T, keyPath string) *config.Server {
 // prints the public half).
 func hostKeyDeriveCmd() string { return "ssh-keygen -y -f " + shQuote(testDeployKeyPath) }
 
+// deployPubReadCmd is the read of the site user's deploy .pub that the
+// repository_key path compares by key material (root runs it; a public key).
+func deployPubReadCmd() string { return "cat " + shQuote(testDeployKeyPath+".pub") }
+
 // knownHostLookupCmd is accounts.Check's unchanged known-host probe.
 func knownHostLookupCmd() string {
 	return "ssh-keygen -F " + shQuote("github.com") + " -f " + shQuote(testKnownHosts) + " >/dev/null 2>&1"
@@ -193,7 +197,9 @@ func TestDeployKeyFromFileSatisfiedWhenEqual(t *testing.T) {
 	f.On("test -e "+shQuote(testDeployKeyPath), bssh.Result{})
 	// Real ssh-keygen -y prints the key's stored comment as a third field.
 	f.On(hostKeyDeriveCmd(), bssh.Result{Stdout: key.authorizedKey + " some-comment\n"})
-	f.On("test -e "+shQuote(testDeployKeyPath+".pub"), bssh.Result{})
+	// The .pub is compared by key material (type + base64): a comment other
+	// than the one berth writes is not drift.
+	f.On(deployPubReadCmd(), bssh.Result{Stdout: key.authorizedKey + " operator@laptop\n"})
 	f.On(knownHostLookupCmd(), bssh.Result{})
 	stubConsoleLocked(f)
 
@@ -202,14 +208,18 @@ func TestDeployKeyFromFileSatisfiedWhenEqual(t *testing.T) {
 		t.Fatalf("Check() error = %v", err)
 	}
 	if !cr.Satisfied {
-		t.Errorf("expected satisfied with the host key equal to repository_key; got %+v", cr)
+		t.Errorf("expected satisfied with the host key and its .pub equal to repository_key; got %+v", cr)
 	}
 	if strings.Contains(cr.Reason, "deploy key") {
 		t.Errorf("Reason must not be about the deploy key: %q", cr.Reason)
 	}
-	// Satisfied must come from COMPARING the keys, not from mere presence.
+	// Satisfied must come from COMPARING the keys, not from mere presence —
+	// the private key's public half AND the .pub's key material.
 	if !calledCmd(f, hostKeyDeriveCmd()) {
 		t.Errorf("Check must derive the host key's public half to compare it; calls:\n%s", strings.Join(callCmds(f), "\n"))
+	}
+	if !calledCmd(f, deployPubReadCmd()) {
+		t.Errorf("Check must read the .pub to compare its key material; calls:\n%s", strings.Join(callCmds(f), "\n"))
 	}
 	if len(f.Writes()) != 0 {
 		t.Errorf("Check wrote %d file(s)", len(f.Writes()))
@@ -324,7 +334,7 @@ func TestDeployKeyFromFileRestoresMissingPubOnly(t *testing.T) {
 	stubDeployKeyCheckBase(t, f, s)
 	f.On("test -e "+shQuote(testDeployKeyPath), bssh.Result{})
 	f.On(hostKeyDeriveCmd(), bssh.Result{Stdout: key.authorizedKey + "\n"})
-	f.On("test -e "+shQuote(testDeployKeyPath+".pub"), bssh.Result{ExitCode: 1})
+	f.On(deployPubReadCmd(), bssh.Result{ExitCode: 1, Stderr: "No such file or directory"})
 	cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil || cr.Satisfied || !strings.Contains(cr.Reason, ".pub") {
 		t.Fatalf("Check() = (%+v, %v), want unsatisfied naming the missing .pub", cr, err)
@@ -334,7 +344,7 @@ func TestDeployKeyFromFileRestoresMissingPubOnly(t *testing.T) {
 	stubDeployKeyApplyBase(f)
 	f.On("test -e "+shQuote(testDeployKeyPath), bssh.Result{})
 	f.On(hostKeyDeriveCmd(), bssh.Result{Stdout: key.authorizedKey + "\n"})
-	f.On("test -e "+shQuote(testDeployKeyPath+".pub"), bssh.Result{ExitCode: 1})
+	f.On(deployPubReadCmd(), bssh.Result{ExitCode: 1, Stderr: "No such file or directory"})
 	pubWrite := writeAsUserModeCmd(testDeployUser, testDeployKeyPath+".pub", 0o644)
 	f.On(pubWrite, bssh.Result{})
 	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -345,6 +355,93 @@ func TestDeployKeyFromFileRestoresMissingPubOnly(t *testing.T) {
 	}
 	if calledCmd(f, writeAsUserModeCmd(testDeployUser, testDeployKeyPath, 0o600)) {
 		t.Error("the private key is already the configured one; it must not be rewritten")
+	}
+}
+
+// TestDeployKeyFromFileRewritesStalePubOnly: the host already holds
+// repository_key, but its .pub carries another key — what a forced
+// replacement leaves when its second write (the .pub) fails. Presence alone
+// would bless it and `berth site key` would print a key that no longer
+// matches. Check compares the .pub's key material and flags the gap (no
+// refusal: the .pub is derived data, not a key someone registered); Apply
+// rewrites the .pub alone, with berth's usual comment, and never the private
+// key it just proved identical.
+func TestDeployKeyFromFileRewritesStalePubOnly(t *testing.T) {
+	chdirTemp(t)
+	key := newTestDeployKey(t, "")
+	stale := newTestDeployKey(t, "")
+	s := deployKeyServer(t, key.path)
+	for _, stalePub := range []string{
+		stale.authorizedKey + " " + testDeployUser + "@github.com\n", // the replaced key's .pub
+		"",          // an empty file
+		"garbage\n", // not a key line at all
+	} {
+		// Presence is stubbed too, so a presence-only Check is caught
+		// blessing the stale file rather than tripping on an unstubbed probe.
+		f := bssh.NewFakeRunner()
+		stubDeployKeyCheckBase(t, f, s)
+		f.On("test -e "+shQuote(testDeployKeyPath), bssh.Result{})
+		f.On(hostKeyDeriveCmd(), bssh.Result{Stdout: key.authorizedKey + "\n"})
+		f.On("test -e "+shQuote(testDeployKeyPath+".pub"), bssh.Result{})
+		f.On(deployPubReadCmd(), bssh.Result{Stdout: stalePub})
+		f.On(knownHostLookupCmd(), bssh.Result{})
+		stubConsoleLocked(f)
+		cr, err := Accounts(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{}, s, f)
+		if err != nil || cr.Satisfied || !strings.Contains(cr.Reason, ".pub") {
+			t.Fatalf(".pub %q: Check() = (%+v, %v), want unsatisfied naming the .pub", stalePub, cr, err)
+		}
+		if strings.Contains(cr.Reason, keyBlob(stale.authorizedKey)) || strings.Contains(strings.Join(cr.Changes, " "), keyBlob(stale.authorizedKey)) {
+			t.Errorf(".pub %q: the verdict echoes the stale key material: %+v", stalePub, cr)
+		}
+
+		f = bssh.NewFakeRunner()
+		stubDeployKeyApplyBase(f)
+		f.On("test -e "+shQuote(testDeployKeyPath), bssh.Result{})
+		f.On(hostKeyDeriveCmd(), bssh.Result{Stdout: key.authorizedKey + "\n"})
+		f.On("test -e "+shQuote(testDeployKeyPath+".pub"), bssh.Result{})
+		f.On(deployPubReadCmd(), bssh.Result{Stdout: stalePub})
+		pubWrite := writeAsUserModeCmd(testDeployUser, testDeployKeyPath+".pub", 0o644)
+		f.On(pubWrite, bssh.Result{})
+		if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+			t.Fatalf(".pub %q: Apply() error = %v", stalePub, err)
+		}
+		if !calledCmd(f, pubWrite) {
+			t.Fatalf(".pub %q: expected the .pub rewritten as %s with mode 0644; calls:\n%s", stalePub, testDeployUser, strings.Join(callCmds(f), "\n"))
+		}
+		if got, want := string(writtenContent(f, testDeployKeyPath+".pub")), key.authorizedKey+" "+testDeployUser+"@github.com\n"; got != want {
+			t.Errorf(".pub %q: rewritten .pub = %q, want %q", stalePub, got, want)
+		}
+		if calledCmd(f, writeAsUserModeCmd(testDeployUser, testDeployKeyPath, 0o600)) {
+			t.Errorf(".pub %q: the private key is already the configured one; it must not be rewritten", stalePub)
+		}
+		assertNoKeyInCommands(t, f, key)
+	}
+}
+
+// TestDeployKeyFromFileMatchingPubNoWrite: a host whose private key and .pub
+// both carry repository_key gets no write from Apply — the .pub's comment is
+// not part of the comparison, so an operator's comment survives.
+func TestDeployKeyFromFileMatchingPubNoWrite(t *testing.T) {
+	chdirTemp(t)
+	key := newTestDeployKey(t, "")
+	s := deployKeyServer(t, key.path)
+	f := bssh.NewFakeRunner()
+	stubDeployKeyApplyBase(f)
+	f.On("test -e "+shQuote(testDeployKeyPath), bssh.Result{})
+	f.On(hostKeyDeriveCmd(), bssh.Result{Stdout: key.authorizedKey + "\n"})
+	f.On(deployPubReadCmd(), bssh.Result{Stdout: key.authorizedKey + " operator@laptop\n"})
+	if err := Accounts(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if !calledCmd(f, deployPubReadCmd()) {
+		t.Errorf("Apply must compare the .pub's key material; calls:\n%s", strings.Join(callCmds(f), "\n"))
+	}
+	for _, p := range []string{testDeployKeyPath, testDeployKeyPath + ".pub"} {
+		for _, mode := range []os.FileMode{0o600, 0o644} {
+			if calledCmd(f, writeAsUserModeCmd(testDeployUser, p, mode)) {
+				t.Errorf("Apply rewrote %s although the host already holds repository_key", p)
+			}
+		}
 	}
 }
 
