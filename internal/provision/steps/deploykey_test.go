@@ -428,6 +428,55 @@ func TestLoadLocalDeployKeyDerivesPublicFacts(t *testing.T) {
 	}
 }
 
+func TestLoadLocalDeployKeyNormalizesCRLF(t *testing.T) {
+	// A key saved with CRLF line endings (a Windows editor, a git checkout
+	// with autocrlf) parses fine locally, but OpenSSH on the host refuses to
+	// load it ("invalid format"): installed verbatim it breaks every deploy,
+	// and the next Check refuses the very key berth installed. The installed
+	// bytes must be the LF form.
+	key := newTestDeployKey(t, "")
+	crlfPath := filepath.Join(t.TempDir(), "deploy_key_crlf")
+	crlf := strings.ReplaceAll(string(key.private), "\n", "\r\n")
+	if err := os.WriteFile(crlfPath, []byte(crlf), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadLocalDeployKey(crlfPath)
+	if err != nil {
+		t.Fatalf("loadLocalDeployKey(CRLF copy) error = %v", err)
+	}
+	// Messages report counts, never the key bytes.
+	if n := strings.Count(string(got.Private), "\r"); n != 0 {
+		t.Errorf("Private still carries %d CR byte(s)", n)
+	}
+	if !strings.HasSuffix(string(got.Private), "\n") || strings.HasSuffix(string(got.Private), "\n\n") {
+		t.Errorf("Private must end with exactly one newline (last bytes %q)", got.Private[max(0, len(got.Private)-3):])
+	}
+	if string(got.Private) != string(key.private) {
+		t.Errorf("Private (%d bytes) differs from the LF original (%d bytes)", len(got.Private), len(key.private))
+	}
+	if got.Fingerprint != key.fingerprint {
+		t.Errorf("Fingerprint = %q, want the LF original's %q", got.Fingerprint, key.fingerprint)
+	}
+}
+
+func TestLoadLocalDeployKeyAppendsMissingNewline(t *testing.T) {
+	// OpenSSH refuses a private key whose last line has no newline; berth
+	// appends exactly one so the installed key loads.
+	key := newTestDeployKey(t, "")
+	path := filepath.Join(t.TempDir(), "deploy_key_nonl")
+	if err := os.WriteFile(path, []byte(strings.TrimRight(string(key.private), "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadLocalDeployKey(path)
+	if err != nil {
+		t.Fatalf("loadLocalDeployKey(no final newline) error = %v", err)
+	}
+	if string(got.Private) != string(key.private) {
+		t.Errorf("Private (%d bytes, ends %q) is not the file plus exactly one newline (%d bytes)",
+			len(got.Private), got.Private[max(0, len(got.Private)-3):], len(key.private))
+	}
+}
+
 func TestLoadLocalDeployKeyExpandsHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
