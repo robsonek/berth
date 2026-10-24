@@ -373,8 +373,9 @@ func TestKeepaliveClosesDeadConnection(t *testing.T) {
 	waitErr := make(chan error, 1)
 	go func() { waitErr <- conn.Wait() }()
 	select {
-	case <-waitErr:
+	case err := <-waitErr:
 		// Connection closed by the keepalive loop — dead transport detected.
+		t.Logf("connection closed: %v", err)
 	case <-time.After(3 * time.Second):
 		t.Fatal("keepalive never closed the dead connection")
 	}

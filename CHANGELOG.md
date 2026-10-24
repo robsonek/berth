@@ -23,6 +23,47 @@ Notable changes to berth. Older releases are documented on the
   uses the default bundle), and a new `checkout_path` check in `analyze`,
   which does not apply because berth checks out at the workspace root and
   does not set the input.
+- **dependabot's `open-pull-requests-limit` 3 → 10**, enough for every pinned
+  action at once, so a batch of red PRs can no longer fill every slot and
+  leave a stale one unrefreshed, as happened to #94. Its other two PRs from
+  that batch landed as proposed: `actions/upload-artifact` v7.0.2 (#95,
+  retries on HTTP 429) and `goreleaser/goreleaser-action` v7.3.0 (#96,
+  dependency updates, and it reuses a goreleaser binary already in the
+  runner's tool cache).
+- **`golang.org/x/crypto` v0.58.0, `golang.org/x/term` v0.47.0,
+  `github.com/pkg/sftp` v1.13.12, `charm.land/bubbletea/v2` v2.1.0**, which
+  also move `x/sync`, `x/sys`, `x/text`, `ultraviolet`, `x/ansi`,
+  `go-runewidth` and `xo/terminfo` forward as their requirements. These are
+  maintenance releases, not security fixes; govulncheck was already clean on
+  the previous set.
+  - x/crypto adds the ML-DSA (post-quantum) host-key and public-key
+    algorithms. They are appended after the existing defaults, so the order
+    of preference against today's hosts is unchanged. It also fixes the CBC
+    ciphers in encrypt-then-MAC mode, and `knownhosts` now accepts CRLF line
+    endings.
+  - The sftp client returns an error on a malformed server reply instead of
+    panicking, which hardens the transfer under `WriteFile`.
+  - bubbletea fixes a deadlock in its signal goroutine at shutdown and falls
+    back to default dimensions on a 0x0 terminal.
+  - x/term only moves x/sys.
+
+  Nothing berth writes to a host changes.
+- **govulncheck v1.8.0 → v1.9.0** in the CI gate and the weekly scan; the new
+  release only updates its dependencies.
+- **golangci-lint v2.14.0 → v2.15.0** (all four pins, in both passes in
+  `ci.yml` and both in `release.yml`). Its errcheck 1.30 now reports dropped
+  values from channels of type `error`. The two such receives in
+  `internal/ssh` (the exec teardown wait and a keepalive test) now bind the
+  value to a name, because the bare `_ = <-ch` form trips staticcheck S1005.
+  revive's `enable-default-rules` was re-probed on v2.15.0 and is still
+  required.
+- **CI now runs `goreleaser check`**, using the same unpinned `~> v2` range as
+  `release.yml`. A new GoReleaser release that rejects `.goreleaser.yaml`, or
+  deprecates a property it uses, now shows up on an ordinary PR instead of at
+  tag time. The check fails on deprecations too, even though a release would
+  only warn. Releases stay on the newest v2 on purpose: the range never
+  crosses into v3, and dependabot does not bump this input, so a pin would go
+  stale.
 
 ### Fixed
 
