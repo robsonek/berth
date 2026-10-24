@@ -2144,6 +2144,26 @@ func TestEnvLineInSetScriptRealShell(t *testing.T) {
 		{"redis-client-quoted", "REDIS_CLIENT", "REDIS_CLIENT=\"phpredis\"\n", 0},
 		{"redis-client-predis", "REDIS_CLIENT", "REDIS_CLIENT=predis\n", 1},
 		{"redis-client-empty", "REDIS_CLIENT", "REDIS_CLIENT=\n", 1},
+		// phpdotenv also reads `export KEY=`, leading whitespace and spaces
+		// around `=`, which the ^KEY= anchor cannot see. Any such
+		// assignment of a berth-owned key is its own verdict (exit 5),
+		// whatever its value and whatever canonical lines sit beside it.
+		{"export-form", "DB_URL", "export DB_URL=x\n", 5},
+		{"leading-spaces", "DB_USERNAME", "  DB_USERNAME=sync\n", 5},
+		{"spaces-around-equals", "DB_USERNAME", "DB_USERNAME = sync\n", 5},
+		{"export-two-spaces", "REDIS_HOST", "export  REDIS_HOST=/x\n", 5},
+		{"export-tab", "REDIS_HOST", "export\tREDIS_HOST=/x\n", 5},
+		{"leading-tab", "DB_USERNAME", "\tDB_USERNAME=appuser\n", 5},
+		{"space-before-equals", "DB_USERNAME", "DB_USERNAME =appuser\n", 5},
+		{"export-with-the-right-value", "DB_USERNAME", "export DB_USERNAME=appuser\n", 5},
+		{"canonical-then-export", "DB_USERNAME", "DB_USERNAME=appuser\nexport DB_USERNAME=other\n", 5},
+		{"non-canonical-beside-duplicates", "DB_USERNAME", "DB_USERNAME=appuser\nDB_USERNAME=appuser\n DB_USERNAME=other\n", 5},
+		{"commented-export-is-ignored", "DB_URL", "#export DB_URL=x\n", 3},
+		{"indented-comment-is-ignored", "DB_URL", "  # DB_URL=x\n", 3},
+		{"longer-key-is-ignored", "DB_URL", "DB_URL_BACKUP=x\n", 3},
+		{"export-longer-key-is-ignored", "DB_URL", "export DB_URL_BACKUP=x\n", 3},
+		{"export-glued-is-another-key", "DB_URL", "exportDB_URL=x\n", 3},
+		{"canonical-beside-ignored-forms", "DB_USERNAME", "#export DB_USERNAME=x\nDB_USERNAME_OLD = y\nDB_USERNAME=appuser\n", 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -2181,6 +2201,20 @@ func TestEnvLineInSetScriptRealShell(t *testing.T) {
 		exit, stdout := shellRun(t, envLineInSetScript(env, "DB_USERNAME"), string(stdin))
 		if exit != 4 || stdout != "3\n" {
 			t.Fatalf("got exit %d stdout %q, want exit 4 and exactly the count \"3\\n\"", exit, stdout)
+		}
+	})
+	// The non-canonical verdict prints nothing either: not the line, not
+	// its value, not a count.
+	t.Run("non-canonical-prints-nothing", func(t *testing.T) {
+		if err := os.WriteFile(env, []byte("export DB_USERNAME=LEAKCHECK\nDB_USERNAME=appuser\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stdin, err := envAcceptStdin(accept["DB_USERNAME"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exit, stdout := shellRun(t, envLineInSetScript(env, "DB_USERNAME"), string(stdin)); exit != 5 || stdout != "" {
+			t.Fatalf("got exit %d stdout %q, want exit 5 and no output", exit, stdout)
 		}
 	})
 	// Every other verdict prints nothing at all.
@@ -2296,6 +2330,20 @@ func TestEnvLineInSetExitMap(t *testing.T) {
 	if want := "DB_USERNAME appears 3 times in " + sharedEnvPath(site) + "; keep exactly one line"; err.Error() != want {
 		t.Errorf("duplicate error = %q, want %q", err, want)
 	}
+	// Exit 5: the key is assigned in a form the probe cannot verify
+	// (export, leading whitespace, spaces around =) — surfaced as the
+	// dedicated error naming the key, the path and the canonical line,
+	// never anything the probe printed.
+	f = bssh.NewFakeRunner()
+	f.On(cmd, bssh.Result{ExitCode: 5, Stdout: "LEAKCHECK\n", Stderr: "LEAKCHECK"})
+	match, present, err := envLineInSet(context.Background(), f, site, "DB_USERNAME", []string{"DB_USERNAME=appuser", `DB_USERNAME="appuser"`})
+	var nc *envNonCanonicalKeyError
+	if !errors.As(err, &nc) || nc.Key != "DB_USERNAME" || nc.Path != sharedEnvPath(site) || nc.Canonical != "DB_USERNAME=appuser" || match || !present {
+		t.Fatalf("exit 5: got (%v, %v, %#v), want (false, true, envNonCanonicalKeyError{DB_USERNAME, %s, DB_USERNAME=appuser})", match, present, err, sharedEnvPath(site))
+	}
+	if want := "DB_USERNAME is assigned in a form berth cannot verify in " + sharedEnvPath(site) + " (export, leading space or spaces around =); write it as DB_USERNAME=appuser"; err.Error() != want {
+		t.Errorf("non-canonical error = %q, want %q", err, want)
+	}
 	// A count the script cannot have printed is a hard probe error — not a
 	// duplicate verdict, and its stdout is never echoed.
 	for _, out := range []string{"LEAKCHECK\n", "1\n", ""} {
@@ -2339,6 +2387,68 @@ func TestAssertEnvBerthKeysRefusesDuplicatedKey(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "DB_USERNAME=") {
 		t.Errorf("a duplicated key must be reported as a duplicate, not as a mismatch line: %q", err)
+	}
+}
+
+// TestAssertEnvBerthKeysRefusesNonCanonicalForms: phpdotenv reads
+// `export KEY=`, leading whitespace and `KEY = value`, none of which the
+// ^KEY= anchor sees — `export DB_URL=mysql://elsewhere` would otherwise
+// read as an absent DB_URL. Such an assignment of a berth-owned key is
+// refused with the canonical line to write instead, in the SAME error as
+// every other problem, and never with a current value.
+func TestAssertEnvBerthKeysRefusesNonCanonicalForms(t *testing.T) {
+	s := berthKeysServer()
+	site := s.Sites[0]
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	stubBerthEnvKeys(f, s)
+	f.On(envLineInSetScript(envPath(s), "DB_URL"), bssh.Result{ExitCode: 5, Stdout: "LEAKCHECK\n", Stderr: "LEAKCHECK"})
+	f.On(envLineInSetScript(envPath(s), "DB_USERNAME"), bssh.Result{ExitCode: 5})
+	f.On(envLineInSetScript(envPath(s), "REDIS_PASSWORD"), bssh.Result{ExitCode: 4, Stdout: "2\n"})
+	f.On(envLineInSetScript(envPath(s), "REDIS_HOST"), bssh.Result{ExitCode: 1, Stderr: "LEAKCHECK"})
+	err := assertEnvBerthKeys(context.Background(), f, s, site)
+	if err == nil {
+		t.Fatal("want one error naming the non-canonical keys, the duplicate and the mismatch")
+	}
+	for _, want := range []string{
+		"DB_USERNAME is assigned in a form berth cannot verify in " + envPath(s) + " (export, leading space or spaces around =); write it as DB_USERNAME=appuser",
+		"DB_URL is assigned in a form berth cannot verify in " + envPath(s) + " (export, leading space or spaces around =); write it as DB_URL=",
+		"REDIS_PASSWORD appears 2 times in " + envPath(s) + "; keep exactly one line",
+		"expected REDIS_HOST=" + valkeySocketPath(site.Domain),
+		"--force does not override this check",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should contain %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "LEAKCHECK") {
+		t.Errorf("error leaks a current .env value: %q", err)
+	}
+	if strings.Contains(err.Error(), "expected DB_USERNAME") || strings.Contains(err.Error(), ", DB_USERNAME=appuser") {
+		t.Errorf("a non-canonical key must be reported as such, not as a mismatch line: %q", err)
+	}
+}
+
+func TestDatabaseRefusesNonCanonicalEnvKeyEvenWithForce(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
+	f.On(envLineInSetScript(envPath(s), "DB_URL"), bssh.Result{ExitCode: 5})
+	want := "DB_URL is assigned in a form berth cannot verify in " + envPath(s)
+	if _, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{Force: true}, s, f); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Check() = %v, want the non-canonical refusal under --force", err)
+	}
+	// NOTE: apt install is deliberately NOT stubbed — Apply must refuse first.
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{Force: true}, s, f); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Apply() = %v, want the non-canonical refusal under --force", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "apt-get") || strings.HasPrefix(c.Cmd, "mariadb ") {
+			t.Errorf("nothing may be installed or mutated after the refusal; ran %q", c.Cmd)
+		}
 	}
 }
 

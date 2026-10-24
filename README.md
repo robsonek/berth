@@ -1021,6 +1021,9 @@ all match). Each of these keys must appear on at most one line: a key that
 appears more than once is refused whatever the values, because a correct
 line must not vouch for a duplicate the application may read instead (the
 error says `<KEY> appears <N> times in <path>; keep exactly one line`).
+A line that assigns one of these keys in another form phpdotenv reads
+(`export KEY=…`, leading whitespace, or spaces around `=`) is refused too,
+since berth cannot verify it: write the key as the canonical `KEY=value` line.
 Trailing whitespace is ignored. `DB_URL`, `REDIS_PASSWORD`, `REDIS_URL` and
 `REDIS_CLIENT` may be missing; any other key that is missing counts as a
 mismatch. The error lists every problem at once — each

@@ -300,6 +300,22 @@ func TestRecordingRunnerDerivesWave3AnswersFromState(t *testing.T) {
 	if res, err := conv.Run(ctx, redisHost, []byte(envValueFormsStdin("REDIS_HOST", fixtureValkeySocket))); err != nil || res.ExitCode != 4 || res.Stdout != "2\n" {
 		t.Errorf("duplicated REDIS_HOST = (%+v, %v), want exit 4 with the count 2", res, err)
 	}
+	// A non-canonical assignment (export, leading whitespace, spaces around
+	// =) is its own verdict, silent on stdout — beside an agreeing
+	// canonical line, and for a key that has no canonical line at all.
+	// Commented and longer-key lines stay invisible.
+	env = convHost.files[fixtureSharedEnv]
+	env.content += "export REDIS_PORT=1\n  DB_URL = mysql://elsewhere\n#export REDIS_URL=x\nREDIS_URL_OLD=x\n"
+	convHost.files[fixtureSharedEnv] = env
+	if res, err := conv.Run(ctx, envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PORT"), []byte(envValueFormsStdin("REDIS_PORT", "0"))); err != nil || res.ExitCode != 5 || res.Stdout != "" {
+		t.Errorf("export REDIS_PORT beside REDIS_PORT=0 = (%+v, %v), want exit 5 and no output", res, err)
+	}
+	if res, err := conv.Run(ctx, envLineInSetProbeCmd(fixtureSharedEnv, "DB_URL"), []byte(envUnsetStdin("DB_URL"))); err != nil || res.ExitCode != 5 || res.Stdout != "" {
+		t.Errorf("spaced DB_URL = (%+v, %v), want exit 5 and no output", res, err)
+	}
+	if res, err := conv.Run(ctx, envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_URL"), []byte(envUnsetStdin("REDIS_URL"))); err != nil || res.ExitCode != 3 {
+		t.Errorf("commented/longer REDIS_URL = (%+v, %v), want exit 3 (no assignment of the key)", res, err)
+	}
 }
 
 // The deploy key's public-half read follows the modelled key file: the
@@ -1531,23 +1547,36 @@ func envLineInSetFixtureKey(cmd string) string {
 	return ""
 }
 
-// answerEnvLineInSet evaluates envLineInSetScript: the KEY= lines of the
-// modelled .env are counted first (more than one: exit 4 with the count as
-// the only stdout), then every stdin line is an accepted KEY=value line
-// (`while IFS= read -r want` reads only newline-terminated lines), the one
-// KEY= line is trimmed of trailing ASCII whitespace, and the verdict is
-// string equality against any of them. Exit map: 0 match, 1 none matches,
-// 2 unreadable file, 3 no KEY= line, 4 duplicated key.
+// answerEnvLineInSet evaluates envLineInSetScript: the lines of the
+// modelled .env that assign KEY in any form (the script's ERE, C-locale
+// [[:space:]] being Go's ASCII class) and the canonical KEY= lines are
+// counted first — fewer canonical lines than assignments: exit 5, silent;
+// more than one KEY= line: exit 4 with the count as the only stdout — then
+// every stdin line is an accepted KEY=value line (`while IFS= read -r want`
+// reads only newline-terminated lines), the one KEY= line is trimmed of
+// trailing ASCII whitespace, and the verdict is string equality against any
+// of them. Exit map: 0 match, 1 none matches, 2 unreadable file, 3 no line
+// assigns KEY, 4 duplicated key, 5 non-canonical assignment.
 func (r *recordingRunner) answerEnvLineInSet(path, key string, stdin []byte) bssh.Result {
 	file, ok := r.h.files[path]
 	if !ok {
 		return bssh.Result{ExitCode: 2}
 	}
-	n := 0
+	assigns := regexp.MustCompile(`^[[:space:]]*(export[[:space:]]+)?` + regexp.QuoteMeta(key) + `[[:space:]]*=`)
+	t, n := 0, 0
 	for _, l := range strings.Split(file.content, "\n") {
+		if assigns.MatchString(l) {
+			t++
+		}
 		if strings.HasPrefix(l, key+"=") {
 			n++
 		}
+	}
+	if t == 0 {
+		return bssh.Result{ExitCode: 3}
+	}
+	if n < t {
+		return bssh.Result{ExitCode: 5}
 	}
 	if n > 1 {
 		return bssh.Result{ExitCode: 4, Stdout: strconv.Itoa(n) + "\n"}

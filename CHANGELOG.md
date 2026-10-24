@@ -68,9 +68,12 @@ Notable changes to berth. Older releases are documented on the
   ignored. Each of these keys must appear on at most
   one line: a duplicated key is refused whatever the values
   (`<KEY> appears <N> times in <path>; keep exactly one line`), since a
-  correct line must not vouch for a duplicate the app may read instead. The
-  error lists every duplicated or disagreeing key at once, with the expected
-  line for each mismatch, and never prints the current value. Like the
+  correct line must not vouch for a duplicate the app may read instead. A
+  key assigned in another form phpdotenv reads (`export KEY=…`, leading
+  whitespace or spaces around `=`) is refused as well, with the canonical
+  line to write instead. The error lists every duplicated or disagreeing key
+  at once, with the expected line for each mismatch, and never prints the
+  current value. Like the
   existing `DB_CONNECTION` check, `--force` does not override it.
   **Behaviour change:** a host whose `.env` disagrees (for example
   `REDIS_HOST=127.0.0.1` under `valkey: true`, left over from a seed without

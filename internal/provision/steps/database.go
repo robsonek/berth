@@ -365,8 +365,15 @@ func berthOwnedEnv(s *config.Server, site config.Site) []envExpectation {
 }
 
 // envLineInSetScript builds the exact shell script envLineInSet runs. It
-// first COUNTS the <key>= lines (`grep -c`, the same anchor, under the
-// C-locale pin, explicit exit mapping): a key on more than one line is a
+// first COUNTS every line that assigns <key> in any form phpdotenv reads
+// (`grep -cE`, ERE `^[[:space:]]*(export[[:space:]]+)?<key>[[:space:]]*=`)
+// and then the canonical <key>= lines (`grep -c '^<key>='`), both under the
+// C-locale pin with explicit exit mapping. Fewer canonical lines than
+// assignments means some line uses `export`, leading whitespace or spaces
+// around `=`: the probe cannot verify such a line (it could set the key, or
+// override a correct canonical line, unseen), so that is a verdict of its
+// own whatever the values. A comment (`#export KEY=`) or a longer key
+// (`KEY_OLD=`) matches neither count. Next, a key on more than one line is a
 // verdict of its own whatever the values, because which line the app reads
 // is phpdotenv's business (a later line can override an earlier one), and a
 // correct first line must never vouch for a wrong later one. With exactly
@@ -378,13 +385,17 @@ func berthOwnedEnv(s *config.Server, site config.Site) []envExpectation {
 // no `-f -`, no pattern-file/input fd sharing (grep reads only its file
 // operand). Exit map: 0 = the line is one of the accepted lines; 1 = one
 // line, none of them; 2 = I/O error (also when the line vanishes between the
-// count and the capture); 3 = no <key>= line; 4 = more than one <key>= line,
-// with the line COUNT — never a value — as the only stdout. Every other
-// verdict prints nothing. Shared with the real-shell test in database_test.go
-// so the tested bytes are the production bytes.
+// count and the capture); 3 = no line assigns <key>; 4 = more than one
+// <key>= line, with the line COUNT — never a value — as the only stdout;
+// 5 = <key> is assigned in a non-canonical form (checked before 4). Every
+// verdict but 4 prints nothing. Shared with the real-shell test in
+// database_test.go so the tested bytes are the production bytes.
 func envLineInSetScript(path, key string) string {
-	return cLocalePin + "n=$(grep -c '^" + key + "=' " + shQuote(path) + "); s=$?; " +
+	return cLocalePin + "t=$(grep -cE '^[[:space:]]*(export[[:space:]]+)?" + key + "[[:space:]]*=' " + shQuote(path) + "); s=$?; " +
 		"if [ $s -eq 1 ]; then exit 3; elif [ $s -ne 0 ]; then exit 2; fi; " +
+		"n=$(grep -c '^" + key + "=' " + shQuote(path) + "); s=$?; " +
+		"if [ $s -gt 1 ]; then exit 2; fi; " +
+		`if [ "$n" -lt "$t" ]; then exit 5; fi; ` +
 		`if [ "$n" -gt 1 ]; then printf '%s\n' "$n"; exit 4; fi; ` +
 		"line=$(grep -m1 '^" + key + "=' " + shQuote(path) + ") || exit 2; " +
 		`line=$(printf '%s' "$line" | sed 's/[[:space:]]*$//'); ` +
@@ -402,6 +413,22 @@ type envDuplicateKeyError struct {
 
 func (e *envDuplicateKeyError) Error() string {
 	return fmt.Sprintf("%s appears %d times in %s; keep exactly one line", e.Key, e.Count, e.Path)
+}
+
+// envNonCanonicalKeyError reports a berth-owned key assigned in a form the
+// probe cannot verify: `export KEY=`, leading whitespace or spaces around
+// `=`. phpdotenv reads every one of them, but the ^KEY= anchor sees none, so
+// such a line could set the key (or override a correct canonical line)
+// unseen. It names the key, the path and the canonical line to write —
+// never a value.
+type envNonCanonicalKeyError struct {
+	Key       string
+	Path      string
+	Canonical string
+}
+
+func (e *envNonCanonicalKeyError) Error() string {
+	return fmt.Sprintf("%s is assigned in a form berth cannot verify in %s (export, leading space or spaces around =); write it as %s", e.Key, e.Path, e.Canonical)
 }
 
 // envAcceptStdin serializes an accept set into envLineInSetScript's stdin:
@@ -422,9 +449,11 @@ func envAcceptStdin(accept []string) ([]byte, error) {
 
 // envLineInSet reports whether the ONLY <key>= line of a site's live
 // shared/.env is one of the accepted lines (modulo trailing ASCII
-// whitespace). present is false only when the file has no <key>= line; a key
-// on more than one line returns an *envDuplicateKeyError (whatever the
-// values). The accepted lines travel via STDIN, the live line never leaves
+// whitespace). present is false only when no line assigns <key>; a key
+// assigned in a non-canonical form returns an *envNonCanonicalKeyError
+// naming accept[0] as the line to write, and a key on more than one line an
+// *envDuplicateKeyError (both whatever the values). The accepted lines
+// travel via STDIN, the live line never leaves
 // the host (the verdict is the exit code; the only stdout is the duplicate
 // count), and a probe failure (grep exit 2, unreadable file, a duplicate
 // verdict without a sane count) is a hard error rather than silent agreement.
@@ -452,6 +481,12 @@ func envLineInSet(ctx context.Context, r bssh.Runner, site config.Site, key stri
 			return false, true, fmt.Errorf("probe %s in %s: duplicate verdict without a valid line count", key, sharedEnvPath(site))
 		}
 		return false, true, &envDuplicateKeyError{Key: key, Count: n, Path: sharedEnvPath(site)}
+	case 5:
+		canonical := key + "="
+		if len(accept) > 0 {
+			canonical = accept[0]
+		}
+		return false, true, &envNonCanonicalKeyError{Key: key, Path: sharedEnvPath(site), Canonical: canonical}
 	default:
 		return false, false, fmt.Errorf("probe %s in %s: %s", key, sharedEnvPath(site), res.Stderr)
 	}
@@ -464,10 +499,12 @@ func envLineInSet(ctx context.Context, r bssh.Runner, site config.Site, key stri
 // valkey: true) — would otherwise leave the app on a database, role or cache
 // berth never set up while every run reports green. A key on more than one
 // line is refused whatever the values — a correct line must never vouch for
-// a duplicate the app may read instead. A fresh box (no .env) is fine: the
-// seed will be consistent. Every problem (duplicates and mismatches) is
-// collected before failing, so one run names them all; the error prints only
-// key names, line counts and the canonical lines (Accept[0]), never the
+// a duplicate the app may read instead — and so is a key assigned in a form
+// the probe cannot verify (`export KEY=`, leading whitespace, `KEY = v`),
+// which phpdotenv reads too. A fresh box (no .env) is fine: the seed will be
+// consistent. Every problem (non-canonical forms, duplicates and mismatches)
+// is collected before failing, so one run names them all; the error prints
+// only key names, line counts and the canonical lines (Accept[0]), never the
 // current values. Deliberately NOT overridable by --force, like
 // assertEnvEngineMatch: the fix is the operator's edit.
 func assertEnvBerthKeys(ctx context.Context, r bssh.Runner, s *config.Server, site config.Site) error {
@@ -482,8 +519,9 @@ func assertEnvBerthKeys(ctx context.Context, r bssh.Runner, s *config.Server, si
 	for _, e := range berthOwnedEnv(s, site) {
 		match, present, err := envLineInSet(ctx, r, site, e.Key, e.Accept)
 		var dup *envDuplicateKeyError
-		if errors.As(err, &dup) {
-			problems = append(problems, dup.Error())
+		var nonCanonical *envNonCanonicalKeyError
+		if errors.As(err, &dup) || errors.As(err, &nonCanonical) {
+			problems = append(problems, err.Error())
 			continue
 		}
 		if err != nil {

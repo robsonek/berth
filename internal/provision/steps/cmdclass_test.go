@@ -606,25 +606,29 @@ var auditedScripts = map[string]string{
 	// assertEnvBerthKeys' per-key probe (envLineInSetScript, database.go),
 	// one per key berthOwnedEnv lists for the fixture site (Valkey on: the
 	// DB pair plus the redis trio). Audited command by command: the C-locale
-	// pin (assignment + export, process-local); `grep -c` counts the KEY=
-	// lines of its file operand (reads; explicit exit mapping); a numeric
-	// `[ -gt ]` test and, for a duplicated key, `printf` of that COUNT to
-	// stdout (a number, never a value) before exit 4; `grep -m1` captures
-	// the single KEY= line; a printf|sed trailing-whitespace trim (s///, no
-	// w, no e); a `while IFS= read -r want` loop over stdin whose only body
+	// pin (assignment + export, process-local); `grep -cE` counts the lines
+	// assigning KEY in any phpdotenv form (an ERE anchored at ^ with optional
+	// leading space and `export`; reads its file operand only, explicit exit
+	// mapping); `grep -c` counts the canonical KEY= lines of the same file;
+	// numeric `[ -lt ]`/`[ -gt ]` tests — fewer canonical lines than
+	// assignments exits 5 printing nothing — and, for a duplicated key,
+	// `printf` of the COUNT to stdout (a number, never a value) before exit
+	// 4; `grep -m1` captures the single KEY= line; a printf|sed
+	// trailing-whitespace trim (s///, no w, no e); a `while IFS= read -r
+	// want` loop over stdin whose only body
 	// is a quoted [ "$line" = "$want" ] string equality — no eval, no sh, no
 	// `-f -`, no grep over the accepted lines. Verdicts travel as exit codes;
 	// no line content is printed. Registered here on its own text (a
 	// stdin-less run would read no accepted line and exit 1); the payloads it
 	// is actually issued with are bound pair by pair in auditedStdin.
-	envLineInSetProbeCmd(fixtureSharedEnv, "DB_DATABASE"):    "envLineInSetScript (database.go), DB_DATABASE: locale pin + grep -c count (+ count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
-	envLineInSetProbeCmd(fixtureSharedEnv, "DB_USERNAME"):    "envLineInSetScript (database.go), DB_USERNAME: locale pin + grep -c count (+ count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
-	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_HOST"):     "envLineInSetScript (database.go), REDIS_HOST: locale pin + grep -c count (+ count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
-	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PORT"):     "envLineInSetScript (database.go), REDIS_PORT: locale pin + grep -c count (+ count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
-	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PASSWORD"): "envLineInSetScript (database.go), REDIS_PASSWORD: locale pin + grep -c count (+ count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
-	envLineInSetProbeCmd(fixtureSharedEnv, "DB_URL"):         "envLineInSetScript (database.go), DB_URL: locale pin + grep -c count (+ count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
-	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_URL"):      "envLineInSetScript (database.go), REDIS_URL: locale pin + grep -c count (+ count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
-	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_CLIENT"):   "envLineInSetScript (database.go), REDIS_CLIENT: locale pin + grep -c count (+ count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "DB_DATABASE"):    "envLineInSetScript (database.go), DB_DATABASE: locale pin + grep -cE/grep -c counts (exit 5 on a non-canonical form, count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "DB_USERNAME"):    "envLineInSetScript (database.go), DB_USERNAME: locale pin + grep -cE/grep -c counts (exit 5 on a non-canonical form, count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_HOST"):     "envLineInSetScript (database.go), REDIS_HOST: locale pin + grep -cE/grep -c counts (exit 5 on a non-canonical form, count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PORT"):     "envLineInSetScript (database.go), REDIS_PORT: locale pin + grep -cE/grep -c counts (exit 5 on a non-canonical form, count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PASSWORD"): "envLineInSetScript (database.go), REDIS_PASSWORD: locale pin + grep -cE/grep -c counts (exit 5 on a non-canonical form, count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "DB_URL"):         "envLineInSetScript (database.go), DB_URL: locale pin + grep -cE/grep -c counts (exit 5 on a non-canonical form, count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_URL"):      "envLineInSetScript (database.go), REDIS_URL: locale pin + grep -cE/grep -c counts (exit 5 on a non-canonical form, count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_CLIENT"):   "envLineInSetScript (database.go), REDIS_CLIENT: locale pin + grep -cE/grep -c counts (exit 5 on a non-canonical form, count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
 
 	// Wave 4 (site, tls, backups, offsite), same discipline: pasted literals
 	// for production consts and const-composed commands, test-local mirror
@@ -897,8 +901,11 @@ func envValueMatchProbeCmd(path, key string) string {
 // envLineInSetProbeCmd mirrors envLineInSetScript's composition
 // (database.go) — a copy on purpose (see auditedScripts and auditedStdin).
 func envLineInSetProbeCmd(path, key string) string {
-	return "LC_ALL=C; export LC_ALL; n=$(grep -c '^" + key + "=' " + shQuote(path) + "); s=$?; " +
+	return "LC_ALL=C; export LC_ALL; t=$(grep -cE '^[[:space:]]*(export[[:space:]]+)?" + key + "[[:space:]]*=' " + shQuote(path) + "); s=$?; " +
 		"if [ $s -eq 1 ]; then exit 3; elif [ $s -ne 0 ]; then exit 2; fi; " +
+		"n=$(grep -c '^" + key + "=' " + shQuote(path) + "); s=$?; " +
+		"if [ $s -gt 1 ]; then exit 2; fi; " +
+		`if [ "$n" -lt "$t" ]; then exit 5; fi; ` +
 		`if [ "$n" -gt 1 ]; then printf '%s\n' "$n"; exit 4; fi; ` +
 		"line=$(grep -m1 '^" + key + "=' " + shQuote(path) + ") || exit 2; " +
 		`line=$(printf '%s' "$line" | sed 's/[[:space:]]*$//'); ` +
