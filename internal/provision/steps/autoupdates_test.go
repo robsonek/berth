@@ -455,3 +455,19 @@ func TestUnattendedOriginsManualAbsentIsSatisfied(t *testing.T) {
 		}
 	}
 }
+
+// assertInstalledWith fails unless the step issued exactly one package
+// install and it is want. (FakeRunner already fails Apply on an unstubbed
+// install command; this pins the count and names the command on failure.)
+func assertInstalledWith(t *testing.T, f *bssh.FakeRunner, want string) {
+	t.Helper()
+	var got []string
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "apt-get install") {
+			got = append(got, c.Cmd)
+		}
+	}
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("package installs = %q, want exactly [%q]", got, want)
+	}
+}

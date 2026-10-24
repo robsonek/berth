@@ -535,7 +535,8 @@ func (d database) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serv
 		}
 	}
 	// Install the server once (optionally from its producer repo).
-	if repo, has, used := databaseUpstream(eng, s); used {
+	repo, has, used := databaseUpstream(eng, s)
+	if used {
 		if err := ensureOwnRepo(ctx, rc, r, repo); err != nil {
 			return fmt.Errorf("add %s repo: %w", repo.Name, err)
 		}
@@ -546,8 +547,9 @@ func (d database) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serv
 	}
 	// A default-major metapackage (PGDG's postgresql) is installed, never
 	// upgraded: once the repo repoints it at the next major, an upgrade here
-	// would install that major beside the running cluster.
-	install := aptInstall
+	// would install that major beside the running cluster. Under
+	// apt.upstream_updates: manual no upstream server package is upgraded.
+	install := upstreamInstall(s, used)
 	if eng.ServerPackageTracksMajor() {
 		install = aptInstallNoUpgrade
 	}

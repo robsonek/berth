@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/robsonek/berth/internal/apt"
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
 	bssh "github.com/robsonek/berth/internal/ssh"
@@ -295,7 +294,6 @@ func (php) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 	if err != nil {
 		return err
 	}
-	m := apt.New(r)
 	// The write path re-classifies via ensureOwnRepo (never a bare EnsureRepo:
 	// Apply often runs for unrelated drift, and the raw call would overwrite a
 	// foreign list without --force); the stock path sweeps a lingering
@@ -317,7 +315,7 @@ func (php) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r b
 	if err := invalidateReloaded(ctx, r, fpmService(s)); err != nil {
 		return err
 	}
-	if err := m.EnsurePackages(ctx, nil, pkgs...); err != nil {
+	if err := upstreamInstall(s, sury)(ctx, r, pkgs...); err != nil {
 		return err
 	}
 	if res, err := r.Run(ctx, "install -d -o root -g root -m 0755 "+shQuote(phpLogDir), nil); err != nil {

@@ -14,7 +14,10 @@ Notable changes to berth. Older releases are documented on the
   removes its `/etc/apt/apt.conf.d/52berth-unattended-upgrades` drop-in (a
   file there that berth did not write is left alone, even with `--force`).
   The repositories stay configured, and updates from Debian's own
-  repositories are still applied automatically. The README gains a
+  repositories are still applied automatically. Provisioning still installs
+  missing upstream packages but never upgrades installed ones: the php,
+  nginx and database steps install them with `apt-get install --no-upgrade`,
+  as berth already installs the PostgreSQL server package. The README gains a
   "Controlled upstream update" procedure for the maintenance window. The
   default (`auto`, or no key) keeps today's behaviour, so no host drifts.
 

@@ -73,6 +73,20 @@ func unattendedRepos(s *config.Server) ([]apt.Repo, error) {
 	return upstreamRepos(s)
 }
 
+// upstreamInstall returns the package installer of a php/nginx/database step;
+// used reports whether the step installs from its own upstream repo. Under
+// apt.upstream_updates: manual an upstream install is apt-get install
+// --no-upgrade (the mechanism the PostgreSQL server package already uses): a
+// missing package still installs, an installed one is never upgraded, so a
+// provision run never moves upstream packages the operator upgrades by hand.
+// Otherwise — and always for Debian's own packages — it is the plain install.
+func upstreamInstall(s *config.Server, used bool) func(context.Context, bssh.Runner, ...string) error {
+	if used && !s.Apt.UpstreamAutoUpdates() {
+		return aptInstallNoUpgrade
+	}
+	return aptInstall
+}
+
 // unattendedOriginsPath is base's drop-in extending unattended-upgrades to the
 // upstream repos the config uses. It sorts after the stock
 // 50unattended-upgrades; apt.conf list values accumulate across files, so the

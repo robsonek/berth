@@ -538,3 +538,46 @@ func TestNginxApplyDebianSourceRemovesLingeringRepo(t *testing.T) {
 		t.Fatalf("want one upstream-versions warning, got %v", warns)
 	}
 }
+
+// runNginxApplyInstall runs Nginx().Apply for s (repo list absent, nginx
+// running) with wantInstall as the only stubbed package install, and asserts
+// it was the one issued.
+func runNginxApplyInstall(t *testing.T, s *config.Server, wantInstall string) {
+	t.Helper()
+	f := bssh.NewFakeRunner()
+	if s.Nginx.Source == "nginx" {
+		stubEnsureRepoChain(f, apt.NginxOrg())
+		f.On("install -d /etc/nginx/sites-available /etc/nginx/sites-enabled", bssh.Result{})
+		f.On("cat "+shQuote("/etc/nginx/conf.d/berth-sites.conf"), bssh.Result{ExitCode: 1})
+		f.On("sed -ri 's|^[[:space:]]*user[[:space:]]+[^;]*;|user  www-data;|' "+nginxConfPath, bssh.Result{})
+	}
+	f.On(wantInstall, bssh.Result{})
+	f.On("systemctl enable nginx", bssh.Result{})
+	stubNginxApplyTail(f)
+	if err := Nginx().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	assertInstalledWith(t, f, wantInstall)
+}
+
+// Under apt.upstream_updates: manual a provision installs nginx.org's nginx
+// when missing but never upgrades an installed one.
+func TestNginxApplyManualUpstreamNeverUpgrades(t *testing.T) {
+	s := &config.Server{Nginx: config.Nginx{Source: "nginx"}, Apt: config.Apt{UpstreamUpdates: "manual"}}
+	runNginxApplyInstall(t, s, "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-upgrade nginx")
+}
+
+// The default (and auto) install command is byte-identical to before; Debian's
+// nginx is not an upstream package, so manual leaves it on the plain install.
+func TestNginxApplyInstallUnchangedOutsideManualUpstream(t *testing.T) {
+	for _, c := range []struct{ name, source, updates string }{
+		{"nginx.org, default", "nginx", ""},
+		{"nginx.org, auto", "nginx", "auto"},
+		{"debian, manual", "debian", "manual"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := &config.Server{Nginx: config.Nginx{Source: c.source}, Apt: config.Apt{UpstreamUpdates: c.updates}}
+			runNginxApplyInstall(t, s, "DEBIAN_FRONTEND=noninteractive apt-get install -y nginx")
+		})
+	}
+}

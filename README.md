@@ -553,11 +553,12 @@ scope):
     17 from PGDG) once Debian publishes a newer version than the installed
     one, which then replaces it with Debian's build. You choose when the
     upstream packages move — see
-    [Controlled upstream update](#controlled-upstream-update). A
-    `berth provision` run is one such moment: when the php, nginx or MariaDB
-    database step has work to do, its `apt-get install` also upgrades that
-    step's installed packages to the repository's current version. The
-    default is `auto` (leaving the key out is the same).
+    [Controlled upstream update](#controlled-upstream-update). Provisioning
+    still installs missing upstream packages but never upgrades installed
+    ones (`apt-get install --no-upgrade` in the php, nginx and database
+    steps), though a newly installed package can still pull in newer
+    versions of the packages it depends on. The default is `auto` (leaving
+    the key out is the same).
 - **fail2ban** — a managed jail bans SSH brute-forcers (bound to your configured
   SSH port) and repeat offenders (`recidive`). berth writes it as
   `/etc/fail2ban/jail.d/99-berth.conf`, leaving `jail.local` — which loads

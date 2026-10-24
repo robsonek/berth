@@ -1997,3 +1997,50 @@ func TestDatabaseApplyRegistersCachedPasswordBeforeCachedAppKeyValidationFails(t
 		t.Fatalf("the password must already be registered when cached APP_KEY validation fails; Apply => %q", got)
 	}
 }
+
+// runMariaDBApplyInstall runs Database().Apply on a fresh single-site MariaDB
+// box (repo list absent, no .env yet) with wantInstall as the only stubbed
+// package install, and asserts it was the one issued.
+func runMariaDBApplyInstall(t *testing.T, source, updates, wantInstall string) {
+	t.Helper()
+	chdirTemp(t)
+	s := databaseServer()
+	s.Database.Source = source
+	s.Apt.UpstreamUpdates = updates
+	repo := apt.MariaDBOrg()
+	f := bssh.NewFakeRunner()
+	stubEngineRepoAbsent(f, repo)
+	if source == "mariadb" {
+		stubEnsureRepoChain(f, repo)
+	}
+	f.On(wantInstall, bssh.Result{})
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
+	f.On("mysql --protocol=socket", bssh.Result{})
+	stubClientAuthAbsent(f, s, ".my.cnf")
+	stubEnvSeed(f, s)
+	stubClientAuthSeed(f, s, ".my.cnf")
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	assertInstalledWith(t, f, wantInstall)
+}
+
+// Under apt.upstream_updates: manual a provision installs the MariaDB
+// upstream server when missing but never upgrades an installed one.
+func TestDatabaseApplyManualMariaDBNeverUpgrades(t *testing.T) {
+	runMariaDBApplyInstall(t, "mariadb", "manual", "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-upgrade mariadb-server")
+}
+
+// The default (and auto) install command is byte-identical to before; Debian's
+// MariaDB is not an upstream package, so manual leaves it on the plain install.
+func TestDatabaseApplyMariaDBInstallUnchangedOutsideManualUpstream(t *testing.T) {
+	for _, c := range []struct{ name, source, updates string }{
+		{"mariadb.org, default", "mariadb", ""},
+		{"mariadb.org, auto", "mariadb", "auto"},
+		{"debian, manual", "debian", "manual"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			runMariaDBApplyInstall(t, c.source, c.updates, "DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server")
+		})
+	}
+}
