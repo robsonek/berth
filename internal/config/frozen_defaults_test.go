@@ -36,6 +36,15 @@ func TestOnHostDefaultsAreFrozen(t *testing.T) {
 	if b.RetentionDaysEff() != 7 || b.ScheduleEff() != "30 3 * * *" {
 		t.Errorf("backups defaults changed: %d %q", b.RetentionDaysEff(), b.ScheduleEff())
 	}
+	// workers gates whether Supervisor programs autostart and get started by
+	// berth; apt.upstream_updates gates the unattended-upgrades origins
+	// drop-in for berth's upstream repos.
+	if (&Server{}).WorkersRunning(Site{}) {
+		t.Error("workers default changed: want dormant (programs never started by berth)")
+	}
+	if !(Apt{}).UpstreamAutoUpdates() {
+		t.Error("apt.upstream_updates default changed: want automatic upstream updates")
+	}
 }
 
 // The Load()-path defaults with on-host consequences: scheduler=true gates

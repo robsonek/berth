@@ -356,6 +356,47 @@ func TestSchedulerEnabled(t *testing.T) {
 	}
 }
 
+func TestValidateFirstDeployKnobs(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*Server)
+		wantErr string // "" = valid; otherwise the error must START with it (names the key)
+	}{
+		{"upstream_updates auto", func(s *Server) { s.Apt.UpstreamUpdates = "auto" }, ""},
+		{"upstream_updates manual", func(s *Server) { s.Apt.UpstreamUpdates = "manual" }, ""},
+		{"server workers dormant", func(s *Server) { s.Workers = "dormant" }, ""},
+		{"server workers running", func(s *Server) { s.Workers = "running" }, ""},
+		{"site workers dormant", func(s *Server) { s.Sites[0].Workers = "dormant" }, ""},
+		{"site workers running", func(s *Server) { s.Sites[0].Workers = "running" }, ""},
+		{"repository_key with repository", func(s *Server) {
+			s.Sites[0].Repository = "git@github.com:o/r.git"
+			s.Sites[0].RepositoryKey = "~/.ssh/deploy_key"
+		}, ""},
+		{"upstream_updates weekly", func(s *Server) { s.Apt.UpstreamUpdates = "weekly" }, "apt.upstream_updates must be auto or manual"},
+		{"server workers on", func(s *Server) { s.Workers = "on" }, "workers must be dormant or running"},
+		{"site workers x", func(s *Server) { s.Sites[0].Workers = "x" }, "sites[0].workers must be dormant or running"},
+		{"repository_key without repository", func(s *Server) { s.Sites[0].RepositoryKey = "~/.ssh/deploy_key" }, "sites[0].repository_key requires sites[0].repository"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := base()
+			tc.mutate(s)
+			err := s.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want valid, got %v", err)
+				}
+				return
+			}
+			// HasPrefix, not Contains: "workers must be…" is a substring of the
+			// per-site message, so only the prefix tells server from site apart.
+			if err == nil || !strings.HasPrefix(err.Error(), tc.wantErr) {
+				t.Fatalf("want error starting with %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
 func validQueueServer() *Server {
 	return &Server{
 		ID:   "test-machine-0001",

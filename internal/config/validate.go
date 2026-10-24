@@ -69,6 +69,12 @@ var allowedPHPVersions = map[string]bool{"8.2": true, "8.3": true, "8.4": true, 
 var allowedPHPSources = map[string]bool{"auto": true, "sury": true, "debian": true}
 var allowedNginxSources = map[string]bool{"debian": true, "nginx": true}
 
+// allowedUpstreamUpdates and allowedWorkers list "" on purpose: the zero
+// value IS the default (no SetDefault), so wizard ToServer() and
+// literal-Server callers get the pre-knob behavior without seeding anything.
+var allowedUpstreamUpdates = map[string]bool{"": true, "auto": true, "manual": true}
+var allowedWorkers = map[string]bool{"": true, "dormant": true, "running": true}
+
 // allowedValkeyPolicies are the maxmemory-policy values Valkey accepts.
 var allowedValkeyPolicies = map[string]bool{
 	"noeviction": true, "allkeys-lru": true, "allkeys-lfu": true, "allkeys-random": true,
@@ -310,6 +316,9 @@ func (s *Server) Validate() error {
 	if s.Fail2ban.Maxretry != 0 && (s.Fail2ban.Maxretry < 1 || s.Fail2ban.Maxretry > 100) {
 		return fmt.Errorf("fail2ban.maxretry %d out of range (1-100)", s.Fail2ban.Maxretry)
 	}
+	if !allowedWorkers[s.Workers] {
+		return fmt.Errorf("workers must be dormant or running (got %q)", s.Workers)
+	}
 	if err := s.Tuning.validate(); err != nil {
 		return err
 	}
@@ -356,6 +365,14 @@ func (s *Server) Validate() error {
 		}
 		if err := site.validate(); err != nil {
 			return fmt.Errorf("site %d: %w", i, err)
+		}
+		if !allowedWorkers[site.Workers] {
+			return fmt.Errorf("sites[%d].workers must be dormant or running (got %q)", i, site.Workers)
+		}
+		// The key is installed as the site's git deploy key; without a
+		// repository there is nothing for it to authenticate against.
+		if site.RepositoryKey != "" && site.Repository == "" {
+			return fmt.Errorf("sites[%d].repository_key requires sites[%d].repository", i, i)
 		}
 		// Per-site database identity: every site carries its own block. Checked
 		// before the SQL-identifier tests so the message names the real problem
@@ -782,6 +799,9 @@ func ValidateAptPackage(p string) error {
 }
 
 func (a Apt) validate() error {
+	if !allowedUpstreamUpdates[a.UpstreamUpdates] {
+		return fmt.Errorf("apt.upstream_updates must be auto or manual (got %q)", a.UpstreamUpdates)
+	}
 	seen := map[string]bool{}
 	for _, repo := range a.Repos {
 		if err := ValidateAptRepoName(repo.Name); err != nil {

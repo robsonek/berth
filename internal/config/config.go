@@ -536,11 +536,20 @@ func offsiteEnvLoaderFor(path string) string {
 // what berth's own steps install. Repos are fully declarative (removed from
 // the config -> swept from the host); packages are INSTALL-ONLY by design —
 // removing one stops managing it, berth never uninstalls (no ledger, no
-// apt-get remove cascade risk).
+// apt-get remove cascade risk). UpstreamUpdates decides whether
+// unattended-upgrades may update packages from berth's own upstream repos
+// (Sury, nginx.org, MariaDB, PGDG): "" or "auto" (default) = yes, "manual" =
+// only the operator upgrades them. The zero value is the default, so it has
+// no SetDefault.
 type Apt struct {
-	Repos    []AptRepo `mapstructure:"repos" yaml:"repos,omitempty"`
-	Packages []string  `mapstructure:"packages" yaml:"packages,omitempty"`
+	Repos           []AptRepo `mapstructure:"repos" yaml:"repos,omitempty"`
+	Packages        []string  `mapstructure:"packages" yaml:"packages,omitempty"`
+	UpstreamUpdates string    `mapstructure:"upstream_updates" yaml:"upstream_updates,omitempty"` // auto (default) | manual
 }
+
+// UpstreamAutoUpdates reports whether unattended-upgrades may update packages
+// from berth's upstream repos: true unless upstream_updates is "manual".
+func (a Apt) UpstreamAutoUpdates() bool { return a.UpstreamUpdates != "manual" }
 
 // AptRepo is one pinned third-party repository. The on-host artifacts live in
 // the berth- namespace (/etc/apt/sources.list.d/berth-<name>.list and the
@@ -606,6 +615,7 @@ type Site struct {
 	DeployPath     string       `mapstructure:"deploy_path" yaml:"deploy_path"`
 	User           string       `mapstructure:"user" yaml:"user,omitempty"` // OS user that owns/runs the site; derived from the domain when empty
 	Repository     string       `mapstructure:"repository" yaml:"repository,omitempty"`
+	RepositoryKey  string       `mapstructure:"repository_key" yaml:"repository_key,omitempty"` // local path (~ allowed) to the private deploy key to install instead of generating one; requires repository
 	SSL            bool         `mapstructure:"ssl" yaml:"ssl"`
 	SSLMode        string       `mapstructure:"ssl_mode" yaml:"ssl_mode,omitempty"` // letsencrypt (default) | selfsigned
 	SSLEmail       string       `mapstructure:"ssl_email" yaml:"ssl_email,omitempty"`
@@ -616,6 +626,7 @@ type Site struct {
 	Backups        *bool        `mapstructure:"backups" yaml:"backups,omitempty"`                 // per-site override; nil = inherit server default
 	Queue          *QueueConfig `mapstructure:"queue" yaml:"queue,omitempty"`
 	Daemons        []Daemon     `mapstructure:"daemons" yaml:"daemons,omitempty"`
+	Workers        string       `mapstructure:"workers" yaml:"workers,omitempty"` // dormant | running; empty = inherit server default
 }
 
 // CertMode returns the certificate mode for a site, defaulting to "letsencrypt".
@@ -658,6 +669,18 @@ func (s *Server) SchedulerEnabled(site Site) bool {
 		return *site.Scheduler
 	}
 	return s.Scheduler
+}
+
+// WorkersRunning reports whether a site's Supervisor programs (queue worker
+// and daemons) should be running: an explicit per-site sites[].workers wins;
+// otherwise the server-level workers default applies. Only "running" is true —
+// the empty default keeps the programs dormant, as before the knob existed.
+func (s *Server) WorkersRunning(site Site) bool {
+	w := site.Workers
+	if w == "" {
+		w = s.Workers
+	}
+	return w == "running"
 }
 
 // CloudflareOnlyEnabled reports whether origin lockdown applies to a site: an
@@ -874,6 +897,7 @@ type Server struct {
 	Valkey         bool     `mapstructure:"valkey" yaml:"valkey"`
 	Queue          bool     `mapstructure:"queue" yaml:"queue"`
 	Scheduler      bool     `mapstructure:"scheduler" yaml:"scheduler"`
+	Workers        string   `mapstructure:"workers" yaml:"workers,omitempty"` // dormant (default) | running; sites[].workers overrides
 	CloudflareOnly bool     `mapstructure:"cloudflare_only" yaml:"cloudflare_only"`
 	Fail2ban       Fail2ban `mapstructure:"fail2ban" yaml:"fail2ban,omitempty"`
 	Tuning         Tuning   `mapstructure:"tuning" yaml:"tuning,omitempty"`
