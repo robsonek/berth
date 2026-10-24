@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
 
@@ -266,6 +268,82 @@ func TestRecordingRunnerDerivesWave3AnswersFromState(t *testing.T) {
 	}
 	if res, err := conv.Run(ctx, match, []byte("DB_PASSWORD=SomethingElse0000000000000000000\n")); err != nil || res.ExitCode != 1 {
 		t.Errorf("disagreeing value = (%+v, %v), want exit 1", res, err)
+	}
+
+	// The berth-key probe walks its stdin accept set against the modelled
+	// .env: the site's own socket is accepted, any other host is not, and
+	// the seed's absent REDIS_PASSWORD reads as "no line" (exit 3).
+	redisHost := envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_HOST")
+	if res, err := conv.Run(ctx, redisHost, []byte(envValueFormsStdin("REDIS_HOST", fixtureValkeySocket))); err != nil || res.ExitCode != 0 {
+		t.Errorf("provisioned REDIS_HOST = (%+v, %v), want exit 0", res, err)
+	}
+	if res, err := conv.Run(ctx, redisHost, []byte(envValueFormsStdin("REDIS_HOST", "127.0.0.1"))); err != nil || res.ExitCode != 1 {
+		t.Errorf("other REDIS_HOST = (%+v, %v), want exit 1", res, err)
+	}
+	if res, err := conv.Run(ctx, envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PASSWORD"), []byte(redisPasswordUnsetStdin)); err != nil || res.ExitCode != 3 {
+		t.Errorf("absent REDIS_PASSWORD = (%+v, %v), want exit 3", res, err)
+	}
+	// The override keys: the seed writes REDIS_CLIENT=phpredis (accepted)
+	// and neither URL (absent, exit 3).
+	if res, err := conv.Run(ctx, envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_CLIENT"), []byte(envValueFormsStdin("REDIS_CLIENT", "phpredis"))); err != nil || res.ExitCode != 0 {
+		t.Errorf("seeded REDIS_CLIENT = (%+v, %v), want exit 0", res, err)
+	}
+	for _, key := range []string{"DB_URL", "REDIS_URL"} {
+		if res, err := conv.Run(ctx, envLineInSetProbeCmd(fixtureSharedEnv, key), []byte(envUnsetStdin(key))); err != nil || res.ExitCode != 3 {
+			t.Errorf("absent %s = (%+v, %v), want exit 3", key, res, err)
+		}
+	}
+	// A duplicated key is its own verdict, even when the first line agrees.
+	env := convHost.files[fixtureSharedEnv]
+	env.content += "REDIS_HOST=127.0.0.1\n"
+	convHost.files[fixtureSharedEnv] = env
+	if res, err := conv.Run(ctx, redisHost, []byte(envValueFormsStdin("REDIS_HOST", fixtureValkeySocket))); err != nil || res.ExitCode != 4 || res.Stdout != "2\n" {
+		t.Errorf("duplicated REDIS_HOST = (%+v, %v), want exit 4 with the count 2", res, err)
+	}
+	// A non-canonical assignment (export, leading whitespace, spaces around
+	// =) is its own verdict, silent on stdout — beside an agreeing
+	// canonical line, and for a key that has no canonical line at all.
+	// Commented and longer-key lines stay invisible.
+	env = convHost.files[fixtureSharedEnv]
+	env.content += "export REDIS_PORT=1\n  DB_URL = mysql://elsewhere\n#export REDIS_URL=x\nREDIS_URL_OLD=x\n"
+	convHost.files[fixtureSharedEnv] = env
+	if res, err := conv.Run(ctx, envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PORT"), []byte(envValueFormsStdin("REDIS_PORT", "0"))); err != nil || res.ExitCode != 5 || res.Stdout != "" {
+		t.Errorf("export REDIS_PORT beside REDIS_PORT=0 = (%+v, %v), want exit 5 and no output", res, err)
+	}
+	if res, err := conv.Run(ctx, envLineInSetProbeCmd(fixtureSharedEnv, "DB_URL"), []byte(envUnsetStdin("DB_URL"))); err != nil || res.ExitCode != 5 || res.Stdout != "" {
+		t.Errorf("spaced DB_URL = (%+v, %v), want exit 5 and no output", res, err)
+	}
+	if res, err := conv.Run(ctx, envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_URL"), []byte(envUnsetStdin("REDIS_URL"))); err != nil || res.ExitCode != 3 {
+		t.Errorf("commented/longer REDIS_URL = (%+v, %v), want exit 3 (no assignment of the key)", res, err)
+	}
+}
+
+// The deploy key's public-half read follows the modelled key file: the
+// maximal variant's converged host holds the repository_key itself, so the
+// answer IS that key's public half; a file that is not a key or is missing
+// answers ssh-keygen's failure, so a canned line can never bless a mismatch.
+func TestRecordingRunnerDerivesDeployKeyFromState(t *testing.T) {
+	ctx := context.Background()
+	s := variantServer(t, "maximal")
+	local, err := loadLocalDeployKey(s.Sites[0].RepositoryKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	derive := "ssh-keygen -y -f " + shQuote(deployKeyPath("appuser"))
+	convHost := newFakeHost(t, "converged", s)
+	conv := newRecordingRunner(convHost)
+	if res, err := conv.Run(ctx, derive, nil); err != nil || res.ExitCode != 0 || strings.TrimSpace(res.Stdout) != local.AuthorizedKey {
+		t.Errorf("installed repository_key = (%+v, %v), want its public half %q", res, err, local.AuthorizedKey)
+	}
+	key := convHost.files[deployKeyPath("appuser")]
+	key.content = "not a key\n"
+	convHost.files[deployKeyPath("appuser")] = key
+	if res, err := conv.Run(ctx, derive, nil); err != nil || res.ExitCode == 0 || res.Stdout != "" {
+		t.Errorf("unparsable key file = (%+v, %v), want a failure with no public half", res, err)
+	}
+	fresh := newRecordingRunner(newFakeHost(t, "fresh", s))
+	if res, err := fresh.Run(ctx, derive, nil); err != nil || res.ExitCode == 0 {
+		t.Errorf("missing key file = (%+v, %v), want a failure", res, err)
 	}
 }
 
@@ -655,6 +733,14 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 	case cmd == sshKnownHostProbeCmd(fixtureGitKnownHost, fixtureKnownHostsPath):
 		return r.answerKnownHostLookup(fixtureGitKnownHost, fixtureKnownHostsPath), true
 
+	// hostDeployKey's public-half read (deploykey.go): accounts.Check PARSES
+	// the first two fields and compares them with the repository_key's.
+	// Answered with real ssh-keygen -y semantics over the modelled key file,
+	// never canned: the derived "<type> <base64>" line for a key that
+	// parses, exit 255 for a missing or unparsable file.
+	case f[0] == "ssh-keygen" && len(f) == 4 && f[1] == "-y" && f[2] == "-f":
+		return r.answerPublicHalf(unq(f[3])), true
+
 	// sshdOptsGuard PARSES the file body for the last SSHD_OPTS assignment;
 	// keyed to the production const so the model tracks the issued shape. A
 	// missing file is exit 0 with no output — the probe's own semantics
@@ -747,11 +833,11 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 
 	// probeSQL PARSES stdout (trimmed "1") and the exit code. Answered from
 	// the modelled database/grant sets; an empty result set is exit 0 with no
-	// output, exactly what mysql -N -e prints.
+	// output, exactly what mariadb -N -e prints.
 	case cmd == mariadbDBExistsProbe("app"):
-		return r.answerMySQLScalar(r.h.databases["app"]), true
+		return r.answerMariaDBScalar(r.h.databases["app"]), true
 	case cmd == mariadbUserGrantedProbe("app", "app"):
-		return r.answerMySQLScalar(r.h.dbGrants["app:app"]), true
+		return r.answerMariaDBScalar(r.h.dbGrants["app:app"]), true
 
 	// probePSQL, the postgres twin (the postgres variant): PARSES stdout
 	// (trimmed "1") and the exit code, answered from the same modelled sets
@@ -774,6 +860,13 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 		return r.answerEnvValueMatch(fixtureSharedEnv, "DB_PASSWORD", stdin), true
 	case cmd == envValueMatchProbeCmd(fixtureSharedEnv, "APP_KEY"):
 		return r.answerEnvValueMatch(fixtureSharedEnv, "APP_KEY", stdin), true
+
+	// envLineInSet (assertEnvBerthKeys) reads ONLY the exit code: the accept
+	// set arrives on stdin, one line per `read`, and the live first KEY= line
+	// (trailing ASCII whitespace trimmed) is string-compared to each. Keyed
+	// on the exact per-key probe text, so an unlisted key stays unanswered.
+	case envLineInSetFixtureKey(cmd) != "":
+		return r.answerEnvLineInSet(fixtureSharedEnv, envLineInSetFixtureKey(cmd), stdin), true
 
 	// nginxRunsAsWWWData reads ONLY the exit code of its grep -qE over
 	// nginx.conf (reached under nginx.source=nginx). Real grep semantics over
@@ -872,12 +965,15 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 		cmd == "[ "+shQuote(unq(f[1]))+" -ef "+shQuote(unq(f[3]))+" ]":
 		return r.answerSameFile(unq(f[1]), unq(f[3])), true
 
-	// site.Check PARSES supervisorctl's stdout+stderr for "no such" only —
-	// the loaded/not-loaded distinction is the whole verdict. Loaded derives
-	// from the model: the program's conf file exists and supervisord runs.
-	// No profile models the on-disk-but-never-reread state, so that branch
-	// stays unexercised (same documented limit as the valkey stale-binary
-	// branch). A loaded-but-dormant worker answers STOPPED at exit 3 —
+	// site.Check PARSES supervisorctl's stdout+stderr for "no such" (the
+	// loaded verdict) and the second column of every line (the workers:
+	// running verdict). Loaded derives from the model: the program's conf
+	// file exists and supervisord runs. No profile models the on-disk-but-
+	// never-reread state, so that branch stays unexercised (same documented
+	// limit as the valkey stale-binary branch). The process state derives
+	// from the conf supervisord loaded, one line per numprocs: autostart=true
+	// means supervisord started it (RUNNING, exit 0 — a healthy program), a
+	// dormant autostart=false conf answers STOPPED at exit 3 —
 	// supervisorctl's real exit for a non-RUNNING program, which the Check
 	// ignores.
 	case len(f) == 3 && f[0] == "supervisorctl" && f[1] == "status" &&
@@ -886,10 +982,27 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 		prog := strings.TrimSuffix(unq(f[2]), ":*")
 		conf, ok := r.h.files["/etc/supervisor/conf.d/"+prog+".conf"]
 		sup, supOK := r.h.unit("supervisor")
-		if ok && conf.kind == "regular file" && supOK && sup.active {
-			return bssh.Result{ExitCode: 3, Stdout: prog + ":" + prog + "_00" + strings.Repeat(" ", 8) + "STOPPED   Not started\n"}, true
+		if !ok || conf.kind != "regular file" || !supOK || !sup.active {
+			return bssh.Result{ExitCode: 4, Stdout: unq(f[2]) + ": ERROR (no such group)\n"}, true
 		}
-		return bssh.Result{ExitCode: 4, Stdout: unq(f[2]) + ": ERROR (no such group)\n"}, true
+		lines := strings.Split(conf.content, "\n")
+		state, tail, exit := "STOPPED", "Not started", 3
+		if slices.Contains(lines, "autostart=true") {
+			state, tail, exit = "RUNNING", "pid 4242, uptime 1:00:00", 0
+		}
+		n := 1
+		for _, l := range lines {
+			if v, found := strings.CutPrefix(l, "numprocs="); found {
+				if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+					n = parsed
+				}
+			}
+		}
+		var out strings.Builder
+		for i := range n {
+			fmt.Fprintf(&out, "%s:%s_%02d%s%s   %s\n", prog, prog, i, strings.Repeat(" ", 8), state, tail)
+		}
+		return bssh.Result{ExitCode: exit, Stdout: out.String()}, true
 
 	// Validators just need to succeed so the Check continues. Whether ISSUING
 	// them is allowed is the classifier's judgement, not the model's. Only the
@@ -1054,16 +1167,32 @@ func (r *recordingRunner) answerKnownHostLookup(token, path string) bssh.Result 
 	return bssh.Result{ExitCode: 1}
 }
 
+// answerPublicHalf evaluates `ssh-keygen -y -f <path>` over the model: the
+// public half of the modelled private key, or ssh-keygen's exit 255 with its
+// diagnostic when the file is missing or is not a key (the fixture's
+// placeholder keys are not — only a repository_key site models a real one).
+func (r *recordingRunner) answerPublicHalf(path string) bssh.Result {
+	file, ok := r.h.files[path]
+	if !ok {
+		return bssh.Result{ExitCode: 255, Stderr: path + ": No such file or directory"}
+	}
+	signer, err := ssh.ParsePrivateKey([]byte(file.content))
+	if err != nil {
+		return bssh.Result{ExitCode: 255, Stderr: `Load key "` + path + `": invalid format`}
+	}
+	return bssh.Result{Stdout: string(ssh.MarshalAuthorizedKey(signer.PublicKey()))}
+}
+
 // mariadbDBExistsProbe / mariadbUserGrantedProbe mirror probeSQL's
 // composition over DatabaseExists/UserGranted (internal/database/mariadb.go)
 // — copies on purpose, so a production probe change makes the answer fall
 // away loudly instead of feeding the new shape a stale reply.
 func mariadbDBExistsProbe(db string) string {
-	return `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='` + db + `'"`
+	return `mariadb --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='` + db + `'"`
 }
 
 func mariadbUserGrantedProbe(user, db string) string {
-	return `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='` + db + `' AND GRANTEE='''` + user + `''@''localhost''' LIMIT 1"`
+	return `mariadb --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='` + db + `' AND GRANTEE='''` + user + `''@''localhost''' LIMIT 1"`
 }
 
 // valkeyPingProbeCmd mirrors valkeyPingCmd's composition (valkey.go) — a copy
@@ -1074,13 +1203,13 @@ func valkeyPingProbeCmd(user, pool string) string {
 		shQuote("/run/berth-valkey/"+pool+"/valkey.sock") + " ping"
 }
 
-// answerMySQLScalar evaluates a probeSQL query whose modelled truth is hit:
-// mysql prints "1" for a matching row, nothing for an empty result set, both
+// answerMariaDBScalar evaluates a probeSQL query whose modelled truth is hit:
+// mariadb prints "1" for a matching row, nothing for an empty result set, both
 // at exit 0 — but only while the server package is present and the daemon
 // runs; a stopped daemon answers the client's connect error.
-func (r *recordingRunner) answerMySQLScalar(hit bool) bssh.Result {
+func (r *recordingRunner) answerMariaDBScalar(hit bool) bssh.Result {
 	if _, ok := r.h.packages["mariadb-server"]; !ok {
-		return bssh.Result{ExitCode: 127, Stderr: "sh: 1: mysql: not found"}
+		return bssh.Result{ExitCode: 127, Stderr: "sh: 1: mariadb: not found"}
 	}
 	if u, ok := r.h.unit("mariadb.service"); !ok || !u.active {
 		return bssh.Result{ExitCode: 1, Stderr: "ERROR 2002 (HY000): Can't connect to local server"}
@@ -1107,7 +1236,7 @@ func pgUserGrantedProbe(user, db string) string {
 	return pgProbeCmd("SELECT 1 FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE d.datname='" + db + "' AND r.rolname='" + user + "'")
 }
 
-// answerPSQLScalar is answerMySQLScalar's postgres twin: psql -tA prints the
+// answerPSQLScalar is answerMariaDBScalar's postgres twin: psql -tA prints the
 // bare value for a matching row and nothing for an empty result set, both at
 // exit 0. Without the server package there is no postgres account for sudo
 // to become (its own exit 1); a stopped daemon answers psql's connect
@@ -1404,6 +1533,70 @@ func (r *recordingRunner) answerEnvValueMatch(path, key string, stdin []byte) bs
 		return bssh.Result{}
 	}
 	return bssh.Result{ExitCode: 1}
+}
+
+// envLineInSetFixtureKey returns the key when cmd is the exact
+// envLineInSetScript probe for one of the keys berthOwnedEnv lists, aimed
+// at the fixture site's shared/.env; "" otherwise.
+func envLineInSetFixtureKey(cmd string) string {
+	for _, key := range []string{"DB_DATABASE", "DB_USERNAME", "DB_URL", "REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD", "REDIS_URL", "REDIS_CLIENT"} {
+		if cmd == envLineInSetProbeCmd(fixtureSharedEnv, key) {
+			return key
+		}
+	}
+	return ""
+}
+
+// answerEnvLineInSet evaluates envLineInSetScript: the lines of the
+// modelled .env that assign KEY in any form (the script's ERE, C-locale
+// [[:space:]] being Go's ASCII class) and the canonical KEY= lines are
+// counted first — fewer canonical lines than assignments: exit 5, silent;
+// more than one KEY= line: exit 4 with the count as the only stdout — then
+// every stdin line is an accepted KEY=value line (`while IFS= read -r want`
+// reads only newline-terminated lines), the one KEY= line is trimmed of
+// trailing ASCII whitespace, and the verdict is string equality against any
+// of them. Exit map: 0 match, 1 none matches, 2 unreadable file, 3 no line
+// assigns KEY, 4 duplicated key, 5 non-canonical assignment.
+func (r *recordingRunner) answerEnvLineInSet(path, key string, stdin []byte) bssh.Result {
+	file, ok := r.h.files[path]
+	if !ok {
+		return bssh.Result{ExitCode: 2}
+	}
+	assigns := regexp.MustCompile(`^[[:space:]]*(export[[:space:]]+)?` + regexp.QuoteMeta(key) + `[[:space:]]*=`)
+	t, n := 0, 0
+	for _, l := range strings.Split(file.content, "\n") {
+		if assigns.MatchString(l) {
+			t++
+		}
+		if strings.HasPrefix(l, key+"=") {
+			n++
+		}
+	}
+	if t == 0 {
+		return bssh.Result{ExitCode: 3}
+	}
+	if n < t {
+		return bssh.Result{ExitCode: 5}
+	}
+	if n > 1 {
+		return bssh.Result{ExitCode: 4, Stdout: strconv.Itoa(n) + "\n"}
+	}
+	line, found := firstEnvLine(file.content, key)
+	if !found {
+		return bssh.Result{ExitCode: 3}
+	}
+	got := trimTrailingASCIISpace(line)
+	rest := string(stdin)
+	for {
+		want, tail, terminated := strings.Cut(rest, "\n")
+		if !terminated {
+			return bssh.Result{ExitCode: 1}
+		}
+		if got == want {
+			return bssh.Result{}
+		}
+		rest = tail
+	}
 }
 
 // parseReloadedSince recognizes reloadstamp.go's probe shape:

@@ -2,9 +2,9 @@
 //
 // The wizard collects every supported feature combination (multi-site,
 // postgres+pgdg, nginx.org upstream, self-signed/HTTP3 TLS, per-site
-// queue/daemons/scheduler, fail2ban + tuning, extra apt repos + packages,
-// optional ssh.fingerprint pinning) with progressive disclosure and
-// incremental validation.
+// queue/daemons/scheduler/workers, deploy keys, fail2ban + tuning, extra apt
+// repos + packages, upstream update policy, optional ssh.fingerprint pinning)
+// with progressive disclosure and incremental validation.
 //
 // All TTY I/O (huh forms) lives behind the prompter interface (prompter.go) so
 // the orchestration in run.go is exercised with a scripted fake. Normalization
@@ -58,8 +58,10 @@ type Answers struct {
 	CloudflareOnly bool // server-wide origin-lockdown default
 
 	// server-level extras
-	AptRepos    []AptRepoAnswers
-	AptPackages string // space-separated; "" = none
+	AptRepos           []AptRepoAnswers
+	AptPackages        string // space-separated; "" = none
+	AptUpstreamUpdates string // "" (auto, key omitted) | "manual"
+	Workers            string // server-wide Supervisor programs: "" (dormant, key omitted) | "running"
 
 	Sites []SiteAnswers
 }
@@ -135,19 +137,21 @@ type OffsiteAnswers struct {
 }
 
 type SiteAnswers struct {
-	Domain     string
-	DeployPath string
-	User       string // "" => ToServer fills in the domain-derived name (YAML stays explicit)
-	DBName     string
-	DBUser     string
-	Repository string
-	SSL        bool
-	SSLMode    string // letsencrypt | selfsigned (only meaningful when SSL)
-	SSLEmail   string
-	HTTP3      bool
+	Domain        string
+	DeployPath    string
+	User          string // "" => ToServer fills in the domain-derived name (YAML stays explicit)
+	DBName        string
+	DBUser        string
+	Repository    string
+	RepositoryKey string // local path to a private deploy key; "" = generate one (asked only with a repository)
+	SSL           bool
+	SSLMode       string // letsencrypt | selfsigned (only meaningful when SSL)
+	SSLEmail      string
+	HTTP3         bool
 
 	// site advanced
 	SchedulerOverride  string        // "inherit" | "on" | "off"
+	WorkersOverride    string        // "inherit" | "dormant" | "running"
 	CloudflareOverride string        // "inherit" | "on" | "off"
 	BackupsOverride    string        // "inherit" | "on" | "off"
 	Queue              *QueueAnswers // nil => inherit server-wide

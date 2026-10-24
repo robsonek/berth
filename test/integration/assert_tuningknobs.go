@@ -53,7 +53,7 @@ func assertTuningKnobs(ctx context.Context, t *testing.T, c *bssh.Client, srv *c
 				continue
 			}
 			want := mariadbSizeBytes(t, p.knob)
-			res, err := c.Run(ctx, `sudo mysql --protocol=socket -N -e 'SELECT @@`+p.variable+`'`, nil)
+			res, err := c.Run(ctx, `sudo mariadb --protocol=socket -N -e 'SELECT @@`+p.variable+`'`, nil)
 			if err != nil {
 				t.Fatalf("read @@%s: %v", p.variable, err)
 			}
@@ -62,7 +62,7 @@ func assertTuningKnobs(ctx context.Context, t *testing.T, c *bssh.Client, srv *c
 			}
 		}
 		if v := srv.Tuning.MariaDBMaxConnections; v != 0 {
-			res, err := c.Run(ctx, `sudo mysql --protocol=socket -N -e 'SELECT @@max_connections'`, nil)
+			res, err := c.Run(ctx, `sudo mariadb --protocol=socket -N -e 'SELECT @@max_connections'`, nil)
 			if err != nil {
 				t.Fatalf("read @@max_connections: %v", err)
 			}

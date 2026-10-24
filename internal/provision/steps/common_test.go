@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"fmt"
+	"os"
 	gopath "path"
 	"strings"
 	"testing"
@@ -60,14 +61,18 @@ func TestPkgInstalledRequiresInstalledStatus(t *testing.T) {
 	}
 }
 
-// writeAsUserCmd mirrors writeFileAsUser's command so FakeRunner stubs match.
-// Keep in lockstep with writeFileAsUser. Every as-user write berth performs
-// today is 0600 (.env, client-auth files, authorized_keys), so the mode is
-// fixed here; re-parametrize if production ever writes another mode.
-func writeAsUserCmd(user, p string) string {
+// writeAsUserCmd mirrors writeFileAsUser's command so FakeRunner stubs match,
+// for the 0600 mode almost every as-user write uses (.env, client-auth files,
+// authorized_keys, the deploy private key). Keep in lockstep with
+// writeFileAsUser.
+func writeAsUserCmd(user, p string) string { return writeAsUserModeCmd(user, p, 0o600) }
+
+// writeAsUserModeCmd is writeAsUserCmd for an explicit mode — the deploy
+// key's .pub is the one as-user write that is not 0600 (0644).
+func writeAsUserModeCmd(user, p string, mode os.FileMode) string {
 	dir := gopath.Dir(p)
-	inner := fmt.Sprintf(`umask 077; t=$(mktemp %s) && trap 'rm -f "$t"' EXIT INT TERM && cat > "$t" && chmod 600 "$t" && mv -fT -- "$t" %s`,
-		shQuote(dir+"/.berth.XXXXXX"), shQuote(p))
+	inner := fmt.Sprintf(`umask 077; t=$(mktemp %s) && trap 'rm -f "$t"' EXIT INT TERM && cat > "$t" && chmod %o "$t" && mv -fT -- "$t" %s`,
+		shQuote(dir+"/.berth.XXXXXX"), mode.Perm(), shQuote(p))
 	return "sudo -u " + user + " sh -c " + shQuote(inner)
 }
 

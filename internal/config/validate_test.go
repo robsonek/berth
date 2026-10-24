@@ -356,6 +356,129 @@ func TestSchedulerEnabled(t *testing.T) {
 	}
 }
 
+func TestValidateFirstDeployKnobs(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*Server)
+		wantErr string // "" = valid; otherwise the error must START with it (names the key)
+	}{
+		{"upstream_updates auto", func(s *Server) { s.Apt.UpstreamUpdates = "auto" }, ""},
+		{"upstream_updates manual", func(s *Server) { s.Apt.UpstreamUpdates = "manual" }, ""},
+		{"server workers dormant", func(s *Server) { s.Workers = "dormant" }, ""},
+		{"server workers running", func(s *Server) { s.Workers = "running" }, ""},
+		{"site workers dormant", func(s *Server) { s.Sites[0].Workers = "dormant" }, ""},
+		{"site workers running", func(s *Server) { s.Sites[0].Workers = "running" }, ""},
+		{"repository_key with repository", func(s *Server) {
+			s.Sites[0].Repository = "git@github.com:o/r.git"
+			s.Sites[0].RepositoryKey = "~/.ssh/deploy_key"
+		}, ""},
+		{"upstream_updates weekly", func(s *Server) { s.Apt.UpstreamUpdates = "weekly" }, "apt.upstream_updates must be auto or manual"},
+		{"server workers on", func(s *Server) { s.Workers = "on" }, "workers must be dormant or running"},
+		{"site workers x", func(s *Server) { s.Sites[0].Workers = "x" }, "sites[0].workers must be dormant or running"},
+		{"repository_key without repository", func(s *Server) { s.Sites[0].RepositoryKey = "~/.ssh/deploy_key" }, "sites[0].repository_key requires sites[0].repository"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := base()
+			tc.mutate(s)
+			err := s.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want valid, got %v", err)
+				}
+				return
+			}
+			// HasPrefix, not Contains: "workers must be…" is a substring of the
+			// per-site message, so only the prefix tells server from site apart.
+			if err == nil || !strings.HasPrefix(err.Error(), tc.wantErr) {
+				t.Fatalf("want error starting with %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestValidateDaemonCommandPath: supervisord resolves a command's first token
+// against ITS OWN cwd (/ under systemd) before it chdirs to directory=, so a
+// relative path containing '/' can never be found and the program goes FATAL
+// without forking. Such a token is refused at load; a bare name (looked up in
+// PATH) and an interpreter running a relative script stay valid.
+func TestValidateDaemonCommandPath(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		wantErr string // "" = valid; otherwise the exact error
+	}{
+		{"relative path with slash", "scripts/x.sh --flag", `sites[0].daemons[1].command: "scripts/x.sh" is a relative path; supervisord cannot find it from directory= — use an absolute path or run it through an interpreter, e.g. "bash scripts/x.sh"`},
+		{"dot-slash relative path", "./run.sh", `sites[0].daemons[1].command: "./run.sh" is a relative path; supervisord cannot find it from directory= — use an absolute path or run it through an interpreter, e.g. "bash ./run.sh"`},
+		{"leading whitespace relative path", "  bin/worker", `sites[0].daemons[1].command: "bin/worker" is a relative path; supervisord cannot find it from directory= — use an absolute path or run it through an interpreter, e.g. "bash bin/worker"`},
+		{"absolute path", "/usr/local/bin/worker --once", ""},
+		{"interpreter with relative script", "bash scripts/x.sh", ""},
+		{"php artisan", "php artisan reverb:start", ""},
+		{"bare name from PATH", "sleep infinity", ""},
+		// supervisord shlex-splits the command (POSIX mode), so the token it
+		// stats is the UNQUOTED first word: quotes are judged by what they
+		// enclose, and the error shows the token without them.
+		{"double-quoted absolute path", `"/usr/bin/php" artisan x`, ""},
+		{"single-quoted absolute path", `'/opt/x/run.sh'`, ""},
+		{"quoted and unquoted runs join into one absolute word", `"/usr"/bin/php artisan x`, ""},
+		{"quoted bare name from PATH", `"php" artisan x`, ""},
+		{"escaped quote inside double quotes stays in the word", `"/opt/a\"b/run" x`, ""},
+		{"double-quoted relative path", `"scripts/x.sh"`, `sites[0].daemons[1].command: "scripts/x.sh" is a relative path; supervisord cannot find it from directory= — use an absolute path or run it through an interpreter, e.g. "bash scripts/x.sh"`},
+		{"single-quoted dot-slash relative path", `'./run.sh'`, `sites[0].daemons[1].command: "./run.sh" is a relative path; supervisord cannot find it from directory= — use an absolute path or run it through an interpreter, e.g. "bash ./run.sh"`},
+		{"quoted run joined to a relative tail", `"bin"/worker --once`, `sites[0].daemons[1].command: "bin/worker" is a relative path; supervisord cannot find it from directory= — use an absolute path or run it through an interpreter, e.g. "bash bin/worker"`},
+		// A word that needs quoting keeps it in the suggestion, so the
+		// suggested command still names ONE script.
+		{"quoted space does not end the word", `'my scripts/x.sh' a`, `sites[0].daemons[1].command: "my scripts/x.sh" is a relative path; supervisord cannot find it from directory= — use an absolute path or run it through an interpreter, e.g. "bash 'my scripts/x.sh'"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := base()
+			s.Sites[0].Daemons = []Daemon{
+				{Name: "first", Command: "php artisan pulse:check"},
+				{Name: "second", Command: tc.command},
+			}
+			err := s.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want valid, got %v", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tc.wantErr {
+				t.Fatalf("got error %v\nwant %s", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestSupervisordArgv0 pins the first word against Python's shlex.split
+// (POSIX mode), which is what supervisord's get_execv_args runs; every want
+// below was checked against shlex.split(command)[0].
+func TestSupervisordArgv0(t *testing.T) {
+	for _, tc := range []struct{ command, want string }{
+		{"php artisan x", "php"},
+		{"  bin/worker --once", "bin/worker"},
+		{`"/usr/bin/php" artisan x`, "/usr/bin/php"},
+		{`'/opt/x/run.sh'`, "/opt/x/run.sh"},
+		{`"/usr"/bin/php x`, "/usr/bin/php"},
+		{`/usr/'local bin'/w x`, "/usr/local bin/w"},
+		{`"a\"b" c`, `a"b`},
+		{`"a\\b" c`, `a\b`},
+		{`"a\nb" c`, `a\nb`},
+		{`'a\"b' c`, `a\"b`},
+		{`\/usr/bin/php x`, "/usr/bin/php"},
+		{`a\ b c`, "a b"},
+		{`"" x`, ""},
+		{`'scripts/x.sh`, "scripts/x.sh"},
+		{`"scripts/x.sh`, "scripts/x.sh"},
+		{"#/x.sh", "#/x.sh"},
+	} {
+		if got := supervisordArgv0(tc.command); got != tc.want {
+			t.Errorf("supervisordArgv0(%q) = %q, want %q", tc.command, got, tc.want)
+		}
+	}
+}
+
 func validQueueServer() *Server {
 	return &Server{
 		ID:   "test-machine-0001",

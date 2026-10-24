@@ -1108,3 +1108,57 @@ func TestPHPDeferralConvergesViaSiteSharedStamp(t *testing.T) {
 		t.Errorf("php.Check must be satisfied once site reloaded and stamped the shared unit; got %+v", cr)
 	}
 }
+
+// runPHPApplyInstall runs PHP().Apply for s (PHP 8.4, sury list absent, live
+// FPM, nothing else to fix) with wantInstall as the only stubbed package
+// install, and asserts it was the one issued.
+func runPHPApplyInstall(t *testing.T, s *config.Server, wantInstall string) {
+	t.Helper()
+	f := bssh.NewFakeRunner()
+	f.On(phpPoolConflictProbeCmd("8.4"), bssh.Result{})
+	stubSuryRepoAbsent(f)
+	if s.PHP.Source == "sury" {
+		stubEnsureRepoChain(f, apt.Sury())
+	}
+	f.On("rm -f "+shQuote("/var/lib/berth/php8.4-fpm.reloaded"), bssh.Result{})
+	f.On(wantInstall, bssh.Result{})
+	f.On("install -d -o root -g root -m 0755 "+shQuote(phpLogDir), bssh.Result{})
+	f.On("cat "+shQuote(opcacheDropInPath("8.4")), bssh.Result{ExitCode: 1})
+	f.On("cat "+shQuote(phpTuningDropInPath("8.4")), bssh.Result{ExitCode: 1})
+	f.On("php-fpm8.4 -t", bssh.Result{})
+	f.On("systemctl is-active php8.4-fpm", bssh.Result{})
+	f.On("systemctl reload php8.4-fpm", bssh.Result{})
+	f.On(markReloadedCmd("php8.4-fpm"), bssh.Result{})
+	if err := PHP().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	assertInstalledWith(t, f, wantInstall)
+}
+
+// Under apt.upstream_updates: manual a provision installs missing Surý
+// packages but never upgrades installed ones.
+func TestPHPApplyManualUpstreamNeverUpgrades(t *testing.T) {
+	s := &config.Server{PHP: config.PHP{Version: "8.4", Source: "sury"}, Apt: config.Apt{UpstreamUpdates: "manual"}}
+	want := "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-upgrade " + strings.Join(phpExtPkgs(), " ")
+	if !strings.Contains(want, "--no-upgrade") {
+		t.Fatal("test bug: the manual install must carry --no-upgrade")
+	}
+	runPHPApplyInstall(t, s, want)
+}
+
+// The default (and auto) install command is byte-identical to before, and
+// Debian's own PHP packages are not upstream packages, so manual leaves them
+// on the plain install.
+func TestPHPApplyInstallUnchangedOutsideManualUpstream(t *testing.T) {
+	plain := "DEBIAN_FRONTEND=noninteractive apt-get install -y " + strings.Join(phpExtPkgs(), " ")
+	for _, c := range []struct{ name, source, updates string }{
+		{"sury, default", "sury", ""},
+		{"sury, auto", "sury", "auto"},
+		{"debian, manual", "debian", "manual"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := &config.Server{PHP: config.PHP{Version: "8.4", Source: c.source}, Apt: config.Apt{UpstreamUpdates: c.updates}}
+			runPHPApplyInstall(t, s, plain)
+		})
+	}
+}

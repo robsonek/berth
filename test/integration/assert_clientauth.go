@@ -5,8 +5,12 @@ package integration
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/ssh"
 
 	"github.com/robsonek/berth/internal/config"
 	dbpkg "github.com/robsonek/berth/internal/database"
@@ -52,12 +56,15 @@ func assertClientDBAuth(ctx context.Context, t *testing.T, c *bssh.Client, srv *
 }
 
 // assertDeployKeys verifies each repository site's deploy key PAIR (generated
-// by the accounts step): the private half is present, owned by the site user
-// and 0600, the public half is a printable ed25519 key (what `berth site key`
-// surfaces), and the two actually match (`ssh-keygen -y` re-derivation) — a
-// pubkey orphaned from its private key would paste fine into the repo host and
-// then never authenticate. Sites without a repository have no managed key by
-// design and are skipped.
+// by the accounts step, or installed from repository_key): the private half
+// is present, owned by the site user and 0600, the public half is a printable
+// key (what `berth site key` surfaces; ed25519 when berth generated it), and
+// the two actually match (`ssh-keygen -y` re-derivation) — a pubkey orphaned
+// from its private key would paste fine into the repo host and then never
+// authenticate. With repository_key the pair must also BE that key: the
+// host's re-derived public half equals the one derived locally from the
+// configured file. Sites without a repository have no managed key by design
+// and are skipped.
 func assertDeployKeys(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server) {
 	t.Helper()
 	for _, site := range srv.Sites {
@@ -87,7 +94,9 @@ func assertDeployKeys(ctx context.Context, t *testing.T, c *bssh.Client, srv *co
 			continue
 		}
 		pubLine := strings.TrimSpace(res.Stdout)
-		if !strings.HasPrefix(pubLine, "ssh-ed25519 ") {
+		// A generated key is ed25519; a repository_key may be any type ssh
+		// loads, and is held to the stronger equality check below instead.
+		if site.RepositoryKey == "" && !strings.HasPrefix(pubLine, "ssh-ed25519 ") {
 			t.Errorf("%s: pubkey is not ed25519: %q", site.Domain, pubLine)
 			continue
 		}
@@ -101,8 +110,42 @@ func assertDeployKeys(ctx context.Context, t *testing.T, c *bssh.Client, srv *co
 		}
 		// Compare type + blob; the .pub carries an extra comment field.
 		pubFields, derFields := strings.Fields(pubLine), strings.Fields(derived.Stdout)
-		if len(derFields) < 2 || pubFields[0] != derFields[0] || pubFields[1] != derFields[1] {
+		if len(pubFields) < 2 || len(derFields) < 2 || pubFields[0] != derFields[0] || pubFields[1] != derFields[1] {
 			t.Errorf("%s: pubkey does not match the private key", site.Domain)
+			continue
+		}
+		if site.RepositoryKey != "" {
+			want, err := localAuthorizedKey(site.RepositoryKey)
+			if err != nil {
+				t.Fatalf("%s: %v", site.Domain, err)
+			}
+			// Public halves only: nothing secret is compared or printed.
+			if got := derFields[0] + " " + derFields[1]; got != want {
+				t.Errorf("%s: the host's deploy key is not repository_key %s", site.Domain, site.RepositoryKey)
+			}
 		}
 	}
+}
+
+// localAuthorizedKey derives "<type> <base64>" from the local private key at
+// path (a leading ~/ is the local home) — the derivation berth makes before
+// it installs a repository_key.
+func localAuthorizedKey(path string) (string, error) {
+	local := path
+	if rest, ok := strings.CutPrefix(path, "~/"); ok {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve ~ in repository_key %s: %w", path, err)
+		}
+		local = filepath.Join(home, rest)
+	}
+	b, err := os.ReadFile(local)
+	if err != nil {
+		return "", fmt.Errorf("repository_key %s: %w", path, err)
+	}
+	signer, err := ssh.ParsePrivateKey(b)
+	if err != nil {
+		return "", fmt.Errorf("repository_key %s: %w", path, err)
+	}
+	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey()))), nil
 }

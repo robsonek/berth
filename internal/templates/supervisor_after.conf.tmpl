@@ -1,0 +1,6 @@
+# Ordering only: supervisord (and the workers: running programs it starts)
+# comes up after the database and each site's Valkey at boot, so a worker
+# never races a backend that is still starting and goes FATAL.
+[Unit]
+{{ range .After }}After={{ . }}
+{{ end -}}

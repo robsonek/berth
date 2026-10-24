@@ -34,7 +34,7 @@ import (
 //     enabled, every per-site berth-valkey-<pool> instance is active and the
 //     stock valkey-server is inactive
 //   - `nginx -t` exits 0
-//   - `mysql --protocol=socket -e 'SELECT 1'` exits 0
+//   - `mariadb --protocol=socket -e 'SELECT 1'` exits 0
 //   - HTTP GET / returns a response (502 is acceptable pre-deploy: no app yet)
 //   - every site answers a staged tenant-unique PHP probe through its own Host
 //     header (and SNI over TLS) — the per-site routing and pool proof
@@ -117,7 +117,7 @@ func TestProvisionFreshDebian13(t *testing.T) {
 			`sudo -u postgres psql -tAc 'SELECT 1'`)
 	} else {
 		assertExitZero(ctx, t, client, "mariadb socket",
-			`sudo mysql --protocol=socket -e 'SELECT 1'`)
+			`sudo mariadb --protocol=socket -e 'SELECT 1'`)
 	}
 	assertHTTPServes(t, "http://"+net.JoinHostPort(srv.Host, "80")+"/", false)
 

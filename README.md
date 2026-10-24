@@ -139,6 +139,9 @@ database:
 
 valkey: false                  # one Valkey instance per site (cache/session/queue)
 queue: false                   # server-wide default: a queue:work worker on every site
+workers: dormant               # dormant (default) | running — berth starts the
+                               # Supervisor programs and they come back after a
+                               # reboot (per site; see "Running programs")
 scheduler: true                # install the Laravel scheduler cron (per site)
 cloudflare_only: false         # opt-in: refuse non-Cloudflare requests (per site)
 
@@ -186,7 +189,8 @@ backups:                       # optional opt-in local backups — off by defaul
   retention_days: 7            # prune dumps older than N days (default 7; 1–3650)
   schedule: "30 3 * * *"       # 5-field cron, run as root (default 03:30 daily)
 
-apt:                           # optional extra third-party apt repos & packages
+apt:                           # optional extra third-party apt repos & packages,
+                               # and the upstream update policy
   repos:                       # (see "Extra apt repositories & packages" below)
     - name: signal-cli         # ^[a-z0-9][a-z0-9-]{0,31}$ — lands on the host as
                                # /etc/apt/sources.list.d/berth-<name>.list + keyring
@@ -198,6 +202,9 @@ apt:                           # optional extra third-party apt repos & packages
                                # 40-hex signing-key fingerprint, verified on fetch
   packages: [signal-cli-native, htop]   # extra packages — install-only, berth
                                # never uninstalls a name you remove from the list
+  upstream_updates: auto       # auto (default) | manual — manual keeps berth's own
+                               # upstream repos (Surý, nginx.org, MariaDB, PGDG) out
+                               # of unattended-upgrades (see "Controlled upstream update")
 
 sites:                         # one or more
   - domain: app.example.com            # required
@@ -207,6 +214,9 @@ sites:                         # one or more
     repository: git@github.com:acme/app.git   # optional — SSH git URL only; berth
                                        # generates a per-site deploy key for it
                                        # (print it with `berth site key`)
+    repository_key: ~/keys/app-deploy  # optional, requires repository — install this
+                                       # local private key as the deploy key instead
+                                       # of generating one (see "Deploy key from a file")
     database: { name: app, user: app }        # per-site DB (required for every site)
     ssl: true
     ssl_mode: selfsigned               # letsencrypt (default) | selfsigned —
@@ -214,6 +224,7 @@ sites:                         # one or more
     ssl_email: admin@example.com       # required with letsencrypt
     http3: false                       # requires ssl: true + nginx.source: nginx
     scheduler: true                    # per-site override of the server default
+    workers: running                   # per-site override of the server default
     cloudflare_only: true              # per-site override of the server default
     backups: false                     # per-site override of the server default
                                        # (nil/absent = inherit backups.enabled)
@@ -272,6 +283,39 @@ the same current `host:port`. Rules:
   unaffected and never bypassed.
 - Downgrading berth below this version after an `id`/envelope exists is not
   supported (older binaries reject both the config key and the cache format).
+
+### Deploy key from a file (`repository_key:`)
+
+For a site with a `repository`, berth generates an ed25519 deploy key on the
+host (`/home/<user>/.ssh/id_ed25519`) the first time, and you register its
+public half at the git host. When the git host already trusts a key you keep
+(for example the deploy key of a server being replaced), point
+`repository_key` at that local private key instead. The `accounts` step then
+installs it:
+
+- The key is read and parsed on your machine before berth probes the host.
+  A missing file, a file that is not a private key, or a passphrase-protected
+  key stops the run (a deploy key must work unattended). So the file must
+  exist at that path on **every** workstation that provisions this server or
+  runs `berth status --drift` against it, not only on the one that first
+  installed the key.
+- When the site user has no key yet, berth writes the private key (mode
+  0600) and its `.pub` (0644, with the `<user>@<git-host>` comment a generated
+  key gets) as the site user. The key travels on stdin, never on a command
+  line, and is never logged.
+- When the host already holds the same key, the step is satisfied once its
+  `.pub` carries that key too; a missing `.pub`, or one left holding another
+  key, is rewritten (the private key is not touched). When it
+  holds a different key, berth refuses and names both SHA256 fingerprints. To
+  replace it, re-run with `--only accounts --force`. `--force` applies to the
+  whole step, so this also lets `accounts` overwrite its other files that
+  berth did not write, such as an operator's `authorized_keys`; a bare
+  `--force` extends that to every step. The replaced key stops working
+  wherever it is registered.
+- Without `repository_key`, nothing changes: berth generates a key when there
+  is none and never replaces one.
+
+The git host's `known_hosts` entry is scanned exactly as for a generated key.
 
 ## Package sources
 
@@ -370,9 +414,12 @@ berth tunes the host for production Laravel out of the box:
   backend when berth first seeds a site's `shared/.env` (without Valkey the
   app keeps the database driver), so enable `valkey` before the initial
   provision — the `REDIS_*` lines are seed-time-only: flipping `valkey:` on
-  an already-seeded host never rewrites the existing `.env`; update the
-  site's `.env` by hand, or remove it so the next run re-seeds it (cached
-  secrets are reused). Flipping `valkey: false` on a provisioned host makes the
+  an already-seeded host never rewrites the existing `.env`, and the
+  `database` step refuses to continue while the site's `REDIS_HOST` /
+  `REDIS_PORT` still point elsewhere (the checked keys are listed under
+  [Multiple sites](#multiple-sites-isolated-per-domain)); update the site's
+  `.env` by hand, or remove it so the next run re-seeds it (cached secrets
+  are reused). Flipping `valkey: false` on a provisioned host makes the
   next full run (or `--only valkey`) stop and remove every berth-managed
   instance — **first** move each application's `.env` cache/session/queue off
   the Valkey socket, or the app breaks the moment the instance goes away.
@@ -538,6 +585,30 @@ scope):
     `--only base` first: `--only` of any step that requires `base` (php,
     nginx, database, site, tls, …) refuses with `base` among the unmet
     prerequisites while `base` is unsatisfied.
+  - **`apt.upstream_updates: manual`** keeps the upstream repositories out
+    of unattended-upgrades: berth removes its `52berth-unattended-upgrades`
+    drop-in, metapackage blacklist included (a file there that berth did not
+    write is left alone, even with `--force`), so unattended-upgrades no
+    longer installs updates from Surý, nginx.org, MariaDB or PGDG. The
+    repositories stay configured, and updates from Debian's own repositories
+    (the stock unattended-upgrades origins) are still applied automatically —
+    including to a package Debian also ships (PHP 8.4 from Surý, PostgreSQL
+    17 from PGDG) once Debian publishes a newer version than the installed
+    one, which then replaces it with Debian's build. You choose when the
+    upstream packages move — see
+    [Controlled upstream update](#controlled-upstream-update). Provisioning
+    still installs missing upstream packages but never upgrades installed
+    ones (`apt-get install --no-upgrade` in the php, nginx and database
+    steps), though a newly installed package can still pull in newer
+    versions of the packages it depends on. For example, Surý's
+    `php<ver>-*` packages require the exact version of `php<ver>-common`, so
+    adding a missing PHP extension can upgrade `php<ver>-common` and with it
+    every installed `php<ver>-*` package. Two installs do not pass
+    `--no-upgrade` at all: the extra packages under `apt.packages` and the
+    database dump client the `backups` step installs when its binary is
+    missing (`mariadb-client` or `postgresql-client`) use a plain
+    `apt-get install`, which can likewise upgrade upstream packages they
+    depend on. The default is `auto` (leaving the key out is the same).
 - **fail2ban** — a managed jail bans SSH brute-forcers (bound to your configured
   SSH port) and repeat offenders (`recidive`). berth writes it as
   `/etc/fail2ban/jail.d/99-berth.conf`, leaving `jail.local` — which loads
@@ -569,6 +640,54 @@ scope):
   tracked via the cache entry, and locking removes the cached plaintext); a
   password berth did not set is left alone, and an existing usable password
   is reused, never rotated.
+
+### Controlled upstream update
+
+With `apt.upstream_updates: manual`, upgrade the upstream packages yourself, in
+a maintenance window you choose:
+
+1. Stop every berth Supervisor program on the host — per site, the queue worker
+   `berth-<pool>` and each daemon `berth-<pool>-<name>`, where `<pool>` is the
+   site's domain with dots replaced by underscores:
+
+   ```sh
+   sudo supervisorctl stop 'berth-<pool>:*'          # the queue worker
+   sudo supervisorctl stop 'berth-<pool>-<name>:*'   # each daemon
+   ```
+
+2. Upgrade:
+
+   ```sh
+   sudo apt-get update && sudo apt-get upgrade
+   ```
+
+   Use `apt-get upgrade`, not `apt upgrade` or `apt full-upgrade`: those two
+   can install a new PHP or PostgreSQL major beside the running one (the
+   PostgreSQL note under "Automatic security updates" in
+   [Security & hardening](#security--hardening) explains why). A package
+   `apt-get upgrade` keeps back needs a new dependency; upgrade it by name only
+   after checking what it pulls in.
+
+   With `nginx.source: nginx`, an nginx.org update can ask what to do about
+   the modified `/etc/nginx/nginx.conf`. Keep the currently-installed version
+   (`N`, the default): berth edits that file's `user` line, and the package
+   maintainer's version would undo the edit.
+
+3. Check both configurations; each must report that it is OK:
+
+   ```sh
+   sudo nginx -t
+   sudo php-fpm<ver> -t      # e.g. php-fpm8.5 -t
+   ```
+
+4. Start the programs again:
+
+   ```sh
+   sudo supervisorctl start 'berth-<pool>:*'
+   sudo supervisorctl start 'berth-<pool>-<name>:*'
+   ```
+
+   or, with `workers: running`, run `berth provision`, which starts them.
 
 ### Cloudflare origin lockdown (`cloudflare_only:`)
 
@@ -614,8 +733,9 @@ schedule:run` every minute as the site's own user. It is **on by default**; set
 `scheduler: false` server-wide, or `scheduler: false` on an individual site, to
 skip it (disabling it on a re-run removes the cron).
 
-With `queue: true` berth installs a dormant Supervisor `queue:work` program per
-site. Tune that worker — or replace it with **Horizon** — and add arbitrary
+With `queue: true` berth installs a Supervisor `queue:work` program per site
+(dormant by default, see [Running programs](#running-programs-workers)). Tune
+that worker — or replace it with **Horizon** — and add arbitrary
 long-running processes, per site:
 
 ```yaml
@@ -636,16 +756,88 @@ sites:
       - { name: reverb, command: php artisan reverb:start }
 ```
 
-Every program is installed **dormant** (`autostart=false`) — your deployer starts
-and restarts them; berth never runs them. `queue: horizon` emits an `artisan
-horizon` program instead of `queue:work` (Horizon runs single-process and manages
-its own workers, so the `queue:work` knobs don't apply; configure it in your app's
-`config/horizon.php`, and note it needs the Redis/Valkey queue driver).
+A daemon's `command` runs in `<deploy_path>/current`, but supervisord looks up
+its first word **before** it changes into that directory. A bare name (`php`,
+`bash`) is found in `PATH` and an absolute path works as is. A relative path
+such as `scripts/run.sh` is never found, so validation rejects it: write
+`bash scripts/run.sh` (the interpreter resolves the script after the
+directory change) or use an absolute path. The first word is read the way
+supervisord splits the line, quotes removed: `"/usr/bin/php" artisan …` is
+absolute, `'scripts/run.sh'` is still relative.
+
+By default every program is installed **dormant** (`autostart=false`) — your
+deployer starts and restarts them; berth never runs them. `queue: horizon` emits
+an `artisan horizon` program instead of `queue:work` (Horizon runs
+single-process and manages its own workers, so the `queue:work` knobs don't
+apply; configure it in your app's `config/horizon.php`, and note it needs the
+Redis/Valkey queue driver).
 `queue: none` opts a single site out of the server-wide worker — the only
 per-site off switch under `queue: true` (a shorthand like `horizon`; combining
 it with the other worker knobs is rejected). Each site
 user gets **narrow sudoers** to control only its own programs, and Supervisor is
 installed whenever any site declares a worker or a daemon.
+
+### Running programs (`workers:`)
+
+`workers:` decides who starts a site's Supervisor programs — the queue worker
+and every daemon. Set it server-wide, or per site (the site value wins, like
+`scheduler`):
+
+```yaml
+workers: dormant             # server-wide default: dormant | running
+sites:
+  - domain: app.example.com
+    deploy_path: /var/www/app
+    workers: running         # per-site override of the server default
+```
+
+- **`dormant`** (the default, also when the key is absent): the programs are
+  installed with `autostart=false`. berth never starts them, and none starts by
+  itself after a reboot; your deployer starts and restarts them.
+- **`running`**: the programs are installed with `autostart=true`. A
+  provisioning run starts every program that is not RUNNING, and from then on
+  Supervisor starts them by itself after a server (or supervisord) restart,
+  without a provisioning run. The target is declarative: a later run that
+  finds a program stopped reports it as drift and starts it again. A program
+  that does not reach RUNNING fails the run. The error quotes supervisorctl's
+  status line with its reason (for example `Exited too quickly` or `can't find
+  command`) and names both logs: `/var/log/supervisor/<program>.log` (the
+  program's output) and `/var/log/supervisor/supervisord.log`, where spawn
+  errors land while the program log stays empty. Your deployer keeps its narrow
+  `restart` grant, so restart the programs after each deploy to load the new
+  release.
+- **Boot order:** at boot systemd starts Supervisor, the database and each
+  site's Valkey in parallel, and a worker that exits within a second while its
+  backend is still coming up (a long InnoDB recovery after an unclean shutdown,
+  say) uses up Supervisor's start retries and stays FATAL. So while any site
+  runs `running`, berth writes the drop-in
+  `/etc/systemd/system/supervisor.service.d/berth-after.conf`, which orders
+  `supervisor.service` `After=` the database unit (`mariadb.service` or
+  `postgresql.service`) and every `berth-valkey-<pool>.service`, then runs
+  `systemctl daemon-reload`. It only orders the start: it adds no
+  `Wants=`/`Requires=`, so a database that fails to start does not keep
+  Supervisor down. When no site runs `running` any more, berth removes its
+  drop-in; a file at that path that berth did not write is left alone. The
+  drop-in is managed only while some site still has a queue worker or a
+  daemon (otherwise the `supervisor` step does not run), so removing the last
+  program leaves it in place; it only orders the start, so it is harmless and
+  can be deleted by hand.
+- **No release yet:** until `<deploy_path>/current` exists there is no code to
+  run, so with `running` the programs stay dormant and the run warns
+  (`workers: running is set, but <deploy_path>/current does not exist yet`).
+  Provision again after the first deploy to start them.
+- **Rewriting a dormant program's conf stops it.** `supervisorctl update`
+  removes and re-adds a program whose conf changed; with `autostart=false` the
+  re-added program stays STOPPED. When a run is about to change the conf of a
+  dormant program that is running — after switching from `running` back to
+  `dormant`, or after a berth upgrade that changes the conf — it warns
+  (`supervisorctl update leaves <program> STOPPED`). Start the program again
+  with your deployer.
+
+**Cutover pattern:** while a new server is not live yet, keep its background
+work off (`scheduler: false`, `workers: dormant`). To go live, flip both
+together — `scheduler: true` and `workers: running` — and run one provisioning:
+the scheduler cron and the programs start in the same run.
 
 ## Backups (opt-in)
 
@@ -688,7 +880,7 @@ operation (below).
 
 ```bash
 # MariaDB
-gunzip -c /var/backups/berth/<pool>/<db>-<ts>.sql.gz | mysql <db>
+gunzip -c /var/backups/berth/<pool>/<db>-<ts>.sql.gz | mariadb <db>
 # PostgreSQL (plain-SQL dump — psql, not pg_restore)
 gunzip -c /var/backups/berth/<pool>/<db>-<ts>.sql.gz | sudo -u postgres psql <db>
 # Files
@@ -810,6 +1002,40 @@ sites:
 Every site carries its own `database: {name, user}` block, and the OS users
 must be distinct. A site without `user:` always runs as its derived
 `b_<slug>_<hash>` account, no matter how many sites the config lists.
+
+`shared/.env` is seeded once and never rewritten, so an existing file (an
+operator-preseeded one, or one seeded under a different config) could point
+the app at a database, role or cache berth never set up while every run
+reports green. The `database` step therefore checks, on every run and before
+it changes anything on the host, that an existing `shared/.env` agrees with
+what berth provisions for the site, and stops the run when it does not:
+
+| Key | Expected value |
+| --- | --- |
+| `DB_DATABASE` | the site's `database.name` |
+| `DB_USERNAME` | the site's `database.user` |
+| `DB_URL` | absent or empty (`DB_URL=`, `""`, `''`, `null` or `(null)`) — Laravel lets a URL override the keys above |
+| `REDIS_HOST` (with `valkey: true`) | the site's own socket, `/run/berth-valkey/<pool>/valkey.sock` (`<pool>` is the domain with `.` replaced by `_`) |
+| `REDIS_PORT` (with `valkey: true`) | `0` |
+| `REDIS_PASSWORD` (with `valkey: true`) | absent or empty: `REDIS_PASSWORD=`, `REDIS_PASSWORD=""`, `REDIS_PASSWORD=''`, `REDIS_PASSWORD=null` or `REDIS_PASSWORD=(null)` — the per-site instance has no password |
+| `REDIS_URL` (with `valkey: true`) | absent or empty, as for `DB_URL` — a URL would override the socket above |
+| `REDIS_CLIENT` (with `valkey: true`) | absent or `phpredis` — the client that takes the socket path with port `0` |
+
+A value may be written unquoted, in double quotes or in single quotes
+(`DB_USERNAME=appuser`, `DB_USERNAME="appuser"` and `DB_USERNAME='appuser'`
+all match). Each of these keys must appear on at most one line: a key that
+appears more than once is refused whatever the values, because a correct
+line must not vouch for a duplicate the application may read instead (the
+error says `<KEY> appears <N> times in <path>; keep exactly one line`).
+A line that assigns one of these keys in another form phpdotenv reads
+(`export KEY=…`, leading whitespace, or spaces around `=`) is refused too,
+since berth cannot verify it: write the key as the canonical `KEY=value` line.
+Trailing whitespace is ignored. `DB_URL`, `REDIS_PASSWORD`, `REDIS_URL` and
+`REDIS_CLIENT` may be missing; any other key that is missing counts as a
+mismatch. The error lists every problem at once — each
+duplicated key, and each disagreeing key with the line berth expects — and
+never prints the file's current values. `--force` does not override this
+check: edit the file and run again.
 
 Each TLS site uses Let's Encrypt by default; set `ssl_mode: selfsigned` on a site
 to generate a self-signed certificate instead (no public DNS or `ssl_email`

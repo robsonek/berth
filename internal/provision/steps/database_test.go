@@ -106,7 +106,7 @@ func TestDatabaseApplyGeneratesPersistsAndEnsures(t *testing.T) {
 	stubClientAuthAbsent(f, s, ".my.cnf")
 	stubEnvSeed(f, s)
 	stubClientAuthSeed(f, s, ".my.cnf")
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 
 	if err := Database(red).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -142,7 +142,7 @@ func TestDatabaseApplyGeneratesPersistsAndEnsures(t *testing.T) {
 	// The password must reach the SQL via stdin, never the command string.
 	var sawCreateDB, sawCreateUser bool
 	for _, c := range f.Calls() {
-		if strings.HasPrefix(c.Cmd, "mysql") {
+		if strings.HasPrefix(c.Cmd, "mariadb ") {
 			if strings.Contains(string(c.Stdin), "CREATE DATABASE IF NOT EXISTS") {
 				sawCreateDB = true
 			}
@@ -177,7 +177,7 @@ func TestDatabaseApplyOnlyTenantMutatesSharedEnv(t *testing.T) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
 	stubClientAuthAbsent(f, s, ".my.cnf")
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 	f.On(writeAsUserCmd("deploy", envPath(s)), bssh.Result{})
 	f.On(writeAsUserCmd("deploy", clientAuthPath(s, s.Sites[0], ".my.cnf")), bssh.Result{})
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -200,7 +200,7 @@ func TestDatabaseApplySeedsRedisWhenValkey(t *testing.T) {
 	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 
 	stubClientAuthAbsent(f, s, ".my.cnf")
 	stubEnvSeed(f, s)
@@ -234,7 +234,7 @@ func TestDatabaseApplyKeepsDatabaseDriverWithoutValkey(t *testing.T) {
 	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 
 	stubClientAuthAbsent(f, s, ".my.cnf")
 	stubEnvSeed(f, s)
@@ -260,9 +260,10 @@ func TestDatabaseApplyHealsFromExistingEnvWithoutRewriting(t *testing.T) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env already present
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Reused123\n"})
 	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // absent -> not backfilled
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 
 	stubClientAuthAbsent(f, s, ".my.cnf")
 	stubClientAuthSeed(f, s, ".my.cnf")
@@ -274,7 +275,7 @@ func TestDatabaseApplyHealsFromExistingEnvWithoutRewriting(t *testing.T) {
 	}
 	var sawEnsureUser bool
 	for _, c := range f.Calls() {
-		if strings.HasPrefix(c.Cmd, "mysql") && strings.Contains(string(c.Stdin), "Reused123") {
+		if strings.HasPrefix(c.Cmd, "mariadb ") && strings.Contains(string(c.Stdin), "Reused123") {
 			sawEnsureUser = true
 		}
 	}
@@ -291,13 +292,14 @@ func TestDatabaseApplyFailsWhenExistingEnvLacksPassword(t *testing.T) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"}) // guard passes; the missing password fails later
-	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})                                    // key absent
+	stubBerthEnvKeys(f, s)
+	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // key absent
 	err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
 	if err == nil || !strings.Contains(err.Error(), "has no DB_PASSWORD") {
 		t.Fatalf("err = %v, want the pointed no-DB_PASSWORD error", err)
 	}
 	for _, c := range f.Calls() {
-		if strings.HasPrefix(c.Cmd, "mysql") {
+		if strings.HasPrefix(c.Cmd, "mariadb ") {
 			t.Fatal("no SQL may run when the existing .env cannot supply the password")
 		}
 	}
@@ -314,6 +316,7 @@ func TestDatabaseCheckSatisfiedDoesNotReseedExistingEnv(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present, driver matches
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("LC_ALL=C; export LC_ALL; grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0})
@@ -332,8 +335,8 @@ func TestDatabaseCheckSatisfiedDoesNotReseedExistingEnv(t *testing.T) {
 }
 
 const (
-	mariadbDBProbe    = `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='myapp'"`
-	mariadbGrantProbe = `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='myapp' AND GRANTEE='''myapp''@''localhost''' LIMIT 1"`
+	mariadbDBProbe    = `mariadb --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='myapp'"`
+	mariadbGrantProbe = `mariadb --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='myapp' AND GRANTEE='''myapp''@''localhost''' LIMIT 1"`
 )
 
 // stubGreenRemote stubs every REMOTE probe of a fully provisioned single-site
@@ -343,6 +346,7 @@ const (
 func stubGreenRemote(f *bssh.FakeRunner, s *config.Server) {
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	stubEngineRepoAbsent(f, apt.MariaDBOrg())
 	f.On("LC_ALL=C; export LC_ALL; grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0})
@@ -772,6 +776,7 @@ func TestProbeScriptsPinTheCLocale(t *testing.T) {
 		"envValueMatch":        envValueMatchScript("/tmp/e", "DB_PASSWORD"),
 		"envBerthAppKey":       envBerthAppKeyScript("/tmp/e"),
 		"envCredentialPresent": envCredentialPresentScript("/tmp/e"),
+		"envLineInSet":         envLineInSetScript("/tmp/e", "DB_USERNAME"),
 	} {
 		if !strings.HasPrefix(script, "LC_ALL=C; export LC_ALL; ") {
 			t.Errorf("%s script does not pin the C locale: %q", name, script)
@@ -794,8 +799,12 @@ func TestDatabaseCheckSkipsAgreementWhenCacheEmpty(t *testing.T) {
 	if cr.Satisfied || !strings.Contains(cr.Reason, "local secret cache missing") {
 		t.Fatalf("want the missing-cache reason, got %+v", cr)
 	}
+	// Matched by exact command, not by its `read -r want` idiom: the
+	// non-secret berth-key probe (envLineInSetScript) shares that idiom and
+	// legitimately runs before the cache is consulted.
 	for _, c := range f.Calls() {
-		if strings.Contains(c.Cmd, "IFS= read -r want") {
+		if c.Cmd == envValueMatchScript(envPath(s), "DB_PASSWORD") || c.Cmd == envValueMatchScript(envPath(s), "APP_KEY") ||
+			strings.Contains(string(c.Stdin), "DB_PASSWORD=") || strings.Contains(string(c.Stdin), "APP_KEY=") {
 			t.Fatalf("no agreement probe may run with an empty cache; saw %q", c.Cmd)
 		}
 	}
@@ -858,7 +867,7 @@ func TestDatabaseApplyCachesSecretsBeforeSeedingEnv(t *testing.T) {
 	stubClientAuthAbsent(f, s, ".my.cnf")
 	stubEnvSeed(f, s)
 	stubClientAuthSeed(f, s, ".my.cnf")
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 	spy := &envWriteSpy{FakeRunner: f, host: s.Host, dbUser: s.SiteDBUser(s.Sites[0]), envPath: envPath(s)}
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, spy); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -881,6 +890,7 @@ func TestDatabaseApplyFailsWhenAppKeyGrepErrors(t *testing.T) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=existingpw\n"})
 	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 2, Stderr: "grep: input: I/O error"})
 	err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f)
@@ -895,6 +905,7 @@ func TestDatabaseCheckUnsatisfiedWhenDatabaseMissing(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present, driver matches
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("LC_ALL=C; export LC_ALL; grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0}) // credential present
 	stubEngineRepoAbsent(f, apt.MariaDBOrg())
@@ -917,6 +928,7 @@ func TestDatabaseCheckUnsatisfiedWhenUserOrGrantMissing(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present, driver matches
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("LC_ALL=C; export LC_ALL; grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0})
 	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
@@ -940,6 +952,7 @@ func TestDatabaseCheckUnsatisfiedWhenEnvLacksValidPassword(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present, driver matches
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("LC_ALL=C; export LC_ALL; grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 1}) // no valid DB_PASSWORD on the first line (or key absent — same outcome)
 	stubEngineRepoAbsent(f, apt.MariaDBOrg())
@@ -954,7 +967,7 @@ func TestDatabaseCheckUnsatisfiedWhenEnvLacksValidPassword(t *testing.T) {
 		t.Errorf("Reason = %q", cr.Reason)
 	}
 	for _, c := range f.Calls() {
-		if strings.Contains(c.Cmd, "mysql") {
+		if strings.HasPrefix(c.Cmd, "mariadb ") {
 			t.Fatalf("no DB probe may run once the credential is missing; saw %q", c.Cmd)
 		}
 	}
@@ -975,7 +988,7 @@ func TestDatabaseCheckSkipsProbesWhenNotInstalled(t *testing.T) {
 		t.Fatal("missing server package must be unsatisfied")
 	}
 	for _, c := range f.Calls() {
-		if strings.Contains(c.Cmd, "mysql") {
+		if strings.HasPrefix(c.Cmd, "mariadb ") {
 			t.Fatalf("no probe may run without an installed server; saw %q", c.Cmd)
 		}
 	}
@@ -1074,7 +1087,7 @@ func TestDatabaseApplyDebianSourceRemovesLingeringRepo(t *testing.T) {
 	f.On("rm -f "+repo.SourceListPath()+" "+repo.KeyringPath(), bssh.Result{ExitCode: 0})
 	f.On("apt-get update", bssh.Result{ExitCode: 0})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 	stubClientAuthAbsent(f, s, ".my.cnf")
 	stubEnvSeed(f, s)
 	stubClientAuthSeed(f, s, ".my.cnf")
@@ -1110,7 +1123,7 @@ func TestDatabaseApplySourceMariaDBAddsRepo(t *testing.T) {
 	stubEnsureRepoChain(f, repo)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // fresh box: no .env yet
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 
 	stubClientAuthAbsent(f, s, ".my.cnf")
 	stubEnvSeed(f, s)
@@ -1188,6 +1201,7 @@ func TestDatabaseApplyRejectsTamperedPassword(t *testing.T) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env already present
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
 	// A tampered env value containing a quote must be rejected (defence-in-depth).
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{Stdout: "DB_PASSWORD=bad'value\n"})
 
@@ -1205,6 +1219,7 @@ func TestDatabaseApplyRejectsLeadingSpacePassword(t *testing.T) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env already present
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
 	// A leading-space value fails Check's probe, so laundering it here would
 	// oscillate forever (Check unsatisfied, Apply "succeeds"). It must instead
 	// fail loudly with the charset refusal.
@@ -1214,7 +1229,7 @@ func TestDatabaseApplyRejectsLeadingSpacePassword(t *testing.T) {
 		t.Fatalf("err = %v, want the charset refusal for a leading-space value", err)
 	}
 	for _, c := range f.Calls() {
-		if strings.HasPrefix(c.Cmd, "mysql") {
+		if strings.HasPrefix(c.Cmd, "mariadb ") {
 			t.Fatal("no SQL may run when the reused password is rejected")
 		}
 	}
@@ -1228,6 +1243,7 @@ func TestDatabaseApplyRejectsTrailingUnicodeSpacePassword(t *testing.T) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env already present
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
 	// A trailing NBSP (U+00A0) is NOT [[:space:]] to the Check probe's C-locale
 	// grep, so Check rejects this line; trimming it away here would oscillate
 	// forever. It must stay in the value and fail the charset refusal.
@@ -1237,7 +1253,7 @@ func TestDatabaseApplyRejectsTrailingUnicodeSpacePassword(t *testing.T) {
 		t.Fatalf("err = %v, want the charset refusal for a trailing-NBSP value", err)
 	}
 	for _, c := range f.Calls() {
-		if strings.HasPrefix(c.Cmd, "mysql") {
+		if strings.HasPrefix(c.Cmd, "mariadb ") {
 			t.Fatal("no SQL may run when the reused password is rejected")
 		}
 	}
@@ -1251,11 +1267,12 @@ func TestDatabaseApplyAcceptsTrailingASCIIWhitespacePassword(t *testing.T) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env already present
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
 	// A trailing vertical tab IS [[:space:]] to the Check probe (POSIX C-locale
 	// set), so Apply must trim it the same way and reuse the value.
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Good123\v\n"})
 	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // absent -> not backfilled
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 	stubClientAuthAbsent(f, s, ".my.cnf")
 	stubClientAuthSeed(f, s, ".my.cnf")
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
@@ -1263,7 +1280,7 @@ func TestDatabaseApplyAcceptsTrailingASCIIWhitespacePassword(t *testing.T) {
 	}
 	var sawEnsureUser bool
 	for _, c := range f.Calls() {
-		if strings.HasPrefix(c.Cmd, "mysql") && strings.Contains(string(c.Stdin), "Good123") {
+		if strings.HasPrefix(c.Cmd, "mariadb ") && strings.Contains(string(c.Stdin), "Good123") {
 			sawEnsureUser = true
 		}
 	}
@@ -1362,7 +1379,7 @@ func TestDatabaseApplySeedsClientAuthFile(t *testing.T) {
 	f.On("test -e '/home/deploy/.my.cnf'", bssh.Result{ExitCode: 1}) // fresh box: no client creds yet
 	stubEnvSeed(f, s)
 	stubClientAuthSeed(f, s, ".my.cnf")
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -1406,10 +1423,11 @@ func TestDatabaseApplyClientAuthFileNeverRewritten(t *testing.T) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env already present
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Reused123\n"})
 	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 1}) // absent -> not backfilled
 	f.On("test -e '/home/deploy/.my.cnf'", bssh.Result{ExitCode: 0})            // already seeded (possibly operator-customized)
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -1432,10 +1450,11 @@ func stubDivergedEnv(f *bssh.FakeRunner, s *config.Server, newPW string) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=" + newPW + "\n"})
 	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "APP_KEY=" + divergedAppKey + "\n"})
 	f.On("test -e "+shQuote("/home/deploy/.my.cnf"), bssh.Result{ExitCode: 0})
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 }
 
 // Divergence heals end to end: Check flags it (pinned above), Apply ALTERs
@@ -1457,7 +1476,7 @@ func TestDatabaseApplyReconcilesRoleAndCacheTowardEnv(t *testing.T) {
 	// The role reconciles toward the live .env, and no secret rides argv.
 	var sawEnsureUser bool
 	for _, c := range f.Calls() {
-		if strings.HasPrefix(c.Cmd, "mysql") && strings.Contains(string(c.Stdin), "NewPass2") {
+		if strings.HasPrefix(c.Cmd, "mariadb ") && strings.Contains(string(c.Stdin), "NewPass2") {
 			sawEnsureUser = true
 		}
 		if c.Cmd == clientAuthContainsScript("/home/deploy/.my.cnf") {
@@ -1622,6 +1641,7 @@ func TestDatabaseCheckUnsatisfiedWhenClientAuthMissing(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present, driver matches
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
 	f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("LC_ALL=C; export LC_ALL; grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s))+" | grep -Eq '^DB_PASSWORD=[A-Za-z0-9]+[[:space:]]*$'", bssh.Result{ExitCode: 0})
 	f.On(mariadbDBProbe, bssh.Result{Stdout: "1\n"})
@@ -1706,7 +1726,7 @@ func TestDatabaseApplyFailsOnEngineEnvConflictBeforeMutating(t *testing.T) {
 		t.Fatalf("Apply() = %v, want the engine/env conflict error", err)
 	}
 	for _, c := range f.Calls() {
-		if strings.Contains(c.Cmd, "apt-get") || strings.HasPrefix(c.Cmd, "mysql") {
+		if strings.Contains(c.Cmd, "apt-get") || strings.HasPrefix(c.Cmd, "mariadb ") {
 			t.Errorf("Apply must not install or mutate anything after detecting the conflict; ran %q", c.Cmd)
 		}
 	}
@@ -1734,7 +1754,7 @@ func TestDatabaseApplyPreScansAllSitesBeforeMutating(t *testing.T) {
 		t.Fatalf("Apply() = %v, want the conflict error naming the second site", err)
 	}
 	for _, c := range f.Calls() {
-		if strings.Contains(c.Cmd, "apt-get") || strings.HasPrefix(c.Cmd, "mysql") {
+		if strings.Contains(c.Cmd, "apt-get") || strings.HasPrefix(c.Cmd, "mariadb ") {
 			t.Errorf("no site may be installed or mutated when a later site conflicts; ran %q", c.Cmd)
 		}
 	}
@@ -1778,6 +1798,7 @@ func TestDatabaseCheckPassesWhenDBConnectionMatchesOrFileAbsent(t *testing.T) {
 			f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: tc.envExists})
 			if tc.grep != nil {
 				f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), *tc.grep)
+				stubBerthEnvKeys(f, s)
 			}
 			f.On("dpkg -s mariadb-server", bssh.Result{ExitCode: 1}) // not installed -> early unsatisfied
 			stubEngineRepoAbsent(f, apt.MariaDBOrg())
@@ -1806,7 +1827,7 @@ func TestDatabaseApplyRecoversAppKeyFromCache(t *testing.T) {
 	stubClientAuthAbsent(f, s, ".my.cnf")
 	stubEnvSeed(f, s)
 	stubClientAuthSeed(f, s, ".my.cnf")
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
@@ -1827,7 +1848,7 @@ func TestDatabaseApplyCachesGeneratedAppKey(t *testing.T) {
 	stubClientAuthAbsent(f, s, ".my.cnf")
 	stubEnvSeed(f, s)
 	stubClientAuthSeed(f, s, ".my.cnf")
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
@@ -1849,10 +1870,11 @@ func TestDatabaseApplyBackfillsAppKeyFromExistingEnv(t *testing.T) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0}) // .env present
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=existingpw\n"})
 	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "APP_KEY=" + envKey + "\n"})
 	f.On("test -e "+shQuote("/home/deploy/.my.cnf"), bssh.Result{ExitCode: 0}) // client creds present
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
@@ -1879,10 +1901,11 @@ func TestDatabaseApplySkipsNonBerthEnvAppKey(t *testing.T) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=existingpw\n"})
 	f.On("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "APP_KEY=base64:short\n"})
 	f.On("test -e "+shQuote("/home/deploy/.my.cnf"), bssh.Result{ExitCode: 0})
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() = %v; a non-berth APP_KEY must not brick Apply", err)
 	}
@@ -1959,6 +1982,7 @@ func TestDatabaseApplyRegistersPasswordBeforeAppKeyAcquisitionFails(t *testing.T
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server", bssh.Result{})
 	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
 	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
 	f.On("grep -m1 '^DB_PASSWORD=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_PASSWORD=Hunter22pw\n"})
 	f.OnError("grep -m1 '^APP_KEY=' "+shQuote(envPath(s)), errors.New("connection lost"))
 
@@ -1995,5 +2019,682 @@ func TestDatabaseApplyRegistersCachedPasswordBeforeCachedAppKeyValidationFails(t
 	}
 	if got := red.Apply("leak Hunter22pw leak"); strings.Contains(got, "Hunter22pw") {
 		t.Fatalf("the password must already be registered when cached APP_KEY validation fails; Apply => %q", got)
+	}
+}
+
+// runMariaDBApplyInstall runs Database().Apply on a fresh single-site MariaDB
+// box (repo list absent, no .env yet) with wantInstall as the only stubbed
+// package install, and asserts it was the one issued.
+func runMariaDBApplyInstall(t *testing.T, source, updates, wantInstall string) {
+	t.Helper()
+	chdirTemp(t)
+	s := databaseServer()
+	s.Database.Source = source
+	s.Apt.UpstreamUpdates = updates
+	repo := apt.MariaDBOrg()
+	f := bssh.NewFakeRunner()
+	stubEngineRepoAbsent(f, repo)
+	if source == "mariadb" {
+		stubEnsureRepoChain(f, repo)
+	}
+	f.On(wantInstall, bssh.Result{})
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
+	f.On("mariadb --protocol=socket", bssh.Result{})
+	stubClientAuthAbsent(f, s, ".my.cnf")
+	stubEnvSeed(f, s)
+	stubClientAuthSeed(f, s, ".my.cnf")
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	assertInstalledWith(t, f, wantInstall)
+}
+
+// Under apt.upstream_updates: manual a provision installs the MariaDB
+// upstream server when missing but never upgrades an installed one.
+func TestDatabaseApplyManualMariaDBNeverUpgrades(t *testing.T) {
+	runMariaDBApplyInstall(t, "mariadb", "manual", "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-upgrade mariadb-server")
+}
+
+// The default (and auto) install command is byte-identical to before; Debian's
+// MariaDB is not an upstream package, so manual leaves it on the plain install.
+func TestDatabaseApplyMariaDBInstallUnchangedOutsideManualUpstream(t *testing.T) {
+	for _, c := range []struct{ name, source, updates string }{
+		{"mariadb.org, default", "mariadb", ""},
+		{"mariadb.org, auto", "mariadb", "auto"},
+		{"debian, manual", "debian", "manual"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			runMariaDBApplyInstall(t, c.source, c.updates, "DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server")
+		})
+	}
+}
+
+// berthKeysServer is databaseServer with Valkey on (so the redis keys are
+// berth-provisioned too) and the neutral appuser DB identity.
+func berthKeysServer() *config.Server {
+	s := databaseServer()
+	s.Valkey = true
+	s.Sites[0].Database.User = "appuser"
+	return s
+}
+
+// stubBerthEnvKeys stubs every envLineInSetScript probe assertEnvBerthKeys
+// issues for every site of s as agreeing (exit 0: the live line is one berth
+// accepts). Callers override individual keys with their own On() AFTER this
+// call (On replaces the stub for the exact command).
+func stubBerthEnvKeys(f *bssh.FakeRunner, s *config.Server) {
+	for _, site := range s.Sites {
+		for _, e := range berthOwnedEnv(s, site) {
+			f.On(envLineInSetScript(sharedEnvPath(site), e.Key), bssh.Result{})
+		}
+	}
+}
+
+// Pins the actual shell semantics of envLineInSet's script over the accept
+// sets berthOwnedEnv builds — a FakeRunner stub can only echo back what we
+// assume. The stdin is the exact payload envLineInSet sends.
+func TestEnvLineInSetScriptRealShell(t *testing.T) {
+	s := berthKeysServer()
+	accept := map[string][]string{}
+	for _, e := range berthOwnedEnv(s, s.Sites[0]) {
+		accept[e.Key] = e.Accept
+	}
+	dir := t.TempDir()
+	env := filepath.Join(dir, ".env")
+	cases := []struct {
+		name, key, file string
+		exit            int
+	}{
+		{"plain", "DB_USERNAME", "DB_USERNAME=appuser\n", 0},
+		{"double-quoted", "DB_USERNAME", "DB_USERNAME=\"appuser\"\n", 0},
+		{"single-quoted", "DB_USERNAME", "DB_USERNAME='appuser'\n", 0},
+		{"trailing-ascii-ws", "DB_USERNAME", "DB_USERNAME=appuser  \n", 0},
+		{"no-trailing-newline", "DB_USERNAME", "DB_USERNAME=appuser", 0},
+		{"other-value", "DB_USERNAME", "DB_USERNAME=other\n", 1},
+		{"mismatched-quotes", "DB_USERNAME", "DB_USERNAME=\"appuser'\n", 1},
+		{"value-prefix", "DB_USERNAME", "DB_USERNAME=appuser2\n", 1},
+		// A berth-owned key on more than one line is refused whatever the
+		// values (exit 4): which line the app reads is not berth's to guess.
+		{"duplicate-correct-then-wrong", "DB_USERNAME", "DB_USERNAME=appuser\nDB_USERNAME=other\n", 4},
+		{"duplicate-wrong-then-correct", "DB_USERNAME", "DB_USERNAME=other\nDB_USERNAME=appuser\n", 4},
+		{"duplicate-both-correct", "DB_USERNAME", "DB_USERNAME=appuser\nDB_USERNAME='appuser'\n", 4},
+		{"duplicate-absent-ok-key", "REDIS_PASSWORD", "REDIS_PASSWORD=\nREDIS_PASSWORD=hunter2\n", 4},
+		{"longer-key-is-not-a-duplicate", "DB_USERNAME", "DB_USERNAME_OLD=other\nDB_USERNAME=appuser\n", 0},
+		{"unicode-ws-not-trimmed", "DB_USERNAME", "DB_USERNAME=appuser \n", 1},
+		{"longer-key-is-not-the-key", "DB_USERNAME", "DB_USERNAME_OLD=appuser\n", 3},
+		{"missing-line", "DB_USERNAME", "APP_ENV=production\n", 3},
+		{"redis-password-null", "REDIS_PASSWORD", "REDIS_PASSWORD=null\n", 0},
+		{"redis-password-empty", "REDIS_PASSWORD", "REDIS_PASSWORD=\n", 0},
+		{"redis-password-empty-quotes", "REDIS_PASSWORD", "REDIS_PASSWORD=''\n", 0},
+		{"redis-password-last-accepted", "REDIS_PASSWORD", "REDIS_PASSWORD=(null)\n", 0},
+		{"redis-password-set", "REDIS_PASSWORD", "REDIS_PASSWORD=hunter2\n", 1},
+		{"redis-host-socket", "REDIS_HOST", "REDIS_HOST=" + valkeySocketPath("app.example.com") + "\n", 0},
+		{"redis-host-tcp", "REDIS_HOST", "REDIS_HOST=127.0.0.1\n", 1},
+		// The override keys: empty (any accepted spelling) or absent passes,
+		// a value is refused, a duplicate is refused whatever the values.
+		{"db-url-empty", "DB_URL", "DB_URL=\n", 0},
+		{"db-url-empty-double-quotes", "DB_URL", "DB_URL=\"\"\n", 0},
+		{"db-url-null", "DB_URL", "DB_URL=null\n", 0},
+		{"db-url-set", "DB_URL", "DB_URL=mysql://other:pw@127.0.0.1/other\n", 1},
+		{"db-url-absent", "DB_URL", "DB_DATABASE=myapp\n", 3},
+		{"db-url-duplicate", "DB_URL", "DB_URL=\nDB_URL=mysql://other@127.0.0.1/other\n", 4},
+		{"redis-url-empty-single-quotes", "REDIS_URL", "REDIS_URL=''\n", 0},
+		{"redis-url-set", "REDIS_URL", "REDIS_URL=redis://127.0.0.1:6379\n", 1},
+		{"redis-client-phpredis", "REDIS_CLIENT", "REDIS_CLIENT=phpredis\n", 0},
+		{"redis-client-quoted", "REDIS_CLIENT", "REDIS_CLIENT=\"phpredis\"\n", 0},
+		{"redis-client-predis", "REDIS_CLIENT", "REDIS_CLIENT=predis\n", 1},
+		{"redis-client-empty", "REDIS_CLIENT", "REDIS_CLIENT=\n", 1},
+		// phpdotenv also reads `export KEY=`, leading whitespace and spaces
+		// around `=`, which the ^KEY= anchor cannot see. Any such
+		// assignment of a berth-owned key is its own verdict (exit 5),
+		// whatever its value and whatever canonical lines sit beside it.
+		{"export-form", "DB_URL", "export DB_URL=x\n", 5},
+		{"leading-spaces", "DB_USERNAME", "  DB_USERNAME=sync\n", 5},
+		{"spaces-around-equals", "DB_USERNAME", "DB_USERNAME = sync\n", 5},
+		{"export-two-spaces", "REDIS_HOST", "export  REDIS_HOST=/x\n", 5},
+		{"export-tab", "REDIS_HOST", "export\tREDIS_HOST=/x\n", 5},
+		{"leading-tab", "DB_USERNAME", "\tDB_USERNAME=appuser\n", 5},
+		{"space-before-equals", "DB_USERNAME", "DB_USERNAME =appuser\n", 5},
+		{"export-with-the-right-value", "DB_USERNAME", "export DB_USERNAME=appuser\n", 5},
+		{"canonical-then-export", "DB_USERNAME", "DB_USERNAME=appuser\nexport DB_USERNAME=other\n", 5},
+		{"non-canonical-beside-duplicates", "DB_USERNAME", "DB_USERNAME=appuser\nDB_USERNAME=appuser\n DB_USERNAME=other\n", 5},
+		{"commented-export-is-ignored", "DB_URL", "#export DB_URL=x\n", 3},
+		{"indented-comment-is-ignored", "DB_URL", "  # DB_URL=x\n", 3},
+		{"longer-key-is-ignored", "DB_URL", "DB_URL_BACKUP=x\n", 3},
+		{"export-longer-key-is-ignored", "DB_URL", "export DB_URL_BACKUP=x\n", 3},
+		{"export-glued-is-another-key", "DB_URL", "exportDB_URL=x\n", 3},
+		{"canonical-beside-ignored-forms", "DB_USERNAME", "#export DB_USERNAME=x\nDB_USERNAME_OLD = y\nDB_USERNAME=appuser\n", 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if err := os.WriteFile(env, []byte(c.file), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stdin, err := envAcceptStdin(accept[c.key])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := shellExit(t, envLineInSetScript(env, c.key), string(stdin)); got != c.exit {
+				t.Fatalf("exit = %d, want %d", got, c.exit)
+			}
+		})
+	}
+	t.Run("unreadable-file", func(t *testing.T) {
+		stdin, err := envAcceptStdin(accept["DB_USERNAME"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := shellExit(t, envLineInSetScript(filepath.Join(dir, "missing"), "DB_USERNAME"), string(stdin)); got != 2 {
+			t.Fatalf("exit = %d, want 2 (I/O error, never silent absence)", got)
+		}
+	})
+	// The duplicate verdict carries the line COUNT on stdout — and nothing
+	// else: no value of any line may leave the host.
+	t.Run("duplicate-prints-only-the-count", func(t *testing.T) {
+		if err := os.WriteFile(env, []byte("DB_USERNAME=LEAKCHECK\nAPP_ENV=production\nDB_USERNAME=appuser\nDB_USERNAME=other\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stdin, err := envAcceptStdin(accept["DB_USERNAME"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		exit, stdout := shellRun(t, envLineInSetScript(env, "DB_USERNAME"), string(stdin))
+		if exit != 4 || stdout != "3\n" {
+			t.Fatalf("got exit %d stdout %q, want exit 4 and exactly the count \"3\\n\"", exit, stdout)
+		}
+	})
+	// The non-canonical verdict prints nothing either: not the line, not
+	// its value, not a count.
+	t.Run("non-canonical-prints-nothing", func(t *testing.T) {
+		if err := os.WriteFile(env, []byte("export DB_USERNAME=LEAKCHECK\nDB_USERNAME=appuser\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stdin, err := envAcceptStdin(accept["DB_USERNAME"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exit, stdout := shellRun(t, envLineInSetScript(env, "DB_USERNAME"), string(stdin)); exit != 5 || stdout != "" {
+			t.Fatalf("got exit %d stdout %q, want exit 5 and no output", exit, stdout)
+		}
+	})
+	// Every other verdict prints nothing at all.
+	t.Run("single-line-prints-nothing", func(t *testing.T) {
+		if err := os.WriteFile(env, []byte("DB_USERNAME=LEAKCHECK\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stdin, err := envAcceptStdin(accept["DB_USERNAME"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exit, stdout := shellRun(t, envLineInSetScript(env, "DB_USERNAME"), string(stdin)); exit != 1 || stdout != "" {
+			t.Fatalf("got exit %d stdout %q, want exit 1 and no output", exit, stdout)
+		}
+	})
+}
+
+// shellRun is shellExit that also returns the script's stdout, for the
+// verdicts whose stdout is part of the contract.
+func shellRun(t *testing.T, script, stdin string) (int, string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell required")
+	}
+	cmd := exec.Command("/bin/sh", "-c", script)
+	cmd.Stdin = strings.NewReader(stdin)
+	out, err := cmd.Output()
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode(), string(out)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return 0, string(out)
+}
+
+func TestBerthOwnedEnvKeysAndForms(t *testing.T) {
+	s := berthKeysServer()
+	got := berthOwnedEnv(s, s.Sites[0])
+	sock := valkeySocketPath("app.example.com")
+	want := []envExpectation{
+		{Key: "DB_DATABASE", Accept: []string{"DB_DATABASE=myapp", `DB_DATABASE="myapp"`, "DB_DATABASE='myapp'"}},
+		{Key: "DB_USERNAME", Accept: []string{"DB_USERNAME=appuser", `DB_USERNAME="appuser"`, "DB_USERNAME='appuser'"}},
+		{Key: "REDIS_HOST", Accept: []string{"REDIS_HOST=" + sock, `REDIS_HOST="` + sock + `"`, "REDIS_HOST='" + sock + "'"}},
+		{Key: "REDIS_PORT", Accept: []string{"REDIS_PORT=0", `REDIS_PORT="0"`, "REDIS_PORT='0'"}},
+		{Key: "REDIS_PASSWORD", AbsentOK: true, Accept: []string{"REDIS_PASSWORD=", `REDIS_PASSWORD=""`, "REDIS_PASSWORD=''", "REDIS_PASSWORD=null", "REDIS_PASSWORD=(null)"}},
+		// Override keys: a non-empty DB_URL / REDIS_URL wins over every
+		// key above in Laravel's config, and a non-phpredis client cannot
+		// take the socket host the way berth seeds it.
+		{Key: "REDIS_URL", AbsentOK: true, Accept: []string{"REDIS_URL=", `REDIS_URL=""`, "REDIS_URL=''", "REDIS_URL=null", "REDIS_URL=(null)"}},
+		{Key: "REDIS_CLIENT", AbsentOK: true, Accept: []string{"REDIS_CLIENT=phpredis", `REDIS_CLIENT="phpredis"`, "REDIS_CLIENT='phpredis'"}},
+	}
+	want = append(want[:2], append([]envExpectation{
+		{Key: "DB_URL", AbsentOK: true, Accept: []string{"DB_URL=", `DB_URL=""`, "DB_URL=''", "DB_URL=null", "DB_URL=(null)"}},
+	}, want[2:]...)...)
+	if len(got) != len(want) {
+		t.Fatalf("berthOwnedEnv = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i].Key != want[i].Key || got[i].AbsentOK != want[i].AbsentOK || strings.Join(got[i].Accept, "\n") != strings.Join(want[i].Accept, "\n") {
+			t.Errorf("berthOwnedEnv[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestEnvLineInSetRefusesMultilineAccept(t *testing.T) {
+	// Defensive: an accepted line carrying CR/LF would smuggle a second line
+	// past `read` — refused before anything runs.
+	s := berthKeysServer()
+	f := bssh.NewFakeRunner()
+	for _, bad := range []string{"DB_USERNAME=a\nDB_USERNAME=b", "DB_USERNAME=a\r"} {
+		if _, _, err := envLineInSet(context.Background(), f, s.Sites[0], "DB_USERNAME", []string{bad}); err == nil {
+			t.Errorf("accept %q: want an error", bad)
+		}
+	}
+	if len(f.Calls()) != 0 {
+		t.Errorf("no probe may run for a refused accept set; ran %v", callCmds(f))
+	}
+}
+
+func TestEnvLineInSetExitMap(t *testing.T) {
+	s := berthKeysServer()
+	site := s.Sites[0]
+	cmd := envLineInSetScript(sharedEnvPath(site), "DB_USERNAME")
+	for _, c := range []struct {
+		exit           int
+		match, present bool
+		wantErr        bool
+	}{
+		{0, true, true, false},
+		{1, false, true, false},
+		{3, false, false, false},
+		{2, false, false, true},
+	} {
+		f := bssh.NewFakeRunner()
+		f.On(cmd, bssh.Result{ExitCode: c.exit, Stderr: "grep: failure"})
+		match, present, err := envLineInSet(context.Background(), f, site, "DB_USERNAME", []string{"DB_USERNAME=appuser"})
+		if (err != nil) != c.wantErr || match != c.match || present != c.present {
+			t.Errorf("exit %d: got (%v, %v, %v), want (%v, %v, err=%v)", c.exit, match, present, err, c.match, c.present, c.wantErr)
+		}
+	}
+
+	// Exit 4: the key is duplicated; stdout is the line count, surfaced as
+	// the dedicated duplicate error (key, count, path — never a value).
+	f := bssh.NewFakeRunner()
+	f.On(cmd, bssh.Result{ExitCode: 4, Stdout: "3\n", Stderr: "LEAKCHECK"})
+	_, _, err := envLineInSet(context.Background(), f, site, "DB_USERNAME", []string{"DB_USERNAME=appuser"})
+	var dup *envDuplicateKeyError
+	if !errors.As(err, &dup) || dup.Key != "DB_USERNAME" || dup.Count != 3 || dup.Path != sharedEnvPath(site) {
+		t.Fatalf("exit 4: err = %#v, want an envDuplicateKeyError{DB_USERNAME, 3, %s}", err, sharedEnvPath(site))
+	}
+	if want := "DB_USERNAME appears 3 times in " + sharedEnvPath(site) + "; keep exactly one line"; err.Error() != want {
+		t.Errorf("duplicate error = %q, want %q", err, want)
+	}
+	// Exit 5: the key is assigned in a form the probe cannot verify
+	// (export, leading whitespace, spaces around =) — surfaced as the
+	// dedicated error naming the key, the path and the canonical line,
+	// never anything the probe printed.
+	f = bssh.NewFakeRunner()
+	f.On(cmd, bssh.Result{ExitCode: 5, Stdout: "LEAKCHECK\n", Stderr: "LEAKCHECK"})
+	match, present, err := envLineInSet(context.Background(), f, site, "DB_USERNAME", []string{"DB_USERNAME=appuser", `DB_USERNAME="appuser"`})
+	var nc *envNonCanonicalKeyError
+	if !errors.As(err, &nc) || nc.Key != "DB_USERNAME" || nc.Path != sharedEnvPath(site) || nc.Canonical != "DB_USERNAME=appuser" || match || !present {
+		t.Fatalf("exit 5: got (%v, %v, %#v), want (false, true, envNonCanonicalKeyError{DB_USERNAME, %s, DB_USERNAME=appuser})", match, present, err, sharedEnvPath(site))
+	}
+	if want := "DB_USERNAME is assigned in a form berth cannot verify in " + sharedEnvPath(site) + " (export, leading space or spaces around =); write it as DB_USERNAME=appuser"; err.Error() != want {
+		t.Errorf("non-canonical error = %q, want %q", err, want)
+	}
+	// A count the script cannot have printed is a hard probe error — not a
+	// duplicate verdict, and its stdout is never echoed.
+	for _, out := range []string{"LEAKCHECK\n", "1\n", ""} {
+		f := bssh.NewFakeRunner()
+		f.On(cmd, bssh.Result{ExitCode: 4, Stdout: out})
+		_, _, err := envLineInSet(context.Background(), f, site, "DB_USERNAME", []string{"DB_USERNAME=appuser"})
+		if err == nil || errors.As(err, &dup) || strings.Contains(err.Error(), "LEAKCHECK") {
+			t.Errorf("exit 4 with stdout %q: err = %v, want a hard probe error that echoes nothing", out, err)
+		}
+	}
+}
+
+func TestAssertEnvBerthKeysRefusesDuplicatedKey(t *testing.T) {
+	s := berthKeysServer()
+	site := s.Sites[0]
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	stubBerthEnvKeys(f, s)
+	// DB_USERNAME duplicated, REDIS_PASSWORD (an AbsentOK key) duplicated,
+	// REDIS_HOST plainly mismatched: all three land in ONE error.
+	f.On(envLineInSetScript(envPath(s), "DB_USERNAME"), bssh.Result{ExitCode: 4, Stdout: "2\n", Stderr: "LEAKCHECK"})
+	f.On(envLineInSetScript(envPath(s), "REDIS_PASSWORD"), bssh.Result{ExitCode: 4, Stdout: "3\n"})
+	f.On(envLineInSetScript(envPath(s), "REDIS_HOST"), bssh.Result{ExitCode: 1, Stdout: "REDIS_HOST=LEAKCHECK\n", Stderr: "LEAKCHECK"})
+	err := assertEnvBerthKeys(context.Background(), f, s, site)
+	if err == nil {
+		t.Fatal("want an error naming both duplicated keys and the mismatch")
+	}
+	for _, want := range []string{
+		"DB_USERNAME appears 2 times in " + envPath(s) + "; keep exactly one line",
+		"REDIS_PASSWORD appears 3 times in " + envPath(s) + "; keep exactly one line",
+		"REDIS_HOST=" + valkeySocketPath(site.Domain),
+		"berth never rewrites an existing shared/.env",
+		"--force does not override this check",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should contain %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "LEAKCHECK") {
+		t.Errorf("error leaks a current .env value: %q", err)
+	}
+	if strings.Contains(err.Error(), "DB_USERNAME=") {
+		t.Errorf("a duplicated key must be reported as a duplicate, not as a mismatch line: %q", err)
+	}
+}
+
+// TestAssertEnvBerthKeysRefusesNonCanonicalForms: phpdotenv reads
+// `export KEY=`, leading whitespace and `KEY = value`, none of which the
+// ^KEY= anchor sees — `export DB_URL=mysql://elsewhere` would otherwise
+// read as an absent DB_URL. Such an assignment of a berth-owned key is
+// refused with the canonical line to write instead, in the SAME error as
+// every other problem, and never with a current value.
+func TestAssertEnvBerthKeysRefusesNonCanonicalForms(t *testing.T) {
+	s := berthKeysServer()
+	site := s.Sites[0]
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	stubBerthEnvKeys(f, s)
+	f.On(envLineInSetScript(envPath(s), "DB_URL"), bssh.Result{ExitCode: 5, Stdout: "LEAKCHECK\n", Stderr: "LEAKCHECK"})
+	f.On(envLineInSetScript(envPath(s), "DB_USERNAME"), bssh.Result{ExitCode: 5})
+	f.On(envLineInSetScript(envPath(s), "REDIS_PASSWORD"), bssh.Result{ExitCode: 4, Stdout: "2\n"})
+	f.On(envLineInSetScript(envPath(s), "REDIS_HOST"), bssh.Result{ExitCode: 1, Stderr: "LEAKCHECK"})
+	err := assertEnvBerthKeys(context.Background(), f, s, site)
+	if err == nil {
+		t.Fatal("want one error naming the non-canonical keys, the duplicate and the mismatch")
+	}
+	for _, want := range []string{
+		"DB_USERNAME is assigned in a form berth cannot verify in " + envPath(s) + " (export, leading space or spaces around =); write it as DB_USERNAME=appuser",
+		"DB_URL is assigned in a form berth cannot verify in " + envPath(s) + " (export, leading space or spaces around =); write it as DB_URL=",
+		"REDIS_PASSWORD appears 2 times in " + envPath(s) + "; keep exactly one line",
+		"expected REDIS_HOST=" + valkeySocketPath(site.Domain),
+		"--force does not override this check",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should contain %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "LEAKCHECK") {
+		t.Errorf("error leaks a current .env value: %q", err)
+	}
+	if strings.Contains(err.Error(), "expected DB_USERNAME") || strings.Contains(err.Error(), ", DB_USERNAME=appuser") {
+		t.Errorf("a non-canonical key must be reported as such, not as a mismatch line: %q", err)
+	}
+}
+
+func TestDatabaseRefusesNonCanonicalEnvKeyEvenWithForce(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
+	f.On(envLineInSetScript(envPath(s), "DB_URL"), bssh.Result{ExitCode: 5})
+	want := "DB_URL is assigned in a form berth cannot verify in " + envPath(s)
+	if _, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{Force: true}, s, f); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Check() = %v, want the non-canonical refusal under --force", err)
+	}
+	// NOTE: apt install is deliberately NOT stubbed — Apply must refuse first.
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{Force: true}, s, f); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Apply() = %v, want the non-canonical refusal under --force", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "apt-get") || strings.HasPrefix(c.Cmd, "mariadb ") {
+			t.Errorf("nothing may be installed or mutated after the refusal; ran %q", c.Cmd)
+		}
+	}
+}
+
+func TestDatabaseRefusesDuplicatedEnvKeyEvenWithForce(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
+	f.On(envLineInSetScript(envPath(s), "DB_DATABASE"), bssh.Result{ExitCode: 4, Stdout: "2\n"})
+	want := "DB_DATABASE appears 2 times in " + envPath(s) + "; keep exactly one line"
+	if _, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{Force: true}, s, f); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Check() = %v, want the duplicate refusal under --force", err)
+	}
+	// NOTE: apt install is deliberately NOT stubbed — Apply must refuse first.
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{Force: true}, s, f); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Apply() = %v, want the duplicate refusal under --force", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "apt-get") || strings.HasPrefix(c.Cmd, "mariadb ") {
+			t.Errorf("nothing may be installed or mutated after the refusal; ran %q", c.Cmd)
+		}
+	}
+}
+
+func TestAssertEnvBerthKeysListsEveryMismatch(t *testing.T) {
+	s := berthKeysServer()
+	site := s.Sites[0]
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	stubBerthEnvKeys(f, s)
+	// The live values ride every channel a careless implementation could
+	// echo: neither may surface in the error.
+	leak := bssh.Result{ExitCode: 1, Stdout: "DB_USERNAME=LEAKCHECK\n", Stderr: "LEAKCHECK"}
+	f.On(envLineInSetScript(envPath(s), "DB_USERNAME"), leak)
+	f.On(envLineInSetScript(envPath(s), "REDIS_HOST"), leak)
+	err := assertEnvBerthKeys(context.Background(), f, s, site)
+	if err == nil {
+		t.Fatal("want an error listing both mismatched keys")
+	}
+	for _, want := range []string{
+		"DB_USERNAME=appuser",
+		"REDIS_HOST=" + valkeySocketPath(site.Domain),
+		"berth never rewrites an existing shared/.env",
+		"--force does not override this check",
+		envPath(s),
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should contain %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "LEAKCHECK") {
+		t.Errorf("error leaks the current .env value: %q", err)
+	}
+	for _, unwanted := range []string{"DB_DATABASE=", "REDIS_PORT=", "REDIS_PASSWORD="} {
+		if strings.Contains(err.Error(), unwanted) {
+			t.Errorf("error %q names %s although it matched", err, unwanted)
+		}
+	}
+	// Every probe ran (no early exit on the first mismatch), and each one
+	// carried its accept set on stdin — never in the command string.
+	for _, e := range berthOwnedEnv(s, site) {
+		cmd := envLineInSetScript(envPath(s), e.Key)
+		var seen bool
+		for _, c := range f.Calls() {
+			if c.Cmd != cmd {
+				continue
+			}
+			seen = true
+			if want := strings.Join(e.Accept, "\n") + "\n"; string(c.Stdin) != want {
+				t.Errorf("%s stdin = %q, want %q", e.Key, c.Stdin, want)
+			}
+			// The grep anchor '^KEY=' is the only place the key may appear.
+			if strings.Contains(strings.ReplaceAll(c.Cmd, "'^"+e.Key+"='", ""), e.Accept[0]) {
+				t.Errorf("%s: the expected line rode the command string: %q", e.Key, c.Cmd)
+			}
+		}
+		if !seen {
+			t.Errorf("no probe for %s", e.Key)
+		}
+	}
+}
+
+func TestAssertEnvBerthKeysNoEnvIsFine(t *testing.T) {
+	s := berthKeysServer()
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 1})
+	if err := assertEnvBerthKeys(context.Background(), f, s, s.Sites[0]); err != nil {
+		t.Fatalf("no shared/.env: got %v, want nil (the seed will be consistent)", err)
+	}
+	if got := callCmds(f); len(got) != 1 {
+		t.Errorf("want only the existence probe, ran %q", got)
+	}
+}
+
+func TestAssertEnvBerthKeysRedisPasswordAbsentOK(t *testing.T) {
+	s := berthKeysServer()
+	site := s.Sites[0]
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	stubBerthEnvKeys(f, s)
+	f.On(envLineInSetScript(envPath(s), "REDIS_PASSWORD"), bssh.Result{ExitCode: 3}) // no line at all
+	if err := assertEnvBerthKeys(context.Background(), f, s, site); err != nil {
+		t.Fatalf("absent REDIS_PASSWORD: got %v, want nil", err)
+	}
+	// A SET password is refused (phpredis would AUTH against an instance
+	// that has none configured)...
+	f.On(envLineInSetScript(envPath(s), "REDIS_PASSWORD"), bssh.Result{ExitCode: 1})
+	if err := assertEnvBerthKeys(context.Background(), f, s, site); err == nil || !strings.Contains(err.Error(), "REDIS_PASSWORD=") {
+		t.Errorf("set REDIS_PASSWORD: got %v, want an error naming REDIS_PASSWORD=", err)
+	}
+	// ...and absence is tolerated ONLY where AbsentOK says so.
+	f.On(envLineInSetScript(envPath(s), "REDIS_PASSWORD"), bssh.Result{ExitCode: 3})
+	f.On(envLineInSetScript(envPath(s), "DB_USERNAME"), bssh.Result{ExitCode: 3})
+	if err := assertEnvBerthKeys(context.Background(), f, s, site); err == nil || !strings.Contains(err.Error(), "DB_USERNAME=appuser") {
+		t.Errorf("absent DB_USERNAME: got %v, want an error naming DB_USERNAME=appuser", err)
+	}
+}
+
+func TestAssertEnvBerthKeysSkipsRedisWithoutValkey(t *testing.T) {
+	s := berthKeysServer()
+	s.Valkey = false
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	stubBerthEnvKeys(f, s)
+	if err := assertEnvBerthKeys(context.Background(), f, s, s.Sites[0]); err != nil {
+		t.Fatalf("got %v, want nil", err)
+	}
+	sawDBURL := false
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "REDIS_") {
+			t.Errorf("valkey: false must not probe redis keys; ran %q", c.Cmd)
+		}
+		if c.Cmd == envLineInSetScript(envPath(s), "DB_URL") {
+			sawDBURL = true
+		}
+	}
+	if !sawDBURL {
+		t.Error("DB_URL is probed whatever valkey says: it overrides the database keys")
+	}
+}
+
+// TestAssertEnvBerthKeysRefusesOverrideKeys: DB_URL and REDIS_URL override
+// every per-key setting berth checks (Laravel's config reads the URL first),
+// and only phpredis takes the socket host berth seeds — so a set URL or
+// another client is refused like a mismatched key, listing the expected
+// line and never the current value. Absence passes for all three.
+func TestAssertEnvBerthKeysRefusesOverrideKeys(t *testing.T) {
+	s := berthKeysServer()
+	site := s.Sites[0]
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	stubBerthEnvKeys(f, s)
+	for _, key := range []string{"DB_URL", "REDIS_URL", "REDIS_CLIENT"} {
+		f.On(envLineInSetScript(envPath(s), key), bssh.Result{ExitCode: 3}) // no line
+	}
+	if err := assertEnvBerthKeys(context.Background(), f, s, site); err != nil {
+		t.Fatalf("absent DB_URL/REDIS_URL/REDIS_CLIENT: got %v, want nil", err)
+	}
+
+	leak := bssh.Result{ExitCode: 1, Stdout: "LEAKCHECK\n", Stderr: "LEAKCHECK"}
+	for _, key := range []string{"DB_URL", "REDIS_URL", "REDIS_CLIENT"} {
+		f.On(envLineInSetScript(envPath(s), key), leak)
+	}
+	f.On(envLineInSetScript(envPath(s), "REDIS_URL"), bssh.Result{ExitCode: 4, Stdout: "2\n", Stderr: "LEAKCHECK"})
+	err := assertEnvBerthKeys(context.Background(), f, s, site)
+	if err == nil {
+		t.Fatal("want an error naming DB_URL, REDIS_URL and REDIS_CLIENT")
+	}
+	for _, want := range []string{
+		"DB_URL= (or no DB_URL line)",
+		"REDIS_URL appears 2 times in " + envPath(s) + "; keep exactly one line",
+		"REDIS_CLIENT=phpredis (or no REDIS_CLIENT line)",
+		"--force does not override this check",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should contain %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "LEAKCHECK") {
+		t.Errorf("error leaks a current .env value: %q", err)
+	}
+}
+
+// TestDatabaseRefusesDBURLOverrideEvenWithForce: the override refusal rides
+// the same path as every berth-key mismatch — Check and Apply, --force or not.
+func TestDatabaseRefusesDBURLOverrideEvenWithForce(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
+	f.On(envLineInSetScript(envPath(s), "DB_URL"), bssh.Result{ExitCode: 1})
+	const want = "DB_URL= (or no DB_URL line)"
+	if _, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{Force: true}, s, f); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Check() = %v, want the DB_URL refusal under --force", err)
+	}
+	// NOTE: apt install is deliberately NOT stubbed — Apply must refuse first.
+	if err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{Force: true}, s, f); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Apply() = %v, want the DB_URL refusal under --force", err)
+	}
+}
+
+func TestAssertEnvBerthKeysProbeErrorIsHard(t *testing.T) {
+	s := berthKeysServer()
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	stubBerthEnvKeys(f, s)
+	f.On(envLineInSetScript(envPath(s), "DB_DATABASE"), bssh.Result{ExitCode: 2, Stderr: "grep: input: Permission denied"})
+	if err := assertEnvBerthKeys(context.Background(), f, s, s.Sites[0]); err == nil || !strings.Contains(err.Error(), "Permission denied") {
+		t.Fatalf("got %v, want the probe's I/O error, never silent agreement", err)
+	}
+}
+
+func TestDatabaseCheckRefusesMismatchedEnvEvenWithForce(t *testing.T) {
+	chdirTemp(t) // Check preflight-reads the local secret cache
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
+	f.On(envLineInSetScript(envPath(s), "DB_USERNAME"), bssh.Result{ExitCode: 1})
+	_, err := Database(secret.NewRedactor()).Check(context.Background(), provision.RunCtx{Force: true}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "DB_USERNAME=myapp") || !strings.Contains(err.Error(), "--force does not override this check") {
+		t.Fatalf("Check() = %v; --force must not override the shared/.env key check", err)
+	}
+}
+
+func TestDatabaseApplyRefusesMismatchedEnvBeforeMutating(t *testing.T) {
+	chdirTemp(t)
+	s := databaseServer()
+	f := bssh.NewFakeRunner()
+	f.On("test -e "+shQuote(envPath(s)), bssh.Result{ExitCode: 0})
+	f.On("grep -m1 '^DB_CONNECTION=' "+shQuote(envPath(s)), bssh.Result{ExitCode: 0, Stdout: "DB_CONNECTION=mysql\n"})
+	stubBerthEnvKeys(f, s)
+	f.On(envLineInSetScript(envPath(s), "DB_DATABASE"), bssh.Result{ExitCode: 1})
+	// NOTE: apt install is deliberately NOT stubbed — the guard must fire before it.
+	err := Database(secret.NewRedactor()).Apply(context.Background(), provision.RunCtx{Force: true}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "DB_DATABASE=myapp") {
+		t.Fatalf("Apply() = %v, want the shared/.env key refusal", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "apt-get") || strings.HasPrefix(c.Cmd, "mariadb ") {
+			t.Errorf("Apply must not install or mutate anything after the refusal; ran %q", c.Cmd)
+		}
 	}
 }

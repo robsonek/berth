@@ -2,8 +2,10 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/robsonek/berth/internal/config"
@@ -292,6 +294,258 @@ func assertEnvEngineMatch(ctx context.Context, r bssh.Runner, s *config.Server, 
 	return nil
 }
 
+// envExpectation is one shared/.env key whose value berth provisions
+// elsewhere (the database, its role, the per-site Valkey socket), so a live
+// .env disagreeing with it points the app at something berth never set up.
+// Accept lists every line form that counts as agreement; Accept[0] is the
+// canonical line, the only form an error ever prints. AbsentOK tolerates a
+// missing line (the app's default is then the right one).
+type envExpectation struct {
+	Key      string
+	Accept   []string
+	AbsentOK bool
+}
+
+// envValueForms is the accept set for a plain value: unquoted, double- and
+// single-quoted — the three spellings phpdotenv reads as the same value.
+// The unquoted form comes first: it is what seedSharedEnv writes.
+func envValueForms(key, value string) envExpectation {
+	return envExpectation{Key: key, Accept: []string{
+		key + "=" + value,
+		key + `="` + value + `"`,
+		key + "='" + value + "'",
+	}}
+}
+
+// envUnsetForms is the expectation for a key that must be absent or empty:
+// an empty value in each quoting, and the two spellings phpdotenv/Laravel
+// read as null. The bare `KEY=` comes first: it is the line an error prints.
+func envUnsetForms(key string) envExpectation {
+	return envExpectation{Key: key, AbsentOK: true, Accept: []string{
+		key + "=",
+		key + `=""`,
+		key + "=''",
+		key + "=null",
+		key + "=(null)",
+	}}
+}
+
+// berthOwnedEnv lists, in probe and report order, the shared/.env keys a
+// site's app must agree on with what berth provisions: the database and role
+// the database step creates and, when Valkey is on, the site's own instance
+// socket (REDIS_PORT=0 is how phpredis takes a path-shaped host as a unix
+// socket). REDIS_PASSWORD must be unset or empty: the per-site instance has
+// no password (isolation is the 0700 socket directory), and phpredis sends
+// AUTH for any non-empty value, which an instance without one rejects.
+// DB_URL and REDIS_URL must be unset or empty too: Laravel parses a URL into
+// the connection settings and lets it win over the separate keys, so a set
+// URL would point the app elsewhere while every key above reads correct.
+// REDIS_CLIENT may be absent (Laravel defaults to phpredis) or phpredis, the
+// client that takes berth's socket host with REDIS_PORT=0. The values are
+// config-derived and validated (no CR/LF); envLineInSet re-checks anyway
+// before any of them reaches a probe.
+func berthOwnedEnv(s *config.Server, site config.Site) []envExpectation {
+	exp := []envExpectation{
+		envValueForms("DB_DATABASE", s.SiteDBName(site)),
+		envValueForms("DB_USERNAME", s.SiteDBUser(site)),
+		envUnsetForms("DB_URL"),
+	}
+	if s.Valkey {
+		client := envValueForms("REDIS_CLIENT", "phpredis")
+		client.AbsentOK = true
+		exp = append(exp,
+			envValueForms("REDIS_HOST", valkeySocketPath(site.Domain)),
+			envValueForms("REDIS_PORT", "0"),
+			envUnsetForms("REDIS_PASSWORD"),
+			envUnsetForms("REDIS_URL"),
+			client,
+		)
+	}
+	return exp
+}
+
+// envLineInSetScript builds the exact shell script envLineInSet runs. It
+// first COUNTS every line that assigns <key> in any form phpdotenv reads
+// (`grep -cE`, ERE `^[[:space:]]*(export[[:space:]]+)?<key>[[:space:]]*=`)
+// and then the canonical <key>= lines (`grep -c '^<key>='`), both under the
+// C-locale pin with explicit exit mapping. Fewer canonical lines than
+// assignments means some line uses `export`, leading whitespace or spaces
+// around `=`: the probe cannot verify such a line (it could set the key, or
+// override a correct canonical line, unseen), so that is a verdict of its
+// own whatever the values. A comment (`#export KEY=`) or a longer key
+// (`KEY_OLD=`) matches neither count. Next, a key on more than one line is a
+// verdict of its own whatever the values, because which line the app reads
+// is phpdotenv's business (a later line can override an earlier one), and a
+// correct first line must never vouch for a wrong later one. With exactly
+// one line, that line is captured, trimmed of trailing whitespace exactly as
+// envValueMatchScript trims it (the pin keeps the trim ASCII-only), then
+// compared against every accepted line read from stdin — `while IFS= read
+// -r want` takes one line per iteration, and the comparison is plain quoted
+// shell string equality: no grep pattern semantics over the accepted lines,
+// no `-f -`, no pattern-file/input fd sharing (grep reads only its file
+// operand). Exit map: 0 = the line is one of the accepted lines; 1 = one
+// line, none of them; 2 = I/O error (also when the line vanishes between the
+// count and the capture); 3 = no line assigns <key>; 4 = more than one
+// <key>= line, with the line COUNT — never a value — as the only stdout;
+// 5 = <key> is assigned in a non-canonical form (checked before 4). Every
+// verdict but 4 prints nothing. Shared with the real-shell test in
+// database_test.go so the tested bytes are the production bytes.
+func envLineInSetScript(path, key string) string {
+	return cLocalePin + "t=$(grep -cE '^[[:space:]]*(export[[:space:]]+)?" + key + "[[:space:]]*=' " + shQuote(path) + "); s=$?; " +
+		"if [ $s -eq 1 ]; then exit 3; elif [ $s -ne 0 ]; then exit 2; fi; " +
+		"n=$(grep -c '^" + key + "=' " + shQuote(path) + "); s=$?; " +
+		"if [ $s -gt 1 ]; then exit 2; fi; " +
+		`if [ "$n" -lt "$t" ]; then exit 5; fi; ` +
+		`if [ "$n" -gt 1 ]; then printf '%s\n' "$n"; exit 4; fi; ` +
+		"line=$(grep -m1 '^" + key + "=' " + shQuote(path) + ") || exit 2; " +
+		`line=$(printf '%s' "$line" | sed 's/[[:space:]]*$//'); ` +
+		`while IFS= read -r want; do [ "$line" = "$want" ] && exit 0; done; exit 1`
+}
+
+// envDuplicateKeyError reports a berth-owned key that appears on more than
+// one line of a shared/.env. It names the key, the line count and the path —
+// never a value.
+type envDuplicateKeyError struct {
+	Key   string
+	Count int
+	Path  string
+}
+
+func (e *envDuplicateKeyError) Error() string {
+	return fmt.Sprintf("%s appears %d times in %s; keep exactly one line", e.Key, e.Count, e.Path)
+}
+
+// envNonCanonicalKeyError reports a berth-owned key assigned in a form the
+// probe cannot verify: `export KEY=`, leading whitespace or spaces around
+// `=`. phpdotenv reads every one of them, but the ^KEY= anchor sees none, so
+// such a line could set the key (or override a correct canonical line)
+// unseen. It names the key, the path and the canonical line to write —
+// never a value.
+type envNonCanonicalKeyError struct {
+	Key       string
+	Path      string
+	Canonical string
+}
+
+func (e *envNonCanonicalKeyError) Error() string {
+	return fmt.Sprintf("%s is assigned in a form berth cannot verify in %s (export, leading space or spaces around =); write it as %s", e.Key, e.Path, e.Canonical)
+}
+
+// envAcceptStdin serializes an accept set into envLineInSetScript's stdin:
+// one line each, every line newline-terminated (a final unterminated line
+// would make `read` fail and skip it). A line carrying CR or LF is refused —
+// it would smuggle an extra accepted line past `read`.
+func envAcceptStdin(accept []string) ([]byte, error) {
+	var b strings.Builder
+	for _, line := range accept {
+		if strings.ContainsAny(line, "\r\n") {
+			return nil, fmt.Errorf("accepted shared/.env line for probe contains a line break")
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return []byte(b.String()), nil
+}
+
+// envLineInSet reports whether the ONLY <key>= line of a site's live
+// shared/.env is one of the accepted lines (modulo trailing ASCII
+// whitespace). present is false only when no line assigns <key>; a key
+// assigned in a non-canonical form returns an *envNonCanonicalKeyError
+// naming accept[0] as the line to write, and a key on more than one line an
+// *envDuplicateKeyError (both whatever the values). The accepted lines
+// travel via STDIN, the live line never leaves
+// the host (the verdict is the exit code; the only stdout is the duplicate
+// count), and a probe failure (grep exit 2, unreadable file, a duplicate
+// verdict without a sane count) is a hard error rather than silent agreement.
+func envLineInSet(ctx context.Context, r bssh.Runner, site config.Site, key string, accept []string) (match, present bool, err error) {
+	stdin, err := envAcceptStdin(accept)
+	if err != nil {
+		return false, false, fmt.Errorf("probe %s in %s: %w", key, sharedEnvPath(site), err)
+	}
+	res, err := r.Run(ctx, envLineInSetScript(sharedEnvPath(site), key), stdin)
+	if err != nil {
+		return false, false, err
+	}
+	switch res.ExitCode {
+	case 0:
+		return true, true, nil
+	case 1:
+		return false, true, nil
+	case 3:
+		return false, false, nil
+	case 4:
+		// The stdout is the script's own count; a malformed one is never
+		// echoed (whatever produced it is not the audited script's output).
+		n, perr := strconv.Atoi(strings.TrimSpace(res.Stdout))
+		if perr != nil || n < 2 {
+			return false, true, fmt.Errorf("probe %s in %s: duplicate verdict without a valid line count", key, sharedEnvPath(site))
+		}
+		return false, true, &envDuplicateKeyError{Key: key, Count: n, Path: sharedEnvPath(site)}
+	case 5:
+		canonical := key + "="
+		if len(accept) > 0 {
+			canonical = accept[0]
+		}
+		return false, true, &envNonCanonicalKeyError{Key: key, Path: sharedEnvPath(site), Canonical: canonical}
+	default:
+		return false, false, fmt.Errorf("probe %s in %s: %s", key, sharedEnvPath(site), res.Stderr)
+	}
+}
+
+// assertEnvBerthKeys fails loudly when an existing shared/.env disagrees with
+// the keys berth provisions for the site (berthOwnedEnv). shared/.env is
+// seed-if-absent and never rewritten, so a mismatch — an operator-preseeded
+// env, or one written for a different config (REDIS_HOST=127.0.0.1 under
+// valkey: true) — would otherwise leave the app on a database, role or cache
+// berth never set up while every run reports green. A key on more than one
+// line is refused whatever the values — a correct line must never vouch for
+// a duplicate the app may read instead — and so is a key assigned in a form
+// the probe cannot verify (`export KEY=`, leading whitespace, `KEY = v`),
+// which phpdotenv reads too. A fresh box (no .env) is fine: the seed will be
+// consistent. Every problem (non-canonical forms, duplicates and mismatches)
+// is collected before failing, so one run names them all; the error prints
+// only key names, line counts and the canonical lines (Accept[0]), never the
+// current values. Deliberately NOT overridable by --force, like
+// assertEnvEngineMatch: the fix is the operator's edit.
+func assertEnvBerthKeys(ctx context.Context, r bssh.Runner, s *config.Server, site config.Site) error {
+	exists, err := fileExists(ctx, r, sharedEnvPath(site))
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	var problems, want []string
+	for _, e := range berthOwnedEnv(s, site) {
+		match, present, err := envLineInSet(ctx, r, site, e.Key, e.Accept)
+		var dup *envDuplicateKeyError
+		var nonCanonical *envNonCanonicalKeyError
+		if errors.As(err, &dup) || errors.As(err, &nonCanonical) {
+			problems = append(problems, err.Error())
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if match || (!present && e.AbsentOK) {
+			continue
+		}
+		line := e.Accept[0]
+		if e.AbsentOK {
+			line += " (or no " + e.Key + " line)"
+		}
+		want = append(want, line)
+	}
+	if len(want) > 0 {
+		problems = append(problems, "expected "+strings.Join(want, ", "))
+	}
+	if len(problems) == 0 {
+		return nil
+	}
+	return fmt.Errorf("shared/.env for %s disagrees with what berth provisions for this site: %s. berth never rewrites an existing shared/.env, so the app would keep using values berth never set up: edit %s (exactly one line per key; KEY=value, KEY=\"value\" and KEY='value' are accepted) and re-run (--force does not override this check)",
+		site.Domain, strings.Join(problems, "; "), sharedEnvPath(site))
+}
+
 func (d database) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
 	eng, err := dbpkg.Get(s.Database.Engine)
 	if err != nil {
@@ -311,12 +565,16 @@ func (d database) Check(ctx context.Context, rc provision.RunCtx, s *config.Serv
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	// Engine/env conflict is checked before the installed probe because an
-	// engine switch makes Check early-return on the missing new server package
-	// and never reach the per-site probes otherwise.
+	// Engine/env conflict (and any other disagreement on a berth-provisioned
+	// key) is checked before the installed probe because an engine switch
+	// makes Check early-return on the missing new server package and never
+	// reach the per-site probes otherwise.
 	driver, _, _, _ := eng.EnvConnection()
 	for _, site := range s.Sites {
 		if err := assertEnvEngineMatch(ctx, r, s, site, driver); err != nil {
+			return provision.CheckResult{}, err
+		}
+		if err := assertEnvBerthKeys(ctx, r, s, site); err != nil {
 			return provision.CheckResult{}, err
 		}
 	}
@@ -527,15 +785,20 @@ func (d database) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serv
 		return err
 	}
 	driver, host, port, socket := eng.EnvConnection()
-	// Pre-scan every site BEFORE touching apt/repos/SQL: an engine switch must
-	// abort before the new server is even installed.
+	// Pre-scan every site BEFORE touching apt/repos/SQL: an engine switch (or
+	// an env disagreeing on a berth-provisioned key) must abort before the new
+	// server is even installed.
 	for _, site := range s.Sites {
 		if err := assertEnvEngineMatch(ctx, r, s, site, driver); err != nil {
 			return err
 		}
+		if err := assertEnvBerthKeys(ctx, r, s, site); err != nil {
+			return err
+		}
 	}
 	// Install the server once (optionally from its producer repo).
-	if repo, has, used := databaseUpstream(eng, s); used {
+	repo, has, used := databaseUpstream(eng, s)
+	if used {
 		if err := ensureOwnRepo(ctx, rc, r, repo); err != nil {
 			return fmt.Errorf("add %s repo: %w", repo.Name, err)
 		}
@@ -546,8 +809,9 @@ func (d database) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serv
 	}
 	// A default-major metapackage (PGDG's postgresql) is installed, never
 	// upgraded: once the repo repoints it at the next major, an upgrade here
-	// would install that major beside the running cluster.
-	install := aptInstall
+	// would install that major beside the running cluster. Under
+	// apt.upstream_updates: manual no upstream server package is upgraded.
+	install := upstreamInstall(s, used)
 	if eng.ServerPackageTracksMajor() {
 		install = aptInstallNoUpgrade
 	}

@@ -1,0 +1,8 @@
+# managed by berth
+# Ordering only: supervisord (and the workers: running programs it starts)
+# comes up after the database and each site's Valkey at boot, so a worker
+# never races a backend that is still starting and goes FATAL.
+[Unit]
+After=mariadb.service
+After=berth-valkey-api_example_com.service
+After=berth-valkey-app_example_com.service

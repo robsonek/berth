@@ -88,8 +88,20 @@ var (
 // operator entries are allowed); unattended-upgrades' own matcher allows each
 // repo's package from its site and blacklists exactly the metapackages; with no
 // upstream repo, berth's own file is gone (a foreign file there is preserved).
+// Under apt.upstream_updates: manual nothing may exist at the path: berth
+// removes its own drop-in, and a test host carries no operator file there.
 func assertUnattendedOrigins(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server) {
 	t.Helper()
+	if !srv.Apt.UpstreamAutoUpdates() {
+		res, err := c.Run(ctx, "test ! -e "+unattendedDropIn, nil)
+		if err != nil {
+			t.Fatalf("probe %s: %v", unattendedDropIn, err)
+		}
+		if res.ExitCode != 0 {
+			t.Errorf("%s exists although apt.upstream_updates is manual", unattendedDropIn)
+		}
+		return
+	}
 	checks := aptProvenanceChecks(srv)
 	req := uuProbeRequest{Origins: []uuOriginProbe{}, Names: []string{}}
 	var wantPatterns, wantBlacklist, mustBlock, mustPass []string

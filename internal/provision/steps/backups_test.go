@@ -34,7 +34,7 @@ func freshBackupsApplyFixture(s *config.Server) *bssh.FakeRunner {
 	// prereqs present
 	f.On("systemctl is-active cron", okResult)
 	f.On("systemctl is-enabled cron", okResult)
-	f.On("command -v mysqldump >/dev/null 2>&1", okResult)
+	f.On("command -v mariadb-dump >/dev/null 2>&1", okResult)
 	// dir installs
 	f.On("install -d -o root -g root -m 0755 '"+backupBaseDir+"'", okResult)
 	f.On("install -d -o root -g root -m 0755 '"+backupLogDir+"'", okResult)
@@ -78,7 +78,7 @@ func TestBackupsApplyWritesScriptCronDirAndPrereqs(t *testing.T) {
 			t.Errorf("%s: mode=%o owner=%s:%s, want %o root:root", p, w.Mode, w.Owner, w.Group, mode)
 		}
 	}
-	if !strings.Contains(string(got[backupScriptPath(site.Domain)].Content), "mysqldump --protocol=socket --single-transaction --no-tablespaces --routines --events 'myapp'") {
+	if !strings.Contains(string(got[backupScriptPath(site.Domain)].Content), "mariadb-dump --protocol=socket --single-transaction --no-tablespaces --routines --events 'myapp'") {
 		t.Errorf("script missing dump command:\n%s", got[backupScriptPath(site.Domain)].Content)
 	}
 	if !strings.HasPrefix(string(got[backupScriptPath(site.Domain)].Content), "# managed by berth\nset -euo pipefail") {
@@ -147,7 +147,7 @@ func satisfiedBackupsCheckFixture(t *testing.T, s *config.Server) *bssh.FakeRunn
 	f.On("stat -c '%U:%G %a' '"+backupLogrotatePath+"'", bssh.Result{Stdout: "root:root 644\n"})
 	f.On("systemctl is-active cron", okResult)
 	f.On("systemctl is-enabled cron", okResult)
-	f.On("command -v mysqldump >/dev/null 2>&1", okResult)
+	f.On("command -v mariadb-dump >/dev/null 2>&1", okResult)
 	return f
 }
 

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -169,6 +170,59 @@ func TestDaemonsDecode(t *testing.T) {
 	}
 }
 
+func TestLoadFirstDeployKnobs(t *testing.T) {
+	body := "workers: running\napt: {upstream_updates: manual}\n" + baseCfg +
+		"    workers: dormant\n" +
+		"    repository: git@github.com:o/r.git\n" +
+		"    repository_key: ~/.ssh/deploy_key\n"
+	s, err := Load(writeTmpConfig(t, body))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if s.Apt.UpstreamUpdates != "manual" {
+		t.Errorf("Apt.UpstreamUpdates = %q, want manual", s.Apt.UpstreamUpdates)
+	}
+	if s.Workers != "running" {
+		t.Errorf("Workers = %q, want running", s.Workers)
+	}
+	site := s.Sites[0]
+	if site.Workers != "dormant" {
+		t.Errorf("Sites[0].Workers = %q, want dormant", site.Workers)
+	}
+	if site.Repository != "git@github.com:o/r.git" {
+		t.Errorf("Sites[0].Repository = %q, want git@github.com:o/r.git", site.Repository)
+	}
+	if site.RepositoryKey != "~/.ssh/deploy_key" {
+		t.Errorf("Sites[0].RepositoryKey = %q, want ~/.ssh/deploy_key", site.RepositoryKey)
+	}
+	if s.Apt.UpstreamAutoUpdates() {
+		t.Error("upstream_updates: manual must turn automatic upstream updates off")
+	}
+	if s.WorkersRunning(site) {
+		t.Error("a per-site workers: dormant must override the server-wide running")
+	}
+}
+
+func TestWorkersRunningInheritance(t *testing.T) {
+	cases := []struct {
+		server, site string
+		want         bool
+	}{
+		{"running", "", true},
+		{"running", "dormant", false},
+		{"", "running", true},
+		{"", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("server=%q site=%q", tc.server, tc.site), func(t *testing.T) {
+			s := &Server{Workers: tc.server}
+			if got := s.WorkersRunning(Site{Workers: tc.site}); got != tc.want {
+				t.Errorf("WorkersRunning = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSiteProgramNamesAndEnablement(t *testing.T) {
 	off := &Server{Sites: []Site{{Domain: "a.example.com", Daemons: []Daemon{{Name: "x", Command: "php artisan x"}}}}}
 	if off.QueueEnabled(off.Sites[0]) {
@@ -201,7 +255,7 @@ func TestServerYAMLOmitsEmptyOptionalFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := string(b)
-	for _, absent := range []string{"fingerprint:", "ssl_mode:", "ssl_email:", "repository:"} {
+	for _, absent := range []string{"fingerprint:", "ssl_mode:", "ssl_email:", "repository:", "repository_key:", "workers:", "upstream_updates:"} {
 		if strings.Contains(out, absent) {
 			t.Errorf("expected %q to be omitted, got:\n%s", absent, out)
 		}
@@ -474,6 +528,51 @@ func TestDerivationsAreFrozen(t *testing.T) {
 	}
 	if OffsiteKnownHostsPath != "/root/.ssh/berth_offsite_known_hosts" {
 		t.Fatalf("OffsiteKnownHostsPath changed: %s", OffsiteKnownHostsPath)
+	}
+}
+
+// TestDatabaseUnit pins the database engine's systemd unit. It is Debian's
+// packaging name rather than a berth choice, but berth writes it into a
+// unit-file drop-in (After=), where systemd needs the full name with its
+// suffix — a suffix-less spelling would be ignored there.
+func TestDatabaseUnit(t *testing.T) {
+	for engine, want := range map[string]string{
+		"mariadb":  "mariadb.service",
+		"postgres": "postgresql.service",
+	} {
+		if got := DatabaseUnit(engine); got != want {
+			t.Errorf("DatabaseUnit(%q) = %q, want %q", engine, got, want)
+		}
+	}
+}
+
+// TestAnyWorkersRunning: true iff at least one site resolves to running,
+// with the per-site value winning over the server default — the twin of
+// AnyBackupsEnabled over WorkersRunning.
+func TestAnyWorkersRunning(t *testing.T) {
+	cases := []struct {
+		name         string
+		server       string
+		site1, site2 string
+		want         bool
+	}{
+		{"default", "", "", "", false},
+		{"server dormant", "dormant", "", "", false},
+		{"server running", "running", "", "", true},
+		{"one site running", "", "", "running", true},
+		{"every site overrides running server", "running", "dormant", "dormant", false},
+		{"one site keeps running server", "running", "dormant", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Server{Workers: tc.server, Sites: []Site{
+				{Domain: "a.example.com", Workers: tc.site1},
+				{Domain: "b.example.com", Workers: tc.site2},
+			}}
+			if got := s.AnyWorkersRunning(); got != tc.want {
+				t.Errorf("AnyWorkersRunning() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

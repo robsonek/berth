@@ -3,6 +3,135 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Added
+
+- **`apt.upstream_updates: manual`** keeps berth's upstream repositories
+  (Surý, nginx.org, MariaDB, PGDG) out of unattended-upgrades. Since 0.32.0
+  the APT periodic run updates their packages and restarts the services they
+  ship; with `manual` the operator picks the moment instead. `base` then
+  removes its `/etc/apt/apt.conf.d/52berth-unattended-upgrades` drop-in (a
+  file there that berth did not write is left alone, even with `--force`).
+  The repositories stay configured, and updates from Debian's own
+  repositories are still applied automatically. Provisioning still installs
+  missing upstream packages but never upgrades installed ones: the php,
+  nginx and database steps install them with `apt-get install --no-upgrade`,
+  as berth already installs the PostgreSQL server package. A missing package
+  can still pull in newer dependencies: Surý's `php<ver>-*` packages require
+  the exact version of `php<ver>-common`, so installing a missing one (a new
+  PHP extension, say) can upgrade `php<ver>-common` and with it every
+  installed `php<ver>-*` package. The README gains a
+  "Controlled upstream update" procedure for the maintenance window. The
+  default (`auto`, or no key) keeps today's behaviour, so no host drifts.
+- **`workers: running`** has berth start each site's Supervisor programs (the
+  queue worker and every daemon) and keeps them up across reboots. It is set
+  server-wide or per site (`sites[].workers` wins). The default, `dormant`
+  (or no key), keeps today's behaviour byte for byte: `autostart=false`, and
+  berth starts nothing, so no host drifts. With `running` the `site` step
+  renders `autostart=true`, so Supervisor starts the programs by itself after
+  a reboot. After `supervisorctl update` it starts every program that is not
+  RUNNING, and fails when one does not reach RUNNING. The error quotes
+  supervisorctl's status lines with their reason (such as `Exited too
+  quickly` or `can't find command`) and names both
+  `/var/log/supervisor/<program>.log` and `/var/log/supervisor/supervisord.log`,
+  where spawn errors land; for a program supervisord never loaded it points
+  at `supervisord.log` and the conf instead. The `site` step's Check reports
+  a stopped program as drift, so the next run starts it again.
+  Until `<deploy_path>/current` exists the programs stay dormant and the run
+  warns; provision again after the first deploy. So that the programs do not
+  race their backends at boot, the `supervisor` step writes the systemd
+  drop-in `/etc/systemd/system/supervisor.service.d/berth-after.conf` while
+  any site runs `running`: it orders `supervisor.service` `After=` the
+  database unit and every site's `berth-valkey-<pool>.service` (ordering
+  only, no `Wants=`/`Requires=`), followed by `systemctl daemon-reload`. Once
+  no site runs `running` the step removes its drop-in again and leaves a file
+  it did not write alone. Its Check reads that one path on dormant hosts
+  too; they get no file and no daemon-reload. In dormant mode, a run that
+  is about to rewrite the conf of a running program warns that `supervisorctl
+  update` leaves it STOPPED. The README documents the cutover: flip
+  `scheduler` and `workers` together and run one provisioning.
+- **The `database` step refuses a `shared/.env` that disagrees with the keys
+  berth provisions.** berth seeds `shared/.env` once and never rewrites it,
+  so a file written for another config kept the app on a database, role or
+  cache berth never set up while every run reported green. On every run, in
+  Check and before Apply changes anything on the host, an existing `.env`
+  must now carry `DB_DATABASE` and `DB_USERNAME` matching the site's
+  `database` block and an absent or empty `DB_URL` and, with `valkey: true`,
+  `REDIS_HOST` set to the site's own socket
+  (`/run/berth-valkey/<pool>/valkey.sock`), `REDIS_PORT=0`, an absent or
+  empty `REDIS_PASSWORD` and `REDIS_URL` (`KEY=`, `""`, `''`, `null` or
+  `(null)`), and an absent or `phpredis` `REDIS_CLIENT`. A set `DB_URL` or
+  `REDIS_URL` would override the other keys in Laravel, and only phpredis
+  reads the socket host with port `0` the way berth seeds it. Values may be
+  unquoted, double-quoted or single-quoted, and trailing whitespace is
+  ignored. Each of these keys must appear on at most
+  one line: a duplicated key is refused whatever the values
+  (`<KEY> appears <N> times in <path>; keep exactly one line`), since a
+  correct line must not vouch for a duplicate the app may read instead. A
+  key assigned in another form phpdotenv reads (`export KEY=…`, leading
+  whitespace or spaces around `=`) is refused as well, with the canonical
+  line to write instead. The error lists every duplicated or disagreeing key
+  at once, with the expected line for each mismatch, and never prints the
+  current value. Like the
+  existing `DB_CONNECTION` check, `--force` does not override it.
+  **Behaviour change:** a host whose `.env` disagrees (for example
+  `REDIS_HOST=127.0.0.1` under `valkey: true`, left over from a seed without
+  Valkey) now stops provisioning at the `database` step instead of running
+  on with an app that talks to the wrong backend. Fix the listed lines in the
+  `.env` and run again. A host without a `shared/.env` is unaffected.
+- **`sites[].repository_key`** installs a deploy key you already have instead
+  of generating one, so a key the git host trusts no longer has to be copied
+  to the server by hand. It is the path of a local private key (`~` allowed)
+  and requires `repository`. berth reads and parses it on the workstation
+  before it probes the host: a missing file, a file that is not a private
+  key, or a passphrase-protected key stops the run. The `accounts` step
+  writes the key to `/home/<user>/.ssh/id_ed25519` (0600) and its `.pub`
+  (0644, comment `<user>@<git-host>`) as the site user, with the key on
+  stdin, never on a command line or in a log. Every carriage return is
+  removed (CRLF line endings become LF) and a missing final newline is
+  added, since OpenSSH refuses to load a key file in either form. When the
+  host already holds that key the step is satisfied (a missing `.pub`, or
+  one that carries another key, is rewritten). When it holds a different
+  key, berth refuses and names both SHA256 fingerprints;
+  `--only accounts --force` replaces it (and, like any
+  `--force` of that step, also lets it overwrite an `authorized_keys` berth
+  did not write). The Check compares keys with a read-only
+  `ssh-keygen -y -f <key>`. Without `repository_key` nothing changes: berth
+  generates a key when there is none and never replaces one.
+- **`berth init` sets the new knobs:** `apt.upstream_updates` and `workers`
+  in the advanced server options, a site's `workers` override in its advanced
+  options, and `repository_key` in a separate form after the core site form,
+  asked only when the site has a `repository`.
+
+### Changed
+
+- **The MariaDB client is called as `mariadb` and `mariadb-dump`.** MariaDB
+  12.3 marks the `mysql*` program names as deprecated and prints a warning
+  naming the replacement. Debian 13's MariaDB 11.8 and mariadb.org's 12.3
+  both ship the new names, so berth now uses them everywhere: the `database`
+  step's SQL and its read-only `information_schema` probes, the dump in the
+  per-site backup script, and the `backups` step's prerequisite check
+  (`command -v mariadb-dump`). The backup script
+  (`/usr/local/sbin/berth-backup-<pool>`) changes bytes, so the first run
+  after upgrading re-applies it once. The README's restore command now pipes
+  into `mariadb`. PostgreSQL (`psql`, `pg_dump`) is unchanged.
+
+### Fixed
+
+- **A daemon `command` that starts with a relative path is refused at
+  load.** supervisord looks up a command's first word from its own working
+  directory (`/` under systemd) before it changes into `directory=`, so
+  `command: scripts/run.sh` was never found: the program went FATAL without
+  starting and its log stayed empty. A first word that contains `/` must now
+  be absolute (`sites[i].daemons[j].command: "<path>" is a relative path; …`);
+  run a relative script through an interpreter instead, for example
+  `bash scripts/run.sh`. A bare name looked up in `PATH` (`php`, `bash`) is
+  still accepted. The first word is read the way supervisord splits the
+  line, quotes removed, so a quoted absolute path such as
+  `"/usr/bin/php" artisan reverb:start` is accepted. Such a config never
+  worked, so no working host changes.
+
 ## [0.32.1] — 2026-10-24
 
 ### Changed

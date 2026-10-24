@@ -370,7 +370,7 @@ func dbProbeStdinCmd(driver, host, port, socket, dbUser, dbName, sql string) str
 		} else if port != "" {
 			conn += " -P" + sqQuote(port)
 		}
-		return fmt.Sprintf(`IFS= read -r pw; MYSQL_PWD="$pw" mysql %s -u%s %s -e %s`, conn, sqQuote(dbUser), sqQuote(dbName), sqQuote(sql))
+		return fmt.Sprintf(`IFS= read -r pw; MYSQL_PWD="$pw" mariadb %s -u%s %s -e %s`, conn, sqQuote(dbUser), sqQuote(dbName), sqQuote(sql))
 	case "pgsql":
 		return fmt.Sprintf(`IFS= read -r pw; PGPASSWORD="$pw" psql -h%s -p%s -U%s -d%s -tAc %s`, sqQuote(host), sqQuote(port), sqQuote(dbUser), sqQuote(dbName), sqQuote(sql))
 	default:

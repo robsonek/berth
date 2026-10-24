@@ -25,6 +25,9 @@ func TestClassifyCommandPolicy(t *testing.T) {
 	}{
 		// Metacharacter-free reads, judged by the tables.
 		{"cat '/etc/nginx/sites-available/app.example.com'", cmdReadOnly},
+		// supervisor.Check's one probe of the boot-ordering drop-in (both
+		// modes: managed-file classify / managedFilePresent).
+		{"cat '/etc/systemd/system/supervisor.service.d/berth-after.conf'", cmdReadOnly},
 		{"test -e '/var/www/app/shared'", cmdReadOnly},
 		{"stat -c '%U %u %F' '/var/www/app'", cmdReadOnly},
 		{"dpkg -s nginx", cmdReadOnly},
@@ -46,7 +49,7 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{"php-fpm -t", cmdRejected},
 		{"php-fpm8 -t", cmdRejected},
 		// Every other certbot subcommand drives issuance/renewal state and
-		// must reject — pinned the way mysql's and setpriv's mutating
+		// must reject — pinned the way mariadb's and setpriv's mutating
 		// siblings were. Extra arguments on the listing reject too: only the
 		// bare inventory was measured.
 		{"certbot certonly --webroot -w /var/www/berth-acme/app.example.com -d app.example.com", cmdRejected},
@@ -61,6 +64,9 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{"install -d -m 0755 /var/log/php", cmdRejected},
 		{"systemctl start nginx", cmdRejected},
 		{"systemctl daemon-reload", cmdRejected},
+		// supervisor.Apply's drop-in writes and removal stay out of Check.
+		{"install -d -o root -g root -m 0755 '/etc/systemd/system/supervisor.service.d'", cmdRejected},
+		{"rm -f '/etc/systemd/system/supervisor.service.d/berth-after.conf'", cmdRejected},
 		{"useradd -m appuser", cmdRejected},
 		{"apt-get update", cmdRejected},
 
@@ -195,14 +201,18 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		// DDL/DML, a second ;-separated statement, INTO OUTFILE (which
 		// writes files as the server), an extra option smuggling its own
 		// statement — must reject.
-		{`mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app'"`, cmdReadOnly},
-		{`mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='app' AND GRANTEE='''app''@''localhost''' LIMIT 1"`, cmdReadOnly},
-		{`mysql --protocol=socket -N -e "DROP DATABASE app"`, cmdRejected},
-		{`mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app' INTO OUTFILE '/tmp/x'"`, cmdRejected},
-		{`mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA; DROP DATABASE app"`, cmdRejected},
-		{`mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app'" --init-command="DROP DATABASE app"`, cmdRejected},
-		{`mysql --protocol=socket`, cmdRejected},
-		{`mysql -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app'"`, cmdRejected},
+		{`mariadb --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app'"`, cmdReadOnly},
+		{`mariadb --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='app' AND GRANTEE='''app''@''localhost''' LIMIT 1"`, cmdReadOnly},
+		{`mariadb --protocol=socket -N -e "DROP DATABASE app"`, cmdRejected},
+		{`mariadb --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app' INTO OUTFILE '/tmp/x'"`, cmdRejected},
+		{`mariadb --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA; DROP DATABASE app"`, cmdRejected},
+		{`mariadb --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app'" --init-command="DROP DATABASE app"`, cmdRejected},
+		{`mariadb --protocol=socket`, cmdRejected},
+		{`mariadb -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app'"`, cmdRejected},
+		// The deprecated compatibility name is no longer the client berth
+		// issues, so it is no longer table-judged at all: even the probe
+		// shape rejects as an unknown verb.
+		{`mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='app'"`, cmdRejected},
 
 		// The postgres engine's catalog probes (probePSQL,
 		// internal/database/postgres.go): sudo is THE privilege wrapper, so
@@ -342,8 +352,9 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		// The known-host lookup rides the registry too (its redirections
 		// force it there). Its in-place-rewriting siblings -R (remove) and
 		// -H (hash) must never pass, nor a lookup in a file the audit never
-		// covered — and ssh-keygen has NO table entry, so a redirection-free
-		// respelling rejects as an unknown verb rather than by accident.
+		// covered — and ssh-keygen's ONE table entry is pinned to the
+		// `-y -f <path>` public-half read, so a redirection-free respelling
+		// of any other mode rejects by not matching that shape.
 		{`ssh-keygen -F 'git.example.com' -f '/home/appuser/.ssh/known_hosts' >/dev/null 2>&1`, cmdAudited},
 		// The non-default-port endpoint's "[host]:port" token — the other
 		// branch of the same composition — and proof the registry is exact on
@@ -355,6 +366,14 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{`ssh-keygen -F 'git.example.com' -f '/etc/ssh/ssh_known_hosts' >/dev/null 2>&1`, cmdRejected},
 		{`ssh-keygen -F git.example.com`, cmdRejected},
 		{`ssh-keygen -t ed25519 -N x -f /tmp/key`, cmdRejected},
+		// hostDeployKey's repository_key comparison (deploykey.go): -y prints
+		// the public half of the one key file named by -f. Only that exact
+		// shape reads — a bare -y, a second operand, and the other modes
+		// (-p rewrites the key file's passphrase in place) all reject.
+		{`ssh-keygen -y -f '/home/appuser/.ssh/id_ed25519'`, cmdReadOnly},
+		{`ssh-keygen -y`, cmdRejected},
+		{`ssh-keygen -y -f a b`, cmdRejected},
+		{`ssh-keygen -p -f '/home/appuser/.ssh/id_ed25519'`, cmdRejected},
 
 		// Unknown verbs are rejected, not assumed safe.
 		{"sometool --probe /etc/x", cmdRejected},
@@ -405,6 +424,15 @@ func TestAuditedStdinMustMatchExactly(t *testing.T) {
 	// audit never covered must reject, not ride the fixture's registration.
 	if got, _ := classifyCommand(envValueMatchProbeCmd("/etc/shadow", "DB_PASSWORD"), []byte(stdin)); got != cmdRejected {
 		t.Errorf("an unregistered path still passed as %s — the pair must be exact", got)
+	}
+	// The berth-key probe's pairs bind the path the same way: its audited
+	// accept set aimed at another file is a new pair, not a registered one.
+	lineStdin := envValueFormsStdin("DB_USERNAME", "app")
+	if got, _ := classifyCommand(envLineInSetProbeCmd(fixtureSharedEnv, "DB_USERNAME"), []byte(lineStdin)); got != cmdAudited {
+		t.Errorf("registered berth-key pair = %s, want audited", got)
+	}
+	if got, _ := classifyCommand(envLineInSetProbeCmd("/etc/shadow", "DB_USERNAME"), []byte(lineStdin)); got != cmdRejected {
+		t.Errorf("an unregistered berth-key path still passed as %s — the pair must be exact", got)
 	}
 }
 
@@ -575,6 +603,33 @@ var auditedScripts = map[string]string{
 	envCredentialProbeCmd(fixtureSharedEnv): "envCredentialPresentScript (database.go): locale pin + grep -m1 | grep -Eq, exit-code verdict — reads only",
 	envAppKeyProbeCmd(fixtureSharedEnv):     "envBerthAppKeyScript (database.go): locale pin + grep -m1 capture + printf|sed|grep -Eq shape test, exit-code signals — reads only",
 
+	// assertEnvBerthKeys' per-key probe (envLineInSetScript, database.go),
+	// one per key berthOwnedEnv lists for the fixture site (Valkey on: the
+	// DB pair plus the redis trio). Audited command by command: the C-locale
+	// pin (assignment + export, process-local); `grep -cE` counts the lines
+	// assigning KEY in any phpdotenv form (an ERE anchored at ^ with optional
+	// leading space and `export`; reads its file operand only, explicit exit
+	// mapping); `grep -c` counts the canonical KEY= lines of the same file;
+	// numeric `[ -lt ]`/`[ -gt ]` tests — fewer canonical lines than
+	// assignments exits 5 printing nothing — and, for a duplicated key,
+	// `printf` of the COUNT to stdout (a number, never a value) before exit
+	// 4; `grep -m1` captures the single KEY= line; a printf|sed
+	// trailing-whitespace trim (s///, no w, no e); a `while IFS= read -r
+	// want` loop over stdin whose only body
+	// is a quoted [ "$line" = "$want" ] string equality — no eval, no sh, no
+	// `-f -`, no grep over the accepted lines. Verdicts travel as exit codes;
+	// no line content is printed. Registered here on its own text (a
+	// stdin-less run would read no accepted line and exit 1); the payloads it
+	// is actually issued with are bound pair by pair in auditedStdin.
+	envLineInSetProbeCmd(fixtureSharedEnv, "DB_DATABASE"):    "envLineInSetScript (database.go), DB_DATABASE: locale pin + grep -cE/grep -c counts (exit 5 on a non-canonical form, count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "DB_USERNAME"):    "envLineInSetScript (database.go), DB_USERNAME: locale pin + grep -cE/grep -c counts (exit 5 on a non-canonical form, count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_HOST"):     "envLineInSetScript (database.go), REDIS_HOST: locale pin + grep -cE/grep -c counts (exit 5 on a non-canonical form, count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PORT"):     "envLineInSetScript (database.go), REDIS_PORT: locale pin + grep -cE/grep -c counts (exit 5 on a non-canonical form, count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PASSWORD"): "envLineInSetScript (database.go), REDIS_PASSWORD: locale pin + grep -cE/grep -c counts (exit 5 on a non-canonical form, count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "DB_URL"):         "envLineInSetScript (database.go), DB_URL: locale pin + grep -cE/grep -c counts (exit 5 on a non-canonical form, count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_URL"):      "envLineInSetScript (database.go), REDIS_URL: locale pin + grep -cE/grep -c counts (exit 5 on a non-canonical form, count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_CLIENT"):   "envLineInSetScript (database.go), REDIS_CLIENT: locale pin + grep -cE/grep -c counts (exit 5 on a non-canonical form, count printf on duplicate) + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+
 	// Wave 4 (site, tls, backups, offsite), same discipline: pasted literals
 	// for production consts and const-composed commands, test-local mirror
 	// generators for the parameterized compositions.
@@ -598,10 +653,10 @@ var auditedScripts = map[string]string{
 	// binary. Audited: `command -v` resolves a name against PATH without
 	// executing anything; both redirections aim at the null device and the
 	// caller reads only the exit code. Nothing writes. One entry per engine
-	// binary the variants reach (dumpClientBinary: mariadb → mysqldump,
+	// binary the variants reach (dumpClientBinary: mariadb → mariadb-dump,
 	// postgres → pg_dump).
-	commandVProbeCmd("mysqldump"): "commandExists (backups.go) for the mariadb dump client: command -v with output discarded — reads only",
-	commandVProbeCmd("pg_dump"):   "commandExists (backups.go) for the postgres dump client: command -v with output discarded — reads only",
+	commandVProbeCmd("mariadb-dump"): "commandExists (backups.go) for the mariadb dump client: command -v with output discarded — reads only",
+	commandVProbeCmd("pg_dump"):      "commandExists (backups.go) for the postgres dump client: command -v with output discarded — reads only",
 
 	// findRegularFiles' guarded listings (site.go), issued by orphanSiteFiles
 	// over the three orphan namespaces. Audited: `[ -d ]` existence test
@@ -843,6 +898,45 @@ func envValueMatchProbeCmd(path, key string) string {
 		`[ "$line" = "$want" ] && exit 0; exit 1`
 }
 
+// envLineInSetProbeCmd mirrors envLineInSetScript's composition
+// (database.go) — a copy on purpose (see auditedScripts and auditedStdin).
+func envLineInSetProbeCmd(path, key string) string {
+	return "LC_ALL=C; export LC_ALL; t=$(grep -cE '^[[:space:]]*(export[[:space:]]+)?" + key + "[[:space:]]*=' " + shQuote(path) + "); s=$?; " +
+		"if [ $s -eq 1 ]; then exit 3; elif [ $s -ne 0 ]; then exit 2; fi; " +
+		"n=$(grep -c '^" + key + "=' " + shQuote(path) + "); s=$?; " +
+		"if [ $s -gt 1 ]; then exit 2; fi; " +
+		`if [ "$n" -lt "$t" ]; then exit 5; fi; ` +
+		`if [ "$n" -gt 1 ]; then printf '%s\n' "$n"; exit 4; fi; ` +
+		"line=$(grep -m1 '^" + key + "=' " + shQuote(path) + ") || exit 2; " +
+		`line=$(printf '%s' "$line" | sed 's/[[:space:]]*$//'); ` +
+		`while IFS= read -r want; do [ "$line" = "$want" ] && exit 0; done; exit 1`
+}
+
+// envValueFormsStdin mirrors the stdin envLineInSet sends for one of
+// berthOwnedEnv's plain-value expectations (envValueForms + envAcceptStdin,
+// database.go): the unquoted, double- and single-quoted lines, each
+// newline-terminated — a copy on purpose, so a production change to the
+// accept set or its serialization forces a fresh audit of the pair.
+func envValueFormsStdin(key, value string) string {
+	return key + "=" + value + "\n" + key + `="` + value + `"` + "\n" + key + "='" + value + "'\n"
+}
+
+// fixtureValkeySocket is the fixture site's per-site Valkey socket — the
+// REDIS_HOST value berth provisions for it (valkeySocketPath, valkey.go).
+const fixtureValkeySocket = "/run/berth-valkey/app_example_com/valkey.sock"
+
+// redisPasswordUnsetStdin is the exact REDIS_PASSWORD accept set envLineInSet
+// sends (berthOwnedEnv, database.go), pasted literally.
+const redisPasswordUnsetStdin = "REDIS_PASSWORD=\n" + `REDIS_PASSWORD=""` + "\n" + "REDIS_PASSWORD=''\n" + "REDIS_PASSWORD=null\n" + "REDIS_PASSWORD=(null)\n"
+
+// envUnsetStdin mirrors the stdin envLineInSet sends for an absent-or-empty
+// key (envUnsetForms + envAcceptStdin, database.go): the empty value in each
+// quoting plus null and (null), each newline-terminated — a copy on purpose,
+// like envValueFormsStdin.
+func envUnsetStdin(key string) string {
+	return key + "=\n" + key + `=""` + "\n" + key + "=''\n" + key + "=null\n" + key + "=(null)\n"
+}
+
 // classifyCommand judges one (command, stdin) pair. The detail string names the
 // reason, so a contract failure is actionable rather than a riddle.
 func classifyCommand(cmd string, stdin []byte) (cmdVerdict, string) {
@@ -882,6 +976,24 @@ var auditedStdin = map[stdinKey]string{
 	// only; the verdict is the exit code, the secret never reaches stdout.
 	{cmd: envValueMatchProbeCmd(fixtureSharedEnv, "DB_PASSWORD"), stdin: "DB_PASSWORD=" + fixtureDBValue + "\n"}: "envValueMatchScript (database.go), DB_PASSWORD agreement: stdin is the expected line, read into a variable and string-compared — data, not a program",
 	{cmd: envValueMatchProbeCmd(fixtureSharedEnv, "APP_KEY"), stdin: "APP_KEY=" + fixtureAppKey + "\n"}:          "envValueMatchScript (database.go), APP_KEY agreement: stdin is the expected line, read into a variable and string-compared — data, not a program",
+	// assertEnvBerthKeys' probes (envLineInSetScript, database.go), issued
+	// by database.Check per site whenever shared/.env exists, one per key
+	// berthOwnedEnv lists — the same for every variant (all keep Valkey on
+	// and the fixture's app/app DB identity). The stdin is the accept set,
+	// one KEY=value line each: consumed line by line by
+	// `while IFS= read -r want` into a shell variable and used ONLY as the
+	// right-hand side of a quoted [ "$line" = "$want" ] string equality —
+	// data, never a program (no eval, no sh, no `-f -`, no grep pattern).
+	// The values are config-derived and non-secret; the verdict is the exit
+	// code (the duplicate verdict also prints the line count, a number).
+	{cmd: envLineInSetProbeCmd(fixtureSharedEnv, "DB_DATABASE"), stdin: envValueFormsStdin("DB_DATABASE", "app")}:             "envLineInSetScript (database.go), DB_DATABASE accept set: stdin lines are read into a variable and string-compared — data, not a program",
+	{cmd: envLineInSetProbeCmd(fixtureSharedEnv, "DB_USERNAME"), stdin: envValueFormsStdin("DB_USERNAME", "app")}:             "envLineInSetScript (database.go), DB_USERNAME accept set: stdin lines are read into a variable and string-compared — data, not a program",
+	{cmd: envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_HOST"), stdin: envValueFormsStdin("REDIS_HOST", fixtureValkeySocket)}: "envLineInSetScript (database.go), REDIS_HOST accept set: stdin lines are read into a variable and string-compared — data, not a program",
+	{cmd: envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PORT"), stdin: envValueFormsStdin("REDIS_PORT", "0")}:                 "envLineInSetScript (database.go), REDIS_PORT accept set: stdin lines are read into a variable and string-compared — data, not a program",
+	{cmd: envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PASSWORD"), stdin: redisPasswordUnsetStdin}:                           "envLineInSetScript (database.go), REDIS_PASSWORD unset/empty accept set: stdin lines are read into a variable and string-compared — data, not a program",
+	{cmd: envLineInSetProbeCmd(fixtureSharedEnv, "DB_URL"), stdin: envUnsetStdin("DB_URL")}:                                   "envLineInSetScript (database.go), DB_URL unset/empty accept set: stdin lines are read into a variable and string-compared — data, not a program",
+	{cmd: envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_URL"), stdin: envUnsetStdin("REDIS_URL")}:                             "envLineInSetScript (database.go), REDIS_URL unset/empty accept set: stdin lines are read into a variable and string-compared — data, not a program",
+	{cmd: envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_CLIENT"), stdin: envValueFormsStdin("REDIS_CLIENT", "phpredis")}:      "envLineInSetScript (database.go), REDIS_CLIENT accept set: stdin lines are read into a variable and string-compared — data, not a program",
 }
 
 // simpleShape is an exact predicate for one metacharacter-free command shape.
@@ -1044,7 +1156,17 @@ var simpleShapes = []simpleShape{
 		why: "pinned to the two x509 reads tls.go issues; -out and -writerand create files even under -noout, and every respelling falls out by not matching"},
 	{verb: "gpg", allow: gpgIsReadOnly, verdict: cmdReadOnly,
 		why: "pinned to KeyringHoldsExactly's exact argv (apt.go)"},
-	{verb: "mysql", allow: mysqlIsReadOnlyProbe, verdict: cmdReadOnly,
+	// ssh-keygen has writing modes (-p rewrites a key's passphrase in place,
+	// -t/-N generate, -R/-H rewrite known_hosts, -c changes a comment), so
+	// only the one read berth issues in a Check is blessed: -y prints the
+	// public half of the single key file named by -f, writing nothing. The
+	// operand may not be an option. The -F known-host lookup is not here —
+	// its redirections route it through auditedScripts.
+	{verb: "ssh-keygen", allow: func(a []string) bool {
+		return len(a) == 3 && a[0] == "-y" && a[1] == "-f" && !strings.HasPrefix(a[2], "-")
+	}, verdict: cmdReadOnly,
+		why: "pinned to `ssh-keygen -y -f <key>` (hostDeployKey, deploykey.go)"},
+	{verb: "mariadb", allow: mariadbIsReadOnlyProbe, verdict: cmdReadOnly,
 		why: "only probeSQL's -N -e information_schema SELECT reads; any other statement, a ;-chain, INTO OUTFILE or an extra option mutates"},
 	// sudo is THE privilege wrapper — everything behind it is arbitrary code
 	// as another uid unless the whole argv is pinned. The one shape a Check
@@ -1185,8 +1307,8 @@ func sudoIsPostgresCatalogProbe(args []string) bool {
 	return false
 }
 
-// mysqlIsReadOnlyProbe allows only probeSQL's shape
-// (internal/database/mariadb.go): `mysql --protocol=socket -N -e
+// mariadbIsReadOnlyProbe allows only probeSQL's shape
+// (internal/database/mariadb.go): `mariadb --protocol=socket -N -e
 // "SELECT 1 FROM information_schema.…"`. Every pin is load-bearing:
 // --protocol=socket keeps the probe on the local server, -N -e is the exact
 // spelling probeSQL composes, and the statement must be a single SELECT
@@ -1197,7 +1319,7 @@ func sudoIsPostgresCatalogProbe(args []string) bool {
 // mutation, but nothing berth issues needs it), and any extra double quote
 // (exactly one opening and one closing), so a trailing option such as
 // --init-command="…" cannot smuggle its own statement past the prefix check.
-func mysqlIsReadOnlyProbe(args []string) bool {
+func mariadbIsReadOnlyProbe(args []string) bool {
 	if len(args) < 4 || args[0] != "--protocol=socket" || args[1] != "-N" || args[2] != "-e" {
 		return false
 	}

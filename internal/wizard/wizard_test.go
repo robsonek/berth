@@ -1,6 +1,7 @@
 package wizard
 
 import (
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -27,16 +28,28 @@ func validSingle() Answers {
 // chdir-ing into a temp dir so servers/<name>.yml lands there.
 func writeAndLoad(t *testing.T, a Answers) *config.Server {
 	t.Helper()
+	srv, _ := writeAndLoadRaw(t, a)
+	return srv
+}
+
+// writeAndLoadRaw is writeAndLoad that also returns the YAML written to disk,
+// for assertions on what the file omits.
+func writeAndLoadRaw(t *testing.T, a Answers) (*config.Server, string) {
+	t.Helper()
 	t.Chdir(t.TempDir())
 	path, err := a.Write()
 	if err != nil {
 		t.Fatalf("Write() error = %v", err)
 	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s) error = %v", path, err)
+	}
 	srv, err := config.Load(path)
 	if err != nil {
 		t.Fatalf("Load(%s) error = %v", path, err)
 	}
-	return srv
+	return srv, string(raw)
 }
 
 func TestRoundTripSingleSite(t *testing.T) {
@@ -181,6 +194,67 @@ func TestRoundTripAptReposAndPackages(t *testing.T) {
 	if err := srv.Validate(); err != nil {
 		t.Errorf("loaded config must validate: %v", err)
 	}
+}
+
+func TestRoundTripFirstDeployKnobs(t *testing.T) {
+	// Every first-deploy knob the wizard collects must survive the
+	// Write -> config.Load round trip field for field (a yaml-tag slip would
+	// pass ToServer().Validate() yet silently drop the key from the file).
+	t.Run("set", func(t *testing.T) {
+		a := validSingle()
+		a.AptUpstreamUpdates = "manual"
+		a.Workers = "running"
+		a.Sites = []SiteAnswers{
+			{
+				Domain: "app.example.com", DeployPath: "/var/www/app", DBName: "app", DBUser: "appuser",
+				Repository: "git@github.com:acme/app.git", RepositoryKey: "~/keys/app-deploy",
+				SchedulerOverride: "inherit", WorkersOverride: "dormant",
+			},
+			{
+				Domain: "api.example.com", DeployPath: "/var/www/api", DBName: "api", DBUser: "apiuser",
+				SchedulerOverride: "inherit", WorkersOverride: "inherit",
+			},
+		}
+		srv, raw := writeAndLoadRaw(t, a)
+		if srv.Apt.UpstreamUpdates != "manual" {
+			t.Errorf("apt.upstream_updates = %q, want manual", srv.Apt.UpstreamUpdates)
+		}
+		if srv.Workers != "running" {
+			t.Errorf("workers = %q, want running", srv.Workers)
+		}
+		if got := srv.Sites[0]; got.RepositoryKey != "~/keys/app-deploy" || got.Repository != "git@github.com:acme/app.git" {
+			t.Errorf("site 0 repository/repository_key = %q / %q", got.Repository, got.RepositoryKey)
+		}
+		if srv.Sites[0].Workers != "dormant" {
+			t.Errorf("sites[0].workers = %q, want dormant", srv.Sites[0].Workers)
+		}
+		if srv.Sites[1].Workers != "" || srv.Sites[1].RepositoryKey != "" {
+			t.Errorf("site 1 must inherit workers and carry no key: workers=%q key=%q", srv.Sites[1].Workers, srv.Sites[1].RepositoryKey)
+		}
+		if srv.WorkersRunning(srv.Sites[0]) || !srv.WorkersRunning(srv.Sites[1]) {
+			t.Errorf("WorkersRunning = %v/%v, want false (override dormant) / true (inherits running)",
+				srv.WorkersRunning(srv.Sites[0]), srv.WorkersRunning(srv.Sites[1]))
+		}
+		if strings.Count(raw, "workers:") != 2 {
+			t.Errorf("want exactly the server key and site 0's override as workers: lines, got:\n%s", raw)
+		}
+		if err := srv.Validate(); err != nil {
+			t.Errorf("loaded config must validate: %v", err)
+		}
+	})
+	t.Run("defaults-omitted", func(t *testing.T) {
+		// The defaults (auto updates, dormant programs, generated key) are the
+		// zero values: the written YAML must not mention the keys at all.
+		srv, raw := writeAndLoadRaw(t, validSingle())
+		for _, key := range []string{"upstream_updates", "workers", "repository_key"} {
+			if strings.Contains(raw, key) {
+				t.Errorf("default answers must omit %q from the YAML, got:\n%s", key, raw)
+			}
+		}
+		if srv.Apt.UpstreamUpdates != "" || srv.Workers != "" || srv.Sites[0].Workers != "" || srv.Sites[0].RepositoryKey != "" {
+			t.Errorf("defaults must load as zero values: apt=%+v workers=%q site=%+v", srv.Apt, srv.Workers, srv.Sites[0])
+		}
+	})
 }
 
 func TestRoundTripNoFingerprintOmitted(t *testing.T) {

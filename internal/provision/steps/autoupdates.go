@@ -61,6 +61,32 @@ func upstreamRepos(s *config.Server) ([]apt.Repo, error) {
 	return repos, nil
 }
 
+// unattendedRepos returns the upstream repos base's unattended-upgrades
+// drop-in lists: none under apt.upstream_updates: manual (berth then keeps no
+// drop-in, so unattended-upgrades installs nothing from those repos),
+// otherwise every upstream repo the config installs from. The repos stay
+// configured and keyed either way — only unattended-upgrades is affected.
+func unattendedRepos(s *config.Server) ([]apt.Repo, error) {
+	if !s.Apt.UpstreamAutoUpdates() {
+		return nil, nil
+	}
+	return upstreamRepos(s)
+}
+
+// upstreamInstall returns the package installer of a php/nginx/database step;
+// used reports whether the step installs from its own upstream repo. Under
+// apt.upstream_updates: manual an upstream install is apt-get install
+// --no-upgrade (the mechanism the PostgreSQL server package already uses): a
+// missing package still installs, an installed one is never upgraded, so a
+// provision run never moves upstream packages the operator upgrades by hand.
+// Otherwise — and always for Debian's own packages — it is the plain install.
+func upstreamInstall(s *config.Server, used bool) func(context.Context, bssh.Runner, ...string) error {
+	if used && !s.Apt.UpstreamAutoUpdates() {
+		return aptInstallNoUpgrade
+	}
+	return aptInstall
+}
+
 // unattendedOriginsPath is base's drop-in extending unattended-upgrades to the
 // upstream repos the config uses. It sorts after the stock
 // 50unattended-upgrades; apt.conf list values accumulate across files, so the
@@ -111,12 +137,12 @@ func renderUnattendedOrigins(repos []apt.Repo) ([]byte, error) {
 
 // checkUnattendedOrigins classifies base's origins drop-in against the config.
 // Read-only: the only probe is `cat` of the path. The string is the plan line
-// when the file needs work, "" when satisfied. With no upstream repo in use, a
-// berth-managed file is due for removal while an absent or FOREIGN file is
-// fine — in that branch a foreign file is never berth's to touch, not even
-// with --force.
+// when the file needs work, "" when satisfied. With no repo to list (no
+// upstream repo in use, or apt.upstream_updates: manual), a berth-managed file
+// is due for removal while an absent or FOREIGN file is fine — in that branch
+// a foreign file is never berth's to touch, not even with --force.
 func checkUnattendedOrigins(ctx context.Context, r bssh.Runner, s *config.Server, force bool) (bool, string, error) {
-	repos, err := upstreamRepos(s)
+	repos, err := unattendedRepos(s)
 	if err != nil {
 		return false, "", err
 	}
@@ -130,7 +156,11 @@ func checkUnattendedOrigins(ctx context.Context, r bssh.Runner, s *config.Server
 			return false, "", err
 		}
 		if present {
-			return false, "remove " + unattendedOriginsPath + " (no upstream repo in use)", nil
+			why := "no upstream repo in use"
+			if !s.Apt.UpstreamAutoUpdates() {
+				why = "apt.upstream_updates: manual"
+			}
+			return false, "remove " + unattendedOriginsPath + " (" + why + ")", nil
 		}
 		return true, "", nil
 	}
@@ -166,7 +196,7 @@ var aptConfigValidateCmd = "install -d -o root -g root -m 0755 " + berthStateDir
 // validated first and only then published through the normal atomic managed
 // write. On any failure the previous file stays exactly as it was.
 func applyUnattendedOrigins(ctx context.Context, r bssh.Runner, s *config.Server, force bool) error {
-	repos, err := upstreamRepos(s)
+	repos, err := unattendedRepos(s)
 	if err != nil {
 		return err
 	}

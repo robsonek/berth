@@ -221,13 +221,16 @@ var fakeHostProfiles = []string{"fresh", "converged", "drifted", "foreign", "run
 // fixture never enables would pass every guard. baseline is the ORIGINAL
 // fixture, preserved unchanged so today's coverage cannot shrink; maximal
 // turns on every system knob (swap + swappiness, the kernel sysctl drop-in,
-// timezone, static hostname — all opt-in and all off in baseline) and gives
-// the site a repository (the deploy-key and known-host probes); postgres
-// swaps the database engine, whose Check probes are engine-specific code the
-// mariadb variants never reach. postgres differs from baseline in the engine
-// ALONE, so a violation there is engine-attributable on sight — the knob and
-// repository branches are engine-independent and already contracted by
-// maximal, and a fourth all-on variant would re-run them for no new edge.
+// timezone, static hostname — all opt-in and all off in baseline), gives the
+// site a repository and a repository_key (the deploy-key comparison and
+// known-host probes) and sets
+// apt.upstream_updates: manual and workers: running (the release probe and
+// the running verdict); postgres swaps the database engine, whose
+// Check probes are engine-specific code the mariadb variants never reach.
+// postgres differs from baseline in the engine ALONE, so a violation there is
+// engine-attributable on sight — the knob and repository branches are
+// engine-independent and already contracted by maximal, and a fourth all-on
+// variant would re-run them for no new edge.
 // upstream exists because every other variant selects Debian sources: it is
 // the only one that installs php, nginx and the database from their producer
 // repos, so base's unattended-upgrades origins drop-in is written (not
@@ -330,13 +333,31 @@ func variantServer(t *testing.T, variant string) *config.Server {
 		// entry in cmdclass_test.go (both forms come from the same
 		// composition; the data differs, the code path is a superset here).
 		srv.Sites[0].Repository = "ssh://git@git.example.com:2222/app/app.git"
+		// repository_key takes accounts.Check through hostDeployKey's
+		// public-half read (ssh-keygen -y -f) and the key comparison. The key
+		// is a real ed25519 key generated here (outside HOME — any path
+		// works), so the fake host, which models the installed private key
+		// as these same bytes, derives the public half with real parsing,
+		// and converged genuinely matches.
+		srv.Sites[0].RepositoryKey = newTestDeployKey(t, "").path
+		// apt.upstream_updates: manual takes base's origins drop-in through
+		// unattendedRepos' manual short-circuit. maximal installs from
+		// Debian only, so its probe set is unchanged (the one `cat`); the
+		// manual branches themselves are pinned in autoupdates_test.go.
+		srv.Apt.UpstreamUpdates = "manual"
+		// workers: running takes site.Check through programsAutostart's
+		// release probe (test -e <deploy_path>/current) and the running
+		// verdict over the parsed supervisorctl states; every provisioned
+		// profile models a deployed release, so the worker renders
+		// autostart=true and converged answers it RUNNING.
+		srv.Workers = "running"
 	case "postgres":
 		srv.ID = "contract-postgres"
 		// The engine variant: postgres source debian (a valid pairing per
 		// config.Validate — the engine's one upstream would be pgdg). The
 		// pipeline registers NO tuning step for it (registry.go), and
 		// database.Check's engine probes go through peer-auth psql instead
-		// of the mysql client.
+		// of the mariadb client.
 		srv.Database = config.Database{Engine: "postgres", Source: "debian"}
 	case "upstream":
 		srv.ID = "contract-upstream"
@@ -789,6 +810,16 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 	// host and is what the appdirs ancestry probe reports.
 	h.files[site.DeployPath+"/shared/tmp"] = fakeFile{owner: owner, group: owner, uid: uid, gid: uid,
 		mode: "700", kind: "directory", mtimeUnix: 1500000000}
+	// The deployer's release pointer: every provisioned profile models a
+	// once-deployed site, current -> releases/1 (both the tenant's own, like
+	// the rest of the tree). Only workers: running probes it (test -e, which
+	// follows the link), and its presence is what lets that mode render
+	// autostart=true.
+	h.files[site.DeployPath+"/releases/1"] = fakeFile{owner: owner, group: owner, uid: uid, gid: uid,
+		mode: "755", kind: "directory", mtimeUnix: 1500000000}
+	h.files[currentReleasePath(site)] = fakeFile{owner: owner, group: owner, uid: uid, gid: uid,
+		mode: "777", kind: "symbolic link", mtimeUnix: 1500000000,
+		linkTarget: site.DeployPath + "/releases/1"}
 	for _, d := range []string{"/var/www", acmeWebrootBase, acmeWebroot(site.Domain)} {
 		h.files[d] = fakeFile{owner: "root", group: "root", uid: 0, gid: 0,
 			mode: "755", kind: "directory", mtimeUnix: 1500000000}
@@ -823,12 +854,13 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 	h.putManaged(autoUpgradesPath, autoUp, profile)
 
 	// base's unattended-upgrades origins drop-in, rendered by the same
-	// function base.Check compares against. With no upstream repo in use
-	// berth keeps no file; the foreign profile plants an operator file there
-	// to walk the "foreign is left alone" branch. (Under foreign base still
-	// refuses FIRST on the foreign 20auto-upgrades — the drop-in's own
-	// refusal branch is covered by systembase_test.go.)
-	repos, err := upstreamRepos(s)
+	// functions base.Check compares against. With no repo to list (none in
+	// use, or apt.upstream_updates: manual) berth keeps no file; the foreign
+	// profile plants an operator file there to walk the "foreign is left
+	// alone" branch. (Under foreign base still refuses FIRST on the foreign
+	// 20auto-upgrades — the drop-in's own refusal branch is covered by
+	// systembase_test.go.)
+	repos, err := unattendedRepos(s)
 	if err != nil {
 		panic("upstream repos of the fixture: " + err.Error())
 	}
@@ -915,8 +947,10 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 	// (accounts.go), modelled only when the site declares a repository. All
 	// three are third-party or secret-bearing state, never marker-managed:
 	// the key pair is Apply's ssh-keygen output (probed by existence only)
-	// and known_hosts is ssh-keyscan output, hand-modelled from the real
-	// one-line format because the -F lookup's verdict rides its host field.
+	// or, with repository_key, the configured pair (whose private half the
+	// Check also reads back with ssh-keygen -y), and known_hosts is
+	// ssh-keyscan output, hand-modelled from the real one-line format
+	// because the -F lookup's verdict rides its host field.
 	for _, st := range s.Sites {
 		if st.Repository == "" {
 			continue
@@ -935,11 +969,26 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 		}
 		u := s.SiteUser(st)
 		key := deployKeyPath(u)
+		priv := "-----BEGIN OPENSSH PRIVATE KEY-----\nfixture-deploy\n-----END OPENSSH PRIVATE KEY-----\n"
+		pub := "ssh-ed25519 AAAAC3Nza fixture-deploy\n"
+		if st.RepositoryKey != "" {
+			// With repository_key the host holds exactly the configured pair,
+			// in the bytes installRepositoryKey writes: the local key verbatim
+			// and its public half with the <user>@<git-host> comment. Loaded
+			// through the production reader, as rendered files go through
+			// their renderers.
+			local, err := loadLocalDeployKey(st.RepositoryKey)
+			if err != nil {
+				panic("load the fixture repository_key: " + err.Error())
+			}
+			priv = string(local.Private)
+			pub = local.AuthorizedKey + " " + u + "@" + host + "\n"
+		}
 		h.files[key] = fakeFile{
-			content: "-----BEGIN OPENSSH PRIVATE KEY-----\nfixture-deploy\n-----END OPENSSH PRIVATE KEY-----\n",
+			content: priv,
 			owner:   u, group: u, uid: 1001, gid: 1001, mode: "600",
 			kind: "regular file", mtimeUnix: 1500000000}
-		h.files[key+".pub"] = fakeFile{content: "ssh-ed25519 AAAAC3Nza fixture-deploy\n",
+		h.files[key+".pub"] = fakeFile{content: pub,
 			owner: u, group: u, uid: 1001, gid: 1001, mode: "644",
 			kind: "regular file", mtimeUnix: 1500000000}
 		h.files["/home/"+u+"/.ssh/known_hosts"] = fakeFile{
@@ -1084,11 +1133,28 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 		panic("render fpm_pool.conf.tmpl: " + err.Error())
 	}
 	h.putManaged(fpmPoolPath(s.PHP.Version, site.Domain), pool, profile)
-	worker, err := renderSupervisorProgram(programName(site.Domain), queueCommand(s, site), queueNumprocs(site), s.SiteUser(site), site.DeployPath)
+	// autostart follows programsAutostart over THIS model: the release is
+	// modelled on every provisioned profile, so it reduces to the knob.
+	worker, err := renderSupervisorProgram(programName(site.Domain), queueCommand(s, site), queueNumprocs(site), s.SiteUser(site), site.DeployPath, s.WorkersRunning(site))
 	if err != nil {
 		panic("render supervisor.conf.tmpl: " + err.Error())
 	}
 	h.putManaged(supervisorProgramPath(site.Domain), worker, profile)
+	// supervisor's boot-ordering drop-in. Under workers: running it is
+	// berth's file, in the usual four content states (foreign walks the
+	// managed-file refusal). With no site running, a converged host has
+	// none; drifted models the berth file a running->dormant flip leaves
+	// behind (the removal branch), foreign an operator file at that path,
+	// which the dormant Check must leave alone without refusing.
+	if s.AnyWorkersRunning() {
+		order, err := renderSupervisorOrder(s)
+		if err != nil {
+			panic("render supervisor_after.conf.tmpl: " + err.Error())
+		}
+		h.putManaged(supervisorOrderPath, order, profile)
+	} else if profile == "drifted" || profile == "foreign" {
+		h.putManaged(supervisorOrderPath, nil, profile)
+	}
 	cron, err := renderCron(s, site)
 	if err != nil {
 		panic("render scheduler.cron.tmpl: " + err.Error())
@@ -1243,10 +1309,14 @@ func fixtureRenewalConf(domain string) string {
 // DB_PASSWORD and APP_KEY lines and compares the latter two against the
 // seeded local cache, so the fixture values must be the cache's values —
 // and DB_CONNECTION must be the engine's driver, or assertEnvEngineMatch
-// rightly hard-errors. The other keys (DB_HOST/DB_PORT/DB_SOCKET, the
-// cache/queue/redis block) are mirrored for the seed-map fidelity above but
-// VERIFIED BY NO CHECK today — no probe reads them, so a wrong value there
-// cannot fail a test.
+// rightly hard-errors. assertEnvBerthKeys also reads DB_DATABASE,
+// DB_USERNAME, REDIS_HOST, REDIS_PORT and REDIS_CLIENT (and REDIS_PASSWORD,
+// DB_URL and REDIS_URL, absent here as the seed leaves them), so those must
+// be the site's derived identities, its own Valkey socket and phpredis, or
+// the converged host rightly refuses. The
+// other keys (DB_HOST/DB_PORT/DB_SOCKET, the cache/queue block) are
+// mirrored for the seed-map fidelity above but VERIFIED BY NO CHECK today —
+// no probe reads them, so a wrong value there cannot fail a test.
 func fixtureSharedEnvBody(s *config.Server) []byte {
 	kv := map[string]string{
 		"APP_ENV":          "production",

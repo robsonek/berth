@@ -59,7 +59,7 @@ func dumpClientBinary(engine string) string {
 	if engine == "postgres" {
 		return "pg_dump"
 	}
-	return "mysqldump"
+	return "mariadb-dump"
 }
 
 // renderBackupScript bakes the per-pair sidecar fields (the directory

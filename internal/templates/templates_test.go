@@ -149,6 +149,7 @@ func TestRenderSupervisorGolden(t *testing.T) {
 	checkGolden(t, "supervisor.conf.tmpl", "supervisor.golden", struct {
 		ProgramName, Command, DeployPath, User string
 		Numprocs                               int
+		Autostart                              bool
 	}{
 		ProgramName: "berth-app_example_com",
 		Command:     "php /home/deploy/myapp/current/artisan queue:work --sleep=3 --tries=3 --max-time=3600",
@@ -156,10 +157,26 @@ func TestRenderSupervisorGolden(t *testing.T) {
 	})
 }
 
+// TestRenderSupervisorRunningGolden pins the workers: running variant: the
+// same program with autostart=true, so supervisord starts it on load and at
+// every boot. The dormant goldens above stay autostart=false byte-for-byte.
+func TestRenderSupervisorRunningGolden(t *testing.T) {
+	checkGolden(t, "supervisor.conf.tmpl", "supervisor_running.golden", struct {
+		ProgramName, Command, DeployPath, User string
+		Numprocs                               int
+		Autostart                              bool
+	}{
+		ProgramName: "berth-app_example_com",
+		Command:     "php /home/deploy/myapp/current/artisan queue:work --sleep=3 --tries=3 --max-time=3600",
+		DeployPath:  "/home/deploy/myapp", User: "webuser", Numprocs: 1, Autostart: true,
+	})
+}
+
 func TestRenderSupervisorHorizonGolden(t *testing.T) {
 	checkGolden(t, "supervisor.conf.tmpl", "supervisor_horizon.golden", struct {
 		ProgramName, Command, DeployPath, User string
 		Numprocs                               int
+		Autostart                              bool
 	}{
 		ProgramName: "berth-app_example_com",
 		Command:     "php /home/deploy/myapp/current/artisan horizon",
@@ -171,6 +188,7 @@ func TestRenderSupervisorDaemonGolden(t *testing.T) {
 	checkGolden(t, "supervisor.conf.tmpl", "supervisor_daemon.golden", struct {
 		ProgramName, Command, DeployPath, User string
 		Numprocs                               int
+		Autostart                              bool
 	}{
 		ProgramName: "berth-app_example_com-reverb",
 		Command:     "php /home/deploy/myapp/current/artisan reverb:start",
@@ -240,6 +258,15 @@ func TestRenderBerthValkeyServiceGolden(t *testing.T) {
 	})
 }
 
+// TestRenderSupervisorAfterGolden: the supervisor.service ordering drop-in
+// written when any site runs workers — the database unit first, then each
+// site's Valkey instance (the caller sorts them).
+func TestRenderSupervisorAfterGolden(t *testing.T) {
+	checkGolden(t, "supervisor_after.conf.tmpl", "supervisor_after.golden", struct{ After []string }{
+		After: []string{"mariadb.service", "berth-valkey-api_example_com.service", "berth-valkey-app_example_com.service"},
+	})
+}
+
 // mariadbTuningGoldenData mirrors the render struct in steps.renderMariaDBTuning
 // (test-local copy — keep the fields in sync).
 type mariadbTuningGoldenData struct {
@@ -291,7 +318,7 @@ func TestRenderBackupScriptGolden(t *testing.T) {
 		RetentionDays                                                       int
 	}{
 		Pool:          "app_example_com",
-		DumpCommand:   "mysqldump --protocol=socket --single-transaction --no-tablespaces --routines --events 'myapp'",
+		DumpCommand:   "mariadb-dump --protocol=socket --single-transaction --no-tablespaces --routines --events 'myapp'",
 		DBName:        "myapp",
 		DeployPath:    "/home/deploy/myapp",
 		BackupDir:     "/var/backups/berth/app_example_com",

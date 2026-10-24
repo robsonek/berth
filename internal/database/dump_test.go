@@ -10,7 +10,7 @@ func TestDumpCommand(t *testing.T) {
 	// config.Load) already excludes metacharacters, but the command lands in a
 	// root cron script, so the quoting must not depend on a validator the
 	// caller might have bypassed (literal &config.Server{}).
-	if got := (MariaDB{}).DumpCommand("appdb"); got != "mysqldump --protocol=socket --single-transaction --no-tablespaces --routines --events 'appdb'" {
+	if got := (MariaDB{}).DumpCommand("appdb"); got != "mariadb-dump --protocol=socket --single-transaction --no-tablespaces --routines --events 'appdb'" {
 		t.Errorf("mariadb dump = %q", got)
 	}
 	if got := (Postgres{}).DumpCommand("appdb"); got != "sudo -u postgres pg_dump 'appdb'" {
@@ -23,7 +23,7 @@ func TestDumpCommand(t *testing.T) {
 	// prevent option injection.)
 	hostile := `ap'db; $(rm -rf /)`
 	got := (MariaDB{}).DumpCommand(hostile)
-	want := `mysqldump --protocol=socket --single-transaction --no-tablespaces --routines --events 'ap'\''db; $(rm -rf /)'`
+	want := `mariadb-dump --protocol=socket --single-transaction --no-tablespaces --routines --events 'ap'\''db; $(rm -rf /)'`
 	if got != want {
 		t.Errorf("hostile mariadb dump:\ngot  %q\nwant %q", got, want)
 	}

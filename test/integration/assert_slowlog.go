@@ -29,7 +29,7 @@ func assertSlowQueryLog(ctx context.Context, t *testing.T, c *bssh.Client, srv *
 	}
 	const logPath = "/var/log/mysql/mariadb-slow.log" // mirrors steps.mariadbSlowLogPath
 
-	on, err := c.Run(ctx, `sudo mysql --protocol=socket -N -e 'SELECT @@slow_query_log'`, nil)
+	on, err := c.Run(ctx, `sudo mariadb --protocol=socket -N -e 'SELECT @@slow_query_log'`, nil)
 	if err != nil {
 		t.Fatalf("read @@slow_query_log: %v", err)
 	}
@@ -37,7 +37,7 @@ func assertSlowQueryLog(ctx context.Context, t *testing.T, c *bssh.Client, srv *
 		t.Errorf("@@slow_query_log = %q, want 1", got)
 	}
 	eff := srv.Tuning.MariaDBLongQueryTimeEff()
-	lqt, err := c.Run(ctx, `sudo mysql --protocol=socket -N -e 'SELECT CAST(@@long_query_time AS UNSIGNED)'`, nil)
+	lqt, err := c.Run(ctx, `sudo mariadb --protocol=socket -N -e 'SELECT CAST(@@long_query_time AS UNSIGNED)'`, nil)
 	if err != nil {
 		t.Fatalf("read @@long_query_time: %v", err)
 	}
@@ -56,6 +56,6 @@ func assertSlowQueryLog(ctx context.Context, t *testing.T, c *bssh.Client, srv *
 	}
 	marker := fmt.Sprintf("berth-slowlog-probe-%d", time.Now().UnixNano())
 	assertExitZero(ctx, t, c, "slow query captured in the log",
-		fmt.Sprintf(`sudo mysql --protocol=socket -N -e "SELECT SLEEP(%d), '%s'" && sleep 1 && sudo grep -Fq '%s' %s`,
+		fmt.Sprintf(`sudo mariadb --protocol=socket -N -e "SELECT SLEEP(%d), '%s'" && sleep 1 && sudo grep -Fq '%s' %s`,
 			eff+1, marker, marker, logPath))
 }

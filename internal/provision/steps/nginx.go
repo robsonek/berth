@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/robsonek/berth/internal/apt"
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
 	bssh "github.com/robsonek/berth/internal/ssh"
@@ -164,7 +163,6 @@ func stockDefaultsDisabled(ctx context.Context, r bssh.Runner) (bool, error) {
 
 func (nginx) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
 	nginxRepo, useOrg := nginxUpstream(s)
-	m := apt.New(r)
 	// The write path re-classifies via ensureOwnRepo (never a bare EnsureRepo:
 	// Apply often runs for unrelated drift, and the raw call would overwrite a
 	// foreign list without --force).
@@ -184,7 +182,7 @@ func (nginx) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r
 	if err := invalidateReloaded(ctx, r, "nginx"); err != nil {
 		return err
 	}
-	if err := m.EnsurePackages(ctx, nil, "nginx"); err != nil {
+	if err := upstreamInstall(s, useOrg)(ctx, r, "nginx"); err != nil {
 		return fmt.Errorf("install nginx: %w", err)
 	}
 	if useOrg {

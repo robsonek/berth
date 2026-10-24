@@ -11,7 +11,7 @@ import (
 func TestMariaDBEnsureUserUsesStdinNotArgv(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	// The SQL goes through stdin; the command itself must not contain the password.
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 	m := MariaDB{}
 	if err := m.EnsureUser(context.Background(), f, "myapp", "s3cr3t", "myapp"); err != nil {
 		t.Fatalf("EnsureUser() error = %v", err)
@@ -30,7 +30,7 @@ func TestMariaDBEnsureUserUsesStdinNotArgv(t *testing.T) {
 
 func TestMariaDBEnsureDatabaseIdempotent(t *testing.T) {
 	f := bssh.NewFakeRunner()
-	f.On("mysql --protocol=socket", bssh.Result{})
+	f.On("mariadb --protocol=socket", bssh.Result{})
 	if err := (MariaDB{}).EnsureDatabase(context.Background(), f, "myapp"); err != nil {
 		t.Fatal(err)
 	}
@@ -58,8 +58,8 @@ func (e errString) Error() string { return string(e) }
 
 func TestMariaDBProbes(t *testing.T) {
 	m := MariaDB{}
-	dbCmd := `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='myapp'"`
-	grantCmd := `mysql --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='myapp' AND GRANTEE='''myapp''@''localhost''' LIMIT 1"`
+	dbCmd := `mariadb --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='myapp'"`
+	grantCmd := `mariadb --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='myapp' AND GRANTEE='''myapp''@''localhost''' LIMIT 1"`
 	probes := []struct {
 		name string
 		cmd  string
