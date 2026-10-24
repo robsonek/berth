@@ -817,7 +817,11 @@ sites:
   `systemctl daemon-reload`. It only orders the start: it adds no
   `Wants=`/`Requires=`, so a database that fails to start does not keep
   Supervisor down. When no site runs `running` any more, berth removes its
-  drop-in; a file at that path that berth did not write is left alone.
+  drop-in; a file at that path that berth did not write is left alone. The
+  drop-in is managed only while some site still has a queue worker or a
+  daemon (otherwise the `supervisor` step does not run), so removing the last
+  program leaves it in place; it only orders the start, so it is harmless and
+  can be deleted by hand.
 - **No release yet:** until `<deploy_path>/current` exists there is no code to
   run, so with `running` the programs stay dormant and the run warns
   (`workers: running is set, but <deploy_path>/current does not exist yet`).
