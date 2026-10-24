@@ -57,6 +57,20 @@ Notable changes to berth. Older releases are documented on the
   Valkey) now stops provisioning at the `database` step instead of running
   on with an app that talks to the wrong backend. Fix the listed lines in the
   `.env` and run again. A host without a `shared/.env` is unaffected.
+- **`sites[].repository_key`** installs a deploy key you already have instead
+  of generating one, so a key the git host trusts no longer has to be copied
+  to the server by hand. It is the path of a local private key (`~` allowed)
+  and requires `repository`. berth reads and parses it on the workstation
+  before it probes the host: a missing file, a file that is not a private
+  key, or a passphrase-protected key stops the run. The `accounts` step
+  writes the key to `/home/<user>/.ssh/id_ed25519` (0600) and its `.pub`
+  (0644, comment `<user>@<git-host>`) as the site user, with the key on
+  stdin, never on a command line or in a log. When the host already holds
+  that key the step is satisfied (a missing `.pub` is restored). When it
+  holds a different key, berth refuses and names both SHA256 fingerprints;
+  `--force` replaces it. The Check compares keys with a read-only
+  `ssh-keygen -y -f <key>`. Without `repository_key` nothing changes: berth
+  generates a key when there is none and never replaces one.
 
 ### Changed
 

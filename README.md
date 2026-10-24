@@ -214,6 +214,9 @@ sites:                         # one or more
     repository: git@github.com:acme/app.git   # optional — SSH git URL only; berth
                                        # generates a per-site deploy key for it
                                        # (print it with `berth site key`)
+    repository_key: ~/keys/app-deploy  # optional, requires repository — install this
+                                       # local private key as the deploy key instead
+                                       # of generating one (see "Deploy key from a file")
     database: { name: app, user: app }        # per-site DB (required for every site)
     ssl: true
     ssl_mode: selfsigned               # letsencrypt (default) | selfsigned —
@@ -280,6 +283,32 @@ the same current `host:port`. Rules:
   unaffected and never bypassed.
 - Downgrading berth below this version after an `id`/envelope exists is not
   supported (older binaries reject both the config key and the cache format).
+
+### Deploy key from a file (`repository_key:`)
+
+For a site with a `repository`, berth generates an ed25519 deploy key on the
+host (`/home/<user>/.ssh/id_ed25519`) the first time, and you register its
+public half at the git host. When the git host already trusts a key you keep
+(for example the deploy key of a server being replaced), point
+`repository_key` at that local private key instead. The `accounts` step then
+installs it:
+
+- The key is read and parsed on your machine before berth probes the host.
+  A missing file, a file that is not a private key, or a passphrase-protected
+  key stops the run (a deploy key must work unattended).
+- When the site user has no key yet, berth writes the private key (mode
+  0600) and its `.pub` (0644, with the `<user>@<git-host>` comment a generated
+  key gets) as the site user. The key travels on stdin, never on a command
+  line, and is never logged.
+- When the host already holds the same key, the step is satisfied. When it
+  holds a different key, berth refuses and names both SHA256 fingerprints;
+  re-run with `--force` to replace it (`--only accounts --force` keeps the
+  override to this step). The replaced key stops working wherever it is
+  registered.
+- Without `repository_key`, nothing changes: berth generates a key when there
+  is none and never replaces one.
+
+The git host's `known_hosts` entry is scanned exactly as for a generated key.
 
 ## Package sources
 

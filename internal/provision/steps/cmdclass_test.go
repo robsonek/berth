@@ -346,8 +346,9 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		// The known-host lookup rides the registry too (its redirections
 		// force it there). Its in-place-rewriting siblings -R (remove) and
 		// -H (hash) must never pass, nor a lookup in a file the audit never
-		// covered — and ssh-keygen has NO table entry, so a redirection-free
-		// respelling rejects as an unknown verb rather than by accident.
+		// covered — and ssh-keygen's ONE table entry is pinned to the
+		// `-y -f <path>` public-half read, so a redirection-free respelling
+		// of any other mode rejects by not matching that shape.
 		{`ssh-keygen -F 'git.example.com' -f '/home/appuser/.ssh/known_hosts' >/dev/null 2>&1`, cmdAudited},
 		// The non-default-port endpoint's "[host]:port" token — the other
 		// branch of the same composition — and proof the registry is exact on
@@ -359,6 +360,14 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{`ssh-keygen -F 'git.example.com' -f '/etc/ssh/ssh_known_hosts' >/dev/null 2>&1`, cmdRejected},
 		{`ssh-keygen -F git.example.com`, cmdRejected},
 		{`ssh-keygen -t ed25519 -N x -f /tmp/key`, cmdRejected},
+		// hostDeployKey's repository_key comparison (deploykey.go): -y prints
+		// the public half of the one key file named by -f. Only that exact
+		// shape reads — a bare -y, a second operand, and the other modes
+		// (-p rewrites the key file's passphrase in place) all reject.
+		{`ssh-keygen -y -f '/home/appuser/.ssh/id_ed25519'`, cmdReadOnly},
+		{`ssh-keygen -y`, cmdRejected},
+		{`ssh-keygen -y -f a b`, cmdRejected},
+		{`ssh-keygen -p -f '/home/appuser/.ssh/id_ed25519'`, cmdRejected},
 
 		// Unknown verbs are rejected, not assumed safe.
 		{"sometool --probe /etc/x", cmdRejected},
@@ -1120,6 +1129,16 @@ var simpleShapes = []simpleShape{
 		why: "pinned to the two x509 reads tls.go issues; -out and -writerand create files even under -noout, and every respelling falls out by not matching"},
 	{verb: "gpg", allow: gpgIsReadOnly, verdict: cmdReadOnly,
 		why: "pinned to KeyringHoldsExactly's exact argv (apt.go)"},
+	// ssh-keygen has writing modes (-p rewrites a key's passphrase in place,
+	// -t/-N generate, -R/-H rewrite known_hosts, -c changes a comment), so
+	// only the one read berth issues in a Check is blessed: -y prints the
+	// public half of the single key file named by -f, writing nothing. The
+	// operand may not be an option. The -F known-host lookup is not here —
+	// its redirections route it through auditedScripts.
+	{verb: "ssh-keygen", allow: func(a []string) bool {
+		return len(a) == 3 && a[0] == "-y" && a[1] == "-f" && !strings.HasPrefix(a[2], "-")
+	}, verdict: cmdReadOnly,
+		why: "pinned to `ssh-keygen -y -f <key>` (hostDeployKey, deploykey.go)"},
 	{verb: "mariadb", allow: mariadbIsReadOnlyProbe, verdict: cmdReadOnly,
 		why: "only probeSQL's -N -e information_schema SELECT reads; any other statement, a ;-chain, INTO OUTFILE or an extra option mutates"},
 	// sudo is THE privilege wrapper — everything behind it is arbitrary code

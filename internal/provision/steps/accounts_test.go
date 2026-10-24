@@ -620,6 +620,36 @@ func TestAccountsApplyGeneratesDeployKeyWhenRepository(t *testing.T) {
 	}
 }
 
+// Without repository_key the deploy-key path is exactly what it was before
+// the field existed: an absent key is generated on the host, the .pub is
+// probed, the git host is scanned — the same commands, in the same order,
+// and nothing is read with ssh-keygen -y or written from the workstation.
+func TestEnsureDeployKeyWithoutRepositoryKeyUnchanged(t *testing.T) {
+	s := testServerWithKey(t)
+	s.Sites[0].Repository = "git@github.com:owner/repo.git"
+	f := bssh.NewFakeRunner()
+	kh := "/home/deploy/.ssh/known_hosts"
+	want := []string{
+		"test -e '/home/deploy/.ssh/id_ed25519'",
+		"sudo -u deploy ssh-keygen -t ed25519 -N '' -f '/home/deploy/.ssh/id_ed25519' -C 'deploy@github.com'",
+		"test -e '/home/deploy/.ssh/id_ed25519.pub'",
+		"sudo -u deploy sh -c " + shQuote("ssh-keygen -F "+shQuote("github.com")+" -f "+shQuote(kh)+" >/dev/null 2>&1 || ssh-keyscan "+shQuote("github.com")+" >> "+shQuote(kh)),
+	}
+	f.On(want[0], bssh.Result{ExitCode: 1}) // key absent
+	f.On(want[1], bssh.Result{})
+	f.On(want[2], bssh.Result{}) // keygen just wrote it
+	f.On(want[3], bssh.Result{})
+	if err := (accounts{}).ensureDeployKey(context.Background(), false, s, s.Sites[0], nil, f); err != nil {
+		t.Fatalf("ensureDeployKey() error = %v", err)
+	}
+	if got := callCmds(f); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("calls changed without repository_key:\n got: %q\nwant: %q", got, want)
+	}
+	if len(f.Writes()) != 0 {
+		t.Errorf("wrote %d file(s) without repository_key", len(f.Writes()))
+	}
+}
+
 func TestAccountsApplySkipsDeployKeyWithoutRepository(t *testing.T) {
 	chdirTemp(t)
 	s := testServerWithKey(t) // no repository

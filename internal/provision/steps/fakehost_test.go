@@ -222,7 +222,8 @@ var fakeHostProfiles = []string{"fresh", "converged", "drifted", "foreign", "run
 // fixture, preserved unchanged so today's coverage cannot shrink; maximal
 // turns on every system knob (swap + swappiness, the kernel sysctl drop-in,
 // timezone, static hostname — all opt-in and all off in baseline), gives the
-// site a repository (the deploy-key and known-host probes) and sets
+// site a repository and a repository_key (the deploy-key comparison and
+// known-host probes) and sets
 // apt.upstream_updates: manual and workers: running (the release probe and
 // the running verdict); postgres swaps the database engine, whose
 // Check probes are engine-specific code the mariadb variants never reach.
@@ -332,6 +333,13 @@ func variantServer(t *testing.T, variant string) *config.Server {
 		// entry in cmdclass_test.go (both forms come from the same
 		// composition; the data differs, the code path is a superset here).
 		srv.Sites[0].Repository = "ssh://git@git.example.com:2222/app/app.git"
+		// repository_key takes accounts.Check through hostDeployKey's
+		// public-half read (ssh-keygen -y -f) and the key comparison. The key
+		// is a real ed25519 key generated here (outside HOME — any path
+		// works), so the fake host, which models the installed private key
+		// as these same bytes, derives the public half with real parsing,
+		// and converged genuinely matches.
+		srv.Sites[0].RepositoryKey = newTestDeployKey(t, "").path
 		// apt.upstream_updates: manual takes base's origins drop-in through
 		// unattendedRepos' manual short-circuit. maximal installs from
 		// Debian only, so its probe set is unchanged (the one `cat`); the
@@ -939,8 +947,10 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 	// (accounts.go), modelled only when the site declares a repository. All
 	// three are third-party or secret-bearing state, never marker-managed:
 	// the key pair is Apply's ssh-keygen output (probed by existence only)
-	// and known_hosts is ssh-keyscan output, hand-modelled from the real
-	// one-line format because the -F lookup's verdict rides its host field.
+	// or, with repository_key, the configured pair (whose private half the
+	// Check also reads back with ssh-keygen -y), and known_hosts is
+	// ssh-keyscan output, hand-modelled from the real one-line format
+	// because the -F lookup's verdict rides its host field.
 	for _, st := range s.Sites {
 		if st.Repository == "" {
 			continue
@@ -959,11 +969,26 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 		}
 		u := s.SiteUser(st)
 		key := deployKeyPath(u)
+		priv := "-----BEGIN OPENSSH PRIVATE KEY-----\nfixture-deploy\n-----END OPENSSH PRIVATE KEY-----\n"
+		pub := "ssh-ed25519 AAAAC3Nza fixture-deploy\n"
+		if st.RepositoryKey != "" {
+			// With repository_key the host holds exactly the configured pair,
+			// in the bytes installRepositoryKey writes: the local key verbatim
+			// and its public half with the <user>@<git-host> comment. Loaded
+			// through the production reader, as rendered files go through
+			// their renderers.
+			local, err := loadLocalDeployKey(st.RepositoryKey)
+			if err != nil {
+				panic("load the fixture repository_key: " + err.Error())
+			}
+			priv = string(local.Private)
+			pub = local.AuthorizedKey + " " + u + "@" + host + "\n"
+		}
 		h.files[key] = fakeFile{
-			content: "-----BEGIN OPENSSH PRIVATE KEY-----\nfixture-deploy\n-----END OPENSSH PRIVATE KEY-----\n",
+			content: priv,
 			owner:   u, group: u, uid: 1001, gid: 1001, mode: "600",
 			kind: "regular file", mtimeUnix: 1500000000}
-		h.files[key+".pub"] = fakeFile{content: "ssh-ed25519 AAAAC3Nza fixture-deploy\n",
+		h.files[key+".pub"] = fakeFile{content: pub,
 			owner: u, group: u, uid: 1001, gid: 1001, mode: "644",
 			kind: "regular file", mtimeUnix: 1500000000}
 		h.files["/home/"+u+"/.ssh/known_hosts"] = fakeFile{

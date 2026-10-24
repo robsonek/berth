@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
 
@@ -287,6 +289,35 @@ func TestRecordingRunnerDerivesWave3AnswersFromState(t *testing.T) {
 	convHost.files[fixtureSharedEnv] = env
 	if res, err := conv.Run(ctx, redisHost, []byte(envValueFormsStdin("REDIS_HOST", fixtureValkeySocket))); err != nil || res.ExitCode != 4 || res.Stdout != "2\n" {
 		t.Errorf("duplicated REDIS_HOST = (%+v, %v), want exit 4 with the count 2", res, err)
+	}
+}
+
+// The deploy key's public-half read follows the modelled key file: the
+// maximal variant's converged host holds the repository_key itself, so the
+// answer IS that key's public half; a file that is not a key or is missing
+// answers ssh-keygen's failure, so a canned line can never bless a mismatch.
+func TestRecordingRunnerDerivesDeployKeyFromState(t *testing.T) {
+	ctx := context.Background()
+	s := variantServer(t, "maximal")
+	local, err := loadLocalDeployKey(s.Sites[0].RepositoryKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	derive := "ssh-keygen -y -f " + shQuote(deployKeyPath("appuser"))
+	convHost := newFakeHost(t, "converged", s)
+	conv := newRecordingRunner(convHost)
+	if res, err := conv.Run(ctx, derive, nil); err != nil || res.ExitCode != 0 || strings.TrimSpace(res.Stdout) != local.AuthorizedKey {
+		t.Errorf("installed repository_key = (%+v, %v), want its public half %q", res, err, local.AuthorizedKey)
+	}
+	key := convHost.files[deployKeyPath("appuser")]
+	key.content = "not a key\n"
+	convHost.files[deployKeyPath("appuser")] = key
+	if res, err := conv.Run(ctx, derive, nil); err != nil || res.ExitCode == 0 || res.Stdout != "" {
+		t.Errorf("unparsable key file = (%+v, %v), want a failure with no public half", res, err)
+	}
+	fresh := newRecordingRunner(newFakeHost(t, "fresh", s))
+	if res, err := fresh.Run(ctx, derive, nil); err != nil || res.ExitCode == 0 {
+		t.Errorf("missing key file = (%+v, %v), want a failure", res, err)
 	}
 }
 
@@ -675,6 +706,14 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 	// 1 on a present file without it, 255 when the file itself is missing.
 	case cmd == sshKnownHostProbeCmd(fixtureGitKnownHost, fixtureKnownHostsPath):
 		return r.answerKnownHostLookup(fixtureGitKnownHost, fixtureKnownHostsPath), true
+
+	// hostDeployKey's public-half read (deploykey.go): accounts.Check PARSES
+	// the first two fields and compares them with the repository_key's.
+	// Answered with real ssh-keygen -y semantics over the modelled key file,
+	// never canned: the derived "<type> <base64>" line for a key that
+	// parses, exit 255 for a missing or unparsable file.
+	case f[0] == "ssh-keygen" && len(f) == 4 && f[1] == "-y" && f[2] == "-f":
+		return r.answerPublicHalf(unq(f[3])), true
 
 	// sshdOptsGuard PARSES the file body for the last SSHD_OPTS assignment;
 	// keyed to the production const so the model tracks the issued shape. A
@@ -1100,6 +1139,22 @@ func (r *recordingRunner) answerKnownHostLookup(token, path string) bssh.Result 
 		}
 	}
 	return bssh.Result{ExitCode: 1}
+}
+
+// answerPublicHalf evaluates `ssh-keygen -y -f <path>` over the model: the
+// public half of the modelled private key, or ssh-keygen's exit 255 with its
+// diagnostic when the file is missing or is not a key (the fixture's
+// placeholder keys are not — only a repository_key site models a real one).
+func (r *recordingRunner) answerPublicHalf(path string) bssh.Result {
+	file, ok := r.h.files[path]
+	if !ok {
+		return bssh.Result{ExitCode: 255, Stderr: path + ": No such file or directory"}
+	}
+	signer, err := ssh.ParsePrivateKey([]byte(file.content))
+	if err != nil {
+		return bssh.Result{ExitCode: 255, Stderr: `Load key "` + path + `": invalid format`}
+	}
+	return bssh.Result{Stdout: string(ssh.MarshalAuthorizedKey(signer.PublicKey()))}
 }
 
 // mariadbDBExistsProbe / mariadbUserGrantedProbe mirror probeSQL's
