@@ -84,4 +84,17 @@ sites:
 	if s.SSH.User != "root" {
 		t.Errorf("ssh.user default changed: %q, want root", s.SSH.User)
 	}
+	// The first-deploy knobs have NO Load default on purpose: their zero
+	// value IS the pre-knob behaviour (programs dormant, upstream updates
+	// automatic), so a SetDefault here would change what an existing config
+	// means and rewrite every host's files on the next run.
+	if s.Workers != "" {
+		t.Errorf("workers must stay empty after Load (zero value = dormant); got %q", s.Workers)
+	}
+	if s.Sites[0].Workers != "" {
+		t.Errorf("sites[].workers must stay empty after Load (zero value = inherit); got %q", s.Sites[0].Workers)
+	}
+	if s.Apt.UpstreamUpdates != "" {
+		t.Errorf("apt.upstream_updates must stay empty after Load (zero value = auto); got %q", s.Apt.UpstreamUpdates)
+	}
 }
