@@ -31,19 +31,20 @@ type localDeployKey struct {
 // here rather than installed and found broken at the first deploy.
 //
 // Private is the file's bytes in the one form OpenSSH on the host loads:
-// CRLF line endings become LF, and a final newline is added when the file
-// lacks one. OpenSSH refuses either variant ("invalid format") while the Go
-// parser accepts both, so installing the bytes verbatim would leave a key
-// that git cannot use and that the next Check's ssh-keygen -y reads as
-// foreign — refusing, or under --force rewriting, the key berth installed,
-// every run. Both edits are lossless: the PEM/OpenSSH armor is line-based
-// base64 with no meaningful CR.
+// every CR is removed (CRLF endings, and the \r\r\n a doubled conversion
+// leaves, become LF), and a final newline is added when the file lacks one.
+// OpenSSH refuses a CR in a line or a missing final newline ("invalid
+// format") while the Go parser accepts both, so installing the bytes
+// verbatim would leave a key that git cannot use and that the next Check's
+// ssh-keygen -y reads as foreign — refusing, or under --force rewriting, the
+// key berth installed, every run. Both edits are lossless: the PEM/OpenSSH
+// armor is line-based base64 with no meaningful CR.
 func loadLocalDeployKey(path string) (localDeployKey, error) {
 	b, err := os.ReadFile(expandHomeLocal(path))
 	if err != nil {
 		return localDeployKey{}, fmt.Errorf("repository_key %s: %w", path, err)
 	}
-	b = bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n"))
+	b = bytes.ReplaceAll(b, []byte("\r"), nil)
 	signer, err := ssh.ParsePrivateKey(b)
 	if err != nil {
 		var missing *ssh.PassphraseMissingError

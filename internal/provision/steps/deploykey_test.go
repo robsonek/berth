@@ -459,6 +459,30 @@ func TestLoadLocalDeployKeyNormalizesCRLF(t *testing.T) {
 	}
 }
 
+func TestLoadLocalDeployKeyStripsEveryCR(t *testing.T) {
+	// A doubled conversion (CRLF applied twice) leaves \r\r\n endings. The
+	// Go parser still loads them, so rewriting only CRLF pairs would install
+	// "\r\n" lines OpenSSH refuses — every CR must go.
+	key := newTestDeployKey(t, "")
+	path := filepath.Join(t.TempDir(), "deploy_key_crcrlf")
+	if err := os.WriteFile(path, []byte(strings.ReplaceAll(string(key.private), "\n", "\r\r\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadLocalDeployKey(path)
+	if err != nil {
+		t.Fatalf("loadLocalDeployKey(\\r\\r\\n copy) error = %v", err)
+	}
+	if n := strings.Count(string(got.Private), "\r"); n != 0 {
+		t.Errorf("Private still carries %d CR byte(s)", n)
+	}
+	if string(got.Private) != string(key.private) {
+		t.Errorf("Private (%d bytes) differs from the LF original (%d bytes)", len(got.Private), len(key.private))
+	}
+	if got.Fingerprint != key.fingerprint {
+		t.Errorf("Fingerprint = %q, want the LF original's %q", got.Fingerprint, key.fingerprint)
+	}
+}
+
 func TestLoadLocalDeployKeyAppendsMissingNewline(t *testing.T) {
 	// OpenSSH refuses a private key whose last line has no newline; berth
 	// appends exactly one so the installed key loads.

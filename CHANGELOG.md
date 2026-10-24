@@ -81,11 +81,12 @@ Notable changes to berth. Older releases are documented on the
   key, or a passphrase-protected key stops the run. The `accounts` step
   writes the key to `/home/<user>/.ssh/id_ed25519` (0600) and its `.pub`
   (0644, comment `<user>@<git-host>`) as the site user, with the key on
-  stdin, never on a command line or in a log. CRLF line endings are
-  converted to LF and a missing final newline is added, since OpenSSH
-  refuses to load a key file in either form. When the host already holds
-  that key the step is satisfied (a missing `.pub` is restored). When it
-  holds a different key, berth refuses and names both SHA256 fingerprints;
+  stdin, never on a command line or in a log. Every carriage return is
+  removed (CRLF line endings become LF) and a missing final newline is
+  added, since OpenSSH refuses to load a key file in either form. When the
+  host already holds that key the step is satisfied (a missing `.pub` is
+  restored). When it holds a different key, berth refuses and names both
+  SHA256 fingerprints;
   `--force` replaces it. The Check compares keys with a read-only
   `ssh-keygen -y -f <key>`. Without `repository_key` nothing changes: berth
   generates a key when there is none and never replaces one.
