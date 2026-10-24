@@ -27,8 +27,12 @@ Notable changes to berth. Older releases are documented on the
   berth starts nothing, so no host drifts. With `running` the `site` step
   renders `autostart=true`, so Supervisor starts the programs by itself after
   a reboot. After `supervisorctl update` it starts every program that is not
-  RUNNING, and fails, naming the program and
-  `/var/log/supervisor/<program>.log`, when one does not reach RUNNING. Its
+  RUNNING, and fails when one does not reach RUNNING. The error quotes
+  supervisorctl's status lines with their reason (such as `Exited too
+  quickly` or `can't find command`) and names both
+  `/var/log/supervisor/<program>.log` and `/var/log/supervisor/supervisord.log`,
+  where spawn errors land; for a program supervisord never loaded it points
+  at `supervisord.log` and the conf instead. Its
   Check reports a stopped program as drift, so the next run starts it again.
   Until `<deploy_path>/current` exists the programs stay dormant and the run
   warns; provision again after the first deploy. In dormant mode, a run that

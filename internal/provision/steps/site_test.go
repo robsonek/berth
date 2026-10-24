@@ -2542,10 +2542,75 @@ func TestWorkersRunningStartFailureIsLoud(t *testing.T) {
 	if err == nil {
 		t.Fatal("Apply() must fail when the program does not reach RUNNING")
 	}
-	for _, want := range []string{"berth-app_example_com", "/var/log/supervisor/berth-app_example_com.log"} {
+	for _, want := range []string{
+		"berth-app_example_com",
+		// The raw status line, description column included: it is the
+		// first thing that says WHY (here, a crash loop).
+		strings.TrimSpace(workerStatus("FATAL", "Exited too quickly (process log may have details)")),
+		"ERROR (spawn error)",
+		// Both logs: the program's output AND supervisord's own log, where
+		// spawn errors land while the program log stays empty.
+		"/var/log/supervisor/berth-app_example_com.log",
+		"/var/log/supervisor/supervisord.log",
+	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q must contain %q", err, want)
 		}
+	}
+}
+
+// TestWorkersRunningSpawnErrorNamesSupervisordLog: a command supervisord
+// cannot find never forks — the program log stays EMPTY and the reason lives
+// only in the status description and supervisord's own log. The error must
+// carry both, not send the operator to the empty program log.
+func TestWorkersRunningSpawnErrorNamesSupervisordLog(t *testing.T) {
+	s := siteServer()
+	s.Workers = "running"
+	s.Sites[0].Daemons = []config.Daemon{{Name: "relay", Command: "/opt/relay/run"}}
+	const prog = "berth-app_example_com-relay"
+	const status = "supervisorctl status '" + prog + ":*'"
+	const spawnLine = prog + ":" + prog + "_00   FATAL     can't find command '/opt/relay/run'"
+	f := bssh.NewFakeRunner()
+	stubSiteApply(s, f)
+	f.On("test -e '/var/www/myapp/current'", bssh.Result{})
+	f.On(status, bssh.Result{ExitCode: 3, Stdout: spawnLine + "\n"})
+	f.On("supervisorctl start '"+prog+":*'", bssh.Result{ExitCode: 7, Stdout: prog + ":" + prog + "_00: ERROR (spawn error)\n"})
+
+	err := Site().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil {
+		t.Fatal("Apply() must fail when the program cannot be spawned")
+	}
+	for _, want := range []string{spawnLine, "/var/log/supervisor/" + prog + ".log", "/var/log/supervisor/supervisord.log"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q must contain %q", err, want)
+		}
+	}
+}
+
+// TestWorkersRunningUnloadedProgramPointsAtSupervisord: a program
+// supervisord never loaded has no process and no output, so the hint must
+// lead to supervisord's own log (why the conf was not added) — never to the
+// program log alone.
+func TestWorkersRunningUnloadedProgramPointsAtSupervisord(t *testing.T) {
+	s := workersRunningServer()
+	f := bssh.NewFakeRunner()
+	stubSiteApply(s, f)
+	f.On("test -e '/var/www/myapp/current'", bssh.Result{})
+	f.On(workerStatusCmd, bssh.Result{ExitCode: 4, Stdout: workerProg + ":*: ERROR (no such group)\n"})
+	f.On(workerStartCmd, bssh.Result{ExitCode: 2, Stdout: workerProg + ": ERROR (no such group)\n"})
+
+	err := Site().Apply(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil {
+		t.Fatal("Apply() must fail when the program is not loaded")
+	}
+	msg := err.Error()
+	for _, want := range []string{"not loaded", "ERROR (no such group)", "/var/log/supervisor/supervisord.log", supervisorProgramPath("app.example.com")} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q must contain %q", msg, want)
+		}
+	}
+	if strings.Contains(msg, "/var/log/supervisor/"+workerProg+".log") {
+		t.Errorf("an unloaded program has no output; the hint must not send the operator to its log: %q", msg)
 	}
 }
 

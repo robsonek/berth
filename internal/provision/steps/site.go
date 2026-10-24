@@ -405,16 +405,78 @@ func parseProgramStates(out string) []string {
 	return states
 }
 
-// programStates reads the state of every process of one program. The exit
-// code of `supervisorctl status` is ignored on purpose: it is 3 whenever a
-// process is not RUNNING, so it carries no information the states do not.
-// A transport error still propagates.
-func programStates(ctx context.Context, r bssh.Runner, prog string) ([]string, error) {
+// programStatus is one `supervisorctl status '<prog>:*'` answer: the parsed
+// process states, plus the raw lines (description column included — "Exited
+// too quickly", "can't find command …") that a failure report quotes.
+type programStatus struct {
+	states []string
+	lines  []string
+}
+
+// unloaded reports whether supervisord has no such program at all (its conf
+// was never added, or supervisorctl update rejected it) — the case where the
+// program has no process and therefore no output of its own.
+func (p programStatus) unloaded() bool {
+	for _, l := range p.lines {
+		if strings.Contains(l, "no such") {
+			return true
+		}
+	}
+	return false
+}
+
+// readProgramStatus runs the per-program status query. The exit code of
+// `supervisorctl status` is ignored on purpose: it is 3 whenever a process
+// is not RUNNING, so it carries no information the states do not. A
+// transport error still propagates.
+func readProgramStatus(ctx context.Context, r bssh.Runner, prog string) (programStatus, error) {
 	res, err := r.Run(ctx, supervisorStatusCmd(prog), nil)
 	if err != nil {
-		return nil, err
+		return programStatus{}, err
 	}
-	return parseProgramStates(res.Stdout), nil
+	var lines []string
+	for _, l := range strings.Split(res.Stdout+"\n"+res.Stderr, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			lines = append(lines, l)
+		}
+	}
+	return programStatus{states: parseProgramStates(res.Stdout), lines: lines}, nil
+}
+
+// programStates reads the state of every process of one program.
+func programStates(ctx context.Context, r bssh.Runner, prog string) ([]string, error) {
+	st, err := readProgramStatus(ctx, r, prog)
+	return st.states, err
+}
+
+// supervisorLogDir holds both logs a failing program report names: each
+// program's own stdout_logfile (supervisor.conf.tmpl) and supervisord's log.
+const (
+	supervisorLogDir   = "/var/log/supervisor"
+	supervisordLogPath = supervisorLogDir + "/supervisord.log"
+)
+
+func supervisorProgramLogPath(prog string) string { return supervisorLogDir + "/" + prog + ".log" }
+
+// programNotRunningError reports a workers: running program that did not
+// reach RUNNING. It quotes supervisorctl's raw status lines — their
+// description column is the first place that says why — and names BOTH logs:
+// a command supervisord cannot spawn ("can't find command") never forks, so
+// the program's own log stays empty and the reason lands in supervisord.log.
+// A program supervisord never loaded has no process and no output at all, so
+// that hint leads to supervisord.log and the conf alone.
+func programNotRunningError(prog string, st programStatus, startSaid string) error {
+	said := ""
+	if startSaid != "" {
+		said = "; supervisorctl start said: " + startSaid
+	}
+	status := strings.Join(st.lines, "; ")
+	if st.unloaded() {
+		return fmt.Errorf("%s is not loaded in supervisord (workers: running; supervisorctl status: %s%s) — see %s for why supervisorctl update did not add %s",
+			prog, status, said, supervisordLogPath, supervisorProgramConfPath(prog))
+	}
+	return fmt.Errorf("%s did not reach RUNNING (workers: running; supervisorctl status: %s%s) — see %s for its output and %s for spawn errors such as \"can't find command\"",
+		prog, status, said, supervisorProgramLogPath(prog), supervisordLogPath)
 }
 
 // allRunning reports whether a program has processes and every one of them
@@ -465,41 +527,37 @@ var programSettleSleep = func() { time.Sleep(time.Second) }
 const programSettleAttempts = 30
 
 // ensureProgramRunning brings one workers: running program to RUNNING and
-// proves it, or fails naming the program and its log. supervisorctl update
-// starts an autostart=true group asynchronously, and `supervisorctl start
-// '<prog>:*'` skips processes already STARTING or in BACKOFF, so after the
-// start the states are re-read until they leave the transition states. The
-// start's exit code is not the verdict either — the states are.
+// proves it, or fails with supervisorctl's raw status and both logs (see
+// programNotRunningError). supervisorctl update starts an autostart=true
+// group asynchronously, and `supervisorctl start '<prog>:*'` skips processes
+// already STARTING or in BACKOFF, so after the start the states are re-read
+// until they leave the transition states. The start's exit code is not the
+// verdict either — the states are.
 func ensureProgramRunning(ctx context.Context, r bssh.Runner, prog string) error {
-	states, err := programStates(ctx, r, prog)
+	st, err := readProgramStatus(ctx, r, prog)
 	if err != nil {
 		return err
 	}
-	if allRunning(states) {
+	if allRunning(st.states) {
 		return nil
 	}
 	start, err := r.Run(ctx, "supervisorctl start "+shQuote(prog+":*"), nil)
 	if err != nil {
 		return err
 	}
-	if states, err = programStates(ctx, r, prog); err != nil {
+	if st, err = readProgramStatus(ctx, r, prog); err != nil {
 		return err
 	}
-	for i := 0; i < programSettleAttempts && inTransition(states); i++ {
+	for i := 0; i < programSettleAttempts && inTransition(st.states); i++ {
 		programSettleSleep()
-		if states, err = programStates(ctx, r, prog); err != nil {
+		if st, err = readProgramStatus(ctx, r, prog); err != nil {
 			return err
 		}
 	}
-	if allRunning(states) {
+	if allRunning(st.states) {
 		return nil
 	}
-	said := ""
-	if out := strings.TrimSpace(start.Stdout + start.Stderr); out != "" {
-		said = "; supervisorctl start said: " + out
-	}
-	return fmt.Errorf("%s did not reach RUNNING (workers: running; states: %s%s) — see /var/log/supervisor/%s.log for why it does not stay up",
-		prog, strings.Join(states, " "), said, prog)
+	return programNotRunningError(prog, st, strings.TrimSpace(start.Stdout+start.Stderr))
 }
 
 // writeSupervisorProgram writes one program conf under the managed-file

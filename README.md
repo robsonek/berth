@@ -778,8 +778,11 @@ sites:
   Supervisor starts them by itself after a server (or supervisord) restart,
   without a provisioning run. The target is declarative: a later run that
   finds a program stopped reports it as drift and starts it again. A program
-  that does not reach RUNNING fails the run with its name and its log,
-  `/var/log/supervisor/<program>.log`. Your deployer keeps its narrow
+  that does not reach RUNNING fails the run. The error quotes supervisorctl's
+  status line with its reason (for example `Exited too quickly` or `can't find
+  command`) and names both logs: `/var/log/supervisor/<program>.log` (the
+  program's output) and `/var/log/supervisor/supervisord.log`, where spawn
+  errors land while the program log stays empty. Your deployer keeps its narrow
   `restart` grant, so restart the programs after each deploy to load the new
   release.
 - **No release yet:** until `<deploy_path>/current` exists there is no code to
