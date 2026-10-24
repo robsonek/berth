@@ -20,6 +20,7 @@ func (a Answers) ToServer() *config.Server {
 		Nginx:    config.Nginx{Source: a.NginxSource},
 		Database: config.Database{Engine: a.DBEngine, Source: a.DBSource}, // no top-level name/user
 		Valkey:   a.Valkey, Queue: a.Queue, Scheduler: a.Scheduler,
+		Workers:  a.Workers, // "" => omitted (dormant)
 		Fail2ban: config.Fail2ban{Bantime: a.Fail2ban.Bantime, Findtime: a.Fail2ban.Findtime, Maxretry: a.Fail2ban.Maxretry},
 		Tuning: config.Tuning{
 			ValkeyMaxmemory:         a.Tuning.ValkeyMaxmemory,
@@ -59,6 +60,7 @@ func (a Answers) ToServer() *config.Server {
 		})
 	}
 	srv.Apt.Packages = strings.Fields(a.AptPackages)
+	srv.Apt.UpstreamUpdates = a.AptUpstreamUpdates // "" => omitted (auto)
 	for _, sa := range a.Sites {
 		user := sa.User
 		if user == "" {
@@ -69,15 +71,16 @@ func (a Answers) ToServer() *config.Server {
 			user = config.DerivedSiteUser(sa.Domain)
 		}
 		site := config.Site{
-			Domain:     sa.Domain,
-			DeployPath: sa.DeployPath,
-			User:       user,
-			Repository: sa.Repository,
-			Database:   config.SiteDatabase{Name: sa.DBName, User: sa.DBUser},
-			SSL:        sa.SSL,
-			SSLMode:    sa.SSLMode,
-			SSLEmail:   sa.SSLEmail,
-			HTTP3:      sa.HTTP3,
+			Domain:        sa.Domain,
+			DeployPath:    sa.DeployPath,
+			User:          user,
+			Repository:    sa.Repository,
+			RepositoryKey: sa.RepositoryKey,
+			Database:      config.SiteDatabase{Name: sa.DBName, User: sa.DBUser},
+			SSL:           sa.SSL,
+			SSLMode:       sa.SSLMode,
+			SSLEmail:      sa.SSLEmail,
+			HTTP3:         sa.HTTP3,
 		}
 		switch sa.SchedulerOverride {
 		case "on":
@@ -87,6 +90,10 @@ func (a Answers) ToServer() *config.Server {
 			v := false
 			site.Scheduler = &v
 		} // "inherit"/"" => nil
+		switch sa.WorkersOverride {
+		case "dormant", "running":
+			site.Workers = sa.WorkersOverride
+		} // "inherit"/"" => "" (follow the server-wide workers)
 		switch sa.CloudflareOverride {
 		case "on":
 			v := true

@@ -135,6 +135,50 @@ func TestToServerCarriesAptBlock(t *testing.T) {
 	}
 }
 
+func TestToServerCarriesFirstDeployKnobs(t *testing.T) {
+	a := defaults()
+	a.Name, a.Host = "t", "203.0.113.10"
+	a.ID = "test-machine-0001"
+	a.AptUpstreamUpdates = "manual"
+	a.Workers = "running"
+	site := func(n, override string) SiteAnswers {
+		return SiteAnswers{
+			Domain: n + ".example.com", DeployPath: "/srv/" + n, DBName: n + "db", DBUser: n + "usr",
+			SchedulerOverride: "inherit", WorkersOverride: override,
+		}
+	}
+	a.Sites = []SiteAnswers{site("a", "inherit"), site("b", "dormant"), site("c", "running"), site("d", "")}
+	a.Sites[0].Repository = "git@github.com:acme/app.git"
+	a.Sites[0].RepositoryKey = "~/keys/app-deploy"
+	srv := a.ToServer()
+
+	if srv.Apt.UpstreamUpdates != "manual" {
+		t.Errorf("apt.upstream_updates = %q, want manual", srv.Apt.UpstreamUpdates)
+	}
+	if srv.Workers != "running" {
+		t.Errorf("workers = %q, want running", srv.Workers)
+	}
+	if srv.Sites[0].RepositoryKey != "~/keys/app-deploy" {
+		t.Errorf("sites[0].repository_key = %q", srv.Sites[0].RepositoryKey)
+	}
+	// "inherit" (and the zero value) map to the empty override, so the site
+	// follows the server-wide default; dormant/running are carried verbatim.
+	for i, want := range []string{"", "dormant", "running", ""} {
+		if got := srv.Sites[i].Workers; got != want {
+			t.Errorf("sites[%d].workers (override %q) = %q, want %q", i, a.Sites[i].WorkersOverride, got, want)
+		}
+	}
+	if err := srv.Validate(); err != nil {
+		t.Fatalf("wizard output must validate: %v", err)
+	}
+
+	// Default answers map to the zero values (= auto updates, dormant programs).
+	d := Answers{Sites: []SiteAnswers{{WorkersOverride: "inherit"}}}
+	if s := d.ToServer(); s.Apt.UpstreamUpdates != "" || s.Workers != "" || s.Sites[0].Workers != "" || s.Sites[0].RepositoryKey != "" {
+		t.Errorf("default answers must map to zero values: apt=%+v workers=%q site=%+v", s.Apt, s.Workers, s.Sites[0])
+	}
+}
+
 func TestToServerCarriesBreakGlass(t *testing.T) {
 	a := Answers{System: SystemAnswers{BreakGlass: true}}
 	if s := a.ToServer(); !s.System.BreakGlass {

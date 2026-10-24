@@ -73,6 +73,9 @@ Notable changes to berth. Older releases are documented on the
   `--force` replaces it. The Check compares keys with a read-only
   `ssh-keygen -y -f <key>`. Without `repository_key` nothing changes: berth
   generates a key when there is none and never replaces one.
+- **`berth init` sets the new knobs:** `apt.upstream_updates` and `workers`
+  in the advanced server options, a site's `workers` override in its advanced
+  options, and `repository_key` right after a non-empty `repository`.
 
 ### Changed
 

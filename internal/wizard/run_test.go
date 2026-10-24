@@ -97,6 +97,11 @@ func TestRunSingleSiteNoAdvanced(t *testing.T) {
 	if len(a.AptRepos) != 0 {
 		t.Errorf("declined apt-repo confirm must leave AptRepos empty: %+v", a.AptRepos)
 	}
+	// The site-advanced gate was declined: the override tristates keep the
+	// run-path seed, so a later SiteOverrides form would preselect "inherit".
+	if s := a.Sites[0]; s.SchedulerOverride != "inherit" || s.WorkersOverride != "inherit" {
+		t.Errorf("overrides must stay seeded to inherit: scheduler=%q workers=%q", s.SchedulerOverride, s.WorkersOverride)
+	}
 	if err := a.ToServer().Validate(); err != nil {
 		t.Fatalf("assembled server invalid: %v", err)
 	}
@@ -260,13 +265,16 @@ func TestRunServerOpsAndSiteOverrides(t *testing.T) {
 			a.System = SystemAnswers{Swap: "2G", Sysctl: true}
 			a.CloudflareOnly = true
 			a.Backups = BackupsAnswers{Enabled: true, RetentionDays: 7}
+			a.AptUpstreamUpdates = "manual"
+			a.Workers = "running"
 		},
 		siteCore: []func(int, *SiteAnswers){
 			func(_ int, sa *SiteAnswers) {
 				sa.Domain, sa.DeployPath, sa.DBName, sa.DBUser = "a.example.com", "/srv/a", "a", "a"
+				sa.Repository, sa.RepositoryKey = "git@github.com:acme/app.git", "~/keys/app-deploy"
 			},
 		},
-		siteOverrides: func(sa *SiteAnswers) { sa.BackupsOverride = "off" },
+		siteOverrides: func(sa *SiteAnswers) { sa.BackupsOverride, sa.WorkersOverride = "off", "dormant" },
 		// confirms: server advanced gate=true, apt-repo=false, site advanced
 		// gate=true, dedicated-queue=false, add-daemon=false, add another=false
 		confirms: []bool{true, false, true, false, false, false},
@@ -284,6 +292,14 @@ func TestRunServerOpsAndSiteOverrides(t *testing.T) {
 	srv := a.ToServer()
 	if srv.Sites[0].Backups == nil || *srv.Sites[0].Backups {
 		t.Error("site backups should map to *false")
+	}
+	if srv.Apt.UpstreamUpdates != "manual" || srv.Workers != "running" ||
+		srv.Sites[0].Workers != "dormant" || srv.Sites[0].RepositoryKey != "~/keys/app-deploy" {
+		t.Errorf("first-deploy knobs not carried: apt=%+v workers=%q site workers=%q key=%q",
+			srv.Apt, srv.Workers, srv.Sites[0].Workers, srv.Sites[0].RepositoryKey)
+	}
+	if err := srv.Validate(); err != nil {
+		t.Errorf("assembled server invalid: %v", err)
 	}
 	if r := a.SecretRecipe(); r != "" {
 		t.Errorf("a run without offsite must print no secret recipe, got:\n%s", r)

@@ -15,7 +15,7 @@ func run(p prompter) (Answers, error) {
 		}
 		a.ID = id
 	}
-	adv, err := p.Confirm("Configure advanced server options (fail2ban, tuning, swap/sysctl/timezone, Cloudflare, extra apt packages, backups)?")
+	adv, err := p.Confirm("Configure advanced server options (fail2ban, tuning, swap/sysctl/timezone, Cloudflare, apt packages and upstream updates, workers, backups)?")
 	if err != nil {
 		return Answers{}, err
 	}
@@ -55,7 +55,7 @@ func run(p prompter) (Answers, error) {
 		// supervisor program) re-prompts this site instead of surfacing only at
 		// the final Write().
 		for {
-			sa = SiteAnswers{SchedulerOverride: "inherit", CloudflareOverride: "inherit", BackupsOverride: "inherit"}
+			sa = SiteAnswers{SchedulerOverride: "inherit", WorkersOverride: "inherit", CloudflareOverride: "inherit", BackupsOverride: "inherit"}
 
 			// Collect core fields, resolving HTTP/3↔nginx and validating after each
 			// attempt. Server-level fields are already inline-valid, so a failure here

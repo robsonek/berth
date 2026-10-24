@@ -100,7 +100,7 @@ func TestConfigMatrix(t *testing.T) {
 		a := base("ops", "203.0.113.10")
 		a.Sites = []SiteAnswers{{
 			Domain: "a.example.com", DeployPath: "/srv/a", DBName: "adb", DBUser: "ausr",
-			SchedulerOverride: "inherit", CloudflareOverride: "inherit", BackupsOverride: "inherit",
+			SchedulerOverride: "inherit", WorkersOverride: "inherit", CloudflareOverride: "inherit", BackupsOverride: "inherit",
 		}}
 		return a
 	}

@@ -17,9 +17,9 @@ import (
 type prompter interface {
 	ServerCore(a *Answers) error     // host, ssh, php, db (combined), nginx, valkey, queue, scheduler
 	ServerAdvanced(a *Answers) error // fail2ban + tuning
-	ServerOps(a *Answers) error      // swap/sysctl, cloudflare-only, apt packages, backups
+	ServerOps(a *Answers) error      // swap/sysctl, cloudflare-only, apt packages + upstream updates, workers, backups
 	SiteCore(index int, sa *SiteAnswers) error
-	SiteOverrides(sa *SiteAnswers) error // scheduler + cloudflare + backups overrides (inherit/on/off)
+	SiteOverrides(sa *SiteAnswers) error // scheduler/cloudflare/backups (inherit/on/off) + workers (inherit/dormant/running) overrides
 	Queue(q *QueueAnswers) error
 	Daemon(d *DaemonAnswers) error
 	AptRepo(ar *AptRepoAnswers) error
@@ -140,6 +140,11 @@ func (h *huhPrompter) ServerOps(a *Answers) error {
 			huh.NewConfirm().Title("Apply conservative kernel sysctl tuning?").Value(&a.System.Sysctl),
 			huh.NewConfirm().Title("Cloudflare-only origin lockdown (server default)?").Value(&a.CloudflareOnly),
 			huh.NewInput().Title("Extra apt packages (space-separated; blank = none)").Value(&a.AptPackages).Validate(validAptPackages),
+			// The defaults are the zero values, so the YAML omits the key.
+			huh.NewSelect[string]().Title("Upstream package updates (Surý, nginx.org, MariaDB, PGDG): auto = unattended-upgrades applies them, manual = you upgrade them yourself").
+				Options(huh.NewOption("auto", ""), huh.NewOption("manual", "manual")).Value(&a.AptUpstreamUpdates),
+			huh.NewSelect[string]().Title("Supervisor programs, i.e. queue worker and daemons (server default): dormant = your deployer starts them, running = berth starts them and they come back after a reboot").
+				Options(huh.NewOption("dormant", ""), huh.NewOption("running", "running")).Value(&a.Workers),
 		),
 		huh.NewGroup(
 			huh.NewConfirm().Title("Enable nightly local backups (server default)?").Value(&a.Backups.Enabled),
@@ -255,6 +260,20 @@ func (h *huhPrompter) SiteCore(index int, sa *SiteAnswers) error {
 	if err := core.Run(); err != nil {
 		return err
 	}
+	// repository_key requires a repository, so the key is asked only with
+	// one; a key kept from an earlier attempt whose repository was cleared
+	// is dropped (it would otherwise fail validation with no way to clear it).
+	if sa.Repository == "" {
+		sa.RepositoryKey = ""
+	} else {
+		key := huh.NewForm(huh.NewGroup(
+			huh.NewInput().Title("Deploy key (optional, local path to a private key to install; blank = berth generates one on the server)").
+				Value(&sa.RepositoryKey),
+		))
+		if err := key.Run(); err != nil {
+			return err
+		}
+	}
 	if !sa.SSL {
 		sa.SSLMode, sa.SSLEmail, sa.HTTP3 = "", "", false
 		return nil
@@ -276,6 +295,8 @@ func (h *huhPrompter) SiteOverrides(sa *SiteAnswers) error {
 	return huh.NewForm(huh.NewGroup(
 		huh.NewSelect[string]().Title("Scheduler for this site").
 			Options(huh.NewOptions("inherit", "on", "off")...).Value(&sa.SchedulerOverride),
+		huh.NewSelect[string]().Title("Supervisor programs for this site (dormant = your deployer starts them, running = berth starts them)").
+			Options(huh.NewOptions("inherit", "dormant", "running")...).Value(&sa.WorkersOverride),
 		huh.NewSelect[string]().Title("Cloudflare-only for this site").
 			Options(huh.NewOptions("inherit", "on", "off")...).Value(&sa.CloudflareOverride),
 		huh.NewSelect[string]().Title("Backups for this site").
