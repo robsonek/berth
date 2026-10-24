@@ -13,8 +13,11 @@ import (
 	"github.com/robsonek/berth/internal/templates"
 )
 
+// mariadbUnit is the MariaDB server's unit, from the one source of the
+// database unit name (also behind the supervisor ordering drop-in).
+var mariadbUnit = config.DatabaseUnit("mariadb")
+
 const (
-	mariadbUnit       = "mariadb.service"
 	mariadbTuningPath = "/etc/mysql/mariadb.conf.d/99-berth.cnf"
 	// mariadbSlowLogDir hosts the slow query log. Debian 13's mariadb logs to
 	// the journal by default and no longer creates /var/log/mysql, yet its

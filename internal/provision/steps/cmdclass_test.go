@@ -25,6 +25,9 @@ func TestClassifyCommandPolicy(t *testing.T) {
 	}{
 		// Metacharacter-free reads, judged by the tables.
 		{"cat '/etc/nginx/sites-available/app.example.com'", cmdReadOnly},
+		// supervisor.Check's one probe of the boot-ordering drop-in (both
+		// modes: managed-file classify / managedFilePresent).
+		{"cat '/etc/systemd/system/supervisor.service.d/berth-after.conf'", cmdReadOnly},
 		{"test -e '/var/www/app/shared'", cmdReadOnly},
 		{"stat -c '%U %u %F' '/var/www/app'", cmdReadOnly},
 		{"dpkg -s nginx", cmdReadOnly},
@@ -61,6 +64,9 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{"install -d -m 0755 /var/log/php", cmdRejected},
 		{"systemctl start nginx", cmdRejected},
 		{"systemctl daemon-reload", cmdRejected},
+		// supervisor.Apply's drop-in writes and removal stay out of Check.
+		{"install -d -o root -g root -m 0755 '/etc/systemd/system/supervisor.service.d'", cmdRejected},
+		{"rm -f '/etc/systemd/system/supervisor.service.d/berth-after.conf'", cmdRejected},
 		{"useradd -m appuser", cmdRejected},
 		{"apt-get update", cmdRejected},
 

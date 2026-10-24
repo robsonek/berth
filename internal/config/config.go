@@ -683,6 +683,18 @@ func (s *Server) WorkersRunning(site Site) bool {
 	return w == "running"
 }
 
+// AnyWorkersRunning reports whether at least one site resolves to
+// workers: running, which drives whether the supervisor step orders
+// supervisord after the database and Valkey (vs drift-removing that order).
+func (s *Server) AnyWorkersRunning() bool {
+	for _, site := range s.Sites {
+		if s.WorkersRunning(site) {
+			return true
+		}
+	}
+	return false
+}
+
 // CloudflareOnlyEnabled reports whether origin lockdown applies to a site: an
 // explicit per-site sites[].cloudflare_only wins; otherwise the server-level
 // default applies. Twin of SchedulerEnabled.
@@ -735,6 +747,18 @@ func PoolName(domain string) string { return strings.ReplaceAll(domain, ".", "_"
 
 // FPMServiceName is the systemd unit of the shared per-version PHP-FPM master.
 func FPMServiceName(phpVersion string) string { return "php" + phpVersion + "-fpm" }
+
+// DatabaseUnit is the systemd unit of the configured database engine's
+// server, with its suffix (unit-file directives such as After= need it).
+// For postgres it is Debian's umbrella postgresql.service, which every
+// cluster unit (postgresql@<ver>-<name>.service) is ordered Before=, so
+// ordering after it waits for the clusters.
+func DatabaseUnit(engine string) string {
+	if engine == "postgres" {
+		return "postgresql.service"
+	}
+	return "mariadb.service"
+}
 
 // ValkeyInstanceUnit is the systemd unit of a site's dedicated valkey instance.
 func ValkeyInstanceUnit(domain string) string {

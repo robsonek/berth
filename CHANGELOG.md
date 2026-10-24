@@ -32,10 +32,18 @@ Notable changes to berth. Older releases are documented on the
   quickly` or `can't find command`) and names both
   `/var/log/supervisor/<program>.log` and `/var/log/supervisor/supervisord.log`,
   where spawn errors land; for a program supervisord never loaded it points
-  at `supervisord.log` and the conf instead. Its
-  Check reports a stopped program as drift, so the next run starts it again.
+  at `supervisord.log` and the conf instead. The `site` step's Check reports
+  a stopped program as drift, so the next run starts it again.
   Until `<deploy_path>/current` exists the programs stay dormant and the run
-  warns; provision again after the first deploy. In dormant mode, a run that
+  warns; provision again after the first deploy. So that the programs do not
+  race their backends at boot, the `supervisor` step writes the systemd
+  drop-in `/etc/systemd/system/supervisor.service.d/berth-after.conf` while
+  any site runs `running`: it orders `supervisor.service` `After=` the
+  database unit and every site's `berth-valkey-<pool>.service` (ordering
+  only, no `Wants=`/`Requires=`), followed by `systemctl daemon-reload`. Once
+  no site runs `running` the step removes its drop-in again and leaves a file
+  it did not write alone. Its Check reads that one path on dormant hosts
+  too; they get no file and no daemon-reload. In dormant mode, a run that
   is about to rewrite the conf of a running program warns that `supervisorctl
   update` leaves it STOPPED. The README documents the cutover: flip
   `scheduler` and `workers` together and run one provisioning.

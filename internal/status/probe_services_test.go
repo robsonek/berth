@@ -32,6 +32,17 @@ func TestUnitListCoversTheDeclaredStack(t *testing.T) {
 	}
 }
 
+// TestDBUnitStaysSuffixless: dbUnit derives from config.DatabaseUnit, but
+// the status table keeps the short names it always printed — literals, so a
+// change in either function trips this pin.
+func TestDBUnitStaysSuffixless(t *testing.T) {
+	for engine, want := range map[string]string{"mariadb": "mariadb", "postgres": "postgresql"} {
+		if got := dbUnit(engine); got != want {
+			t.Errorf("dbUnit(%q) = %q, want %q", engine, got, want)
+		}
+	}
+}
+
 func TestUnitListPostgresAndNoValkey(t *testing.T) {
 	s := srvFixture()
 	s.Database.Engine = "postgres"

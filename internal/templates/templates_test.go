@@ -258,6 +258,15 @@ func TestRenderBerthValkeyServiceGolden(t *testing.T) {
 	})
 }
 
+// TestRenderSupervisorAfterGolden: the supervisor.service ordering drop-in
+// written when any site runs workers — the database unit first, then each
+// site's Valkey instance (the caller sorts them).
+func TestRenderSupervisorAfterGolden(t *testing.T) {
+	checkGolden(t, "supervisor_after.conf.tmpl", "supervisor_after.golden", struct{ After []string }{
+		After: []string{"mariadb.service", "berth-valkey-api_example_com.service", "berth-valkey-app_example_com.service"},
+	})
+}
+
 // mariadbTuningGoldenData mirrors the render struct in steps.renderMariaDBTuning
 // (test-local copy — keep the fields in sync).
 type mariadbTuningGoldenData struct {

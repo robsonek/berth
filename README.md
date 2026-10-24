@@ -785,6 +785,18 @@ sites:
   errors land while the program log stays empty. Your deployer keeps its narrow
   `restart` grant, so restart the programs after each deploy to load the new
   release.
+- **Boot order:** at boot systemd starts Supervisor, the database and each
+  site's Valkey in parallel, and a worker that exits within a second while its
+  backend is still coming up (a long InnoDB recovery after an unclean shutdown,
+  say) uses up Supervisor's start retries and stays FATAL. So while any site
+  runs `running`, berth writes the drop-in
+  `/etc/systemd/system/supervisor.service.d/berth-after.conf`, which orders
+  `supervisor.service` `After=` the database unit (`mariadb.service` or
+  `postgresql.service`) and every `berth-valkey-<pool>.service`, then runs
+  `systemctl daemon-reload`. It only orders the start: it adds no
+  `Wants=`/`Requires=`, so a database that fails to start does not keep
+  Supervisor down. When no site runs `running` any more, berth removes its
+  drop-in; a file at that path that berth did not write is left alone.
 - **No release yet:** until `<deploy_path>/current` exists there is no code to
   run, so with `running` the programs stay dormant and the run warns
   (`workers: running is set, but <deploy_path>/current does not exist yet`).

@@ -9,10 +9,10 @@ import (
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
 
-// dbUnit is the systemd unit of the configured database engine. Note the
-// steps package spells the MariaDB unit "mariadb.service" (tuning.go:17);
-// systemd resolves the suffix-less form to the same unit, and the shorter
-// name keeps the rendered table narrow.
+// dbUnit is the systemd unit of the configured database engine:
+// config.DatabaseUnit (the one source of the name) without its ".service"
+// suffix. systemctl resolves the suffix-less form to the same unit, and the
+// shorter name keeps the rendered table narrow.
 //
 // KNOWN LIMITATION for postgres: Debian's postgresql.service is an umbrella
 // (Type=oneshot, RemainAfterExit=yes) whose real work lives in per-cluster
@@ -23,10 +23,7 @@ import (
 // config does not carry; real cluster liveness is deferred along with
 // database health (spec §11).
 func dbUnit(engine string) string {
-	if engine == "postgres" {
-		return "postgresql"
-	}
-	return "mariadb"
+	return strings.TrimSuffix(config.DatabaseUnit(engine), ".service")
 }
 
 // unitList is the set of units this server's config implies. Order is stable

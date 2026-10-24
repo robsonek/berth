@@ -531,6 +531,51 @@ func TestDerivationsAreFrozen(t *testing.T) {
 	}
 }
 
+// TestDatabaseUnit pins the database engine's systemd unit. It is Debian's
+// packaging name rather than a berth choice, but berth writes it into a
+// unit-file drop-in (After=), where systemd needs the full name with its
+// suffix — a suffix-less spelling would be ignored there.
+func TestDatabaseUnit(t *testing.T) {
+	for engine, want := range map[string]string{
+		"mariadb":  "mariadb.service",
+		"postgres": "postgresql.service",
+	} {
+		if got := DatabaseUnit(engine); got != want {
+			t.Errorf("DatabaseUnit(%q) = %q, want %q", engine, got, want)
+		}
+	}
+}
+
+// TestAnyWorkersRunning: true iff at least one site resolves to running,
+// with the per-site value winning over the server default — the twin of
+// AnyBackupsEnabled over WorkersRunning.
+func TestAnyWorkersRunning(t *testing.T) {
+	cases := []struct {
+		name         string
+		server       string
+		site1, site2 string
+		want         bool
+	}{
+		{"default", "", "", "", false},
+		{"server dormant", "dormant", "", "", false},
+		{"server running", "running", "", "", true},
+		{"one site running", "", "", "running", true},
+		{"every site overrides running server", "running", "dormant", "dormant", false},
+		{"one site keeps running server", "running", "dormant", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Server{Workers: tc.server, Sites: []Site{
+				{Domain: "a.example.com", Workers: tc.site1},
+				{Domain: "b.example.com", Workers: tc.site2},
+			}}
+			if got := s.AnyWorkersRunning(); got != tc.want {
+				t.Errorf("AnyWorkersRunning() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestOffsiteRepositoryAndDefaults(t *testing.T) {
 	s3 := &Offsite{Backend: "s3", Endpoint: "s3.example.com", Bucket: "bkt"}
 	if got, want := s3.Repository("box-1"), "s3:https://s3.example.com/bkt/box-1"; got != want {

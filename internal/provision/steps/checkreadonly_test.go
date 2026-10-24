@@ -105,6 +105,14 @@ func refusalsFor(variant string) map[string]string {
 		// created), and the FIRST guard the step's Check reaches, ahead of
 		// the swappiness drop-in's drift classify.
 		m["system"] = "not managed by berth"
+		// supervisor: with workers: running the boot-ordering drop-in is
+		// berth's to write, so foreign's operator file at its path aborts
+		// unless --force (standard managed-file policy). Guard order
+		// verified: pkgInstalled and serviceUp are data-only; the drop-in
+		// classify is the step's only refusing guard. (Dormant variants
+		// carry a foreign file there too, which their Check must NOT
+		// refuse — a file berth did not write is never drift there.)
+		m["supervisor"] = "not managed by berth"
 	case "postgres":
 		// tuning is registered only for the mariadb engine (registry.go), so
 		// there is no Check to refuse — keeping the entry would be exactly

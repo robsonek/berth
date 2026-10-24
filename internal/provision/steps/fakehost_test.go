@@ -1140,6 +1140,21 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 		panic("render supervisor.conf.tmpl: " + err.Error())
 	}
 	h.putManaged(supervisorProgramPath(site.Domain), worker, profile)
+	// supervisor's boot-ordering drop-in. Under workers: running it is
+	// berth's file, in the usual four content states (foreign walks the
+	// managed-file refusal). With no site running, a converged host has
+	// none; drifted models the berth file a running->dormant flip leaves
+	// behind (the removal branch), foreign an operator file at that path,
+	// which the dormant Check must leave alone without refusing.
+	if s.AnyWorkersRunning() {
+		order, err := renderSupervisorOrder(s)
+		if err != nil {
+			panic("render supervisor_after.conf.tmpl: " + err.Error())
+		}
+		h.putManaged(supervisorOrderPath, order, profile)
+	} else if profile == "drifted" || profile == "foreign" {
+		h.putManaged(supervisorOrderPath, nil, profile)
+	}
 	cron, err := renderCron(s, site)
 	if err != nil {
 		panic("render scheduler.cron.tmpl: " + err.Error())
