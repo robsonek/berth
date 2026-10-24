@@ -267,6 +267,20 @@ func TestRecordingRunnerDerivesWave3AnswersFromState(t *testing.T) {
 	if res, err := conv.Run(ctx, match, []byte("DB_PASSWORD=SomethingElse0000000000000000000\n")); err != nil || res.ExitCode != 1 {
 		t.Errorf("disagreeing value = (%+v, %v), want exit 1", res, err)
 	}
+
+	// The berth-key probe walks its stdin accept set against the modelled
+	// .env: the site's own socket is accepted, any other host is not, and
+	// the seed's absent REDIS_PASSWORD reads as "no line" (exit 3).
+	redisHost := envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_HOST")
+	if res, err := conv.Run(ctx, redisHost, []byte(envValueFormsStdin("REDIS_HOST", fixtureValkeySocket))); err != nil || res.ExitCode != 0 {
+		t.Errorf("provisioned REDIS_HOST = (%+v, %v), want exit 0", res, err)
+	}
+	if res, err := conv.Run(ctx, redisHost, []byte(envValueFormsStdin("REDIS_HOST", "127.0.0.1"))); err != nil || res.ExitCode != 1 {
+		t.Errorf("other REDIS_HOST = (%+v, %v), want exit 1", res, err)
+	}
+	if res, err := conv.Run(ctx, envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PASSWORD"), []byte(redisPasswordUnsetStdin)); err != nil || res.ExitCode != 3 {
+		t.Errorf("absent REDIS_PASSWORD = (%+v, %v), want exit 3", res, err)
+	}
 }
 
 // The postgres scalar answers must derive from modelled state exactly like
@@ -774,6 +788,13 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 		return r.answerEnvValueMatch(fixtureSharedEnv, "DB_PASSWORD", stdin), true
 	case cmd == envValueMatchProbeCmd(fixtureSharedEnv, "APP_KEY"):
 		return r.answerEnvValueMatch(fixtureSharedEnv, "APP_KEY", stdin), true
+
+	// envLineInSet (assertEnvBerthKeys) reads ONLY the exit code: the accept
+	// set arrives on stdin, one line per `read`, and the live first KEY= line
+	// (trailing ASCII whitespace trimmed) is string-compared to each. Keyed
+	// on the exact per-key probe text, so an unlisted key stays unanswered.
+	case envLineInSetFixtureKey(cmd) != "":
+		return r.answerEnvLineInSet(fixtureSharedEnv, envLineInSetFixtureKey(cmd), stdin), true
 
 	// nginxRunsAsWWWData reads ONLY the exit code of its grep -qE over
 	// nginx.conf (reached under nginx.source=nginx). Real grep semantics over
@@ -1424,6 +1445,47 @@ func (r *recordingRunner) answerEnvValueMatch(path, key string, stdin []byte) bs
 		return bssh.Result{}
 	}
 	return bssh.Result{ExitCode: 1}
+}
+
+// envLineInSetFixtureKey returns the key when cmd is the exact
+// envLineInSetScript probe for one of the keys berthOwnedEnv lists, aimed
+// at the fixture site's shared/.env; "" otherwise.
+func envLineInSetFixtureKey(cmd string) string {
+	for _, key := range []string{"DB_DATABASE", "DB_USERNAME", "REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD"} {
+		if cmd == envLineInSetProbeCmd(fixtureSharedEnv, key) {
+			return key
+		}
+	}
+	return ""
+}
+
+// answerEnvLineInSet evaluates envLineInSetScript: every stdin line is an
+// accepted KEY=value line (`while IFS= read -r want` reads only
+// newline-terminated lines), the first KEY= line of the modelled .env is
+// trimmed of trailing ASCII whitespace, and the verdict is string equality
+// against any of them. Exit map: 0 match, 1 none matches, 3 no KEY= line,
+// 2 unreadable file.
+func (r *recordingRunner) answerEnvLineInSet(path, key string, stdin []byte) bssh.Result {
+	file, ok := r.h.files[path]
+	if !ok {
+		return bssh.Result{ExitCode: 2}
+	}
+	line, found := firstEnvLine(file.content, key)
+	if !found {
+		return bssh.Result{ExitCode: 3}
+	}
+	got := trimTrailingASCIISpace(line)
+	rest := string(stdin)
+	for {
+		want, tail, terminated := strings.Cut(rest, "\n")
+		if !terminated {
+			return bssh.Result{ExitCode: 1}
+		}
+		if got == want {
+			return bssh.Result{}
+		}
+		rest = tail
+	}
 }
 
 // parseReloadedSince recognizes reloadstamp.go's probe shape:

@@ -410,6 +410,15 @@ func TestAuditedStdinMustMatchExactly(t *testing.T) {
 	if got, _ := classifyCommand(envValueMatchProbeCmd("/etc/shadow", "DB_PASSWORD"), []byte(stdin)); got != cmdRejected {
 		t.Errorf("an unregistered path still passed as %s — the pair must be exact", got)
 	}
+	// The berth-key probe's pairs bind the path the same way: its audited
+	// accept set aimed at another file is a new pair, not a registered one.
+	lineStdin := envValueFormsStdin("DB_USERNAME", "app")
+	if got, _ := classifyCommand(envLineInSetProbeCmd(fixtureSharedEnv, "DB_USERNAME"), []byte(lineStdin)); got != cmdAudited {
+		t.Errorf("registered berth-key pair = %s, want audited", got)
+	}
+	if got, _ := classifyCommand(envLineInSetProbeCmd("/etc/shadow", "DB_USERNAME"), []byte(lineStdin)); got != cmdRejected {
+		t.Errorf("an unregistered berth-key path still passed as %s — the pair must be exact", got)
+	}
 }
 
 // TestStdinIsDefaultDenied: a program can arrive on stdin rather than in the
@@ -578,6 +587,24 @@ var auditedScripts = map[string]string{
 	// secret never reaches stdout. Nothing writes.
 	envCredentialProbeCmd(fixtureSharedEnv): "envCredentialPresentScript (database.go): locale pin + grep -m1 | grep -Eq, exit-code verdict — reads only",
 	envAppKeyProbeCmd(fixtureSharedEnv):     "envBerthAppKeyScript (database.go): locale pin + grep -m1 capture + printf|sed|grep -Eq shape test, exit-code signals — reads only",
+
+	// assertEnvBerthKeys' per-key probe (envLineInSetScript, database.go),
+	// one per key berthOwnedEnv lists for the fixture site (Valkey on: the
+	// DB pair plus the redis trio). Audited command by command: the C-locale
+	// pin (assignment + export, process-local); `grep -m1` captures the first
+	// KEY= line from its file operand with an explicit exit mapping; a
+	// printf|sed trailing-whitespace trim (s///, no w, no e); a
+	// `while IFS= read -r want` loop over stdin whose only body is a quoted
+	// [ "$line" = "$want" ] string equality — no eval, no sh, no `-f -`, no
+	// grep over the accepted lines. Verdicts travel as exit codes; nothing is
+	// printed. Registered here on its own text (a stdin-less run would read
+	// no accepted line and exit 1); the payloads it is actually issued with
+	// are bound pair by pair in auditedStdin.
+	envLineInSetProbeCmd(fixtureSharedEnv, "DB_DATABASE"):    "envLineInSetScript (database.go), DB_DATABASE: locale pin + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "DB_USERNAME"):    "envLineInSetScript (database.go), DB_USERNAME: locale pin + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_HOST"):     "envLineInSetScript (database.go), REDIS_HOST: locale pin + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PORT"):     "envLineInSetScript (database.go), REDIS_PORT: locale pin + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
+	envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PASSWORD"): "envLineInSetScript (database.go), REDIS_PASSWORD: locale pin + grep -m1 capture + printf|sed trim + read loop of [ = ] comparisons, exit-code verdict — reads only",
 
 	// Wave 4 (site, tls, backups, offsite), same discipline: pasted literals
 	// for production consts and const-composed commands, test-local mirror
@@ -847,6 +874,32 @@ func envValueMatchProbeCmd(path, key string) string {
 		`[ "$line" = "$want" ] && exit 0; exit 1`
 }
 
+// envLineInSetProbeCmd mirrors envLineInSetScript's composition
+// (database.go) — a copy on purpose (see auditedScripts and auditedStdin).
+func envLineInSetProbeCmd(path, key string) string {
+	return "LC_ALL=C; export LC_ALL; line=$(grep -m1 '^" + key + "=' " + shQuote(path) + "); s=$?; " +
+		"if [ $s -eq 1 ]; then exit 3; elif [ $s -ne 0 ]; then exit 2; fi; " +
+		`line=$(printf '%s' "$line" | sed 's/[[:space:]]*$//'); ` +
+		`while IFS= read -r want; do [ "$line" = "$want" ] && exit 0; done; exit 1`
+}
+
+// envValueFormsStdin mirrors the stdin envLineInSet sends for one of
+// berthOwnedEnv's plain-value expectations (envValueForms + envAcceptStdin,
+// database.go): the unquoted, double- and single-quoted lines, each
+// newline-terminated — a copy on purpose, so a production change to the
+// accept set or its serialization forces a fresh audit of the pair.
+func envValueFormsStdin(key, value string) string {
+	return key + "=" + value + "\n" + key + `="` + value + `"` + "\n" + key + "='" + value + "'\n"
+}
+
+// fixtureValkeySocket is the fixture site's per-site Valkey socket — the
+// REDIS_HOST value berth provisions for it (valkeySocketPath, valkey.go).
+const fixtureValkeySocket = "/run/berth-valkey/app_example_com/valkey.sock"
+
+// redisPasswordUnsetStdin is the exact REDIS_PASSWORD accept set envLineInSet
+// sends (berthOwnedEnv, database.go), pasted literally.
+const redisPasswordUnsetStdin = "REDIS_PASSWORD=\n" + `REDIS_PASSWORD=""` + "\n" + "REDIS_PASSWORD=''\n" + "REDIS_PASSWORD=null\n" + "REDIS_PASSWORD=(null)\n"
+
 // classifyCommand judges one (command, stdin) pair. The detail string names the
 // reason, so a contract failure is actionable rather than a riddle.
 func classifyCommand(cmd string, stdin []byte) (cmdVerdict, string) {
@@ -886,6 +939,21 @@ var auditedStdin = map[stdinKey]string{
 	// only; the verdict is the exit code, the secret never reaches stdout.
 	{cmd: envValueMatchProbeCmd(fixtureSharedEnv, "DB_PASSWORD"), stdin: "DB_PASSWORD=" + fixtureDBValue + "\n"}: "envValueMatchScript (database.go), DB_PASSWORD agreement: stdin is the expected line, read into a variable and string-compared — data, not a program",
 	{cmd: envValueMatchProbeCmd(fixtureSharedEnv, "APP_KEY"), stdin: "APP_KEY=" + fixtureAppKey + "\n"}:          "envValueMatchScript (database.go), APP_KEY agreement: stdin is the expected line, read into a variable and string-compared — data, not a program",
+	// assertEnvBerthKeys' probes (envLineInSetScript, database.go), issued
+	// by database.Check per site whenever shared/.env exists, one per key
+	// berthOwnedEnv lists — the same for every variant (all keep Valkey on
+	// and the fixture's app/app DB identity). The stdin is the accept set,
+	// one KEY=value line each: consumed line by line by
+	// `while IFS= read -r want` into a shell variable and used ONLY as the
+	// right-hand side of a quoted [ "$line" = "$want" ] string equality —
+	// data, never a program (no eval, no sh, no `-f -`, no grep pattern).
+	// The values are config-derived and non-secret; the verdict is the exit
+	// code.
+	{cmd: envLineInSetProbeCmd(fixtureSharedEnv, "DB_DATABASE"), stdin: envValueFormsStdin("DB_DATABASE", "app")}:             "envLineInSetScript (database.go), DB_DATABASE accept set: stdin lines are read into a variable and string-compared — data, not a program",
+	{cmd: envLineInSetProbeCmd(fixtureSharedEnv, "DB_USERNAME"), stdin: envValueFormsStdin("DB_USERNAME", "app")}:             "envLineInSetScript (database.go), DB_USERNAME accept set: stdin lines are read into a variable and string-compared — data, not a program",
+	{cmd: envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_HOST"), stdin: envValueFormsStdin("REDIS_HOST", fixtureValkeySocket)}: "envLineInSetScript (database.go), REDIS_HOST accept set: stdin lines are read into a variable and string-compared — data, not a program",
+	{cmd: envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PORT"), stdin: envValueFormsStdin("REDIS_PORT", "0")}:                 "envLineInSetScript (database.go), REDIS_PORT accept set: stdin lines are read into a variable and string-compared — data, not a program",
+	{cmd: envLineInSetProbeCmd(fixtureSharedEnv, "REDIS_PASSWORD"), stdin: redisPasswordUnsetStdin}:                           "envLineInSetScript (database.go), REDIS_PASSWORD unset/empty accept set: stdin lines are read into a variable and string-compared — data, not a program",
 }
 
 // simpleShape is an exact predicate for one metacharacter-free command shape.

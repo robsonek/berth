@@ -378,9 +378,12 @@ berth tunes the host for production Laravel out of the box:
   backend when berth first seeds a site's `shared/.env` (without Valkey the
   app keeps the database driver), so enable `valkey` before the initial
   provision — the `REDIS_*` lines are seed-time-only: flipping `valkey:` on
-  an already-seeded host never rewrites the existing `.env`; update the
-  site's `.env` by hand, or remove it so the next run re-seeds it (cached
-  secrets are reused). Flipping `valkey: false` on a provisioned host makes the
+  an already-seeded host never rewrites the existing `.env`, and the
+  `database` step refuses to continue while the site's `REDIS_HOST` /
+  `REDIS_PORT` still point elsewhere (the checked keys are listed under
+  [Multiple sites](#multiple-sites-isolated-per-domain)); update the site's
+  `.env` by hand, or remove it so the next run re-seeds it (cached secrets
+  are reused). Flipping `valkey: false` on a provisioned host makes the
   next full run (or `--only valkey`) stop and remove every berth-managed
   instance — **first** move each application's `.env` cache/session/queue off
   the Valkey socket, or the app breaks the moment the instance goes away.
@@ -923,6 +926,29 @@ sites:
 Every site carries its own `database: {name, user}` block, and the OS users
 must be distinct. A site without `user:` always runs as its derived
 `b_<slug>_<hash>` account, no matter how many sites the config lists.
+
+`shared/.env` is seeded once and never rewritten, so an existing file (an
+operator-preseeded one, or one seeded under a different config) could point
+the app at a database, role or cache berth never set up while every run
+reports green. The `database` step therefore checks, on every run and before
+it changes anything on the host, that an existing `shared/.env` agrees with
+what berth provisions for the site, and stops the run when it does not:
+
+| Key | Expected value |
+| --- | --- |
+| `DB_DATABASE` | the site's `database.name` |
+| `DB_USERNAME` | the site's `database.user` |
+| `REDIS_HOST` (with `valkey: true`) | the site's own socket, `/run/berth-valkey/<pool>/valkey.sock` (`<pool>` is the domain with `.` replaced by `_`) |
+| `REDIS_PORT` (with `valkey: true`) | `0` |
+| `REDIS_PASSWORD` (with `valkey: true`) | absent or empty: `REDIS_PASSWORD=`, `REDIS_PASSWORD=""`, `REDIS_PASSWORD=''`, `REDIS_PASSWORD=null` or `REDIS_PASSWORD=(null)` — the per-site instance has no password |
+
+A value may be written unquoted, in double quotes or in single quotes
+(`DB_USERNAME=appuser`, `DB_USERNAME="appuser"` and `DB_USERNAME='appuser'`
+all match). Only the first line for a key counts, trailing whitespace is
+ignored, and a key other than `REDIS_PASSWORD` that is missing counts as a
+mismatch. The error lists every disagreeing key with the line berth expects
+and never prints the file's current values. `--force` does not override this
+check: edit the file and run again.
 
 Each TLS site uses Let's Encrypt by default; set `ssl_mode: selfsigned` on a site
 to generate a self-signed certificate instead (no public DNS or `ssl_email`

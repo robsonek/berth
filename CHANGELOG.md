@@ -35,6 +35,25 @@ Notable changes to berth. Older releases are documented on the
   is about to rewrite the conf of a running program warns that `supervisorctl
   update` leaves it STOPPED. The README documents the cutover: flip
   `scheduler` and `workers` together and run one provisioning.
+- **The `database` step refuses a `shared/.env` that disagrees with the keys
+  berth provisions.** berth seeds `shared/.env` once and never rewrites it,
+  so a file written for another config kept the app on a database, role or
+  cache berth never set up while every run reported green. On every run, in
+  Check and before Apply changes anything on the host, an existing `.env`
+  must now carry `DB_DATABASE` and `DB_USERNAME` matching the site's
+  `database` block and, with `valkey: true`, `REDIS_HOST` set to the site's
+  own socket (`/run/berth-valkey/<pool>/valkey.sock`), `REDIS_PORT=0` and an
+  absent or empty `REDIS_PASSWORD` (`REDIS_PASSWORD=`, `""`, `''`, `null` or
+  `(null)`). Values may be unquoted, double-quoted or single-quoted; only the
+  first line for a key counts and trailing whitespace is ignored. The error
+  lists every disagreeing key with the expected line and never prints the
+  current value. Like the existing `DB_CONNECTION` check, `--force` does not
+  override it.
+  **Behaviour change:** a host whose `.env` disagrees (for example
+  `REDIS_HOST=127.0.0.1` under `valkey: true`, left over from a seed without
+  Valkey) now stops provisioning at the `database` step instead of running
+  on with an app that talks to the wrong backend. Fix the listed lines in the
+  `.env` and run again. A host without a `shared/.env` is unaffected.
 
 ### Changed
 

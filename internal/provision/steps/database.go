@@ -292,6 +292,160 @@ func assertEnvEngineMatch(ctx context.Context, r bssh.Runner, s *config.Server, 
 	return nil
 }
 
+// envExpectation is one shared/.env key whose value berth provisions
+// elsewhere (the database, its role, the per-site Valkey socket), so a live
+// .env disagreeing with it points the app at something berth never set up.
+// Accept lists every line form that counts as agreement; Accept[0] is the
+// canonical line, the only form an error ever prints. AbsentOK tolerates a
+// missing line (the app's default is then the right one).
+type envExpectation struct {
+	Key      string
+	Accept   []string
+	AbsentOK bool
+}
+
+// envValueForms is the accept set for a plain value: unquoted, double- and
+// single-quoted — the three spellings phpdotenv reads as the same value.
+// The unquoted form comes first: it is what seedSharedEnv writes.
+func envValueForms(key, value string) envExpectation {
+	return envExpectation{Key: key, Accept: []string{
+		key + "=" + value,
+		key + `="` + value + `"`,
+		key + "='" + value + "'",
+	}}
+}
+
+// berthOwnedEnv lists, in probe and report order, the shared/.env keys a
+// site's app must agree on with what berth provisions: the database and role
+// the database step creates and, when Valkey is on, the site's own instance
+// socket (REDIS_PORT=0 is how phpredis takes a path-shaped host as a unix
+// socket). REDIS_PASSWORD must be unset or empty: the per-site instance has
+// no password (isolation is the 0700 socket directory), and phpredis sends
+// AUTH for any non-empty value, which an instance without one rejects. The
+// values are config-derived and validated (no CR/LF); envLineInSet re-checks
+// anyway before any of them reaches a probe.
+func berthOwnedEnv(s *config.Server, site config.Site) []envExpectation {
+	exp := []envExpectation{
+		envValueForms("DB_DATABASE", s.SiteDBName(site)),
+		envValueForms("DB_USERNAME", s.SiteDBUser(site)),
+	}
+	if s.Valkey {
+		exp = append(exp,
+			envValueForms("REDIS_HOST", valkeySocketPath(site.Domain)),
+			envValueForms("REDIS_PORT", "0"),
+			envExpectation{Key: "REDIS_PASSWORD", AbsentOK: true, Accept: []string{
+				"REDIS_PASSWORD=",
+				`REDIS_PASSWORD=""`,
+				"REDIS_PASSWORD=''",
+				"REDIS_PASSWORD=null",
+				"REDIS_PASSWORD=(null)",
+			}},
+		)
+	}
+	return exp
+}
+
+// envLineInSetScript builds the exact shell script envLineInSet runs: the
+// FIRST <key>= line is captured with an explicit grep exit mapping, trimmed
+// of trailing whitespace exactly as envValueMatchScript trims it (the
+// C-locale pin keeps the trim ASCII-only), then compared against every
+// accepted line read from stdin — `while IFS= read -r want` takes one line
+// per iteration, and the comparison is plain quoted shell string equality:
+// no grep pattern semantics over the accepted lines, no `-f -`, no
+// pattern-file/input fd sharing (grep reads only its file operand). Exit map:
+// 0 = the line is one of the accepted lines; 1 = present but none of them;
+// 3 = no <key>= line; 2 = I/O error. Shared with the real-shell test in
+// database_test.go so the tested bytes are the production bytes.
+func envLineInSetScript(path, key string) string {
+	return cLocalePin + "line=$(grep -m1 '^" + key + "=' " + shQuote(path) + "); s=$?; " +
+		"if [ $s -eq 1 ]; then exit 3; elif [ $s -ne 0 ]; then exit 2; fi; " +
+		`line=$(printf '%s' "$line" | sed 's/[[:space:]]*$//'); ` +
+		`while IFS= read -r want; do [ "$line" = "$want" ] && exit 0; done; exit 1`
+}
+
+// envAcceptStdin serializes an accept set into envLineInSetScript's stdin:
+// one line each, every line newline-terminated (a final unterminated line
+// would make `read` fail and skip it). A line carrying CR or LF is refused —
+// it would smuggle an extra accepted line past `read`.
+func envAcceptStdin(accept []string) ([]byte, error) {
+	var b strings.Builder
+	for _, line := range accept {
+		if strings.ContainsAny(line, "\r\n") {
+			return nil, fmt.Errorf("accepted shared/.env line for probe contains a line break")
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return []byte(b.String()), nil
+}
+
+// envLineInSet reports whether the FIRST <key>= line of a site's live
+// shared/.env is one of the accepted lines (modulo trailing ASCII
+// whitespace). present is false only when the file has no <key>= line. The
+// accepted lines travel via STDIN, the live line never leaves the host (the
+// verdict is the exit code; nothing is printed), and a probe failure (grep
+// exit 2, unreadable file) is a hard error rather than silent agreement.
+func envLineInSet(ctx context.Context, r bssh.Runner, site config.Site, key string, accept []string) (match, present bool, err error) {
+	stdin, err := envAcceptStdin(accept)
+	if err != nil {
+		return false, false, fmt.Errorf("probe %s in %s: %w", key, sharedEnvPath(site), err)
+	}
+	res, err := r.Run(ctx, envLineInSetScript(sharedEnvPath(site), key), stdin)
+	if err != nil {
+		return false, false, err
+	}
+	switch res.ExitCode {
+	case 0:
+		return true, true, nil
+	case 1:
+		return false, true, nil
+	case 3:
+		return false, false, nil
+	default:
+		return false, false, fmt.Errorf("probe %s in %s: %s", key, sharedEnvPath(site), res.Stderr)
+	}
+}
+
+// assertEnvBerthKeys fails loudly when an existing shared/.env disagrees with
+// the keys berth provisions for the site (berthOwnedEnv). shared/.env is
+// seed-if-absent and never rewritten, so a mismatch — an operator-preseeded
+// env, or one written for a different config (REDIS_HOST=127.0.0.1 under
+// valkey: true) — would otherwise leave the app on a database, role or cache
+// berth never set up while every run reports green. A fresh box (no .env) is
+// fine: the seed will be consistent. Every mismatch is collected before
+// failing, so one run names them all; the error prints only the canonical
+// lines (Accept[0]), never the current values. Deliberately NOT overridable
+// by --force, like assertEnvEngineMatch: the fix is the operator's edit.
+func assertEnvBerthKeys(ctx context.Context, r bssh.Runner, s *config.Server, site config.Site) error {
+	exists, err := fileExists(ctx, r, sharedEnvPath(site))
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	var want []string
+	for _, e := range berthOwnedEnv(s, site) {
+		match, present, err := envLineInSet(ctx, r, site, e.Key, e.Accept)
+		if err != nil {
+			return err
+		}
+		if match || (!present && e.AbsentOK) {
+			continue
+		}
+		line := e.Accept[0]
+		if e.AbsentOK {
+			line += " (or no " + e.Key + " line)"
+		}
+		want = append(want, line)
+	}
+	if len(want) == 0 {
+		return nil
+	}
+	return fmt.Errorf("shared/.env for %s disagrees with what berth provisions for this site; expected %s. berth never rewrites an existing shared/.env, so the app would keep using values berth never set up: edit %s (KEY=value, KEY=\"value\" and KEY='value' are accepted) and re-run (--force does not override this check)",
+		site.Domain, strings.Join(want, ", "), sharedEnvPath(site))
+}
+
 func (d database) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
 	eng, err := dbpkg.Get(s.Database.Engine)
 	if err != nil {
@@ -311,12 +465,16 @@ func (d database) Check(ctx context.Context, rc provision.RunCtx, s *config.Serv
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	// Engine/env conflict is checked before the installed probe because an
-	// engine switch makes Check early-return on the missing new server package
-	// and never reach the per-site probes otherwise.
+	// Engine/env conflict (and any other disagreement on a berth-provisioned
+	// key) is checked before the installed probe because an engine switch
+	// makes Check early-return on the missing new server package and never
+	// reach the per-site probes otherwise.
 	driver, _, _, _ := eng.EnvConnection()
 	for _, site := range s.Sites {
 		if err := assertEnvEngineMatch(ctx, r, s, site, driver); err != nil {
+			return provision.CheckResult{}, err
+		}
+		if err := assertEnvBerthKeys(ctx, r, s, site); err != nil {
 			return provision.CheckResult{}, err
 		}
 	}
@@ -527,10 +685,14 @@ func (d database) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serv
 		return err
 	}
 	driver, host, port, socket := eng.EnvConnection()
-	// Pre-scan every site BEFORE touching apt/repos/SQL: an engine switch must
-	// abort before the new server is even installed.
+	// Pre-scan every site BEFORE touching apt/repos/SQL: an engine switch (or
+	// an env disagreeing on a berth-provisioned key) must abort before the new
+	// server is even installed.
 	for _, site := range s.Sites {
 		if err := assertEnvEngineMatch(ctx, r, s, site, driver); err != nil {
+			return err
+		}
+		if err := assertEnvBerthKeys(ctx, r, s, site); err != nil {
 			return err
 		}
 	}

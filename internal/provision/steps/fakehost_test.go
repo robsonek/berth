@@ -1269,10 +1269,13 @@ func fixtureRenewalConf(domain string) string {
 // DB_PASSWORD and APP_KEY lines and compares the latter two against the
 // seeded local cache, so the fixture values must be the cache's values —
 // and DB_CONNECTION must be the engine's driver, or assertEnvEngineMatch
-// rightly hard-errors. The other keys (DB_HOST/DB_PORT/DB_SOCKET, the
-// cache/queue/redis block) are mirrored for the seed-map fidelity above but
-// VERIFIED BY NO CHECK today — no probe reads them, so a wrong value there
-// cannot fail a test.
+// rightly hard-errors. assertEnvBerthKeys also reads DB_DATABASE,
+// DB_USERNAME, REDIS_HOST and REDIS_PORT (and REDIS_PASSWORD, absent here
+// as the seed leaves it), so those must be the site's derived identities
+// and its own Valkey socket, or the converged host rightly refuses. The
+// other keys (DB_HOST/DB_PORT/DB_SOCKET, the cache/queue/client block) are
+// mirrored for the seed-map fidelity above but VERIFIED BY NO CHECK today —
+// no probe reads them, so a wrong value there cannot fail a test.
 func fixtureSharedEnvBody(s *config.Server) []byte {
 	kv := map[string]string{
 		"APP_ENV":          "production",
