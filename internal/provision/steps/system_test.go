@@ -924,6 +924,77 @@ func TestSystemCheckHostnameDuplicateMarkedLinesUnsatisfied(t *testing.T) {
 	}
 }
 
+func TestHostsAliasConverged(t *testing.T) {
+	const fqdn = "web-1.example.com"
+	cases := []struct {
+		name     string
+		hosts    string
+		hostname string
+		want     bool
+	}{
+		{"marked line", "127.0.0.1 localhost\n127.0.1.1 web-1.example.com web-1 # managed by berth\n", fqdn, true},
+		// cloud-init's manage_etc_hosts rewrites /etc/hosts on every boot with
+		// the same names and no marker: equivalent, so not drift.
+		{"unmarked equivalent (cloud-init)", "127.0.1.1 web-1.example.com web-1\n127.0.0.1 localhost\n", fqdn, true},
+		{"unmarked equivalent, tabs and a foreign comment", "127.0.1.1\tweb-1.example.com\tweb-1 # cloud-init\n", fqdn, true},
+		{"single label, cloud-init repeats it", "127.0.1.1 web1 web1\n", "web1", true},
+		{"other hostname", "127.0.1.1 debian\n", fqdn, false},
+		{"stale marked line for another hostname", "127.0.1.1 web-2.example.com web-2 # managed by berth\n", fqdn, false},
+		// The first name is the canonical one (hostname -f); swapped = short wins.
+		{"short name first", "127.0.1.1 web-1 web-1.example.com\n", fqdn, false},
+		{"fqdn without the short alias", "127.0.1.1 web-1.example.com\n", fqdn, false},
+		{"extra stale alias", "127.0.1.1 web-1.example.com web-1 debian\n", fqdn, false},
+		{"two equivalent unmarked lines", "127.0.1.1 web-1.example.com web-1\n127.0.1.1 web-1.example.com web-1\n", fqdn, false},
+		{"no alias line", "127.0.0.1 localhost\n", fqdn, false},
+		{"commented-out alias only", "# 127.0.1.1 web-1.example.com web-1\n", fqdn, false},
+		{"bare address", "127.0.1.1\n", fqdn, false},
+	}
+	for _, tc := range cases {
+		if got := hostsAliasConverged(tc.hosts, tc.hostname); got != tc.want {
+			t.Errorf("%s: hostsAliasConverged = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestSystemCheckHostnameCloudInitAliasSatisfied(t *testing.T) {
+	// After every reboot cloud-init (manage_etc_hosts) rewrites /etc/hosts with
+	// its own unmarked alias line for the same names: Check must not report it.
+	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("hostnamectl --static", bssh.Result{ExitCode: 0, Stdout: "web-1.example.com\n"})
+	f.On("cat '/etc/hosts'", bssh.Result{ExitCode: 0, Stdout: "127.0.1.1 web-1.example.com web-1\n127.0.0.1 localhost\n"})
+	s := &config.Server{System: config.System{Hostname: "web-1.example.com"}}
+	cr, err := System().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("expected satisfied for an equivalent unmarked alias line; got %+v", cr)
+	}
+}
+
+func TestSystemApplyHostnameCloudInitAliasNoop(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("cat "+shQuote(swappinessStatePath), bssh.Result{ExitCode: 1}) // pre-berth state absent by default
+	f.On("cat '/etc/fstab'", bssh.Result{ExitCode: 0, Stdout: "UUID=x / ext4 defaults 0 1\n"})
+	f.On("cat '/etc/sysctl.d/99-berth-swap.conf'", bssh.Result{ExitCode: 1})
+	f.On("cat '/etc/sysctl.d/99-berth.conf'", bssh.Result{ExitCode: 1})
+	f.On("hostnamectl --static", bssh.Result{ExitCode: 0, Stdout: "web-1.example.com\n"})
+	f.On("cat '/etc/hosts'", bssh.Result{ExitCode: 0, Stdout: "127.0.1.1 web-1.example.com web-1\n127.0.0.1 localhost\n"})
+	s := &config.Server{System: config.System{Hostname: "web-1.example.com"}}
+	if err := System().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "set-hostname") || (strings.Contains(c.Cmd, "/etc/hosts") && !strings.HasPrefix(c.Cmd, "cat ")) {
+			t.Errorf("an equivalent unmarked alias must be left alone; ran %q", c.Cmd)
+		}
+	}
+}
+
 // cmdIdx returns the index of the first Call matching cmd, or -1.
 func cmdIdx(f *bssh.FakeRunner, cmd string) int {
 	for i, c := range f.Calls() {

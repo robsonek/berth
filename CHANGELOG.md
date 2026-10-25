@@ -3,6 +3,20 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Fixed
+
+- **A provider's cloud-init no longer makes `system.hostname` drift after
+  every reboot.** cloud-init's `manage_etc_hosts` rewrites `/etc/hosts` on
+  each boot with its own unmarked `127.0.1.1 <fqdn> <short>` line, which the
+  `system` step reported as drift and replaced. A single `127.0.1.1` line
+  that names the configured hostname (FQDN first, then the short name) now
+  counts as converged with or without the berth marker and is left as it
+  is. A line naming anything else, or a second `127.0.1.1` line, is still
+  replaced without `--force`, as before. cloud-init's own settings are not
+  touched.
+
 ## [0.33.1] — 2026-10-25
 
 ### Fixed
