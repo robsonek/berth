@@ -3,6 +3,22 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Fixed
+
+- **A lost local secret cache no longer costs the offsite restic password.**
+  When `~/.berth/<id>.secrets.json` lacks the repository password but the
+  host's berth-managed `/etc/berth/offsite.env` holds one for the same
+  repository, the `offsite` step adopts it into the cache (with a warning)
+  instead of generating a new one. Before, the generated password was
+  written over the host's copy before the repository probe reported "wrong
+  password", destroying the last copy of the key to every offsite snapshot
+  unless the operator kept a third one. A host value that breaks the secret
+  value contract stops the run with the `berth secret set` recipe and is
+  never printed. The S3 key pair is still not adopted: the run asks for it
+  first, as before.
+
 ## [0.33.0] — 2026-10-25
 
 ### Added

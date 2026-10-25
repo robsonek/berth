@@ -273,8 +273,10 @@ func TestOffsiteCheckMissingPasswordPlansGeneration(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("dpkg -s restic", bssh.Result{Stdout: "Status: install ok installed\n"})
 	f.On("stat -c '%U:%G %a' "+shQuote(offsiteEnvDir), bssh.Result{Stdout: "root:root 755\n"})
-	// env content is unknowable without the password: Check plans the write
-	// unconditionally and must NOT probe the env file's content.
+	// No env file on the host (first use): nothing to adopt, so the env
+	// content is unknowable without the password and Check plans generation
+	// plus the write unconditionally.
+	f.On("cat "+shQuote(offsiteEnvPath), bssh.Result{ExitCode: 1})
 	script, _ := renderOffsiteScript(s)
 	stubFileState(f, offsiteScriptPath, script, "root:root 755", true)
 	cron, _ := renderOffsiteCron(s)
@@ -731,5 +733,169 @@ func TestOffsiteApplySFTPGeneratesKeyPinsHostAndWarnsPubkey(t *testing.T) {
 		if w.Path == offsiteStampPath(repo) {
 			t.Fatal("no stamp while the probe fails")
 		}
+	}
+}
+
+// A lost local cache must never cost the restic password while the host
+// still holds it: the berth-managed /etc/berth/offsite.env is its second
+// copy. Generating a fresh password would overwrite that copy before the
+// repository probe reports "wrong password" — the only surviving key to the
+// offsite snapshots gone. These tests pin adopt-over-generate.
+
+const adoptedHostValue = "host-restic-pw"
+
+// offsiteHostSecrets is the secret set the host's env file was rendered from.
+func offsiteHostSecrets() map[string]string {
+	return map[string]string{
+		secret.OffsiteS3AccessKey:    "AKIAEXAMPLE",
+		secret.OffsiteS3SecretKey:    "fake-secret",
+		secret.OffsiteResticPassword: adoptedHostValue,
+	}
+}
+
+// seedOffsiteCacheWithoutPassword leaves the S3 pair in the cache and drops
+// the restic password (the lost-cache-then-`berth secret set` state).
+func seedOffsiteCacheWithoutPassword(t *testing.T, s *config.Server) {
+	t.Helper()
+	seedOffsiteSecrets(t, s, map[string]string{
+		secret.OffsiteS3AccessKey: "AKIAEXAMPLE",
+		secret.OffsiteS3SecretKey: "fake-secret",
+	})
+}
+
+// stubOffsiteCheckConvergedExceptEnv stubs every Check probe except the env
+// file on an otherwise converged s3 host.
+func stubOffsiteCheckConvergedExceptEnv(t *testing.T, f *bssh.FakeRunner, s *config.Server) {
+	t.Helper()
+	f.On("dpkg -s restic", bssh.Result{Stdout: "Status: install ok installed\n"})
+	f.On("stat -c '%U:%G %a' "+shQuote(offsiteEnvDir), bssh.Result{Stdout: "root:root 755\n"})
+	script, err := renderOffsiteScript(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubFileState(f, offsiteScriptPath, script, "root:root 755", true)
+	cron, err := renderOffsiteCron(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubFileState(f, offsiteCronPath, cron, "root:root 644", true)
+	f.On("stat -c '%U:%G %a' '/var/lib/berth'", bssh.Result{Stdout: "root:root 755\n"})
+	repo := s.Backups.Offsite.Repository(s.ID)
+	stubFileState(f, offsiteStampPath(repo), offsiteStampContent(repo), "root:root 600", true)
+}
+
+func TestOffsiteCheckMissingPasswordAdoptsHostEnvPassword(t *testing.T) {
+	s := offsiteS3Server(t)
+	seedOffsiteCacheWithoutPassword(t, s)
+	f := bssh.NewFakeRunner()
+	stubOffsiteCheckConvergedExceptEnv(t, f, s)
+	env, err := renderOffsiteEnv(s, offsiteHostSecrets())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubFileState(f, offsiteEnvPath, env, "root:root 600", true)
+
+	res, err := Offsite(nil).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"adopt the restic repository password from " + offsiteEnvPath + " into the local cache"}
+	if res.Satisfied || !reflect.DeepEqual(res.Changes, want) {
+		t.Fatalf("Check must plan adoption only (no generate, no env rewrite); got satisfied=%v %v", res.Satisfied, res.Changes)
+	}
+	cache, err := secret.LoadEnvelope(s.CacheKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cache.Secrets[secret.OffsiteResticPassword] != "" {
+		t.Fatal("Check is read-only: it must not write the adopted password into the cache")
+	}
+}
+
+func TestOffsiteCheckMissingPasswordUnadoptableHostEnvPlansGeneration(t *testing.T) {
+	cases := map[string]bssh.Result{
+		"absent file": {ExitCode: 1},
+		"no berth marker": {Stdout: "RESTIC_REPOSITORY='s3:https://s3.example.com/bkt/offsite-test-1'\n" +
+			"RESTIC_PASSWORD='" + adoptedHostValue + "'\n"},
+		"another repository": {Stdout: "# managed by berth\nRESTIC_REPOSITORY='s3:https://other.example.com/x/y'\n" +
+			"RESTIC_PASSWORD='" + adoptedHostValue + "'\n"},
+		"no password line": {Stdout: "# managed by berth\nRESTIC_REPOSITORY='s3:https://s3.example.com/bkt/offsite-test-1'\n"},
+	}
+	for name, envRead := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := offsiteS3Server(t)
+			seedOffsiteCacheWithoutPassword(t, s)
+			if got := s.Backups.Offsite.Repository(s.ID); got != "s3:https://s3.example.com/bkt/offsite-test-1" {
+				t.Fatalf("fixture repository drifted: %s", got)
+			}
+			f := bssh.NewFakeRunner()
+			stubOffsiteCheckConvergedExceptEnv(t, f, s)
+			f.On("cat "+shQuote(offsiteEnvPath), envRead)
+
+			res, err := Offsite(nil).Check(context.Background(), provision.RunCtx{}, s, f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			joined := strings.Join(res.Changes, "\n")
+			for _, want := range []string{"generate restic repository password", "write " + offsiteEnvPath} {
+				if !strings.Contains(joined, want) {
+					t.Errorf("Changes missing %q: %v", want, res.Changes)
+				}
+			}
+			if strings.Contains(joined, "adopt") {
+				t.Errorf("nothing adoptable, yet Check plans adoption: %v", res.Changes)
+			}
+		})
+	}
+}
+
+func TestOffsiteCheckHostEnvPasswordViolatingContractIsLoudError(t *testing.T) {
+	s := offsiteS3Server(t)
+	seedOffsiteCacheWithoutPassword(t, s)
+	f := bssh.NewFakeRunner()
+	stubOffsiteCheckConvergedExceptEnv(t, f, s)
+	f.On("cat "+shQuote(offsiteEnvPath), bssh.Result{Stdout: "# managed by berth\n" +
+		"RESTIC_REPOSITORY='s3:https://s3.example.com/bkt/offsite-test-1'\nRESTIC_PASSWORD='bad'pw'\n"})
+
+	_, err := Offsite(nil).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "berth secret set") {
+		t.Fatalf("an unadoptable host password must hard-error with the recipe (never fall back to generating over it); got %v", err)
+	}
+	if strings.Contains(err.Error(), "bad'pw") {
+		t.Fatalf("the error must never print the host value: %v", err)
+	}
+}
+
+func TestOffsiteApplyAdoptsHostPasswordInsteadOfGenerating(t *testing.T) {
+	s := offsiteS3Server(t)
+	seedOffsiteCacheWithoutPassword(t, s)
+	f := bssh.NewFakeRunner()
+	stubOffsiteApplyBase(t, f, s, offsiteHostSecrets())
+	env, err := renderOffsiteEnv(s, offsiteHostSecrets())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.On("cat "+shQuote(offsiteEnvPath), bssh.Result{Stdout: string(env)}) // the host keeps its copy
+	f.On(offsiteEnvCmd("restic cat config >/dev/null"), bssh.Result{ExitCode: 0})
+	var warns []string
+	rc := provision.RunCtx{Warn: func(m string) { warns = append(warns, m) }}
+
+	if err := Offsite(nil).Apply(context.Background(), rc, s, f); err != nil {
+		t.Fatal(err)
+	}
+	cache, err := secret.LoadEnvelope(s.CacheKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cache.Secrets[secret.OffsiteResticPassword]; got != adoptedHostValue {
+		t.Fatalf("Apply must adopt the host's restic password into the cache; cache holds %q", got)
+	}
+	for _, w := range f.Writes() {
+		if w.Path == offsiteEnvPath && !strings.Contains(string(w.Content), "RESTIC_PASSWORD='"+adoptedHostValue+"'") {
+			t.Fatalf("the env file must keep the host's password, got:\n%s", w.Content)
+		}
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0], "adopted") || strings.Contains(warns[0], adoptedHostValue) {
+		t.Fatalf("Apply must warn once about the adoption without printing the value; got %q", warns)
 	}
 }
