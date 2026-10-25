@@ -964,8 +964,9 @@ snapshot, by encryption design. If only the local cache is lost while the
 host lives, a provision adopts the password from `/etc/berth/offsite.env`
 instead of generating a new one, and warns (naming the repository the file
 was written for when it differs from the config). berth generates a
-password only when that file does not exist; a file without a readable
-password stops the run with the `berth secret set` recipe. The S3 pair is
+password only when that file does not exist; an existing file that cannot
+be read, or holds no readable password, stops the run with the
+`berth secret set` recipe. The S3 pair is
 not adopted — the run asks for it with `berth secret set` first. Changing
 the offsite target later
 initializes a NEW repository; snapshots on the old target remain yours

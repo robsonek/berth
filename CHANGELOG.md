@@ -17,9 +17,9 @@ Notable changes to berth. Older releases are documented on the
   The password is adopted whatever repository the file names (the warning
   names it when it differs from the config) and with or without the berth
   marker (overwriting an unmarked file still needs `--force`). berth now
-  generates a password only when that file does not exist; a file without a
-  readable, contract-valid password stops the run with the
-  `berth secret set` recipe and the value is never printed. The S3 key pair
+  generates a password only when that file does not exist; an existing file
+  that cannot be read, or holds no readable, contract-valid password, stops
+  the run with the `berth secret set` recipe and the value is never printed. The S3 key pair
   is still not adopted: the run asks for it first, as before.
 
 ## [0.33.0] — 2026-10-25

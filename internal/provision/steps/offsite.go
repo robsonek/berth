@@ -92,43 +92,50 @@ func assertNotSymlink(ctx context.Context, r bssh.Runner, path string) error {
 	return nil
 }
 
-// hostResticCopy is the restic password found in the host env file and the
-// repository that file was written for ("" when it names none).
-type hostResticCopy struct{ password, repo string }
+// hostResticCopy is the RESTIC_PASSWORD value found in the host env file and
+// the repository that file was written for ("" when it names none).
+type hostResticCopy struct{ value, repo string }
 
 // hostResticPassword reads the host env file — the second copy of the cached
 // restic password — for a cache that lost it: generating a fresh password
 // would overwrite this copy before the repository probe could report "wrong
-// password". found=false ONLY when the file does not exist (first use). A
-// present file is never generated over: its last RESTIC_PASSWORD='…' value
+// password". found=false ONLY when `test -e` says the file does not exist
+// (first use); an existing file that cannot be read is an error, never
+// mistaken for absence. A present file is never generated over: its last
+// RESTIC_PASSWORD='…' value
 // is adopted whatever repository it names (an alias, IP -> DNS or a new
 // target keeps the key, as the cached password follows a target change) and
 // with or without the berth marker (the write then still needs --force). A
 // present file without a readable, contract-valid password is an error
 // carrying the recipe, never the value.
 func hostResticPassword(ctx context.Context, r bssh.Runner) (c hostResticCopy, found bool, err error) {
+	recipe := fmt.Sprintf("put the correct password into the local cache with: berth secret set <server.yml> %s (only on a host whose offsite repository was never initialized may you remove %s instead, so berth generates one)",
+		secret.OffsiteResticPassword, offsiteEnvPath)
+	exists, err := fileExists(ctx, r, offsiteEnvPath)
+	if err != nil || !exists {
+		return hostResticCopy{}, false, err
+	}
 	res, err := r.Run(ctx, "cat "+shQuote(offsiteEnvPath), nil)
 	if err != nil {
 		return hostResticCopy{}, false, err
 	}
 	if res.ExitCode != 0 {
-		return hostResticCopy{}, false, nil
+		return hostResticCopy{}, false, fmt.Errorf("%s exists but could not be read (%s) while the local cache has no restic password; refusing to generate one over it — re-run, or %s",
+			offsiteEnvPath, strings.TrimSpace(res.Stderr), recipe)
 	}
-	hasPassword := false
+	hasValue := false
 	for _, line := range strings.Split(res.Stdout, "\n") {
 		if v, ok := singleQuotedValue(line, "RESTIC_REPOSITORY"); ok {
 			c.repo = v
 		}
 		if v, ok := singleQuotedValue(line, "RESTIC_PASSWORD"); ok {
-			c.password, hasPassword = v, true
+			c.value, hasValue = v, true
 		}
 	}
-	recipe := fmt.Sprintf("put the correct password into the local cache with: berth secret set <server.yml> %s (only on a host whose offsite repository was never initialized may you remove %s instead, so berth generates one)",
-		secret.OffsiteResticPassword, offsiteEnvPath)
-	if !hasPassword {
+	if !hasValue {
 		return hostResticCopy{}, false, fmt.Errorf("%s exists but holds no RESTIC_PASSWORD='…' line berth can read, and the local cache has no restic password; %s", offsiteEnvPath, recipe)
 	}
-	if err := secret.ValidateSecretValue(c.password); err != nil {
+	if err := secret.ValidateSecretValue(c.value); err != nil {
 		return hostResticCopy{}, false, fmt.Errorf("%s holds a restic password berth cannot adopt (%w); %s", offsiteEnvPath, err, recipe)
 	}
 	return c, true, nil
@@ -288,7 +295,7 @@ func (o offsite) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 			return provision.CheckResult{}, err
 		}
 		if found {
-			secrets[secret.OffsiteResticPassword] = host.password
+			secrets[secret.OffsiteResticPassword] = host.value
 			o.registerSecrets(secrets)
 			changes = append(changes, "adopt the restic repository password from "+offsiteEnvPath+" into the local cache"+host.otherRepoNote(repo))
 		}
@@ -459,7 +466,7 @@ func (o offsite) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serve
 			return err
 		}
 	}
-	secrets, adopted, err := o.loadOrSeedSecrets(s, host.password)
+	secrets, adopted, err := o.loadOrSeedSecrets(s, host.value)
 	if err != nil {
 		return err
 	}

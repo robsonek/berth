@@ -276,7 +276,7 @@ func TestOffsiteCheckMissingPasswordPlansGeneration(t *testing.T) {
 	// No env file on the host (first use): nothing to adopt, so the env
 	// content is unknowable without the password and Check plans generation
 	// plus the write unconditionally.
-	f.On("cat "+shQuote(offsiteEnvPath), bssh.Result{ExitCode: 1})
+	f.On("test -e "+shQuote(offsiteEnvPath), bssh.Result{ExitCode: 1})
 	script, _ := renderOffsiteScript(s)
 	stubFileState(f, offsiteScriptPath, script, "root:root 755", true)
 	cron, _ := renderOffsiteCron(s)
@@ -323,6 +323,7 @@ func stubOffsiteApplyBase(t *testing.T, f *bssh.FakeRunner, s *config.Server, se
 		t.Fatal(err)
 	}
 	stubFileState(f, offsiteEnvPath, env, "", false) // absent -> write
+	f.On("test -e "+shQuote(offsiteEnvPath), bssh.Result{ExitCode: 1})
 	script, err := renderOffsiteScript(s)
 	if err != nil {
 		t.Fatal(err)
@@ -764,9 +765,10 @@ func seedOffsiteCacheWithoutPassword(t *testing.T, s *config.Server) {
 }
 
 // stubOffsiteCheckConvergedExceptEnv stubs every Check probe except the env
-// file on an otherwise converged s3 host.
+// file's content on an otherwise converged s3 host whose env file exists.
 func stubOffsiteCheckConvergedExceptEnv(t *testing.T, f *bssh.FakeRunner, s *config.Server) {
 	t.Helper()
+	f.On("test -e "+shQuote(offsiteEnvPath), bssh.Result{})
 	f.On("dpkg -s restic", bssh.Result{Stdout: "Status: install ok installed\n"})
 	f.On("stat -c '%U:%G %a' "+shQuote(offsiteEnvDir), bssh.Result{Stdout: "root:root 755\n"})
 	script, err := renderOffsiteScript(s)
@@ -914,6 +916,7 @@ func TestOffsiteApplyAdoptsHostPasswordInsteadOfGenerating(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.On("test -e "+shQuote(offsiteEnvPath), bssh.Result{})
 	f.On("cat "+shQuote(offsiteEnvPath), bssh.Result{Stdout: string(env)}) // the host keeps its copy
 	f.On(offsiteEnvCmd("restic cat config >/dev/null"), bssh.Result{ExitCode: 0})
 	var warns []string
@@ -951,6 +954,7 @@ func TestOffsiteApplyAdoptsPasswordWrittenForAnotherRepository(t *testing.T) {
 	seedOffsiteCacheWithoutPassword(t, s)
 	f := bssh.NewFakeRunner()
 	stubOffsiteApplyBase(t, f, s, offsiteHostSecrets())
+	f.On("test -e "+shQuote(offsiteEnvPath), bssh.Result{})
 	f.On("cat "+shQuote(offsiteEnvPath), bssh.Result{Stdout: "# managed by berth\n" +
 		"RESTIC_REPOSITORY='s3:https://old.example.com/bkt/offsite-test-1'\nRESTIC_PASSWORD='" + adoptedHostValue + "'\n"})
 	f.On(offsiteEnvCmd("restic cat config >/dev/null"), bssh.Result{ExitCode: 0})
@@ -969,5 +973,21 @@ func TestOffsiteApplyAdoptsPasswordWrittenForAnotherRepository(t *testing.T) {
 	}
 	if len(warns) != 1 || !strings.Contains(warns[0], "old.example.com") {
 		t.Fatalf("the warning must name the repository the host file was written for; got %q", warns)
+	}
+}
+
+// A transient read failure of an EXISTING env file must not be mistaken for
+// "absent": that would generate a password over the host copy (review P1).
+func TestOffsiteCheckUnreadableHostEnvIsLoudError(t *testing.T) {
+	s := offsiteS3Server(t)
+	seedOffsiteCacheWithoutPassword(t, s)
+	f := bssh.NewFakeRunner()
+	stubOffsiteCheckConvergedExceptEnv(t, f, s)
+	f.On("test -e "+shQuote(offsiteEnvPath), bssh.Result{})
+	f.On("cat "+shQuote(offsiteEnvPath), bssh.Result{ExitCode: 1, Stderr: "cat: read error: Input/output error"})
+
+	_, err := Offsite(nil).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err == nil || !strings.Contains(err.Error(), "could not be read") {
+		t.Fatalf("an existing env file that cannot be read must stop the run, never fall through to generation; got %v", err)
 	}
 }
