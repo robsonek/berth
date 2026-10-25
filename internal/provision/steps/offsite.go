@@ -96,7 +96,7 @@ func assertNotSymlink(ctx context.Context, r bssh.Runner, path string) error {
 // the repository that file was written for ("" when it names none).
 type hostResticCopy struct{ value, repo string }
 
-// hostResticPassword reads the host env file — the second copy of the cached
+// readHostResticCopy reads the host env file — the second copy of the cached
 // restic password — for a cache that lost it: generating a fresh password
 // would overwrite this copy before the repository probe could report "wrong
 // password". found=false ONLY when `test -e` says the file does not exist
@@ -108,7 +108,7 @@ type hostResticCopy struct{ value, repo string }
 // with or without the berth marker (the write then still needs --force). A
 // present file without a readable, contract-valid password is an error
 // carrying the recipe, never the value.
-func hostResticPassword(ctx context.Context, r bssh.Runner) (c hostResticCopy, found bool, err error) {
+func readHostResticCopy(ctx context.Context, r bssh.Runner) (c hostResticCopy, found bool, err error) {
 	recipe := fmt.Sprintf("put the correct password into the local cache with: berth secret set <server.yml> %s (only on a host whose offsite repository was never initialized may you remove %s instead, so berth generates one)",
 		secret.OffsiteResticPassword, offsiteEnvPath)
 	exists, err := fileExists(ctx, r, offsiteEnvPath)
@@ -290,7 +290,7 @@ func (o offsite) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 	// adopting it keeps the env file (and the repository's key) intact. The
 	// adopted value lives only in this Check's map — Apply persists it.
 	if secrets[secret.OffsiteResticPassword] == "" {
-		host, found, err := hostResticPassword(ctx, r)
+		host, found, err := readHostResticCopy(ctx, r)
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
@@ -462,7 +462,7 @@ func (o offsite) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serve
 	}
 	var host hostResticCopy
 	if cached[secret.OffsiteResticPassword] == "" {
-		if host, _, err = hostResticPassword(ctx, r); err != nil {
+		if host, _, err = readHostResticCopy(ctx, r); err != nil {
 			return err
 		}
 	}
