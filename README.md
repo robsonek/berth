@@ -960,7 +960,15 @@ N-hour window — so gaps in the schedule stretch the retained span.
 `~/.berth/<id>.secrets.json` on the operator machine and in root-owned
 `/etc/berth/offsite.env` on the host. Keep a third copy outside both
 machines (password manager): losing it means losing every offsite
-snapshot, by encryption design. Changing the offsite target later
+snapshot, by encryption design. If only the local cache is lost while the
+host lives, a provision adopts the password from `/etc/berth/offsite.env`
+instead of generating a new one, and warns (naming the repository the file
+was written for when it differs from the config). berth generates a
+password only when that file does not exist; an existing file that cannot
+be read, or holds no readable password, stops the run with the
+`berth secret set` recipe. The S3 pair is
+not adopted — the run asks for it with `berth secret set` first. Changing
+the offsite target later
 initializes a NEW repository; snapshots on the old target remain yours
 to keep or delete. Removing `backups.offsite` sweeps the script, cron,
 env file and host-key pin from the host, but the dedicated sftp keypair

@@ -92,6 +92,73 @@ func assertNotSymlink(ctx context.Context, r bssh.Runner, path string) error {
 	return nil
 }
 
+// hostResticCopy is the RESTIC_PASSWORD value found in the host env file and
+// the repository that file was written for ("" when it names none).
+type hostResticCopy struct{ value, repo string }
+
+// readHostResticCopy reads the host env file — the second copy of the cached
+// restic password — for a cache that lost it: generating a fresh password
+// would overwrite this copy before the repository probe could report "wrong
+// password". found=false ONLY when `test -e` says the file does not exist
+// (first use); an existing file that cannot be read is an error, never
+// mistaken for absence. A present file is never generated over: its last
+// RESTIC_PASSWORD='…' value
+// is adopted whatever repository it names (an alias, IP -> DNS or a new
+// target keeps the key, as the cached password follows a target change) and
+// with or without the berth marker (the write then still needs --force). A
+// present file without a readable, contract-valid password is an error
+// carrying the recipe, never the value.
+func readHostResticCopy(ctx context.Context, r bssh.Runner) (c hostResticCopy, found bool, err error) {
+	recipe := fmt.Sprintf("put the correct password into the local cache with: berth secret set <server.yml> %s (only on a host whose offsite repository was never initialized may you remove %s instead, so berth generates one)",
+		secret.OffsiteResticPassword, offsiteEnvPath)
+	exists, err := fileExists(ctx, r, offsiteEnvPath)
+	if err != nil || !exists {
+		return hostResticCopy{}, false, err
+	}
+	res, err := r.Run(ctx, "cat "+shQuote(offsiteEnvPath), nil)
+	if err != nil {
+		return hostResticCopy{}, false, err
+	}
+	if res.ExitCode != 0 {
+		return hostResticCopy{}, false, fmt.Errorf("%s exists but could not be read (%s) while the local cache has no restic password; refusing to generate one over it — re-run, or %s",
+			offsiteEnvPath, strings.TrimSpace(res.Stderr), recipe)
+	}
+	hasValue := false
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		if v, ok := singleQuotedValue(line, "RESTIC_REPOSITORY"); ok {
+			c.repo = v
+		}
+		if v, ok := singleQuotedValue(line, "RESTIC_PASSWORD"); ok {
+			c.value, hasValue = v, true
+		}
+	}
+	if !hasValue {
+		return hostResticCopy{}, false, fmt.Errorf("%s exists but holds no RESTIC_PASSWORD='…' line berth can read, and the local cache has no restic password; %s", offsiteEnvPath, recipe)
+	}
+	if err := secret.ValidateSecretValue(c.value); err != nil {
+		return hostResticCopy{}, false, fmt.Errorf("%s holds a restic password berth cannot adopt (%w); %s", offsiteEnvPath, err, recipe)
+	}
+	return c, true, nil
+}
+
+// otherRepoNote names the repository a host env file was written for when it
+// differs from the configured one ("" otherwise).
+func (c hostResticCopy) otherRepoNote(repo string) string {
+	if c.repo == repo {
+		return ""
+	}
+	return " (the file was written for repository " + c.repo + ")"
+}
+
+// singleQuotedValue parses one KEY='value' line of the rendered env file.
+func singleQuotedValue(line, key string) (string, bool) {
+	rest, found := strings.CutPrefix(line, key+"='")
+	if !found || !strings.HasSuffix(rest, "'") {
+		return "", false
+	}
+	return strings.TrimSuffix(rest, "'"), true
+}
+
 func renderOffsiteEnv(s *config.Server, secrets map[string]string) ([]byte, error) {
 	off := s.Backups.Offsite
 	return templates.Render("offsite_env.tmpl", struct {
@@ -219,10 +286,23 @@ func (o offsite) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 		changes = append(changes, "create "+offsiteEnvDir+" (root:root 755)")
 	}
 
+	// A cache without the restic password first looks at the host's copy:
+	// adopting it keeps the env file (and the repository's key) intact. The
+	// adopted value lives only in this Check's map — Apply persists it.
+	if secrets[secret.OffsiteResticPassword] == "" {
+		host, found, err := readHostResticCopy(ctx, r)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		if found {
+			secrets[secret.OffsiteResticPassword] = host.value
+			o.registerSecrets(secrets)
+			changes = append(changes, "adopt the restic repository password from "+offsiteEnvPath+" into the local cache"+host.otherRepoNote(repo))
+		}
+	}
 	// The env file is only comparable when every value it renders is known;
 	// without the (auto-generated) password its desired content does not
-	// exist yet, so the write is planned unconditionally and Check must not
-	// read the live file at all (a content probe would be pure noise).
+	// exist yet, so the write is planned unconditionally.
 	if secrets[secret.OffsiteResticPassword] == "" {
 		changes = append(changes, "generate restic repository password", "write "+offsiteEnvPath)
 	} else {
@@ -374,9 +454,25 @@ func (o offsite) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serve
 	// enabled backups, and the backups step (earlier in the pipeline)
 	// already installs + enables the cron daemon.
 
-	secrets, err := o.loadOrSeedSecrets(s)
+	// Remote read OUTSIDE the cache lock (loadOrSeedSecrets' rule): peek at
+	// the cache, and only when it lacks the password fetch the host's copy.
+	cached, err := loadVerifiedSecrets(s)
 	if err != nil {
 		return err
+	}
+	var host hostResticCopy
+	if cached[secret.OffsiteResticPassword] == "" {
+		if host, _, err = readHostResticCopy(ctx, r); err != nil {
+			return err
+		}
+	}
+	secrets, adopted, err := o.loadOrSeedSecrets(s, host.value)
+	if err != nil {
+		return err
+	}
+	if adopted {
+		rc.Warnf("adopted the restic repository password from %s into the local cache (it was missing there)%s — keep a copy of ~/.berth/%s.secrets.json in your password manager",
+			offsiteEnvPath, host.otherRepoNote(repo), s.CacheKey())
 	}
 	if off.Backend == "s3" && (secrets[secret.OffsiteS3AccessKey] == "" || secrets[secret.OffsiteS3SecretKey] == "") {
 		return fmt.Errorf(
@@ -455,36 +551,41 @@ func (o offsite) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serve
 	return o.ensureRepo(ctx, rc, r, repo, off)
 }
 
-// loadOrSeedSecrets loads the offsite secrets, generating and persisting the
-// repository password on first use (the DB-password pattern). The cache lock
-// is held ONLY across load→generate→save — never across remote I/O: a slow
-// target must not block a concurrent `berth secret set` (a value updated
-// after this snapshot simply surfaces as env drift on the next run). Loaded
-// values are revalidated: the cache file is operator-editable.
-func (o offsite) loadOrSeedSecrets(s *config.Server) (map[string]string, error) {
+// loadOrSeedSecrets loads the offsite secrets and, when the cache lacks the
+// repository password, persists hostPW (the host env file's copy, adopted =
+// true) or else a freshly generated one (first use — the DB-password
+// pattern). The cache lock is held ONLY across load→seed→save — never across
+// remote I/O: a slow target must not block a concurrent `berth secret set`
+// (a value updated after this snapshot simply surfaces as env drift on the
+// next run), so the caller reads the host copy before. Loaded values are
+// revalidated: the cache file is operator-editable.
+func (o offsite) loadOrSeedSecrets(s *config.Server, hostPW string) (secrets map[string]string, adopted bool, err error) {
 	release, err := secret.LockCache(s.CacheKey())
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer release()
-	secrets, err := loadVerifiedSecrets(s)
+	secrets, err = loadVerifiedSecrets(s)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if err := validateOffsiteSecrets(secrets); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if secrets[secret.OffsiteResticPassword] == "" {
-		pw, err := secret.Generate(offsiteResticPasswordLen)
-		if err != nil {
-			return nil, err
+		pw := hostPW
+		if pw == "" {
+			if pw, err = secret.Generate(offsiteResticPasswordLen); err != nil {
+				return nil, false, err
+			}
 		}
 		secrets[secret.OffsiteResticPassword] = pw
 		if err := saveSecrets(s, secrets); err != nil {
-			return nil, err
+			return nil, false, err
 		}
+		adopted = hostPW != ""
 	}
-	return secrets, nil
+	return secrets, adopted, nil
 }
 
 // resticExit codes of restic 0.18 (Debian 13); message fallbacks cover
