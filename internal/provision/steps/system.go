@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -458,49 +459,58 @@ func applyTimezone(ctx context.Context, r bssh.Runner, tz string) error {
 	return nil
 }
 
-// hostsHostnameLine is the exact /etc/hosts alias line berth manages for the
-// configured static hostname: FQDN plus its short (first-label) alias, ending
-// with the managed marker as the ownership signal (the fstabSwapLine pattern).
-func hostsHostnameLine(hostname string) string {
-	names := hostname
+// hostsAliasNames is the name list berth's 127.0.1.1 alias carries for the
+// configured static hostname: the FQDN first (the canonical name `hostname -f`
+// reports) plus its short (first-label) alias — the order cloud-init's Debian
+// hosts template writes too.
+func hostsAliasNames(hostname string) []string {
 	if short, _, ok := strings.Cut(hostname, "."); ok && short != "" {
-		names = hostname + " " + short
+		return []string{hostname, short}
 	}
-	return "127.0.1.1 " + names + " " + managedMarker
+	return []string{hostname}
 }
 
-// hostsAliasConverged reports whether /etc/hosts holds berth's exact marked
-// alias line for hostname EXACTLY once and no other 127.0.1.1 line — the
-// "exactly one" state applyHostname's normalization produces (fstabSwapState's
-// scan style). Requiring the absence of foreign lines matters: a stale alias
-// re-added beside the marked one would keep resolving the image's old name
-// forever if Check accepted it. Comment lines are ignored (a commented-out
-// alias is inert, and the sed leaves it in place too).
+// hostsHostnameLine is the exact /etc/hosts alias line berth manages for the
+// configured static hostname, ending with the managed marker as the ownership
+// signal (the fstabSwapLine pattern).
+func hostsHostnameLine(hostname string) string {
+	return "127.0.1.1 " + strings.Join(hostsAliasNames(hostname), " ") + " " + managedMarker
+}
+
+// hostsAliasConverged reports whether /etc/hosts holds EXACTLY one 127.0.1.1
+// line and that line names hostsAliasNames(hostname) — the state
+// applyHostname's normalization produces. The marker is not required: a
+// provider's cloud-init (manage_etc_hosts) rewrites /etc/hosts on every boot
+// with its own unmarked line for the same names, and that line resolves the
+// host exactly like berth's, so treating it as drift would only flag every
+// reboot. Names are compared in order (the first is the canonical one) with
+// repeats dropped (cloud-init repeats a single-label name); any other name
+// list — another hostname, a stale extra alias, a missing short name — and
+// any second 127.0.1.1 line still re-trigger the takeover, so a stale alias
+// can never keep resolving the image's old name. Comment lines and inline
+// comments are ignored (hosts(5): `#` runs to the end of the line; the sed
+// leaves a commented-out alias in place too).
 func hostsAliasConverged(content, hostname string) bool {
-	want := hostsHostnameLine(hostname)
-	marked, foreign := 0, false
+	want := hostsAliasNames(hostname)
+	lines, match := 0, false
 	for _, line := range strings.Split(content, "\n") {
-		t := strings.TrimSpace(line)
-		if t == "" || strings.HasPrefix(t, "#") {
-			continue
+		if i := strings.IndexByte(line, '#'); i >= 0 {
+			line = line[:i]
 		}
-		fields := strings.Fields(t)
+		fields := strings.Fields(line)
 		if len(fields) == 0 || fields[0] != "127.0.1.1" {
 			continue
 		}
-		if t == want {
-			marked++
-		} else {
-			foreign = true
-		}
+		lines++
+		match = slices.Equal(slices.Compact(fields[1:]), want)
 	}
-	return marked == 1 && !foreign
+	return lines == 1 && match
 }
 
 // checkHostname is the read-only predicate for a managed static hostname:
-// satisfied iff `hostnamectl --static` equals the configured name AND berth's
-// marked 127.0.1.1 alias line is present in /etc/hosts (so sudo and other
-// local lookups resolve the name without DNS). Like timezone there is no
+// satisfied iff `hostnamectl --static` equals the configured name AND
+// /etc/hosts holds a single 127.0.1.1 alias line naming it (hostsAliasConverged;
+// so sudo and other local lookups resolve the name without DNS). Like timezone there is no
 // removal counterpart — clearing the knob stops managing the hostname; the
 // marked alias line stays (it still names the host).
 func checkHostname(ctx context.Context, r bssh.Runner, hostname string) (bool, []string, error) {
@@ -531,7 +541,8 @@ func checkHostname(ctx context.Context, r bssh.Runner, hostname string) (bool, [
 // applyHostname sets the static hostname and normalizes /etc/hosts to exactly
 // one marked 127.0.1.1 alias line naming it (delete-any + newline-safe append,
 // the applySwap fstab pattern). Re-entrant: each piece is skipped when already
-// converged, so a satisfied hostname is a full no-op.
+// converged, so a satisfied hostname is a full no-op — including an equivalent
+// unmarked line, which is left as it is.
 func applyHostname(ctx context.Context, r bssh.Runner, hostname string) error {
 	res, err := r.Run(ctx, "hostnamectl --static", nil)
 	if err != nil {

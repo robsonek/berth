@@ -179,6 +179,7 @@ system:                        # optional host-level OS provisioning — all def
   hostname: web-1.example.com  # default off when absent; sets the static hostname
                                # (hostnamectl) and keeps a 127.0.1.1 alias line in
                                # /etc/hosts so sudo resolves the name without DNS
+                               # (an equivalent line written by cloud-init counts)
   break_glass: true            # default off; give the berth account a console
                                # password (saved to ~/.berth/<name>.secrets.json) for
                                # provider console/VNC access when SSH is down —
