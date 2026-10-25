@@ -92,38 +92,55 @@ func assertNotSymlink(ctx context.Context, r bssh.Runner, path string) error {
 	return nil
 }
 
-// hostResticPassword returns the restic password held by the berth-managed
-// host env file for repo — the second copy of the cached password, adopted
-// when the local cache lost it: generating a fresh one would overwrite this
-// copy before the repository probe could report "wrong password". ok=false
-// when nothing is adoptable (absent file, no berth marker, another
-// repository, no password line). A present but contract-violating value is
-// an error, never a reason to fall back to generating over it.
-func hostResticPassword(ctx context.Context, r bssh.Runner, repo string) (pw string, ok bool, err error) {
+// hostResticCopy is the restic password found in the host env file and the
+// repository that file was written for ("" when it names none).
+type hostResticCopy struct{ password, repo string }
+
+// hostResticPassword reads the host env file — the second copy of the cached
+// restic password — for a cache that lost it: generating a fresh password
+// would overwrite this copy before the repository probe could report "wrong
+// password". found=false ONLY when the file does not exist (first use). A
+// present file is never generated over: its last RESTIC_PASSWORD='…' value
+// is adopted whatever repository it names (an alias, IP -> DNS or a new
+// target keeps the key, as the cached password follows a target change) and
+// with or without the berth marker (the write then still needs --force). A
+// present file without a readable, contract-valid password is an error
+// carrying the recipe, never the value.
+func hostResticPassword(ctx context.Context, r bssh.Runner) (c hostResticCopy, found bool, err error) {
 	res, err := r.Run(ctx, "cat "+shQuote(offsiteEnvPath), nil)
 	if err != nil {
-		return "", false, err
+		return hostResticCopy{}, false, err
 	}
-	if res.ExitCode != 0 || !hasManagedMarker(res.Stdout) {
-		return "", false, nil
+	if res.ExitCode != 0 {
+		return hostResticCopy{}, false, nil
 	}
-	repoOK := false
+	hasPassword := false
 	for _, line := range strings.Split(res.Stdout, "\n") {
-		if v, found := singleQuotedValue(line, "RESTIC_REPOSITORY"); found {
-			repoOK = v == repo
+		if v, ok := singleQuotedValue(line, "RESTIC_REPOSITORY"); ok {
+			c.repo = v
 		}
-		if v, found := singleQuotedValue(line, "RESTIC_PASSWORD"); found {
-			pw, ok = v, true
+		if v, ok := singleQuotedValue(line, "RESTIC_PASSWORD"); ok {
+			c.password, hasPassword = v, true
 		}
 	}
-	if !repoOK || !ok {
-		return "", false, nil
+	recipe := fmt.Sprintf("put the correct password into the local cache with: berth secret set <server.yml> %s (only on a host whose offsite repository was never initialized may you remove %s instead, so berth generates one)",
+		secret.OffsiteResticPassword, offsiteEnvPath)
+	if !hasPassword {
+		return hostResticCopy{}, false, fmt.Errorf("%s exists but holds no RESTIC_PASSWORD='…' line berth can read, and the local cache has no restic password; %s", offsiteEnvPath, recipe)
 	}
-	if err := secret.ValidateSecretValue(pw); err != nil {
-		return "", false, fmt.Errorf("%s holds a restic password berth cannot adopt (%w); put the correct password into the local cache with: berth secret set <server.yml> %s",
-			offsiteEnvPath, err, secret.OffsiteResticPassword)
+	if err := secret.ValidateSecretValue(c.password); err != nil {
+		return hostResticCopy{}, false, fmt.Errorf("%s holds a restic password berth cannot adopt (%w); %s", offsiteEnvPath, err, recipe)
 	}
-	return pw, true, nil
+	return c, true, nil
+}
+
+// otherRepoNote names the repository a host env file was written for when it
+// differs from the configured one ("" otherwise).
+func (c hostResticCopy) otherRepoNote(repo string) string {
+	if c.repo == repo {
+		return ""
+	}
+	return " (the file was written for repository " + c.repo + ")"
 }
 
 // singleQuotedValue parses one KEY='value' line of the rendered env file.
@@ -266,14 +283,14 @@ func (o offsite) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 	// adopting it keeps the env file (and the repository's key) intact. The
 	// adopted value lives only in this Check's map — Apply persists it.
 	if secrets[secret.OffsiteResticPassword] == "" {
-		hostPW, adopt, err := hostResticPassword(ctx, r, repo)
+		host, found, err := hostResticPassword(ctx, r)
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
-		if adopt {
-			secrets[secret.OffsiteResticPassword] = hostPW
+		if found {
+			secrets[secret.OffsiteResticPassword] = host.password
 			o.registerSecrets(secrets)
-			changes = append(changes, "adopt the restic repository password from "+offsiteEnvPath+" into the local cache")
+			changes = append(changes, "adopt the restic repository password from "+offsiteEnvPath+" into the local cache"+host.otherRepoNote(repo))
 		}
 	}
 	// The env file is only comparable when every value it renders is known;
@@ -436,23 +453,19 @@ func (o offsite) Apply(ctx context.Context, rc provision.RunCtx, s *config.Serve
 	if err != nil {
 		return err
 	}
-	var hostPW string
+	var host hostResticCopy
 	if cached[secret.OffsiteResticPassword] == "" {
-		pw, ok, err := hostResticPassword(ctx, r, repo)
-		if err != nil {
+		if host, _, err = hostResticPassword(ctx, r); err != nil {
 			return err
 		}
-		if ok {
-			hostPW = pw
-		}
 	}
-	secrets, adopted, err := o.loadOrSeedSecrets(s, hostPW)
+	secrets, adopted, err := o.loadOrSeedSecrets(s, host.password)
 	if err != nil {
 		return err
 	}
 	if adopted {
-		rc.Warnf("adopted the restic repository password from %s into the local cache (it was missing there) — keep a copy of ~/.berth/%s.secrets.json in your password manager",
-			offsiteEnvPath, s.CacheKey())
+		rc.Warnf("adopted the restic repository password from %s into the local cache (it was missing there)%s — keep a copy of ~/.berth/%s.secrets.json in your password manager",
+			offsiteEnvPath, host.otherRepoNote(repo), s.CacheKey())
 	}
 	if off.Backend == "s3" && (secrets[secret.OffsiteS3AccessKey] == "" || secrets[secret.OffsiteS3SecretKey] == "") {
 		return fmt.Errorf(

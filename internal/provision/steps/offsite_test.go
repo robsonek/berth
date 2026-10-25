@@ -812,38 +812,77 @@ func TestOffsiteCheckMissingPasswordAdoptsHostEnvPassword(t *testing.T) {
 	}
 }
 
-func TestOffsiteCheckMissingPasswordUnadoptableHostEnvPlansGeneration(t *testing.T) {
-	cases := map[string]bssh.Result{
-		"absent file": {ExitCode: 1},
-		"no berth marker": {Stdout: "RESTIC_REPOSITORY='s3:https://s3.example.com/bkt/offsite-test-1'\n" +
-			"RESTIC_PASSWORD='" + adoptedHostValue + "'\n"},
-		"another repository": {Stdout: "# managed by berth\nRESTIC_REPOSITORY='s3:https://other.example.com/x/y'\n" +
-			"RESTIC_PASSWORD='" + adoptedHostValue + "'\n"},
-		"no password line": {Stdout: "# managed by berth\nRESTIC_REPOSITORY='s3:https://s3.example.com/bkt/offsite-test-1'\n"},
+// Any host copy with a readable password is adopted — a repository string
+// that changed (alias, IP -> DNS, a new target) or a file without the berth
+// marker is never a reason to generate over the last copy of the key.
+func TestOffsiteCheckMissingPasswordAdoptsFromAnotherRepository(t *testing.T) {
+	s := offsiteS3Server(t)
+	seedOffsiteCacheWithoutPassword(t, s)
+	f := bssh.NewFakeRunner()
+	stubOffsiteCheckConvergedExceptEnv(t, f, s)
+	f.On("cat "+shQuote(offsiteEnvPath), bssh.Result{Stdout: "# managed by berth\n" +
+		"RESTIC_REPOSITORY='s3:https://old.example.com/bkt/offsite-test-1'\nRESTIC_PASSWORD='" + adoptedHostValue + "'\n"})
+	f.On("stat -c '%U:%G %a' "+shQuote(offsiteEnvPath), bssh.Result{Stdout: "root:root 600\n"})
+
+	res, err := Offsite(nil).Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for name, envRead := range cases {
+	joined := strings.Join(res.Changes, "\n")
+	for _, want := range []string{"adopt the restic repository password from " + offsiteEnvPath, "old.example.com", "write " + offsiteEnvPath} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("Changes missing %q: %v", want, res.Changes)
+		}
+	}
+	if strings.Contains(joined, "generate") {
+		t.Errorf("a readable host password must be adopted, never generated over: %v", res.Changes)
+	}
+}
+
+func TestOffsiteCheckMissingPasswordAdoptsFromUnmarkedFile(t *testing.T) {
+	unmarked := bssh.Result{Stdout: "RESTIC_REPOSITORY='s3:https://s3.example.com/bkt/offsite-test-1'\n" +
+		"RESTIC_PASSWORD='" + adoptedHostValue + "'\n"}
+	s := offsiteS3Server(t)
+	seedOffsiteCacheWithoutPassword(t, s)
+	f := bssh.NewFakeRunner()
+	stubOffsiteCheckConvergedExceptEnv(t, f, s)
+	f.On("cat "+shQuote(offsiteEnvPath), unmarked)
+	f.On("stat -c '%U:%G %a' "+shQuote(offsiteEnvPath), bssh.Result{Stdout: "root:root 600\n"})
+
+	// Without --force the foreign file stops the run (the managed-file
+	// contract); with --force the overwrite now carries the adopted value.
+	if _, err := Offsite(nil).Check(context.Background(), provision.RunCtx{}, s, f); err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("an unmarked env file must still need --force; got %v", err)
+	}
+	res, err := Offsite(nil).Check(context.Background(), provision.RunCtx{Force: true}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(res.Changes, "\n")
+	if !strings.Contains(joined, "adopt the restic repository password") || strings.Contains(joined, "generate") {
+		t.Fatalf("with --force the unmarked file's password must be adopted, not generated over: %v", res.Changes)
+	}
+}
+
+func TestOffsiteCheckHostEnvWithoutReadablePasswordIsLoudError(t *testing.T) {
+	cases := map[string]string{
+		"missing line":   "# managed by berth\nRESTIC_REPOSITORY='s3:https://s3.example.com/bkt/offsite-test-1'\n",
+		"unquoted value": "# managed by berth\nRESTIC_PASSWORD=" + adoptedHostValue + "\n",
+	}
+	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
 			s := offsiteS3Server(t)
 			seedOffsiteCacheWithoutPassword(t, s)
-			if got := s.Backups.Offsite.Repository(s.ID); got != "s3:https://s3.example.com/bkt/offsite-test-1" {
-				t.Fatalf("fixture repository drifted: %s", got)
-			}
 			f := bssh.NewFakeRunner()
 			stubOffsiteCheckConvergedExceptEnv(t, f, s)
-			f.On("cat "+shQuote(offsiteEnvPath), envRead)
+			f.On("cat "+shQuote(offsiteEnvPath), bssh.Result{Stdout: content})
 
-			res, err := Offsite(nil).Check(context.Background(), provision.RunCtx{}, s, f)
-			if err != nil {
-				t.Fatal(err)
+			_, err := Offsite(nil).Check(context.Background(), provision.RunCtx{}, s, f)
+			if err == nil || !strings.Contains(err.Error(), "berth secret set") {
+				t.Fatalf("an env file whose password berth cannot read must stop the run (never generate over it); got %v", err)
 			}
-			joined := strings.Join(res.Changes, "\n")
-			for _, want := range []string{"generate restic repository password", "write " + offsiteEnvPath} {
-				if !strings.Contains(joined, want) {
-					t.Errorf("Changes missing %q: %v", want, res.Changes)
-				}
-			}
-			if strings.Contains(joined, "adopt") {
-				t.Errorf("nothing adoptable, yet Check plans adoption: %v", res.Changes)
+			if strings.Contains(err.Error(), adoptedHostValue) {
+				t.Fatalf("the error must never print the host value: %v", err)
 			}
 		})
 	}
@@ -890,12 +929,45 @@ func TestOffsiteApplyAdoptsHostPasswordInsteadOfGenerating(t *testing.T) {
 	if got := cache.Secrets[secret.OffsiteResticPassword]; got != adoptedHostValue {
 		t.Fatalf("Apply must adopt the host's restic password into the cache; cache holds %q", got)
 	}
+	written := false
 	for _, w := range f.Writes() {
-		if w.Path == offsiteEnvPath && !strings.Contains(string(w.Content), "RESTIC_PASSWORD='"+adoptedHostValue+"'") {
-			t.Fatalf("the env file must keep the host's password, got:\n%s", w.Content)
+		if w.Path == offsiteEnvPath {
+			written = true
+			if !strings.Contains(string(w.Content), "RESTIC_PASSWORD='"+adoptedHostValue+"'") {
+				t.Fatalf("the env file must keep the host's password, got:\n%s", w.Content)
+			}
 		}
+	}
+	if !written {
+		t.Fatal("Apply rewrites the env file on every run; it must carry the adopted password")
 	}
 	if len(warns) != 1 || !strings.Contains(warns[0], "adopted") || strings.Contains(warns[0], adoptedHostValue) {
 		t.Fatalf("Apply must warn once about the adoption without printing the value; got %q", warns)
+	}
+}
+
+func TestOffsiteApplyAdoptsPasswordWrittenForAnotherRepository(t *testing.T) {
+	s := offsiteS3Server(t)
+	seedOffsiteCacheWithoutPassword(t, s)
+	f := bssh.NewFakeRunner()
+	stubOffsiteApplyBase(t, f, s, offsiteHostSecrets())
+	f.On("cat "+shQuote(offsiteEnvPath), bssh.Result{Stdout: "# managed by berth\n" +
+		"RESTIC_REPOSITORY='s3:https://old.example.com/bkt/offsite-test-1'\nRESTIC_PASSWORD='" + adoptedHostValue + "'\n"})
+	f.On(offsiteEnvCmd("restic cat config >/dev/null"), bssh.Result{ExitCode: 0})
+	var warns []string
+	rc := provision.RunCtx{Warn: func(m string) { warns = append(warns, m) }}
+
+	if err := Offsite(nil).Apply(context.Background(), rc, s, f); err != nil {
+		t.Fatal(err)
+	}
+	cache, err := secret.LoadEnvelope(s.CacheKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cache.Secrets[secret.OffsiteResticPassword]; got != adoptedHostValue {
+		t.Fatalf("the password written for the old repository must be adopted, never generated over; cache holds %q", got)
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0], "old.example.com") {
+		t.Fatalf("the warning must name the repository the host file was written for; got %q", warns)
 	}
 }
