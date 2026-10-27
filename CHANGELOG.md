@@ -15,8 +15,13 @@ Notable changes to berth. Older releases are documented on the
   only `text/html` was, by the stock `nginx.conf`. The `nginx` step now
   writes a managed `/etc/nginx/conf.d/berth-gzip.conf` (`gzip_vary on`,
   level 5, 256-byte minimum, a text-type list) whose shape follows
-  `nginx.conf`: it adds `gzip on;` only where `nginx.conf` lacks it, since
-  nginx rejects the directive twice in one context. The file is classified
+  `nginx.conf`: berth reads the directives set directly in its `http` block
+  and leaves out every gzip directive already there (`gzip`, `gzip_vary`,
+  `gzip_proxied`, `gzip_comp_level`, `gzip_min_length` — nginx rejects a
+  second one in the same context as a duplicate; `gzip_types` is additive
+  and always written), so Debian's stock `gzip on;` and any tuning an
+  operator uncommented stay theirs, while nested `server`/`location` blocks
+  do not count. The file is classified
   first in the step's Check (a foreign file at its path refuses unless
   `--force`, on a fresh host too) and sits under nginx's reload stamp.
   `gzip: false` removes a berth-managed drop-in (a foreign file is left
@@ -24,8 +29,8 @@ Notable changes to berth. Older releases are documented on the
   it; the default answer writes no `gzip:` line. A config that never sets
   the knob gets the file on its next provision — the first run after
   upgrading reports `nginx` unsatisfied once and reloads it. A `gzip off;`
-  that an operator put into `nginx.conf` is refused outright (Check and
-  Apply) with the two ways out, since the drop-in could only duplicate it.
+  in `nginx.conf`'s `http` block is refused outright (Check and Apply) with
+  the two ways out, since the drop-in could only duplicate it.
 
 ## [0.33.2] — 2026-10-25
 

@@ -434,12 +434,17 @@ berth tunes the host for production Laravel out of the box:
 - **gzip** (`nginx.gzip`, default on): berth writes
   `/etc/nginx/conf.d/berth-gzip.conf`, which compresses text responses —
   HTML, JSON, CSS, JS, SVG, XML, plain text — dynamic PHP output included
-  (`gzip_vary on`, level 5, 256-byte minimum). Debian's stock `nginx.conf`
-  already carries `gzip on;`, so there the drop-in adds only the tuning;
-  nginx.org's ships the directive commented out, so the drop-in switches it
-  on (nginx rejects a second `gzip` directive in the same context as a
-  duplicate, which is why the file's shape follows `nginx.conf`; a `gzip off;`
-  an operator put there is refused outright, with the two ways out). `gzip: false`
+  (`gzip_vary on`, level 5, 256-byte minimum). The file's shape follows
+  `nginx.conf`: berth reads the directives set directly in its `http` block
+  and leaves out every one that is already there — `gzip`, `gzip_vary`,
+  `gzip_proxied`, `gzip_comp_level`, `gzip_min_length` — because nginx
+  rejects a second one in the same context as a duplicate (`gzip_types` is
+  additive and always written). Debian's stock `nginx.conf` carries
+  `gzip on;`, so there the drop-in adds only the tuning; nginx.org's ships
+  the directive commented out, so the drop-in switches it on; tuning an
+  operator uncommented stays theirs. Directives inside nested `server` or
+  `location` blocks do not count. A `gzip off;` in the `http` block is
+  refused outright, with the two ways out. `gzip: false`
   removes the drop-in (a file there that berth did not write is left alone)
   and leaves gzip to the stock `nginx.conf`: Debian's package then still
   compresses `text/html`, nginx.org's compresses nothing. Compressing dynamic

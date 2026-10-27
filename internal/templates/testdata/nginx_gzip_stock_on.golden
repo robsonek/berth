@@ -1,7 +1,8 @@
 # managed by berth
 # gzip for every text response nginx serves, dynamic PHP output included.
-# text/html is always compressed once gzip is on (nginx refuses it in
-# gzip_types as a duplicate), so it is deliberately not listed.
+# A directive nginx.conf already sets in its http block is left out here
+# (nginx rejects it twice in one context); gzip_types is additive. text/html
+# is always compressed once gzip is on, so it is deliberately not listed.
 gzip_vary on;
 gzip_proxied any;
 gzip_comp_level 5;

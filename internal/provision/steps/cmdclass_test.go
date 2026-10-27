@@ -571,14 +571,6 @@ var auditedScripts = map[string]string{
 	// and never reach the shell as a glob or separator. Nothing writes.
 	nginxWorkerUserProbePasted: "nginxRunsAsWWWData (nginx.go): grep -qE over nginx.conf for the www-data worker user, exit-code verdict — reads only",
 
-	// nginxConfGzipFlag's probe (nginx.go), reached whenever nginx.gzip is on
-	// (the default, so every variant): `grep -m1 -E` over the same fixed file
-	// as the worker-user probe, pasted literally for the same reason.
-	// Audited: prints the first matching line of nginx.conf (the Check parses
-	// the flag's value), exit 1 on none; the quoted ERE never reaches the
-	// shell. Nothing writes.
-	nginxGzipFlagProbePasted: "nginxConfGzipFlag (nginx.go): grep -m1 -E over nginx.conf for an active gzip on/off flag, first line printed — reads only",
-
 	// valkey's instance-unit discovery (valkeyListUnitsCmd, valkey.go), a
 	// production const pasted literally. Audited: `ls -1` over a fixed glob
 	// prints matching paths (reads directory entries only); `2>/dev/null`
@@ -859,10 +851,6 @@ func commandVProbeCmd(bin string) string {
 // issues — a fixed pattern over the const nginxConfPath, pasted as a literal
 // (see aptUserListsPasted for why never the production helper).
 const nginxWorkerUserProbePasted = `grep -qE '^[[:space:]]*user[[:space:]]+www-data;' /etc/nginx/nginx.conf`
-
-// nginxGzipFlagProbePasted is the EXACT text nginxConfGzipFlag (nginx.go)
-// issues — see nginxWorkerUserProbePasted for why a pasted literal.
-const nginxGzipFlagProbePasted = `grep -m1 -E '^[[:space:]]*gzip[[:space:]]+(on|off);' /etc/nginx/nginx.conf`
 
 // aptUserListsPasted is the EXACT text of the production const
 // aptUserListsCmd (aptextras.go), pasted as a literal — never referencing the

@@ -10,35 +10,45 @@ import (
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
 
+// The two stock nginx.conf shapes the drop-in adapts to: nginx.org's keeps
+// gzip commented out, Debian's switches it on (tuning commented out).
+const (
+	nginxConfOrg    = "user  nginx;\nhttp {\n    #gzip  on;\n    include /etc/nginx/conf.d/*.conf;\n}\n"
+	nginxConfDebian = "user www-data;\nhttp {\n\tgzip on;\n\n\t# gzip_vary on;\n\t# gzip_comp_level 6;\n\tinclude /etc/nginx/conf.d/*.conf;\n}\n"
+)
+
+// stubNginxConf makes nginx.conf read back with the given content.
+func stubNginxConf(f *bssh.FakeRunner, conf string) {
+	f.On("cat "+shQuote(nginxConfPath), bssh.Result{ExitCode: 0, Stdout: conf})
+}
+
 // stubGzipFresh makes the gzip drop-in read back absent and nginx.conf read
-// back WITHOUT an active gzip flag (nginx.org's stock form): Check reports
-// the drop-in missing, Apply's write guard passes and the render switches
-// gzip on itself.
+// back as nginx.org's stock (no active gzip directive): Check reports the
+// drop-in missing, Apply's write guard passes and the render switches gzip
+// on itself.
 func stubGzipFresh(f *bssh.FakeRunner) {
-	f.On(nginxGzipFlagProbeCmd, bssh.Result{ExitCode: 1})
+	stubNginxConf(f, nginxConfOrg)
 	f.On("cat "+shQuote(nginxGzipPath), bssh.Result{ExitCode: 1})
 }
 
-// stubGzipFlag makes nginx.conf read back with the given active gzip flag
-// line (grep -m1 prints the first match).
-func stubGzipFlag(f *bssh.FakeRunner, line string) {
-	f.On(nginxGzipFlagProbeCmd, bssh.Result{ExitCode: 0, Stdout: line + "\n"})
-}
-
 // stubGzipConverged makes the gzip drop-in read back as berth's rendered
-// content for the given nginx.conf state (stockOn = nginx.conf already
-// carries `gzip on;`, Debian's stock form).
+// content for the given nginx.conf state (stockOn = Debian's stock form,
+// which already carries `gzip on;`).
 func stubGzipConverged(t *testing.T, f *bssh.FakeRunner, stockOn bool) {
 	t.Helper()
-	want, err := renderNginxGzip(stockOn)
+	conf := nginxConfOrg
+	if stockOn {
+		conf = nginxConfDebian
+	}
+	shape, err := nginxGzipShapeFor(nginxHTTPDirectives(conf))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stockOn {
-		stubGzipFlag(f, "\tgzip on;")
-	} else {
-		f.On(nginxGzipFlagProbeCmd, bssh.Result{ExitCode: 1})
+	want, err := renderNginxGzip(shape)
+	if err != nil {
+		t.Fatal(err)
 	}
+	stubNginxConf(f, conf)
 	f.On("cat "+shQuote(nginxGzipPath), bssh.Result{ExitCode: 0, Stdout: string(want)})
 }
 
@@ -99,11 +109,11 @@ func TestNginxCheckSatisfiedWithGzipDropIn(t *testing.T) {
 func TestNginxCheckGzipDropInShapeFollowsStockNginxConf(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	stubNginxCheckConverged(f)
-	withOn, err := renderNginxGzip(false) // the shape that switches gzip on itself
+	withOn, err := renderNginxGzip(nginxGzipShape{Gzip: true, Vary: true, Proxied: true, CompLevel: true, MinLength: true}) // the shape that switches gzip on itself
 	if err != nil {
 		t.Fatal(err)
 	}
-	stubGzipFlag(f, "\tgzip on;") // but nginx.conf already has it
+	stubNginxConf(f, nginxConfDebian) // but nginx.conf already has it
 	f.On("cat "+shQuote(nginxGzipPath), bssh.Result{ExitCode: 0, Stdout: string(withOn)})
 	cr, err := Nginx().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
 	if err != nil {
@@ -119,7 +129,7 @@ func TestNginxCheckGzipDropInShapeFollowsStockNginxConf(t *testing.T) {
 // would surface as an unstubbed-command error instead of the refusal.
 func TestNginxCheckRefusesForeignGzipDropInFirst(t *testing.T) {
 	f := bssh.NewFakeRunner()
-	f.On(nginxGzipFlagProbeCmd, bssh.Result{ExitCode: 1})
+	stubNginxConf(f, nginxConfOrg)
 	f.On("cat "+shQuote(nginxGzipPath), bssh.Result{ExitCode: 0, Stdout: "gzip on;\n"})
 	_, err := Nginx().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
 	if err == nil || !strings.Contains(err.Error(), "not managed by berth") {
@@ -128,7 +138,7 @@ func TestNginxCheckRefusesForeignGzipDropInFirst(t *testing.T) {
 	// --force downgrades the refusal to plain drift.
 	f = bssh.NewFakeRunner()
 	stubNginxCheckConverged(f)
-	f.On(nginxGzipFlagProbeCmd, bssh.Result{ExitCode: 1})
+	stubNginxConf(f, nginxConfOrg)
 	f.On("cat "+shQuote(nginxGzipPath), bssh.Result{ExitCode: 0, Stdout: "gzip on;\n"})
 	cr, err := Nginx().Check(context.Background(), provision.RunCtx{Force: true}, &config.Server{}, f)
 	if err != nil {
@@ -164,8 +174,8 @@ func TestNginxCheckGzipOffSweepsOnlyManagedDropIn(t *testing.T) {
 			t.Errorf("%s: Satisfied = %v, want %v (%+v)", tc.name, cr.Satisfied, tc.want, cr)
 		}
 		for _, c := range f.Calls() {
-			if c.Cmd == nginxGzipFlagProbeCmd {
-				t.Errorf("%s: gzip: false must not probe nginx.conf", tc.name)
+			if c.Cmd == "cat "+shQuote(nginxConfPath) {
+				t.Errorf("%s: gzip: false must not read nginx.conf", tc.name)
 			}
 		}
 	}
@@ -189,12 +199,13 @@ func TestNginxApplyWritesGzipDropIn(t *testing.T) {
 		f.On("systemctl enable nginx", bssh.Result{})
 		stubNginxApplyTail(f)
 		if stockOn {
-			stubGzipFlag(f, "\tgzip on;")
+			stubNginxConf(f, nginxConfDebian)
 		}
 		if err := Nginx().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f); err != nil {
 			t.Fatalf("stockOn=%v: Apply() error = %v", stockOn, err)
 		}
-		want, err := renderNginxGzip(stockOn)
+		shape := nginxGzipShape{Gzip: !stockOn, Vary: true, Proxied: true, CompLevel: true, MinLength: true}
+		want, err := renderNginxGzip(shape)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -214,14 +225,14 @@ func TestNginxApplyWritesGzipDropIn(t *testing.T) {
 		if !found {
 			t.Errorf("stockOn=%v: Apply must write %s", stockOn, nginxGzipPath)
 		}
-		// The nginx.conf probe must run AFTER the package install: on a fresh
+		// The nginx.conf read must run AFTER the package install: on a fresh
 		// host nginx.conf exists only once the package is unpacked.
 		install, probe := -1, -1
 		for i, c := range f.Calls() {
 			switch c.Cmd {
 			case "DEBIAN_FRONTEND=noninteractive apt-get install -y nginx":
 				install = i
-			case nginxGzipFlagProbeCmd:
+			case "cat " + shQuote(nginxConfPath):
 				probe = i
 			}
 		}
@@ -277,7 +288,7 @@ func TestNginxApplyGzipOffRemovesOnlyManagedDropIn(t *testing.T) {
 func TestNginxCheckRefusesGzipOffInNginxConf(t *testing.T) {
 	for _, force := range []bool{false, true} {
 		f := bssh.NewFakeRunner()
-		stubGzipFlag(f, "    gzip off;")
+		stubNginxConf(f, "http {\n    gzip off;\n}\n")
 		_, err := Nginx().Check(context.Background(), provision.RunCtx{Force: force}, &config.Server{}, f)
 		if err == nil || !strings.Contains(err.Error(), "gzip off") || !strings.Contains(err.Error(), "nginx.gzip: false") {
 			t.Errorf("force=%v: want the gzip-off refusal naming nginx.gzip: false, got %v", force, err)
@@ -290,7 +301,7 @@ func TestNginxApplyRefusesGzipOffInNginxConf(t *testing.T) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx", bssh.Result{})
 	f.On("systemctl enable nginx", bssh.Result{})
 	stubNginxApplyTail(f)
-	stubGzipFlag(f, "\tgzip off;")
+	stubNginxConf(f, "http {\n\tgzip off;\n}\n")
 	err := Nginx().Apply(context.Background(), provision.RunCtx{Force: true}, &config.Server{}, f)
 	if err == nil || !strings.Contains(err.Error(), "gzip off") {
 		t.Fatalf("want the gzip-off refusal, got %v", err)
@@ -305,4 +316,75 @@ func TestNginxApplyRefusesGzipOffInNginxConf(t *testing.T) {
 			t.Error("Apply must refuse before validating — the refusal is the diagnosis, not a -t failure")
 		}
 	}
+}
+
+// Greptile P1 (PR #103): nginx's duplicate rule is per context, so a
+// `gzip off;` inside a server block nested in nginx.conf is no conflict —
+// the drop-in still switches gzip on at http level, and nothing is refused.
+// Likewise nginx's permissive `gzip on ;` counts as the http-level flag.
+func TestNginxGzipIgnoresNestedBlocksAndAcceptsSpacing(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	stubNginxCheckConverged(f)
+	conf := "http {\n    server {\n        listen 80;\n        gzip off;\n    }\n}\n"
+	shape, err := nginxGzipShapeFor(nginxHTTPDirectives(conf))
+	if err != nil {
+		t.Fatalf("nested gzip off must not refuse: %v", err)
+	}
+	if !shape.Gzip {
+		t.Fatalf("nested gzip off must not suppress the http-level gzip on; shape %+v", shape)
+	}
+	want, err := renderNginxGzip(shape)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubNginxConf(f, conf)
+	f.On("cat "+shQuote(nginxGzipPath), bssh.Result{ExitCode: 0, Stdout: string(want)})
+	f.On(reloadedSinceCmd("nginx", nginxConfPath, nginxGzipPath), bssh.Result{})
+	cr, err := Nginx().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied {
+		t.Errorf("expected satisfied with a nested gzip off; got %+v", cr)
+	}
+	spaced, err := nginxGzipShapeFor(nginxHTTPDirectives("http {\n\tgzip on ;\n}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spaced.Gzip {
+		t.Errorf("`gzip on ;` must count as the http-level flag; shape %+v", spaced)
+	}
+}
+
+// Greptile P1 (PR #103): tuning an operator uncommented in nginx.conf's http
+// block (Debian ships `# gzip_vary on;` etc. as suggestions) must not be
+// repeated by the drop-in — nginx rejects each as a duplicate — so Apply
+// writes only what nginx.conf leaves unset.
+func TestNginxApplyGzipDropInOmitsTuningNginxConfSets(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx", bssh.Result{})
+	f.On("systemctl enable nginx", bssh.Result{})
+	stubNginxApplyTail(f)
+	stubNginxConf(f, "http {\n\tgzip on;\n\tgzip_vary on;\n\tgzip_comp_level 6;\n\tgzip_types text/css;\n}\n")
+	if err := Nginx().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	for _, w := range f.Writes() {
+		if w.Path != nginxGzipPath {
+			continue
+		}
+		body := string(w.Content)
+		for _, dup := range []string{"gzip on;", "gzip_vary", "gzip_comp_level"} {
+			if strings.Contains(body, dup) {
+				t.Errorf("drop-in repeats %q that nginx.conf already sets:\n%s", dup, body)
+			}
+		}
+		for _, keep := range []string{"gzip_proxied any;", "gzip_min_length 256;", "gzip_types "} {
+			if !strings.Contains(body, keep) {
+				t.Errorf("drop-in must still carry %q:\n%s", keep, body)
+			}
+		}
+		return
+	}
+	t.Fatal("Apply must write the drop-in")
 }

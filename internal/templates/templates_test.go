@@ -508,15 +508,25 @@ func TestRenderUnattendedOriginsGolden(t *testing.T) {
 	}
 }
 
-// The conf.d gzip drop-in (nginx step). Two shapes: nginx.org's stock
-// nginx.conf leaves `gzip` commented out, so the drop-in must switch it on;
-// Debian's stock nginx.conf already carries `gzip on;` at http level, and a
-// second `gzip` directive in the same context is a duplicate nginx -t
-// rejects, so the drop-in then carries only the tuning directives.
+// The conf.d gzip drop-in (nginx step). Each gzip directive is written only
+// when nginx.conf does not already set it at http level — nginx rejects a
+// second gzip / gzip_vary / gzip_proxied / gzip_comp_level / gzip_min_length
+// in one context as a duplicate — while gzip_types is additive and always
+// present. Three shapes: nginx.org's stock nginx.conf sets nothing (full
+// drop-in), Debian's sets `gzip on;` (tuning only), an operator who
+// uncommented Debian's suggested tuning gets gzip_types alone.
+type nginxGzipData struct {
+	Gzip, Vary, Proxied, CompLevel, MinLength bool
+}
+
 func TestRenderNginxGzipGolden(t *testing.T) {
-	checkGolden(t, "nginx_gzip.conf.tmpl", "nginx_gzip.golden", struct{ GzipOn bool }{true})
+	checkGolden(t, "nginx_gzip.conf.tmpl", "nginx_gzip.golden", nginxGzipData{Gzip: true, Vary: true, Proxied: true, CompLevel: true, MinLength: true})
 }
 
 func TestRenderNginxGzipStockOnGolden(t *testing.T) {
-	checkGolden(t, "nginx_gzip.conf.tmpl", "nginx_gzip_stock_on.golden", struct{ GzipOn bool }{false})
+	checkGolden(t, "nginx_gzip.conf.tmpl", "nginx_gzip_stock_on.golden", nginxGzipData{Vary: true, Proxied: true, CompLevel: true, MinLength: true})
+}
+
+func TestRenderNginxGzipTypesOnlyGolden(t *testing.T) {
+	checkGolden(t, "nginx_gzip.conf.tmpl", "nginx_gzip_types_only.golden", nginxGzipData{})
 }

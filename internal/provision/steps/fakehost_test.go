@@ -922,11 +922,16 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 		h.putManaged(nginxBridgePath, nginxBridgeContent(), profile)
 	}
 	// The gzip drop-in (nginx.gzip on, the default for every variant), in the
-	// shape the step renders for the modelled nginx.conf: Debian's already
-	// enables gzip (tuning only), nginx.org's does not (the drop-in adds
-	// `gzip on;`). The rendered-bytes rule: the fixture IS the step's output.
+	// shape the step derives from the MODELLED nginx.conf (put above, per
+	// source): Debian's already enables gzip (tuning only), nginx.org's does
+	// not (the drop-in adds `gzip on;`). The rendered-bytes rule: the fixture
+	// IS the step's output over the fixture's own input.
 	if s.Nginx.GzipEnabled() {
-		gz, err := renderNginxGzip(!useOrg)
+		shape, err := nginxGzipShapeFor(nginxHTTPDirectives(h.files[nginxConfPath].content))
+		if err != nil {
+			panic("shape the fixture gzip drop-in: " + err.Error())
+		}
+		gz, err := renderNginxGzip(shape)
 		if err != nil {
 			panic("render the fixture gzip drop-in: " + err.Error())
 		}

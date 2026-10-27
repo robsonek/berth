@@ -3,8 +3,6 @@ package steps
 import (
 	"context"
 	"fmt"
-	"regexp"
-	"strings"
 
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
@@ -48,70 +46,56 @@ func nginxBridgeContent() []byte {
 // /build/assets/ location the vhosts compress themselves. Written iff
 // nginx.gzip is on (the default), drift-removed otherwise (guarded: a foreign
 // file at the path is never clobbered). conf.d is included in the http
-// context by both supported sources' nginx.conf, like the cloudflare snippet.
+// context by both supported sources' nginx.conf, like the cloudflare snippet;
+// its shape leaves out whatever nginx.conf already sets there (nginxconf.go).
 const nginxGzipPath = "/etc/nginx/conf.d/berth-gzip.conf"
 
-// nginxGzipFlagProbeCmd prints nginx.conf's first ACTIVE `gzip on;` /
-// `gzip off;` line (exit 1 when there is none): Debian's stock nginx.conf
-// carries `gzip on;` at http level, nginx.org's ships the directive commented
-// out. nginx rejects a second `gzip` directive in the same context as a
-// duplicate whatever its value, so the drop-in repeats it only when
-// nginx.conf has no flag at all, and an operator's `gzip off;` is refused
-// (desiredNginxGzip). Fixed text over the const path — the read-only contract
-// pastes it literally.
-const nginxGzipFlagProbeCmd = "grep -m1 -E '^[[:space:]]*gzip[[:space:]]+(on|off);' " + nginxConfPath
-
-// reNginxGzipFlag parses the probe's line: the flag's value.
-var reNginxGzipFlag = regexp.MustCompile(`^\s*gzip\s+(on|off);`)
-
-// nginxConfGzipFlag runs nginxGzipFlagProbeCmd and returns "on", "off" or ""
-// (no active flag — also the answer for a missing nginx.conf on a fresh
-// host; Apply probes only after the package install, so that answer never
-// shapes a written file).
-func nginxConfGzipFlag(ctx context.Context, r bssh.Runner) (string, error) {
-	res, err := r.Run(ctx, nginxGzipFlagProbeCmd, nil)
-	if err != nil {
-		return "", err
-	}
-	if res.ExitCode != 0 {
-		return "", nil
-	}
-	m := reNginxGzipFlag.FindStringSubmatch(res.Stdout)
-	if m == nil {
-		return "", fmt.Errorf("parse nginx.conf gzip flag: unexpected probe output %q", strings.TrimSpace(res.Stdout))
-	}
-	return m[1], nil
-}
-
-// renderNginxGzip renders the gzip drop-in for an nginx.conf that already
-// enables gzip (stockOn: tuning directives only) or does not (the drop-in
-// switches it on itself).
-func renderNginxGzip(stockOn bool) ([]byte, error) {
-	return templates.Render("nginx_gzip.conf.tmpl", struct{ GzipOn bool }{!stockOn})
-}
-
-// desiredNginxGzip is the drop-in content for THIS host: the nginx.conf probe
-// decides the shape, so Check and Apply can never disagree about it. An
-// operator's `gzip off;` is intent the knob cannot honour (the drop-in could
-// only duplicate the directive), so both refuse with the two ways out — a
-// clear refusal here instead of a `"gzip" directive is duplicate` from
-// nginx -t deferred to the site step.
-func desiredNginxGzip(ctx context.Context, r bssh.Runner) ([]byte, error) {
-	flag, err := nginxConfGzipFlag(ctx, r)
+// nginxConfHTTPDirectives reads nginx.conf and returns the directives set
+// directly in its http block (nginxHTTPDirectives): Debian's stock carries
+// `gzip on;` there with the tuning commented out, nginx.org's ships `gzip`
+// commented out. A missing nginx.conf (fresh host) reads as no directives;
+// Apply reads only after the package install, so that answer never shapes
+// a written file.
+func nginxConfHTTPDirectives(ctx context.Context, r bssh.Runner) (map[string][]string, error) {
+	res, err := r.Run(ctx, "cat "+shQuote(nginxConfPath), nil)
 	if err != nil {
 		return nil, err
 	}
-	if flag == "off" {
-		return nil, fmt.Errorf("%s sets gzip off at http level, which berth's gzip drop-in cannot override (nginx rejects a second gzip directive in the same context): remove that line, or set nginx.gzip: false to leave gzip unmanaged", nginxConfPath)
+	if res.ExitCode != 0 {
+		return nil, nil
 	}
-	return renderNginxGzip(flag == "on")
+	return nginxHTTPDirectives(res.Stdout), nil
+}
+
+// renderNginxGzip renders the gzip drop-in in the given shape.
+func renderNginxGzip(shape nginxGzipShape) ([]byte, error) {
+	return templates.Render("nginx_gzip.conf.tmpl", shape)
+}
+
+// desiredNginxGzip is the drop-in content for THIS host: nginx.conf's
+// http-level directives decide the shape (nginxGzipShapeFor), so Check and
+// Apply can never disagree about it, and the drop-in never repeats a
+// directive nginx.conf already sets — a repeat is a duplicate nginx -t
+// rejects, which would otherwise surface as a validator failure deferred to
+// the site step. An operator's http-level `gzip off;` is refused here with
+// the two ways out.
+func desiredNginxGzip(ctx context.Context, r bssh.Runner) ([]byte, error) {
+	http, err := nginxConfHTTPDirectives(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	shape, err := nginxGzipShapeFor(http)
+	if err != nil {
+		return nil, err
+	}
+	return renderNginxGzip(shape)
 }
 
 // checkNginxGzip classifies the gzip drop-in against the knob. On: the
 // rendered content must be present (a foreign file refuses unless --force —
 // the standard managed-file policy). Off: a lingering berth-managed file is
 // drift for Apply to remove; a foreign file or none is converged, and
-// nginx.conf is not probed (nothing to render).
+// nginx.conf is not read (nothing to render).
 func checkNginxGzip(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (bool, error) {
 	if !s.Nginx.GzipEnabled() {
 		present, err := managedFilePresent(ctx, r, nginxGzipPath)
@@ -134,7 +118,7 @@ func checkNginxGzip(ctx context.Context, rc provision.RunCtx, s *config.Server, 
 // ensureNginxGzip is checkNginxGzip's write path: render-and-write under the
 // drift policy when the knob is on, guarded removal of a berth-managed file
 // when it is off. Runs after the package install (nginx.conf must exist for
-// the shape probe) and before the validate+reload.
+// the shape read) and before the validate+reload.
 func ensureNginxGzip(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
 	if !s.Nginx.GzipEnabled() {
 		present, err := managedFilePresent(ctx, r, nginxGzipPath)
@@ -185,7 +169,8 @@ func (n nginx) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 	// The gzip drop-in is classified FIRST and unconditionally — ahead of the
 	// installed/running probes — so a foreign file at its path refuses
 	// (unless --force) on a fresh host too, before Apply could reach the
-	// write. (Mirrors base's unconditional 20auto-upgrades pre-check.)
+	// write. (Mirrors base's unconditional 20auto-upgrades pre-check.) The
+	// nginx.conf read that shapes the render comes first of all.
 	gzipOK, err := checkNginxGzip(ctx, rc, s, r)
 	if err != nil {
 		return provision.CheckResult{}, err
