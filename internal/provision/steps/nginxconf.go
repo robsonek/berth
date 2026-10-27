@@ -10,17 +10,23 @@ import (
 // nothing from main level, events, or any block nested inside http (server,
 // location, map, upstream …). nginx's duplicate rule is per context, so only
 // these can collide with a conf.d drop-in, which nginx.conf includes at http
-// level. The lexer follows nginx's own: `#` comments to end of line, single
-// and double quotes group one argument, `;` ends a directive wherever it
-// stands (`gzip on ;` is valid), `{` opens the block named by the statement's
-// first token. A conf without an http block yields an empty map (a fresh host
-// has no nginx.conf yet).
+// level. The lexer follows nginx's own (ngx_conf_read_token): `#` starts a
+// comment only at a token boundary; a quote opens a quoted argument only at
+// a token start; a backslash escapes the next character inside and outside
+// quotes (`\"` `\'` `\\` drop the backslash, `\t` `\r` `\n` become the
+// control character, anything else is kept as written); `;` ends a
+// directive wherever it stands (`gzip on ;` is valid); `{` opens the block
+// named by the statement's first token unless it follows `$` (a `${var}`
+// reference); a `}` starting a token closes the block, one inside a token
+// is a plain character. A conf without an http block yields an empty map
+// (a fresh host has no nginx.conf yet).
 func nginxHTTPDirectives(conf string) map[string][]string {
 	out := map[string][]string{}
 	var stack []string // enclosing block names, innermost last
 	var args []string  // tokens of the statement being read
 	var tok strings.Builder
-	inTok, quote := false, byte(0)
+	inTok, escaped, variable := false, false, false
+	var quote byte
 	flush := func() {
 		if inTok {
 			args = append(args, tok.String())
@@ -30,22 +36,55 @@ func nginxHTTPDirectives(conf string) map[string][]string {
 	}
 	for i := 0; i < len(conf); i++ {
 		c := conf[i]
+		if escaped {
+			escaped = false
+			inTok = true
+			switch c {
+			case '"', '\'', '\\':
+				tok.WriteByte(c)
+			case 't':
+				tok.WriteByte('\t')
+			case 'r':
+				tok.WriteByte('\r')
+			case 'n':
+				tok.WriteByte('\n')
+			default:
+				tok.WriteByte('\\')
+				tok.WriteByte(c)
+			}
+			continue
+		}
+		if c == '\\' {
+			escaped = true
+			inTok = true
+			variable = false
+			continue
+		}
 		if quote != 0 {
 			if c == quote {
 				quote = 0
-				continue
+			} else {
+				tok.WriteByte(c)
 			}
-			tok.WriteByte(c)
 			continue
 		}
+		wasVariable := variable
+		variable = false
 		switch c {
 		case '#':
-			flush()
+			if inTok {
+				tok.WriteByte(c)
+				continue
+			}
 			for i < len(conf) && conf[i] != '\n' {
 				i++
 			}
 		case '"', '\'':
-			inTok, quote = true, c
+			if inTok {
+				tok.WriteByte(c)
+				continue
+			}
+			quote, inTok = c, true
 		case ' ', '\t', '\r', '\n':
 			flush()
 		case ';':
@@ -57,6 +96,10 @@ func nginxHTTPDirectives(conf string) map[string][]string {
 			}
 			args = nil
 		case '{':
+			if wasVariable {
+				tok.WriteByte(c)
+				continue
+			}
 			flush()
 			name := ""
 			if len(args) > 0 {
@@ -65,7 +108,10 @@ func nginxHTTPDirectives(conf string) map[string][]string {
 			stack = append(stack, name)
 			args = nil
 		case '}':
-			flush()
+			if inTok {
+				tok.WriteByte(c)
+				continue
+			}
 			if len(stack) > 0 {
 				stack = stack[:len(stack)-1]
 			}
@@ -73,6 +119,7 @@ func nginxHTTPDirectives(conf string) map[string][]string {
 		default:
 			inTok = true
 			tok.WriteByte(c)
+			variable = c == '$'
 		}
 	}
 	return out

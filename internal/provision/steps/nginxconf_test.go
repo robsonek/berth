@@ -92,3 +92,30 @@ func TestNginxGzipShapeFromHTTPDirectives(t *testing.T) {
 		}
 	}
 }
+
+// Greptile P1 (PR #103, second round): nginx's lexer escapes the next
+// character after a backslash, inside and outside quotes, so `\"` never
+// closes a double-quoted argument — a valid log_format with an escaped
+// quote before `gzip on;` must not swallow the gzip directive. `${var}`
+// inside an argument is a variable, not a block, and a `}` inside a token
+// is a plain character (only a `}` that starts a token closes a block).
+func TestNginxHTTPDirectivesEscapesAndVariables(t *testing.T) {
+	conf := `
+http {
+    log_format custom "quote: \" $request" '\'s' ;
+    set $x ${foo}bar;
+    gzip on;
+    gzip_vary on\;;
+}
+`
+	got := nginxHTTPDirectives(conf)
+	want := map[string][]string{
+		"log_format": {"custom", `quote: " $request`, `'s`},
+		"set":        {"$x", "${foo}bar"},
+		"gzip":       {"on"},
+		"gzip_vary":  {`on\;`}, // an escaped `;` is no terminator and, like nginx, keeps its backslash
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("nginxHTTPDirectives =\n%v\nwant\n%v", got, want)
+	}
+}
