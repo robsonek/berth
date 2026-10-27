@@ -884,6 +884,23 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 		}
 		return bssh.Result{ExitCode: 1}, true
 
+	// nginxConfEnablesGzip reads ONLY the exit code of its grep -qE over
+	// nginx.conf (reached whenever nginx.gzip is on). Same grep semantics as
+	// the worker-user probe above: the modelled nginx.conf carries Debian's
+	// active `gzip on;` under the stock source and nginx.org's commented-out
+	// form under the upstream variant, so both drop-in shapes are walked.
+	case cmd == nginxGzipOnProbePasted:
+		file, ok := r.h.files[nginxConfPath]
+		if !ok {
+			return bssh.Result{ExitCode: 2, Stderr: "grep: " + nginxConfPath + ": No such file or directory"}, true
+		}
+		for _, line := range strings.Split(file.content, "\n") {
+			if reNginxGzipOn.MatchString(line) {
+				return bssh.Result{}, true
+			}
+		}
+		return bssh.Result{ExitCode: 1}, true
+
 	// envDBConnection PARSES the first KEY= line of grep's stdout (and
 	// Apply's passwordFromEnv/appKeyFromEnv share the shape). Real grep
 	// semantics over the model: first matching line at exit 0, exit 1 on no
@@ -1077,6 +1094,9 @@ var (
 // reNginxWorkerUser mirrors nginxRunsAsWWWData's ERE (nginx.go) in Go regexp
 // form — a copy on purpose, applied per line the way grep applies it.
 var reNginxWorkerUser = regexp.MustCompile(`^[[:space:]]*user[[:space:]]+www-data;`)
+
+// reNginxGzipOn mirrors nginxConfEnablesGzip's ERE (nginx.go) the same way.
+var reNginxGzipOn = regexp.MustCompile(`^[[:space:]]*gzip[[:space:]]+on;`)
 
 // rePoolListen mirrors the listen-directive match inside
 // phpPoolConflictProbeCmd's grep -Eq, in Go regexp form.

@@ -17,7 +17,7 @@ func (a Answers) ToServer() *config.Server {
 		Host:     a.Host,
 		SSH:      config.SSH{User: a.SSHUser, Port: a.Port, Key: a.Key, Fingerprint: a.Fingerprint},
 		PHP:      config.PHP{Version: a.PHPVersion, Source: a.PHPSource},
-		Nginx:    config.Nginx{Source: a.NginxSource},
+		Nginx:    config.Nginx{Source: a.NginxSource, Gzip: gzipKnob(a.Gzip)},
 		Database: config.Database{Engine: a.DBEngine, Source: a.DBSource}, // no top-level name/user
 		Valkey:   a.Valkey, Queue: a.Queue, Scheduler: a.Scheduler,
 		Workers:  a.Workers, // "" => omitted (dormant)
@@ -124,4 +124,15 @@ func (a Answers) ToServer() *config.Server {
 		srv.Sites = append(srv.Sites, site)
 	}
 	return srv
+}
+
+// gzipKnob maps the wizard's gzip answer onto the tri-state config field:
+// the default (on) stays unset so the YAML carries no gzip: line and keeps
+// following berth's default; an explicit no is pinned as gzip: false.
+func gzipKnob(on bool) *bool {
+	if on {
+		return nil
+	}
+	off := false
+	return &off
 }

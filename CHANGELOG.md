@@ -3,7 +3,28 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
-## [0.33.2] — 2026-10-25
+## [Unreleased]
+
+### Added
+
+- **`nginx.gzip`** (default on) compresses text responses — HTML, JSON, CSS,
+  JS, SVG, XML, plain text — dynamic PHP output included. Until now only the
+  static `/build/assets/` location was compressed; with `nginx.source: nginx`
+  every PHP response left the host uncompressed (nginx.org's stock
+  `nginx.conf` keeps `gzip` commented out), and with `nginx.source: debian`
+  only `text/html` was, by the stock `nginx.conf`. The `nginx` step now
+  writes a managed `/etc/nginx/conf.d/berth-gzip.conf` (`gzip_vary on`,
+  level 5, 256-byte minimum, a text-type list) whose shape follows
+  `nginx.conf`: it adds `gzip on;` only where `nginx.conf` lacks it, since
+  nginx rejects the directive twice in one context. The file is classified
+  first in the step's Check (a foreign file at its path refuses unless
+  `--force`, on a fresh host too) and sits under nginx's reload stamp.
+  `gzip: false` removes a berth-managed drop-in (a foreign file is left
+  alone) and leaves gzip to the stock `nginx.conf`. `berth init` asks for
+  it; the default answer writes no `gzip:` line. A config that never sets
+  the knob gets the file on its next provision — the first run after
+  upgrading reports `nginx` unsatisfied once and reloads it.
+
 
 ### Fixed
 

@@ -98,3 +98,13 @@ sites:
 		t.Errorf("apt.upstream_updates must stay empty after Load (zero value = auto); got %q", s.Apt.UpstreamUpdates)
 	}
 }
+
+// nginx.gzip gates the conf.d gzip drop-in (compression of dynamic HTML/JSON
+// responses): unset means ON, so a config that never mentions it gets the
+// file written. Flipping this default adds or removes a managed file on
+// every host — a BREAKING entry, like every pin above.
+func TestNginxGzipDefaultIsFrozen(t *testing.T) {
+	if !(Nginx{}).GzipEnabled() {
+		t.Error("nginx.gzip default changed: want on (unset = gzip drop-in written)")
+	}
+}

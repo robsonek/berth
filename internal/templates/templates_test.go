@@ -507,3 +507,16 @@ func TestRenderUnattendedOriginsGolden(t *testing.T) {
 		})
 	}
 }
+
+// The conf.d gzip drop-in (nginx step). Two shapes: nginx.org's stock
+// nginx.conf leaves `gzip` commented out, so the drop-in must switch it on;
+// Debian's stock nginx.conf already carries `gzip on;` at http level, and a
+// second `gzip` directive in the same context is a duplicate nginx -t
+// rejects, so the drop-in then carries only the tuning directives.
+func TestRenderNginxGzipGolden(t *testing.T) {
+	checkGolden(t, "nginx_gzip.conf.tmpl", "nginx_gzip.golden", struct{ GzipOn bool }{true})
+}
+
+func TestRenderNginxGzipStockOnGolden(t *testing.T) {
+	checkGolden(t, "nginx_gzip.conf.tmpl", "nginx_gzip_stock_on.golden", struct{ GzipOn bool }{false})
+}

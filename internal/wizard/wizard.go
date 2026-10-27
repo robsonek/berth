@@ -45,6 +45,7 @@ type Answers struct {
 	DBEngine    string // mariadb | postgres
 	DBSource    string // debian | mariadb | pgdg (paired with engine)
 	NginxSource string // debian | nginx
+	Gzip        bool   // nginx.gzip: the conf.d gzip drop-in (dynamic responses too); true = berth's default, written as unset
 	Valkey      bool
 	Queue       bool // server-wide default worker
 	Scheduler   bool // server-wide default
@@ -183,6 +184,7 @@ func defaults() Answers {
 		PHPVersion: "8.5", PHPSource: "auto",
 		DBEngine: "mariadb", DBSource: "debian",
 		NginxSource: "debian",
+		Gzip:        true,
 		Scheduler:   true,
 	}
 }

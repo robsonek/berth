@@ -149,6 +149,7 @@ func TestProvisionFreshDebian13(t *testing.T) {
 		useHTTPS, insecureTLS := siteHTTPSProbe(invCtx, t, client, site, sslExplicit)
 		assertSiteServesOwnContent(invCtx, t, client, srv, site, useHTTPS, insecureTLS)
 	}
+	assertGzipResponses(invCtx, t, client, srv, sslExplicit)
 
 	assertMultiSiteIsolation(invCtx, t, client, srv)
 	assertDBAuth(invCtx, t, client, srv)

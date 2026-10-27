@@ -554,6 +554,14 @@ var auditedScripts = map[string]string{
 	// `[ ! … -nt … ]` mtime comparison in the same && chain — reads only.
 	reloadedSinceCmd("nginx", "/etc/nginx/nginx.conf", "/etc/nginx/conf.d/berth-sites.conf"): "reloadedSince (reloadstamp.go) for nginx vs its core config + the nginx.org sites bridge: [ -e ] + [ -nt ] — reads only",
 
+	// With nginx.gzip on (the default) the gzip drop-in joins the core config
+	// (nginxOwnedConfigFiles, nginx.go) — after the bridge under the upstream
+	// variant, alone with nginx.conf otherwise; the two shapes above are what
+	// a gzip: false config still issues. Audited: one more `[ ! … -nt … ]`
+	// mtime comparison in the same && chain — reads only.
+	reloadedSinceCmd("nginx", "/etc/nginx/nginx.conf", "/etc/nginx/conf.d/berth-gzip.conf"):                                       "reloadedSince (reloadstamp.go) for nginx vs its core config + the gzip drop-in: [ -e ] + [ -nt ] — reads only",
+	reloadedSinceCmd("nginx", "/etc/nginx/nginx.conf", "/etc/nginx/conf.d/berth-sites.conf", "/etc/nginx/conf.d/berth-gzip.conf"): "reloadedSince (reloadstamp.go) for nginx vs its core config + the nginx.org sites bridge + the gzip drop-in: [ -e ] + [ -nt ] — reads only",
+
 	// nginxRunsAsWWWData's worker-user probe (nginx.go), reached only under
 	// nginx.source=nginx (the upstream variant), pasted literally — the
 	// production composition is a fixed pattern plus the const nginxConfPath,
@@ -562,6 +570,13 @@ var auditedScripts = map[string]string{
 	// and semicolon sit inside single quotes, so they reach grep as its ERE
 	// and never reach the shell as a glob or separator. Nothing writes.
 	nginxWorkerUserProbePasted: "nginxRunsAsWWWData (nginx.go): grep -qE over nginx.conf for the www-data worker user, exit-code verdict — reads only",
+
+	// nginxConfEnablesGzip's probe (nginx.go), reached whenever nginx.gzip is
+	// on (the default, so every variant): the same `grep -qE` shape over the
+	// same fixed file as the worker-user probe, a different ERE — pasted
+	// literally for the same reason. Audited: -q prints nothing, the verdict
+	// is the exit code, the quoted ERE never reaches the shell. Nothing writes.
+	nginxGzipOnProbePasted: "nginxConfEnablesGzip (nginx.go): grep -qE over nginx.conf for an active `gzip on;`, exit-code verdict — reads only",
 
 	// valkey's instance-unit discovery (valkeyListUnitsCmd, valkey.go), a
 	// production const pasted literally. Audited: `ls -1` over a fixed glob
@@ -843,6 +858,10 @@ func commandVProbeCmd(bin string) string {
 // issues — a fixed pattern over the const nginxConfPath, pasted as a literal
 // (see aptUserListsPasted for why never the production helper).
 const nginxWorkerUserProbePasted = `grep -qE '^[[:space:]]*user[[:space:]]+www-data;' /etc/nginx/nginx.conf`
+
+// nginxGzipOnProbePasted is the EXACT text nginxConfEnablesGzip (nginx.go)
+// issues — see nginxWorkerUserProbePasted for why a pasted literal.
+const nginxGzipOnProbePasted = `grep -qE '^[[:space:]]*gzip[[:space:]]+on;' /etc/nginx/nginx.conf`
 
 // aptUserListsPasted is the EXACT text of the production const
 // aptUserListsCmd (aptextras.go), pasted as a literal — never referencing the

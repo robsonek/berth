@@ -624,13 +624,20 @@ func populateInstalled(h *fakeHost, s *config.Server, profile string) {
 	h.files["/usr/bin/valkey-check-rdb"] = fakeFile{owner: "root", group: "root",
 		mode: "755", kind: "regular file", mtimeUnix: 1400000000}
 	// nginx's package-shipped core config. nginx.Check keys its reload stamp
-	// on this file's MTIME (reloadedSince); the content is only ever grepped
-	// under nginx.source=nginx (the upstream variant), where nginx.org ships
-	// `user nginx;` and Apply's worker-user sed rewrites it to `user  www-data;`
-	// (two spaces). The single-space line modelled here is Debian's stock form;
-	// both satisfy the worker-user grep, which allows any whitespace run.
+	// on this file's MTIME (reloadedSince) and greps its content twice: the
+	// worker user (only under nginx.source=nginx, where nginx.org ships
+	// `user nginx;` and Apply's sed rewrites it to `user  www-data;` — two
+	// spaces; the single-space line here is Debian's stock form, and the grep
+	// allows any whitespace run) and the http-level gzip flag, which decides
+	// the gzip drop-in's shape: Debian's stock nginx.conf carries an active
+	// `gzip on;` (tab-indented inside the http block), nginx.org's ships it
+	// commented out. Modelled per source so BOTH drop-in shapes are walked.
+	nginxConf := "user www-data;\nworker_processes auto;\n\thttp {\n\tgzip on;\n}\n"
+	if _, useOrg := nginxUpstream(s); useOrg {
+		nginxConf = "user www-data;\nworker_processes auto;\nhttp {\n    #gzip  on;\n}\n"
+	}
 	h.files["/etc/nginx/nginx.conf"] = fakeFile{
-		content: "user www-data;\nworker_processes auto;\n",
+		content: nginxConf,
 		owner:   "root", group: "root", mode: "644", kind: "regular file",
 		mtimeUnix: 1500000000,
 	}
@@ -910,8 +917,20 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 	// nginx.org lays down the conf.d bridge (rendered by the step's own
 	// function) and has its stock conf.d/default.conf renamed away; Check
 	// requires default.conf ABSENT (the .disabled copy is not probed).
-	if _, useOrg := nginxUpstream(s); useOrg {
+	_, useOrg := nginxUpstream(s)
+	if useOrg {
 		h.putManaged(nginxBridgePath, nginxBridgeContent(), profile)
+	}
+	// The gzip drop-in (nginx.gzip on, the default for every variant), in the
+	// shape the step renders for the modelled nginx.conf: Debian's already
+	// enables gzip (tuning only), nginx.org's does not (the drop-in adds
+	// `gzip on;`). The rendered-bytes rule: the fixture IS the step's output.
+	if s.Nginx.GzipEnabled() {
+		gz, err := renderNginxGzip(!useOrg)
+		if err != nil {
+			panic("render the fixture gzip drop-in: " + err.Error())
+		}
+		h.putManaged(nginxGzipPath, gz, profile)
 	}
 	// accounts' artifacts. The sudoers bodies come from the same sources the
 	// step compares against: the berth grant is the step's own const, the site
