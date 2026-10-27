@@ -15,7 +15,7 @@ import (
 // the pointed-to answers in place so a re-prompt (passing the same struct) shows
 // the user's prior entries.
 type prompter interface {
-	ServerCore(a *Answers) error     // host, ssh, php, db (combined), nginx, valkey, queue, scheduler
+	ServerCore(a *Answers) error     // host, ssh, php, db (combined), nginx + gzip, valkey, queue, scheduler
 	ServerAdvanced(a *Answers) error // fail2ban + tuning
 	ServerOps(a *Answers) error      // swap/sysctl, cloudflare-only, apt packages + upstream updates, workers, backups
 	SiteCore(index int, sa *SiteAnswers) error
@@ -65,6 +65,7 @@ func (h *huhPrompter) ServerCore(a *Answers) error {
 			huh.NewSelect[string]().Title("PHP source").Options(huh.NewOptions("auto", "sury", "debian")...).Value(&a.PHPSource),
 			huh.NewSelect[config.DatabaseChoice]().Title("Database engine + source").Options(dbOpts...).Value(&choice),
 			huh.NewSelect[string]().Title("nginx source").Options(huh.NewOptions("debian", "nginx")...).Value(&a.NginxSource),
+			huh.NewConfirm().Title("gzip responses (HTML/JSON/CSS/JS, dynamic PHP output included)?").Value(&a.Gzip),
 		),
 		huh.NewGroup(
 			huh.NewConfirm().Title("Install Valkey (Redis)?").Value(&a.Valkey),

@@ -1,0 +1,10 @@
+# managed by berth
+# gzip for every text response nginx serves, dynamic PHP output included.
+# A directive nginx.conf already sets in its http block is left out here
+# (nginx rejects it twice in one context); gzip_types is additive. text/html
+# is always compressed once gzip is on, so it is deliberately not listed.
+gzip_vary on;
+gzip_proxied any;
+gzip_comp_level 5;
+gzip_min_length 256;
+gzip_types text/plain text/css text/javascript text/xml application/javascript application/json application/ld+json application/manifest+json application/xml application/rss+xml application/atom+xml image/svg+xml;

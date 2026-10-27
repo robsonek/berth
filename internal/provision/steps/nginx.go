@@ -7,6 +7,7 @@ import (
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
 	bssh "github.com/robsonek/berth/internal/ssh"
+	"github.com/robsonek/berth/internal/templates"
 )
 
 type nginx struct{}
@@ -40,20 +41,140 @@ func nginxBridgeContent() []byte {
 	return []byte(managedMarker + "\ninclude /etc/nginx/sites-enabled/*;\n")
 }
 
+// nginxGzipPath is the managed http-context drop-in that compresses text
+// responses — dynamic PHP output (HTML, JSON) included, not only the static
+// /build/assets/ location the vhosts compress themselves. Written iff
+// nginx.gzip is on (the default), drift-removed otherwise (guarded: a foreign
+// file at the path is never clobbered). conf.d is included in the http
+// context by both supported sources' nginx.conf, like the cloudflare snippet;
+// its shape leaves out whatever nginx.conf already sets there (nginxconf.go).
+const nginxGzipPath = "/etc/nginx/conf.d/berth-gzip.conf"
+
+// nginxConfHTTPDirectives reads nginx.conf and returns the directives set
+// directly in its http block (nginxHTTPDirectives): Debian's stock carries
+// `gzip on;` there with the tuning commented out, nginx.org's ships `gzip`
+// commented out. A missing nginx.conf (fresh host) reads as no directives;
+// Apply reads only after the package install, so that answer never shapes
+// a written file.
+func nginxConfHTTPDirectives(ctx context.Context, r bssh.Runner) (map[string][]string, error) {
+	res, err := r.Run(ctx, "cat "+shQuote(nginxConfPath), nil)
+	if err != nil {
+		return nil, err
+	}
+	if res.ExitCode != 0 {
+		return nil, nil
+	}
+	return nginxHTTPDirectives(res.Stdout), nil
+}
+
+// renderNginxGzip renders the gzip drop-in in the given shape.
+func renderNginxGzip(shape nginxGzipShape) ([]byte, error) {
+	return templates.Render("nginx_gzip.conf.tmpl", shape)
+}
+
+// desiredNginxGzip is the drop-in content for THIS host: nginx.conf's
+// http-level directives decide the shape (nginxGzipShapeFor), so Check and
+// Apply can never disagree about it, and the drop-in never repeats a
+// directive nginx.conf already sets — a repeat is a duplicate nginx -t
+// rejects, which would otherwise surface as a validator failure deferred to
+// the site step. An operator's http-level `gzip off;` is refused here with
+// the two ways out.
+func desiredNginxGzip(ctx context.Context, r bssh.Runner) ([]byte, error) {
+	http, err := nginxConfHTTPDirectives(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	shape, err := nginxGzipShapeFor(http)
+	if err != nil {
+		return nil, err
+	}
+	return renderNginxGzip(shape)
+}
+
+// checkNginxGzip classifies the gzip drop-in against the knob. On: the
+// rendered content must be present (a foreign file refuses unless --force —
+// the standard managed-file policy). Off: a lingering berth-managed file is
+// drift for Apply to remove; a foreign file or none is converged, and
+// nginx.conf is not read (nothing to render).
+func checkNginxGzip(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (bool, error) {
+	if !s.Nginx.GzipEnabled() {
+		present, err := managedFilePresent(ctx, r, nginxGzipPath)
+		if err != nil {
+			return false, err
+		}
+		return !present, nil
+	}
+	want, err := desiredNginxGzip(ctx, r)
+	if err != nil {
+		return false, err
+	}
+	state, err := checkManagedFile(ctx, r, nginxGzipPath, want)
+	if err != nil {
+		return false, err
+	}
+	return managedFileSatisfied(state, nginxGzipPath, rc.Force)
+}
+
+// ensureNginxGzip is checkNginxGzip's write path: render-and-write under the
+// drift policy when the knob is on, guarded removal of a berth-managed file
+// when it is off. Runs after the package install (nginx.conf must exist for
+// the shape read) and before the validate+reload.
+func ensureNginxGzip(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
+	if !s.Nginx.GzipEnabled() {
+		present, err := managedFilePresent(ctx, r, nginxGzipPath)
+		if err != nil {
+			return err
+		}
+		if !present {
+			return nil
+		}
+		if res, err := r.Run(ctx, "rm -f "+shQuote(nginxGzipPath), nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("remove %s: %s", nginxGzipPath, res.Stderr)
+		}
+		return nil
+	}
+	want, err := desiredNginxGzip(ctx, r)
+	if err != nil {
+		return err
+	}
+	if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
+		Path: nginxGzipPath, Content: want,
+		Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
+	}); err != nil {
+		return fmt.Errorf("write nginx gzip drop-in: %w", err)
+	}
+	return nil
+}
+
 // nginxOwnedConfigFiles are the config files this step's Apply lays down or
 // rewrites, probed against the reload stamp: nginx.conf always (the package
 // ships it; the worker-user sed rewrites it for source=nginx), plus the conf.d
-// sites bridge for source=nginx. The stock-default removals need no entry —
-// a removed path can never be newer than the stamp.
+// sites bridge for source=nginx and the gzip drop-in while nginx.gzip is on.
+// The stock-default removals and the gzip-off sweep need no entry — a removed
+// path can never be newer than the stamp.
 func nginxOwnedConfigFiles(s *config.Server) []string {
 	files := []string{nginxConfPath}
 	if _, useOrg := nginxUpstream(s); useOrg {
 		files = append(files, nginxBridgePath)
 	}
+	if s.Nginx.GzipEnabled() {
+		files = append(files, nginxGzipPath)
+	}
 	return files
 }
 
 func (n nginx) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
+	// The gzip drop-in is classified FIRST and unconditionally — ahead of the
+	// installed/running probes — so a foreign file at its path refuses
+	// (unless --force) on a fresh host too, before Apply could reach the
+	// write. (Mirrors base's unconditional 20auto-upgrades pre-check.) The
+	// nginx.conf read that shapes the render comes first of all.
+	gzipOK, err := checkNginxGzip(ctx, rc, s, r)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
 	nginxRepo, useOrg := nginxUpstream(s)
 	installed, err := pkgInstalled(ctx, r, "nginx")
 	if err != nil {
@@ -102,10 +223,10 @@ func (n nginx) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	if !(installed && up && sourceOK && userOK && bridgeOK && defaultsDisabled && sweepOK) {
+	if !(installed && up && sourceOK && userOK && bridgeOK && defaultsDisabled && sweepOK && gzipOK) {
 		return provision.CheckResult{
 			Satisfied: false,
-			Reason:    "nginx not installed, not running, not from the configured source, worker user not www-data, stock default site still enabled, or a lingering nginx.org repo awaits removal",
+			Reason:    "nginx not installed, not running, not from the configured source, worker user not www-data, stock default site still enabled, a lingering nginx.org repo awaits removal, or the gzip drop-in is missing, stale or lingering",
 			Changes:   n.changes(s),
 		}, nil
 	}
@@ -126,11 +247,21 @@ func (n nginx) Check(ctx context.Context, rc provision.RunCtx, s *config.Server,
 			Changes:   n.changes(s),
 		}, nil
 	}
-	return provision.CheckResult{Satisfied: true, Reason: "nginx installed and running from the " + s.Nginx.Source + " source (worker user www-data); stock default sites disabled"}, nil
+	gzipState := "; gzip drop-in in place"
+	if !s.Nginx.GzipEnabled() {
+		gzipState = "; gzip not managed (nginx.gzip: false)"
+	}
+	return provision.CheckResult{Satisfied: true, Reason: "nginx installed and running from the " + s.Nginx.Source + " source (worker user www-data); stock default sites disabled" + gzipState}, nil
 }
 
 func (nginx) changes(s *config.Server) []string {
-	out := []string{"install nginx (" + s.Nginx.Source + ")", "run workers as www-data", "disable stock default site(s)", "systemctl enable nginx, then start or reload once nginx -t passes"}
+	out := []string{"install nginx (" + s.Nginx.Source + ")", "run workers as www-data", "disable stock default site(s)"}
+	if s.Nginx.GzipEnabled() {
+		out = append(out, "write gzip drop-in "+nginxGzipPath)
+	} else {
+		out = append(out, "remove "+nginxGzipPath+" if berth-managed")
+	}
+	out = append(out, "systemctl enable nginx, then start or reload once nginx -t passes")
 	if _, useOrg := nginxUpstream(s); !useOrg {
 		out = append(out, "remove lingering nginx.org repo if berth-owned")
 	}
@@ -196,6 +327,9 @@ func (nginx) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r
 	if err := disableStockDefaults(ctx, r); err != nil {
 		return err
 	}
+	if err := ensureNginxGzip(ctx, rc, s, r); err != nil {
+		return err
+	}
 	// Enable WITHOUT starting: enablement does not depend on config validity,
 	// while `enable --now` on a dead nginx with a broken vhost would fail on
 	// the start before the validation below could defer the failure to the
@@ -222,7 +356,7 @@ func (nginx) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r
 		if !rc.FullRun {
 			return fmt.Errorf("nginx -t failed after disabling stock defaults: %s — if the failure points at a vhost under /etc/nginx/sites-available/, fix or remove that file, or run a full provision (no --only) so the site step can re-render its vhosts", res.Stderr)
 		}
-		rc.Warnf("nginx -t fails (validator says: %s); berth's own nginx files are fixed content, so the failure is most likely a vhost under /etc/nginx/sites-available/ or a foreign conf.d file; skipping the nginx reload — the site step will re-render its vhosts, validate and reload", res.Stderr)
+		rc.Warnf("nginx -t fails (validator says: %s); berth's own nginx files are fixed content, so the failure is most likely a vhost under /etc/nginx/sites-available/ or a foreign conf.d file (or a gzip directive that nginx.conf and %s both set — a duplicate nginx rejects); skipping the nginx reload — the site step will re-render its vhosts, validate and reload", res.Stderr, nginxGzipPath)
 		return nil
 	}
 	active, err := serviceActive(ctx, r, "nginx")

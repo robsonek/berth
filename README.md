@@ -132,6 +132,8 @@ php:
 
 nginx:
   source: debian               # debian | nginx  (nginx.org mainline; needed for HTTP/3)
+  gzip: true                   # compress HTML/JSON/CSS/JS responses, dynamic PHP output included;
+                               # false = leave gzip to the stock nginx.conf
 
 database:
   engine: mariadb              # mariadb | postgres   (server-wide)
@@ -429,8 +431,30 @@ berth tunes the host for production Laravel out of the box:
   not perform this cleanup.
 - **HTTP/3 (QUIC)** is available per site with `http3: true` (requires `ssl` and
   `nginx.source: nginx`); berth also opens UDP/443.
+- **gzip** (`nginx.gzip`, default on): berth writes
+  `/etc/nginx/conf.d/berth-gzip.conf`, which compresses text responses —
+  HTML, JSON, CSS, JS, SVG, XML, plain text — dynamic PHP output included
+  (`gzip_vary on`, level 5, 256-byte minimum). The file's shape follows
+  `nginx.conf`: berth reads the directives set directly in its `http` block
+  and leaves out every one that is already there — `gzip`, `gzip_vary`,
+  `gzip_proxied`, `gzip_comp_level`, `gzip_min_length` — because nginx
+  rejects a second one in the same context as a duplicate (`gzip_types` is
+  additive and always written). Debian's stock `nginx.conf` carries
+  `gzip on;`, so there the drop-in adds only the tuning; nginx.org's ships
+  the directive commented out, so the drop-in switches it on; tuning an
+  operator uncommented stays theirs. Directives inside nested `server` or
+  `location` blocks do not count. A `gzip off;` in the `http` block is
+  refused outright, with the two ways out. `gzip: false`
+  removes the drop-in (a file there that berth did not write is left alone)
+  and leaves gzip to the stock `nginx.conf`: Debian's package then still
+  compresses `text/html`, nginx.org's compresses nothing. Compressing dynamic
+  responses exposes a page that reflects attacker-controlled input next to a
+  secret to BREACH; Laravel's CSRF token is per session and unmasked, so an
+  application that echoes user input into such a page may prefer
+  `gzip: false`.
 - nginx serves fingerprinted Vite assets under `/build/assets/` with a one-year
-  cache and gzip, and raises `client_max_body_size` for typical uploads.
+  cache and gzip (whatever `nginx.gzip` says), and raises
+  `client_max_body_size` for typical uploads.
 
 ### Service tuning (`tuning:`)
 

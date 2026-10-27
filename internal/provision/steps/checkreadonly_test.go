@@ -33,6 +33,12 @@ var expectedRefusals = map[string]string{
 	// first managed file hardening.Check classifies).
 	"hardening": "not managed by berth",
 	"site":      "not managed by berth",
+	// nginx: a foreign file at the gzip drop-in path aborts unless --force
+	// (nginx.go: checkNginxGzip runs FIRST and unconditionally, ahead of the
+	// installed/running probes, so the refusal lands on a fresh host too).
+	// Guard order verified: the drop-in's cat is the step's second command,
+	// right after the nginx.conf shape probe, which only reads.
+	"nginx": "not managed by berth",
 	// preflight: the foreign apt lock-timeout drop-in aborts unless --force —
 	// deliberate (preflight.go: without this gate even `--only identity` would
 	// clobber a foreign file, preflight being always-run).
@@ -119,13 +125,10 @@ func refusalsFor(variant string) map[string]string {
 		// the dead allowance guard 4c exists to reject.
 		delete(m, "tuning")
 	case "upstream":
-		// nginx: with nginx.source=nginx, a foreign file at nginx.org's
-		// source-list path aborts unless --force (ownRepoUpToDate, aptrepo.go
-		// — the standard managed-file policy over berth's own repo). Guard
-		// order verified: pkgInstalled and serviceUp are data-only; the
-		// nginx.org list classify is the first guard that can refuse, ahead
-		// of the worker-user grep and the sites-bridge classify.
-		m["nginx"] = "not managed by berth"
+		// nginx: baseline's entry holds here too — the gzip drop-in classify
+		// still refuses first; with nginx.source=nginx a foreign file at
+		// nginx.org's source-list path (ownRepoUpToDate, aptrepo.go) and a
+		// foreign sites bridge would refuse with the same substring later.
 		// database: with database.source=mariadb, a foreign file at the
 		// MariaDB repo's source-list path aborts unless --force (the same
 		// ownRepoUpToDate). Guard order verified: the cache preflight is

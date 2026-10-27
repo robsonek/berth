@@ -70,6 +70,7 @@ func stubEnsureRepoChain(f *bssh.FakeRunner, repo apt.Repo) {
 // override that stub after calling this.
 func stubNginxApplyTail(f *bssh.FakeRunner) {
 	stubNginxRepoAbsent(f)
+	stubGzipFresh(f)
 	f.On("rm -f "+shQuote("/var/lib/berth/nginx.reloaded"), bssh.Result{})
 	f.On("rm -f "+shQuote(debianDefaultSite), bssh.Result{})
 	f.On(fmt.Sprintf("test -f %[1]s && mv -f %[1]s %[1]s.disabled || true", shQuote(nginxOrgDefaultConf)), bssh.Result{})
@@ -81,12 +82,13 @@ func stubNginxApplyTail(f *bssh.FakeRunner) {
 
 func TestNginxCheckSatisfiedWhenInstalledAndUp(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	stubGzipConverged(t, f, false)
 	f.On("dpkg -s nginx", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
 	stubDefaultsAbsent(f)
 	stubNginxRepoAbsent(f)
-	f.On(reloadedSinceCmd("nginx", nginxConfPath), bssh.Result{}) // stamp fresh
+	f.On(reloadedSinceCmd("nginx", nginxConfPath, nginxGzipPath), bssh.Result{}) // stamp fresh
 	cr, err := Nginx().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
 	if err != nil {
 		t.Fatal(err)
@@ -101,12 +103,13 @@ func TestNginxCheckUnsatisfiedWhenConfNewerThanStamp(t *testing.T) {
 	// daemon on the old config while every byte-level probe reads converged —
 	// only the reload stamp catches it.
 	f := bssh.NewFakeRunner()
+	stubGzipConverged(t, f, false)
 	f.On("dpkg -s nginx", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
 	stubDefaultsAbsent(f)
 	stubNginxRepoAbsent(f)
-	f.On(reloadedSinceCmd("nginx", nginxConfPath), bssh.Result{ExitCode: 1})
+	f.On(reloadedSinceCmd("nginx", nginxConfPath, nginxGzipPath), bssh.Result{ExitCode: 1})
 	cr, err := Nginx().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
 	if err != nil {
 		t.Fatal(err)
@@ -118,6 +121,7 @@ func TestNginxCheckUnsatisfiedWhenConfNewerThanStamp(t *testing.T) {
 
 func TestNginxCheckUnsatisfiedWhenNotInstalled(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	stubGzipFresh(f)
 	f.On("dpkg -s nginx", bssh.Result{ExitCode: 1})
 	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
@@ -134,6 +138,7 @@ func TestNginxCheckUnsatisfiedWhenNotInstalled(t *testing.T) {
 
 func TestNginxCheckUnsatisfiedWhenNotRunning(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	stubGzipFresh(f)
 	f.On("dpkg -s nginx", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 3}) // inactive
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
@@ -150,6 +155,7 @@ func TestNginxCheckUnsatisfiedWhenNotRunning(t *testing.T) {
 
 func TestNginxCheckUnsatisfiedWhenDefaultSiteEnabled(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	stubGzipFresh(f)
 	f.On("dpkg -s nginx", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
@@ -194,6 +200,7 @@ func TestNginxApplyDisablesStockDefaults(t *testing.T) {
 func TestNginxCheckSourceNginxRequiresRepo(t *testing.T) {
 	s := &config.Server{Nginx: config.Nginx{Source: "nginx"}}
 	f := bssh.NewFakeRunner()
+	stubGzipConverged(t, f, false)
 	f.On("dpkg -s nginx", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
@@ -202,7 +209,7 @@ func TestNginxCheckSourceNginxRequiresRepo(t *testing.T) {
 	// gates this test). source=nginx probes the bridge file too.
 	f.On("grep -qE '^[[:space:]]*user[[:space:]]+www-data;' "+nginxConfPath, bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(nginxBridgePath), bssh.Result{ExitCode: 0, Stdout: string(nginxBridgeContent())})
-	f.On(reloadedSinceCmd("nginx", nginxConfPath, nginxBridgePath), bssh.Result{})
+	f.On(reloadedSinceCmd("nginx", nginxConfPath, nginxBridgePath, nginxGzipPath), bssh.Result{})
 	// nginx.org repo not yet registered -> not satisfied even though nginx runs.
 	stubNginxRepoAbsent(f)
 	cr, err := Nginx().Check(context.Background(), provision.RunCtx{}, s, f)
@@ -230,6 +237,7 @@ func TestNginxCheckUnsatisfiedWhenBridgeMissingOrForeign(t *testing.T) {
 	s := &config.Server{Nginx: config.Nginx{Source: "nginx"}}
 	stubs := func(bridge bssh.Result) *bssh.FakeRunner {
 		f := bssh.NewFakeRunner()
+		stubGzipFresh(f)
 		f.On("dpkg -s nginx", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 		f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
 		f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
@@ -360,6 +368,7 @@ func TestNginxApplyInvalidatesBeforeMutationAndStampsAfterReload(t *testing.T) {
 // nginx.org source-list probe reads back absent (nothing to sweep).
 func stubNginxApplyUpToValidate(f *bssh.FakeRunner) {
 	stubNginxRepoAbsent(f)
+	stubGzipFresh(f)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx", bssh.Result{})
 	f.On("systemctl enable nginx", bssh.Result{})
 	f.On("rm -f "+shQuote("/var/lib/berth/nginx.reloaded"), bssh.Result{})
@@ -485,6 +494,7 @@ func TestNginxCheckDebianSourceFlagsLingeringRepo(t *testing.T) {
 	// earlier upstream provision: drift, Apply removes it (E1).
 	repo := apt.NginxOrg()
 	f := bssh.NewFakeRunner()
+	stubGzipFresh(f)
 	f.On("dpkg -s nginx", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("systemctl is-active nginx", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})

@@ -554,6 +554,14 @@ var auditedScripts = map[string]string{
 	// `[ ! … -nt … ]` mtime comparison in the same && chain — reads only.
 	reloadedSinceCmd("nginx", "/etc/nginx/nginx.conf", "/etc/nginx/conf.d/berth-sites.conf"): "reloadedSince (reloadstamp.go) for nginx vs its core config + the nginx.org sites bridge: [ -e ] + [ -nt ] — reads only",
 
+	// With nginx.gzip on (the default) the gzip drop-in joins the core config
+	// (nginxOwnedConfigFiles, nginx.go) — after the bridge under the upstream
+	// variant, alone with nginx.conf otherwise; the two shapes above are what
+	// a gzip: false config still issues. Audited: one more `[ ! … -nt … ]`
+	// mtime comparison in the same && chain — reads only.
+	reloadedSinceCmd("nginx", "/etc/nginx/nginx.conf", "/etc/nginx/conf.d/berth-gzip.conf"):                                       "reloadedSince (reloadstamp.go) for nginx vs its core config + the gzip drop-in: [ -e ] + [ -nt ] — reads only",
+	reloadedSinceCmd("nginx", "/etc/nginx/nginx.conf", "/etc/nginx/conf.d/berth-sites.conf", "/etc/nginx/conf.d/berth-gzip.conf"): "reloadedSince (reloadstamp.go) for nginx vs its core config + the nginx.org sites bridge + the gzip drop-in: [ -e ] + [ -nt ] — reads only",
+
 	// nginxRunsAsWWWData's worker-user probe (nginx.go), reached only under
 	// nginx.source=nginx (the upstream variant), pasted literally — the
 	// production composition is a fixed pattern plus the const nginxConfPath,

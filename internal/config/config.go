@@ -26,7 +26,19 @@ type PHP struct {
 
 type Nginx struct {
 	Source string `mapstructure:"source" yaml:"source"` // debian | nginx (nginx.org mainline)
+	// Gzip gates the managed /etc/nginx/conf.d/berth-gzip.conf drop-in that
+	// compresses text responses (HTML, JSON, CSS, JS, SVG, XML, plain text),
+	// including dynamic PHP output. nil = on (the default lives in
+	// GzipEnabled, NOT in Load() via SetDefault, so wizard ToServer() and
+	// literal Server callers see the same default); false = berth does not
+	// manage gzip (the drop-in is removed, stock nginx.conf behaviour stays:
+	// Debian's package enables gzip for text/html, nginx.org's does not).
+	Gzip *bool `mapstructure:"gzip" yaml:"gzip,omitempty"`
 }
+
+// GzipEnabled reports whether berth writes its conf.d gzip drop-in: unset
+// means on.
+func (n Nginx) GzipEnabled() bool { return n.Gzip == nil || *n.Gzip }
 
 // Fail2ban holds the tunable knobs for berth's managed jail.d drop-in.
 // bantime and findtime are a number optionally suffixed s/m/h/d/w (e.g. "1h",

@@ -309,23 +309,84 @@ func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) 
 // HTTP-side check cannot discriminate tenants and is not attempted; the HTTPS
 // marker is the proof. Tenants without an installed certificate (where the
 // cert-aware site step keeps the HTTP-only vhost) prove routing over HTTP.
+func assertSiteServesOwnContent(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server, site config.Site, useHTTPS, insecureTLS bool) {
+	t.Helper()
+	marker := "berth-tenant-" + config.PoolName(site.Domain)
+	leaf, cleanup := stageTenantPHP(ctx, t, c, srv, site, "<?php echo '"+marker+"';\n")
+	defer cleanup()
+
+	resp, err := tenantGET(ctx, srv, site, useHTTPS, insecureTLS, leaf, nil)
+	if err != nil {
+		t.Errorf("%s: GET /%s (Host %s): %v", site.Domain, leaf, site.Domain, err)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	t.Logf("GET /%s (Host %s) -> %d %q", leaf, site.Domain, resp.StatusCode, body)
+	if resp.StatusCode != http.StatusOK || string(body) != marker {
+		t.Errorf("%s: want 200 %q, got %d %q — tenant routing or pool selection is broken",
+			site.Domain, marker, resp.StatusCode, body)
+	}
+	if useHTTPS {
+		if resp.TLS == nil || len(resp.TLS.PeerCertificates) == 0 {
+			t.Errorf("%s: no TLS peer certificate", site.Domain)
+		} else if err := resp.TLS.PeerCertificates[0].VerifyHostname(site.Domain); err != nil {
+			t.Errorf("%s: SNI served a certificate not valid for the domain: %v", site.Domain, err)
+		}
+	}
+}
+
+// tenantGET fetches /<leaf> through the host address while forcing the
+// tenant's identity (HTTP Host header; SNI ServerName over TLS), never
+// following redirects. Extra request headers come from hdr; a nil map sends
+// Go's defaults. The caller closes the body.
+func tenantGET(ctx context.Context, srv *config.Server, site config.Site, useHTTPS, insecureTLS bool, leaf string, hdr http.Header) (*http.Response, error) {
+	scheme, port := "http", "80"
+	tr := &http.Transport{}
+	if useHTTPS {
+		scheme, port = "https", "443"
+		tr.TLSClientConfig = &tls.Config{ServerName: site.Domain, InsecureSkipVerify: insecureTLS}
+	}
+	cl := &http.Client{Timeout: 10 * time.Second, Transport: tr,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	url := scheme + "://" + net.JoinHostPort(srv.Host, port) + "/" + leaf
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Host = site.Domain
+	for k, vs := range hdr {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
+	return cl.Do(req)
+}
+
+// stageTenantPHP stages a PHP file with the given source under the site's
+// docroot and returns its random leaf name plus the cleanup the caller defers.
 //
 // Staging runs entirely AS THE SITE USER: the current/ tree is tenant-controlled
 // and outside the appdirs symlink guard, so root must never create or write
 // under it (a symlinked current/public could redirect root's write anywhere).
 // As the site user, even a check-to-use race lands inside the tenant's own
-// privilege. The marker leaf is random per run and created with noclobber, so a
+// privilege. The leaf is random per run and created with noclobber, so a
 // reused box's real app file is never replaced or deleted.
-func assertSiteServesOwnContent(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server, site config.Site, useHTTPS, insecureTLS bool) {
+//
+// Cleanup runs as the site user on a FRESH context (the test context may
+// already be cancelled or exhausted) and fails the test loudly on any error:
+// the unique file, then rmdir — empty-only, never rm -rf — each directory
+// level this call created, deepest first. A failed write runs it before
+// failing, so the directories never outlive the call.
+func stageTenantPHP(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server, site config.Site, php string) (leaf string, cleanup func()) {
 	t.Helper()
 	user := srv.SiteUser(site)
-	marker := "berth-tenant-" + config.PoolName(site.Domain)
 	docroot := site.DeployPath + "/current/public"
 	var leafRand [8]byte
 	if _, err := rand.Read(leafRand[:]); err != nil {
 		t.Fatalf("%s: probe leaf entropy: %v", site.Domain, err)
 	}
-	leaf := "berth-tenant-probe-" + hex.EncodeToString(leafRand[:]) + ".php"
+	leaf = "berth-tenant-probe-" + hex.EncodeToString(leafRand[:]) + ".php"
 	probe := docroot + "/" + leaf
 
 	// Symlink-escape guard: resolve the docroot as the site user and refuse to
@@ -339,7 +400,7 @@ func assertSiteServesOwnContent(ctx context.Context, t *testing.T, c *bssh.Clien
 			site.Domain, docroot, resolved, site.DeployPath)
 	}
 	// Collision guard before cleanup is armed: after this check, anything at the
-	// probe path was created by this run, so the deferred rm -f is provably safe.
+	// probe path was created by this run, so the rm -f below is provably safe.
 	if res, err := c.Run(ctx, "sudo -u "+user+" test -e "+shQuote(probe), nil); err != nil {
 		t.Fatalf("%s: probe collision check: %v", site.Domain, err)
 	} else if res.ExitCode == 0 {
@@ -365,12 +426,7 @@ func assertSiteServesOwnContent(ctx context.Context, t *testing.T, c *bssh.Clien
 			t.Fatalf("%s: create %s: exit %d, stderr %q", site.Domain, docroot, res.ExitCode, strings.TrimSpace(res.Stderr))
 		}
 	}
-	// Cleanup even on failure, as the site user, on a FRESH context (the test
-	// context may already be cancelled or exhausted), failing the test loudly on
-	// any error: the unique probe file, then rmdir — empty-only, never rm -rf —
-	// each level this run created, deepest first. Registered before the probe
-	// write so a failed write still removes the directories.
-	defer func() {
+	cleanup = func() {
 		cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if res, err := c.Run(cctx, "sudo -u "+user+" rm -f "+shQuote(probe), nil); err != nil {
@@ -385,49 +441,18 @@ func assertSiteServesOwnContent(ctx context.Context, t *testing.T, c *bssh.Clien
 				t.Errorf("%s: cleanup %s: exit %d, stderr %q", site.Domain, createdDirs[i], res.ExitCode, strings.TrimSpace(res.Stderr))
 			}
 		}
-	}()
-	// Write the marker as the site user via stdin; noclobber (set -C) keeps the
+	}
+	// Write the source as the site user via stdin; noclobber (set -C) keeps the
 	// creation exclusive even against a race after the collision check.
 	writeCmd := "sudo -u " + user + " sh -c " + shQuote("set -C; umask 022; cat > "+shQuote(probe))
-	if res, err := c.Run(ctx, writeCmd, []byte("<?php echo '"+marker+"';\n")); err != nil {
+	if res, err := c.Run(ctx, writeCmd, []byte(php)); err != nil {
+		cleanup()
 		t.Fatalf("%s: write probe: %v", site.Domain, err)
 	} else if res.ExitCode != 0 {
+		cleanup()
 		t.Fatalf("%s: write probe %s: exit %d, stderr %q", site.Domain, probe, res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
-
-	scheme, port := "http", "80"
-	tr := &http.Transport{}
-	if useHTTPS {
-		scheme, port = "https", "443"
-		tr.TLSClientConfig = &tls.Config{ServerName: site.Domain, InsecureSkipVerify: insecureTLS}
-	}
-	cl := &http.Client{Timeout: 10 * time.Second, Transport: tr,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	url := scheme + "://" + net.JoinHostPort(srv.Host, port) + "/" + leaf
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		t.Fatalf("%s: build request: %v", site.Domain, err)
-	}
-	req.Host = site.Domain
-	resp, err := cl.Do(req)
-	if err != nil {
-		t.Errorf("%s: GET %s (Host %s): %v", site.Domain, url, site.Domain, err)
-		return
-	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	t.Logf("GET %s (Host %s) -> %d %q", url, site.Domain, resp.StatusCode, body)
-	if resp.StatusCode != http.StatusOK || string(body) != marker {
-		t.Errorf("%s: want 200 %q, got %d %q — tenant routing or pool selection is broken",
-			site.Domain, marker, resp.StatusCode, body)
-	}
-	if useHTTPS {
-		if resp.TLS == nil || len(resp.TLS.PeerCertificates) == 0 {
-			t.Errorf("%s: no TLS peer certificate", site.Domain)
-		} else if err := resp.TLS.PeerCertificates[0].VerifyHostname(site.Domain); err != nil {
-			t.Errorf("%s: SNI served a certificate not valid for the domain: %v", site.Domain, err)
-		}
-	}
+	return leaf, cleanup
 }
 
 // eventually polls check until it returns true or the deadline passes.
