@@ -23,8 +23,11 @@ Notable changes to berth. Older releases are documented on the
   alone) and leaves gzip to the stock `nginx.conf`. `berth init` asks for
   it; the default answer writes no `gzip:` line. A config that never sets
   the knob gets the file on its next provision — the first run after
-  upgrading reports `nginx` unsatisfied once and reloads it.
+  upgrading reports `nginx` unsatisfied once and reloads it. A `gzip off;`
+  that an operator put into `nginx.conf` is refused outright (Check and
+  Apply) with the two ways out, since the drop-in could only duplicate it.
 
+## [0.33.2] — 2026-10-25
 
 ### Fixed
 

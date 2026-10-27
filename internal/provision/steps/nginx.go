@@ -3,6 +3,8 @@ package steps
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strings"
 
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
@@ -49,24 +51,36 @@ func nginxBridgeContent() []byte {
 // context by both supported sources' nginx.conf, like the cloudflare snippet.
 const nginxGzipPath = "/etc/nginx/conf.d/berth-gzip.conf"
 
-// nginxGzipOnProbeCmd asks whether nginx.conf itself already switches gzip on
-// at http level: Debian's stock nginx.conf does (`gzip on;`), nginx.org's
-// ships the directive commented out. nginx rejects a second `gzip` directive
-// in the same context as a duplicate, so the drop-in repeats it only when
-// nginx.conf lacks it (renderNginxGzip). Fixed text over the const path — the
-// read-only contract pastes it literally.
-const nginxGzipOnProbeCmd = "grep -qE '^[[:space:]]*gzip[[:space:]]+on;' " + nginxConfPath
+// nginxGzipFlagProbeCmd prints nginx.conf's first ACTIVE `gzip on;` /
+// `gzip off;` line (exit 1 when there is none): Debian's stock nginx.conf
+// carries `gzip on;` at http level, nginx.org's ships the directive commented
+// out. nginx rejects a second `gzip` directive in the same context as a
+// duplicate whatever its value, so the drop-in repeats it only when
+// nginx.conf has no flag at all, and an operator's `gzip off;` is refused
+// (desiredNginxGzip). Fixed text over the const path — the read-only contract
+// pastes it literally.
+const nginxGzipFlagProbeCmd = "grep -m1 -E '^[[:space:]]*gzip[[:space:]]+(on|off);' " + nginxConfPath
 
-// nginxConfEnablesGzip runs nginxGzipOnProbeCmd: exit 0 = nginx.conf carries
-// an active `gzip on;`, anything else (no match, or no nginx.conf yet on a
-// fresh host) = it does not. Apply probes only after the package install, so
-// the fresh-host answer never shapes a written file.
-func nginxConfEnablesGzip(ctx context.Context, r bssh.Runner) (bool, error) {
-	res, err := r.Run(ctx, nginxGzipOnProbeCmd, nil)
+// reNginxGzipFlag parses the probe's line: the flag's value.
+var reNginxGzipFlag = regexp.MustCompile(`^\s*gzip\s+(on|off);`)
+
+// nginxConfGzipFlag runs nginxGzipFlagProbeCmd and returns "on", "off" or ""
+// (no active flag — also the answer for a missing nginx.conf on a fresh
+// host; Apply probes only after the package install, so that answer never
+// shapes a written file).
+func nginxConfGzipFlag(ctx context.Context, r bssh.Runner) (string, error) {
+	res, err := r.Run(ctx, nginxGzipFlagProbeCmd, nil)
 	if err != nil {
-		return false, err
+		return "", err
 	}
-	return res.ExitCode == 0, nil
+	if res.ExitCode != 0 {
+		return "", nil
+	}
+	m := reNginxGzipFlag.FindStringSubmatch(res.Stdout)
+	if m == nil {
+		return "", fmt.Errorf("parse nginx.conf gzip flag: unexpected probe output %q", strings.TrimSpace(res.Stdout))
+	}
+	return m[1], nil
 }
 
 // renderNginxGzip renders the gzip drop-in for an nginx.conf that already
@@ -77,13 +91,20 @@ func renderNginxGzip(stockOn bool) ([]byte, error) {
 }
 
 // desiredNginxGzip is the drop-in content for THIS host: the nginx.conf probe
-// decides the shape, so Check and Apply can never disagree about it.
+// decides the shape, so Check and Apply can never disagree about it. An
+// operator's `gzip off;` is intent the knob cannot honour (the drop-in could
+// only duplicate the directive), so both refuse with the two ways out — a
+// clear refusal here instead of a `"gzip" directive is duplicate` from
+// nginx -t deferred to the site step.
 func desiredNginxGzip(ctx context.Context, r bssh.Runner) ([]byte, error) {
-	stockOn, err := nginxConfEnablesGzip(ctx, r)
+	flag, err := nginxConfGzipFlag(ctx, r)
 	if err != nil {
 		return nil, err
 	}
-	return renderNginxGzip(stockOn)
+	if flag == "off" {
+		return nil, fmt.Errorf("%s sets gzip off at http level, which berth's gzip drop-in cannot override (nginx rejects a second gzip directive in the same context): remove that line, or set nginx.gzip: false to leave gzip unmanaged", nginxConfPath)
+	}
+	return renderNginxGzip(flag == "on")
 }
 
 // checkNginxGzip classifies the gzip drop-in against the knob. On: the

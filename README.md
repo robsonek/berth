@@ -438,7 +438,8 @@ berth tunes the host for production Laravel out of the box:
   already carries `gzip on;`, so there the drop-in adds only the tuning;
   nginx.org's ships the directive commented out, so the drop-in switches it
   on (nginx rejects a second `gzip` directive in the same context as a
-  duplicate, which is why the file's shape follows `nginx.conf`). `gzip: false`
+  duplicate, which is why the file's shape follows `nginx.conf`; a `gzip off;`
+  an operator put there is refused outright, with the two ways out). `gzip: false`
   removes the drop-in (a file there that berth did not write is left alone)
   and leaves gzip to the stock `nginx.conf`: Debian's package then still
   compresses `text/html`, nginx.org's compresses nothing. Compressing dynamic

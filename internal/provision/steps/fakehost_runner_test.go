@@ -884,19 +884,21 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 		}
 		return bssh.Result{ExitCode: 1}, true
 
-	// nginxConfEnablesGzip reads ONLY the exit code of its grep -qE over
-	// nginx.conf (reached whenever nginx.gzip is on). Same grep semantics as
-	// the worker-user probe above: the modelled nginx.conf carries Debian's
-	// active `gzip on;` under the stock source and nginx.org's commented-out
-	// form under the upstream variant, so both drop-in shapes are walked.
-	case cmd == nginxGzipOnProbePasted:
+	// nginxConfGzipFlag PARSES the first matching line of its grep -m1 -E
+	// over nginx.conf (reached whenever nginx.gzip is on). Real grep
+	// semantics over the modelled file, like the worker-user probe above:
+	// first matching line at exit 0, exit 1 on none, exit 2 when the file is
+	// missing. The modelled nginx.conf carries Debian's active `gzip on;`
+	// under the stock source and nginx.org's commented-out form under the
+	// upstream variant, so both drop-in shapes are walked.
+	case cmd == nginxGzipFlagProbePasted:
 		file, ok := r.h.files[nginxConfPath]
 		if !ok {
 			return bssh.Result{ExitCode: 2, Stderr: "grep: " + nginxConfPath + ": No such file or directory"}, true
 		}
 		for _, line := range strings.Split(file.content, "\n") {
-			if reNginxGzipOn.MatchString(line) {
-				return bssh.Result{}, true
+			if reNginxGzipFlagLine.MatchString(line) {
+				return bssh.Result{Stdout: line + "\n"}, true
 			}
 		}
 		return bssh.Result{ExitCode: 1}, true
@@ -1095,8 +1097,8 @@ var (
 // form — a copy on purpose, applied per line the way grep applies it.
 var reNginxWorkerUser = regexp.MustCompile(`^[[:space:]]*user[[:space:]]+www-data;`)
 
-// reNginxGzipOn mirrors nginxConfEnablesGzip's ERE (nginx.go) the same way.
-var reNginxGzipOn = regexp.MustCompile(`^[[:space:]]*gzip[[:space:]]+on;`)
+// reNginxGzipFlagLine mirrors nginxConfGzipFlag's ERE (nginx.go) the same way.
+var reNginxGzipFlagLine = regexp.MustCompile(`^[[:space:]]*gzip[[:space:]]+(on|off);`)
 
 // rePoolListen mirrors the listen-directive match inside
 // phpPoolConflictProbeCmd's grep -Eq, in Go regexp form.

@@ -36,7 +36,8 @@ var expectedRefusals = map[string]string{
 	// nginx: a foreign file at the gzip drop-in path aborts unless --force
 	// (nginx.go: checkNginxGzip runs FIRST and unconditionally, ahead of the
 	// installed/running probes, so the refusal lands on a fresh host too).
-	// Guard order verified: it is the very first probe the step issues.
+	// Guard order verified: the drop-in's cat is the step's second command,
+	// right after the nginx.conf shape probe, which only reads.
 	"nginx": "not managed by berth",
 	// preflight: the foreign apt lock-timeout drop-in aborts unless --force —
 	// deliberate (preflight.go: without this gate even `--only identity` would

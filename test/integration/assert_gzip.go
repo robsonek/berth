@@ -23,9 +23,9 @@ const gzipDropInPath = "/etc/nginx/conf.d/berth-gzip.conf"
 // back gzip-encoded, with Vary: Accept-Encoding, when the client offers gzip,
 // and uncompressed when it insists on identity. The body is decoded and
 // compared, so a Content-Encoding header on an unencoded body cannot pass.
-// With the knob off only the drop-in's absence is asserted: Debian's stock
-// nginx.conf compresses text/html on its own, so the wire format proves
-// nothing about berth there.
+// With the knob off only the absence of a berth-managed drop-in is asserted:
+// Debian's stock nginx.conf compresses text/html on its own, so the wire
+// format proves nothing about berth there.
 //
 // The probe is served by PHP-FPM through the tenant's own vhost (Host header,
 // SNI), so it also covers the http-context drop-in reaching a server block
@@ -33,7 +33,11 @@ const gzipDropInPath = "/etc/nginx/conf.d/berth-gzip.conf"
 func assertGzipResponses(ctx context.Context, t *testing.T, c *bssh.Client, srv *config.Server, sslExplicit bool) {
 	t.Helper()
 	if !srv.Nginx.GzipEnabled() {
-		assertExitZero(ctx, t, c, "gzip drop-in absent (nginx.gzip: false)", "test ! -e "+shQuote(gzipDropInPath))
+		// Off means "not managed": a berth-marked file must be gone, while a
+		// foreign file at the path is legitimately left alone (even with
+		// --force), so only the marker's absence is asserted.
+		assertExitZero(ctx, t, c, "no berth-managed gzip drop-in (nginx.gzip: false)",
+			"! { test -e "+shQuote(gzipDropInPath)+" && head -n 1 "+shQuote(gzipDropInPath)+" | grep -qx '# managed by berth'; }")
 		return
 	}
 	assertExitZero(ctx, t, c, "gzip drop-in managed", "head -n 1 "+shQuote(gzipDropInPath)+" | grep -qx '# managed by berth'")
