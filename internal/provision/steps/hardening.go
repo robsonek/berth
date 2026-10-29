@@ -3,7 +3,6 @@ package steps
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/robsonek/berth/internal/config"
@@ -151,11 +150,6 @@ func renderFail2banJail(s *config.Server) ([]byte, error) {
 	})
 }
 
-// re443udp matches a `443/udp` ufw rule on a port boundary so unrelated UDP rules
-// whose port merely ends in 443 (e.g. 10443/udp, 8443/udp) do not false-positive
-// the QUIC firewall check.
-var re443udp = regexp.MustCompile(`(^|[^0-9])443/udp`)
-
 // verifyBerthAccess is the anti-lockout gate (design §6.2). It opens a brand-new
 // SSH session as the berth account and confirms key auth + passwordless sudo
 // work, BEFORE hardening disables root/password login. It is a package-level var
@@ -191,14 +185,19 @@ func (hardening) Name() string       { return "hardening" }
 func (hardening) Requires() []string { return []string{"accounts"} }
 
 func (hardening) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
-	// ufw must be active.
-	status, err := r.Run(ctx, "ufw status", nil)
+	// Firewall (config block `firewall:`): the ufw state is read as a
+	// tri-state and anything unrecognized fails closed — a mistaken
+	// "inactive" would read as converged under enabled: false, a mistaken
+	// "absent" would skip the rule listing. With the firewall on, the listing
+	// of ufw's rules drives the plan (built-ins, deletes, adds, enable).
+	state, err := ufwStatus(ctx, r)
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	ufwActive := status.ExitCode == 0 && strings.Contains(status.Stdout, "Status: active")
-	// HTTP/3 sites also need UDP/443 (QUIC) opened in the firewall.
-	udpOK := !anySiteHTTP3(s) || re443udp.MatchString(status.Stdout)
+	fwOK, fwChanges, err := checkFirewall(ctx, r, s, state)
+	if err != nil {
+		return provision.CheckResult{}, err
+	}
 
 	// fail2ban must be installed and running.
 	f2bUp, err := serviceUp(ctx, r, "fail2ban")
@@ -285,14 +284,15 @@ func (hardening) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 		return provision.CheckResult{}, err
 	}
 
-	if ufwActive && f2bUp && sshdOK && effectiveOK && udpOK && jailOK && f2bLoaded && sshUp && sshdLoaded {
+	if fwOK && f2bUp && sshdOK && effectiveOK && jailOK && f2bLoaded && sshUp && sshdLoaded {
 		return provision.CheckResult{Satisfied: true, Reason: "firewall, fail2ban and sshd hardening in place"}, nil
 	}
+	// The firewall lines are the literal ufw commands Apply issues (plus
+	// plan annotations), so --dry-run shows exactly what will change.
 	return provision.CheckResult{
 		Satisfied: false,
 		Reason:    "host not fully hardened",
-		Changes: []string{
-			"ufw allow ssh/80/443 + enable",
+		Changes: append(fwChanges,
 			"install fail2ban",
 			"write managed fail2ban jail (sshd port-bound, recidive)",
 			"disable root login, password and kbd-interactive auth (after anti-lockout gate)",
@@ -300,7 +300,7 @@ func (hardening) Check(ctx context.Context, rc provision.RunCtx, s *config.Serve
 			"reload fail2ban to load the managed jail",
 			"start/enable sshd when stopped",
 			"reload ssh to load the managed drop-in",
-		},
+		),
 	}, nil
 }
 
@@ -321,31 +321,26 @@ func (h hardening) Apply(ctx context.Context, rc provision.RunCtx, s *config.Ser
 		return err
 	}
 
-	// Install the firewall and intrusion-prevention packages first: a minimal
-	// Debian install ships neither ufw nor fail2ban, so the ufw commands below
-	// would otherwise fail with "ufw: not found".
-	if res, err := r.Run(ctx, "DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", nil); err != nil {
+	// Install the intrusion-prevention package first — and the firewall, when
+	// the config keeps it on: a minimal Debian install ships neither ufw nor
+	// fail2ban, so the ufw commands below would otherwise fail with "ufw: not
+	// found". With firewall.enabled: false the ufw package is neither
+	// installed nor removed (install-only, like apt.packages).
+	pkgs := "ufw fail2ban"
+	if !s.Firewall.IsEnabled() {
+		pkgs = "fail2ban"
+	}
+	if res, err := r.Run(ctx, "DEBIAN_FRONTEND=noninteractive apt-get install -y "+pkgs, nil); err != nil {
 		return err
 	} else if res.ExitCode != 0 {
-		return fmt.Errorf("install ufw/fail2ban: %s", res.Stderr)
+		return fmt.Errorf("install %s: %s", pkgs, res.Stderr)
 	}
 
-	// Firewall: allow the actual SSH port plus 80/443 BEFORE enabling ufw, so
-	// enabling the firewall can never cut off the current connection (§6.2).
-	cmds := []string{
-		fmt.Sprintf("ufw allow %d/tcp", s.SSH.Port),
-		"ufw allow 80,443/tcp",
-	}
-	if anySiteHTTP3(s) {
-		cmds = append(cmds, "ufw allow 443/udp") // QUIC (HTTP/3)
-	}
-	cmds = append(cmds, "ufw --force enable")
-	for _, cmd := range cmds {
-		if res, err := r.Run(ctx, cmd, nil); err != nil {
-			return err
-		} else if res.ExitCode != 0 {
-			return fmt.Errorf("hardening %q: %s", cmd, res.Stderr)
-		}
+	// Firewall: the actual SSH port plus 80/443 are allowed BEFORE enabling
+	// ufw, so enabling the firewall can never cut off the current connection
+	// (§6.2); the berth-owned rules are reconciled in between (firewall.go).
+	if err := applyFirewall(ctx, r, s); err != nil {
+		return err
 	}
 
 	// A stopped/disabled sshd locks out every NEW connection while berth's

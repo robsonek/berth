@@ -172,6 +172,10 @@ type fakeHost struct {
 	swapRows string
 	dfRows   string
 	gpgKeys  map[string]string // keyring path -> `gpg --show-keys --with-colons` colon output
+	// firewall is the config's owned ufw rules, which the `ufw show added`
+	// answer renders with the production builder (converged) or as the
+	// operator's uncommented twin (drifted).
+	firewall []config.FirewallRule
 	// memTotalKB backs tuning's /proc/meminfo probe on EVERY profile — the
 	// buffer-pool RAM guard runs before any managed-file classify, fresh
 	// included, and /proc/meminfo exists on any host berth can reach.
@@ -355,6 +359,14 @@ func variantServer(t *testing.T, variant string) *config.Server {
 		// profile models a deployed release, so the worker renders
 		// autostart=true and converged answers it RUNNING.
 		srv.Workers = "running"
+		// Owned firewall rules take hardening.Check through the `ufw show
+		// added` listing, the frame and ownership checks and the plan — one
+		// rule with a source (the full ufw form) and one without (the short
+		// form, default proto), so both printed shapes are reconciled.
+		srv.Firewall = config.Firewall{Allow: []config.FirewallRule{
+			{Name: "zabbix", Port: 10050, Proto: "tcp", From: "203.0.113.10"},
+			{Name: "node-exporter", Port: 9100},
+		}}
 	case "postgres":
 		srv.ID = "contract-postgres"
 		// The engine variant: postgres source debian (a valid pairing per
@@ -490,7 +502,8 @@ func newFakeHost(t *testing.T, profile string, s *config.Server) *fakeHost {
 		memTotalKB: 3986812,
 		dfRows: "Filesystem 1B-blocks Used Available Capacity Mounted on\n" +
 			"/dev/vda1 41000000000 16000000000 22000000000 41% /\n",
-		gpgKeys: gpg,
+		gpgKeys:  gpg,
+		firewall: s.Firewall.Allow,
 	}
 	// The base filesystem every Debian host has, fresh included: the ancestry
 	// probes (accounts' /home/x pattern, appdirs' deploy-path chain) PARSE

@@ -82,6 +82,65 @@ func (f Fail2ban) MaxretryEff() int {
 	return f.Maxretry
 }
 
+// Firewall is the declarative firewall block. Enabled nil (the default) keeps
+// today's behaviour: ufw on with the built-in rules (ssh.port/tcp, 80,443/tcp,
+// 443/udp with HTTP/3); false keeps ufw DISABLED on the host — fail2ban and the
+// sshd hardening stay. Allow lists extra inbound rules berth OWNS: each becomes
+// one ufw rule tagged with the comment "berth:<name>", and a rule dropped from
+// the list is deleted from the host on the next run. The default lives in
+// IsEnabled, NOT in Load() via SetDefault (the Nginx.Gzip precedent), so
+// wizard ToServer() and literal Server callers see the same default.
+type Firewall struct {
+	Enabled *bool          `mapstructure:"enabled" yaml:"enabled,omitempty"`
+	Allow   []FirewallRule `mapstructure:"allow" yaml:"allow,omitempty"`
+}
+
+// IsEnabled reports whether berth manages ufw as ON: unset means on.
+func (f Firewall) IsEnabled() bool { return f.Enabled == nil || *f.Enabled }
+
+// FirewallRule is one berth-owned inbound ufw rule.
+type FirewallRule struct {
+	Name  string `mapstructure:"name" yaml:"name"`             // ^[a-z0-9-]{1,32}$, unique — the ufw comment is berth:<name>
+	Port  int    `mapstructure:"port" yaml:"port"`             // 1-65535, one port
+	Proto string `mapstructure:"proto" yaml:"proto,omitempty"` // tcp (default) | udp
+	From  string `mapstructure:"from" yaml:"from,omitempty"`   // IPv4/IPv6 address or CIDR, canonical; empty = any source, both families
+}
+
+// ProtoEff returns the configured protocol or the default tcp.
+func (r FirewallRule) ProtoEff() string {
+	if r.Proto == "" {
+		return "tcp"
+	}
+	return r.Proto
+}
+
+// FirewallCommentPrefix tags every ufw rule berth owns. FROZEN by
+// TestDerivationsAreFrozen: changing it orphans every owned rule on every host
+// (it would read as foreign and never be reconciled again).
+const FirewallCommentPrefix = "berth:"
+
+// FirewallRuleComment is the ufw comment of the rule named name.
+func FirewallRuleComment(name string) string { return FirewallCommentPrefix + name }
+
+// FirewallRuleCommand is the ufw command (without the leading "ufw ") that
+// adds the rule, spelled EXACTLY as `ufw show added` prints it back (ufw's
+// UFWCommandRule.get_command: the short form when the source is any, the full
+// form otherwise). One builder serves the add, the hardening Check's expected
+// line and the delete (through the printed line). FROZEN by
+// TestDerivationsAreFrozen.
+func FirewallRuleCommand(r FirewallRule) string {
+	return FirewallRuleCommandBare(r) + " comment '" + FirewallRuleComment(r.Name) + "'"
+}
+
+// FirewallRuleCommandBare is the same command without its comment: the
+// spelling a pre-existing rule for the same port/proto/source prints with.
+func FirewallRuleCommandBare(r FirewallRule) string {
+	if r.From == "" {
+		return fmt.Sprintf("allow %d/%s", r.Port, r.ProtoEff())
+	}
+	return fmt.Sprintf("allow from %s to any port %d proto %s", r.From, r.Port, r.ProtoEff())
+}
+
 // Tuning holds optional, conservative performance-tuning overrides. The Valkey
 // knobs render into the per-site instance units (`berth-valkey-<pool>.service`;
 // the cap is per instance), the MariaDB ones into a managed mariadb.conf.d
@@ -966,6 +1025,7 @@ type Server struct {
 	Workers        string   `mapstructure:"workers" yaml:"workers,omitempty"` // dormant (default) | running; sites[].workers overrides
 	CloudflareOnly bool     `mapstructure:"cloudflare_only" yaml:"cloudflare_only"`
 	Fail2ban       Fail2ban `mapstructure:"fail2ban" yaml:"fail2ban,omitempty"`
+	Firewall       Firewall `mapstructure:"firewall" yaml:"firewall,omitempty"`
 	Tuning         Tuning   `mapstructure:"tuning" yaml:"tuning,omitempty"`
 	System         System   `mapstructure:"system" yaml:"system,omitempty"`
 	Backups        Backups  `mapstructure:"backups" yaml:"backups,omitempty"`

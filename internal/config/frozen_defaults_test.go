@@ -115,3 +115,13 @@ func TestNginxGzipDefaultIsFrozen(t *testing.T) {
 		t.Error("nginx.gzip default changed: want on (unset = gzip drop-in written)")
 	}
 }
+
+// firewall.enabled gates ufw itself: unset means ON (today's ufw with the
+// built-in SSH/80,443 rules), so a config that never mentions it keeps its
+// firewall. Flipping this default would disable the firewall on every host
+// that does not spell the knob out — a BREAKING entry, like every pin above.
+func TestFirewallEnabledDefaultIsFrozen(t *testing.T) {
+	if !(Firewall{}).IsEnabled() {
+		t.Error("firewall.enabled default changed: want on (unset = ufw enabled with the built-in rules)")
+	}
+}

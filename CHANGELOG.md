@@ -3,6 +3,64 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Added
+
+- **`firewall:` block** — declarative inbound rules and an off switch for the
+  host firewall, both handled by the `hardening` step. `firewall.allow` lists
+  rules berth owns: each entry (`name`, `port`, optional `proto` tcp|udp and
+  `from` address or CIDR) becomes one ufw rule carrying the comment
+  `berth:<name>`, spelled exactly as `ufw show added` prints it
+  (`ufw allow 10050/tcp comment 'berth:zabbix'`, or the
+  `allow from <from> to any port <port> proto <proto>` form with a source),
+  added after the built-in SSH/80,443[/443 udp] rules and before
+  `ufw --force enable`. An entry removed from the config is deleted from the
+  host on the next run (by the exact printed line) and a changed entry is
+  deleted and re-added; rules without a `berth:` comment — hand-added ones and
+  berth's built-ins — are never selected for deletion, and a `berth:` comment on a rule
+  shape berth never writes (application profile, `route`, interface rule)
+  stops the step for manual clean-up instead of a guess. A rule already
+  present for the same port/protocol/source is replaced by berth's (ufw keeps
+  one rule per tuple) and owned from then on; a leftover berth rule that
+  coincides with a built-in is taken over by the built-in `ufw allow`, which
+  the plan reports instead of a delete. Validation requires a canonical `from`
+  spelling (the one ufw prints: bare host, lowercase compressed IPv6, network
+  address, no `/0`, no IPv4-compatible or -mapped IPv6), refuses an entry equal
+  to a built-in rule and two entries for one tuple. `firewall.enabled: false`
+  keeps ufw disabled (`ufw --force disable` when it is active; the package is
+  installed only when the firewall is on and never removed) while fail2ban and
+  the sshd hardening stay — a deliberate downgrade for hosts behind a
+  provider firewall. With the firewall on and ufw installed, every run lists
+  the added ufw rules (`ufw show added`, read-only, in the C locale) so a
+  rule dropped from the config is swept even when the list is now empty;
+  `berth status --drift` reports missing,
+  extra or changed berth rules and an active ufw under `enabled: false`;
+  `--dry-run` prints the literal ufw commands. A rule half-written by ufw (its
+  IPv6 write failed while ufw still reported success) or half-removed by hand
+  (`ufw delete <n>` of one address family) is not detected — a documented
+  boundary; delete the remaining family and provision again. A config
+  without the block issues the same mutations as before on a host without
+  `berth:` rules; a leftover `berth:` rule is swept — or taken over by the
+  built-in rule it coincides with — even after the whole block is removed.
+
+### Changed
+
+- The `hardening` step now fails closed on `ufw status`: exit 127 reads as
+  "ufw not installed", on a zero exit the first line must be exactly
+  `Status: active` or `Status: inactive`, and anything else (an iptables or
+  configuration failure, an unrecognized output) stops the step with the
+  error instead of being read as "inactive" — previously a failing
+  `ufw status` counted as "not active" and sent the run into an Apply that
+  would fail on its first `ufw allow`. Both ufw probes (`ufw status`,
+  `ufw show added`) run under `LC_ALL=C LANGUAGE=C` — ufw translates them
+  through Python's gettext, which reads `LANGUAGE` before `LC_ALL` — so the
+  status text and listing header are compared in English on every host.
+- The HTTP/3 firewall check now requires the exact built-in `ufw allow 443/udp`
+  line in `ufw show added` instead of matching `443/udp` anywhere in the
+  `ufw status` table; a source-limited or commented `443/udp` rule no longer
+  satisfies it.
+
 ## [0.35.0] — 2026-10-29
 
 ### Added
