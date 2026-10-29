@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/robsonek/berth/internal/config"
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
 
@@ -443,6 +444,11 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 	// (assertSiteTreeOwners, assertGroupMembership). The assignment changes
 	// output language only, so the answer is the pinned command's; only this
 	// exact token is stripped, mirroring the classifier's rule.
+	// The ufw probes carry the pair (Python's gettext reads LANGUAGE first);
+	// the pair is stripped as one unit, mirroring the classifier.
+	if rest, ok := strings.CutPrefix(cmd, "LC_ALL=C LANGUAGE=C "); ok {
+		return r.answer(rest, stdin)
+	}
 	if rest, ok := strings.CutPrefix(cmd, "LC_ALL=C "); ok {
 		return r.answer(rest, stdin)
 	}
@@ -613,11 +619,13 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 		}
 		return bssh.Result{ExitCode: 1, Stderr: "id: '" + u + "': no such user"}, true
 
-	// hardening.Check PARSES this stdout twice: strings.Contains for
-	// "Status: active" and the 443/udp QUIC rule regexp. Provisioned profiles
-	// answer the enabled ruleset berth writes; a host without the package
-	// answers the way a shell does — exit 127, which the Check reads as
-	// "not active" data.
+	// hardening.Check reads the FIRST LINE of this stdout as a tri-state
+	// (ufwStatus, firewall.go: exactly "Status: active" or "Status: inactive",
+	// anything else fails closed); the QUIC rule is read from `show added`,
+	// not from here. Provisioned profiles answer the enabled ruleset berth
+	// writes; a host without the package answers the way a shell does — exit
+	// 127, which the Check reads as "ufw not installed". The production
+	// spelling carries the LC_ALL=C pin, which answer() strips above.
 	case cmd == "ufw status":
 		if _, ok := r.h.packages["ufw"]; !ok {
 			return bssh.Result{ExitCode: 127, Stderr: "sh: 1: ufw: not found"}, true
@@ -627,6 +635,31 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 			"--                         ------      ----\n" +
 			"22/tcp                     ALLOW       Anywhere\n" +
 			"80,443/tcp                 ALLOW       Anywhere\n"}, true
+
+	// hardening.Check and Apply PARSE this listing (ufwAddedRules, firewall.go):
+	// the exact header, then one `ufw …` line per rule — the shape a
+	// provisioned Debian 13 host prints. Provisioned profiles answer the
+	// built-in rules berth writes plus the config's owned rules rendered by
+	// the production builder; drifted models an operator's uncommented rule
+	// for each owned tuple (the adoption path) and a stale berth rule (the
+	// delete path). Without the package the shell answers 127. The
+	// production spelling carries the LC_ALL=C pin, which answer() strips.
+	case cmd == "ufw show added":
+		if _, ok := r.h.packages["ufw"]; !ok {
+			return bssh.Result{ExitCode: 127, Stderr: "sh: 1: ufw: not found"}, true
+		}
+		out := ufwAddedHeader + "\nufw allow 22/tcp\nufw allow 80,443/tcp\n"
+		for _, rule := range r.h.firewall {
+			if r.h.profile == "drifted" {
+				out += "ufw " + config.FirewallRuleCommandBare(rule) + "\n"
+				continue
+			}
+			out += "ufw " + config.FirewallRuleCommand(rule) + "\n"
+		}
+		if r.h.profile == "drifted" {
+			out += "ufw allow 9/tcp comment 'berth:stale'\n"
+		}
+		return bssh.Result{Stdout: out}, true
 
 	// consolePasswordUsable (accounts.go) PARSES field 2 of the status line:
 	// P (usable), L (locked), NP (none) — anything else is a hard error there.

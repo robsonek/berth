@@ -255,7 +255,7 @@ func TestServerYAMLOmitsEmptyOptionalFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := string(b)
-	for _, absent := range []string{"fingerprint:", "ssl_mode:", "ssl_email:", "repository:", "repository_key:", "workers:", "upstream_updates:"} {
+	for _, absent := range []string{"fingerprint:", "ssl_mode:", "ssl_email:", "repository:", "repository_key:", "workers:", "upstream_updates:", "firewall:"} {
 		if strings.Contains(out, absent) {
 			t.Errorf("expected %q to be omitted, got:\n%s", absent, out)
 		}
@@ -498,6 +498,21 @@ func TestDerivationsAreFrozen(t *testing.T) {
 	}
 	if got := ValkeyQueueDataDir("app_example_com"); got != "/var/lib/berth-valkey/app_example_com-queue" {
 		t.Fatalf("ValkeyQueueDataDir derivation changed: %s", got)
+	}
+	// The firewall comment is the ownership marker of every ufw rule berth
+	// writes, and the command spelling is what `ufw show added` prints back:
+	// changing either orphans the rules on every provisioned host.
+	if FirewallCommentPrefix != "berth:" {
+		t.Fatalf("FirewallCommentPrefix changed: %s", FirewallCommentPrefix)
+	}
+	if got := FirewallRuleComment("zabbix"); got != "berth:zabbix" {
+		t.Fatalf("FirewallRuleComment derivation changed: %s", got)
+	}
+	if got := FirewallRuleCommand(FirewallRule{Name: "zabbix", Port: 10050}); got != "allow 10050/tcp comment 'berth:zabbix'" {
+		t.Fatalf("FirewallRuleCommand short-form derivation changed: %s", got)
+	}
+	if got := FirewallRuleCommand(FirewallRule{Name: "zabbix", Port: 10050, Proto: "tcp", From: "203.0.113.10"}); got != "allow from 203.0.113.10 to any port 10050 proto tcp comment 'berth:zabbix'" {
+		t.Fatalf("FirewallRuleCommand full-form derivation changed: %s", got)
 	}
 	if got := SiteWorkerProgram("app.example.com"); got != "berth-app_example_com" {
 		t.Fatalf("SiteWorkerProgram derivation changed: %s", got)

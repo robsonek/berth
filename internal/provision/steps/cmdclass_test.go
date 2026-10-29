@@ -159,13 +159,31 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{"LC_ALL=C", cmdRejected},
 		{"PATH=/tmp cat /etc/hosts", cmdRejected},
 
-		// ufw: only the bare status query reads; every other subcommand
-		// (allow, enable, delete…) rewrites rules, so the shape is pinned to
-		// exactly ["status"].
+		// ufw: the bare status query and the `show added` rule listing read;
+		// every other subcommand (allow, delete, enable, disable…) rewrites
+		// rules, so the shapes are pinned to exactly ["status"] and
+		// ["show", "added"].
 		{"ufw status", cmdReadOnly},
+		{"ufw show added", cmdReadOnly},
+		// The production spellings carry the locale pin PAIR (ufw translates
+		// through Python's gettext, which reads LANGUAGE first), which the
+		// classifier strips before judging the rest (firewall.go). Only that
+		// exact pair in that order: a bare LANGUAGE=C, another language or
+		// the pair in front of a mutation are rejected.
+		{"LC_ALL=C LANGUAGE=C ufw status", cmdReadOnly},
+		{"LC_ALL=C LANGUAGE=C ufw show added", cmdReadOnly},
+		{"LC_ALL=C ufw status", cmdReadOnly},
+		{"LANGUAGE=C ufw status", cmdRejected},
+		{"LC_ALL=C LANGUAGE=pl ufw status", cmdRejected},
+		{"LC_ALL=C LANGUAGE=C rm -f /x", cmdRejected},
+		{"LC_ALL=C LANGUAGE=C", cmdRejected},
 		{"ufw status verbose", cmdRejected},
+		{"ufw show raw", cmdRejected},
+		{"ufw show added verbose", cmdRejected},
 		{"ufw allow 80,443/tcp", cmdRejected},
+		{"ufw delete allow 10050/tcp comment 'berth:zabbix'", cmdRejected},
 		{"ufw --force enable", cmdRejected},
+		{"ufw --force disable", cmdRejected},
 
 		// passwd: -S prints status metadata (never a hash); everything else —
 		// including the bare form, -l and -u — changes credentials.
@@ -1165,8 +1183,10 @@ var simpleShapes = []simpleShape{
 	{verb: "swapon", allow: func(a []string) bool { return len(a) == 2 && a[0] == "--show=NAME" && a[1] == "--noheadings" }, verdict: cmdReadOnly,
 		why: "pinned to `swapon --show=NAME --noheadings` (swapActive, system.go); an operand would ENABLE that path as swap"},
 	{verb: "sysctl", allow: sysctlIsReadOnly, verdict: cmdReadOnly},
-	{verb: "ufw", allow: func(a []string) bool { return len(a) == 1 && a[0] == "status" }, verdict: cmdReadOnly,
-		why: "only the bare status query reads; allow/enable/delete rewrite firewall rules"},
+	{verb: "ufw", allow: func(a []string) bool {
+		return (len(a) == 1 && a[0] == "status") || (len(a) == 2 && a[0] == "show" && a[1] == "added")
+	}, verdict: cmdReadOnly,
+		why: "only the bare status query and `show added` read (ufw prints its parsed rule list, firewall.go); allow/delete/enable/disable rewrite firewall rules"},
 	{verb: "passwd", allow: func(a []string) bool { return len(a) == 2 && a[0] == "-S" && !strings.HasPrefix(a[1], "-") }, verdict: cmdReadOnly,
 		why: "pinned to `passwd -S <user>` (consolePasswordUsable, accounts.go); the operand may not be an option — getopt would parse -l/-u there and change credentials"},
 	{verb: "command", allow: func(a []string) bool { return len(a) == 2 && a[0] == "-v" && !strings.HasPrefix(a[1], "-") }, verdict: cmdReadOnly,
@@ -1416,6 +1436,14 @@ func classifySimple(cmd string) (cmdVerdict, string) {
 	// assignment (PATH=…, IFS=…) changes what runs rather than how it prints,
 	// and stays an unknown verb.
 	if verb == "LC_ALL=C" && len(args) > 0 {
+		// The ufw probes (firewall.go) add LANGUAGE=C right after the pin:
+		// ufw translates through Python's gettext, which reads LANGUAGE
+		// before LC_ALL. Only that exact token, only in this position — a
+		// bare LANGUAGE=C, another language or any other assignment stays an
+		// unknown verb.
+		if args[0] == "LANGUAGE=C" && len(args) > 1 {
+			args = args[1:]
+		}
 		return classifySimple(strings.Join(args, " "))
 	}
 	// An absolute or relative path is NOT trusted by its basename: /tmp/cat is

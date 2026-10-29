@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/base64"
 	"fmt"
+	"net"
 	"net/url"
 	"path"
 	"regexp"
@@ -315,6 +316,18 @@ func (s *Server) Validate() error {
 	}
 	if s.Fail2ban.Maxretry != 0 && (s.Fail2ban.Maxretry < 1 || s.Fail2ban.Maxretry > 100) {
 		return fmt.Errorf("fail2ban.maxretry %d out of range (1-100)", s.Fail2ban.Maxretry)
+	}
+	// The firewall block is checked before the per-site loop so its errors
+	// name the firewall entry, not a site; the HTTP/3 flag decides whether the
+	// built-in 443/udp rule exists for an entry to collide with.
+	anyHTTP3 := false
+	for _, st := range s.Sites {
+		if st.HTTP3 {
+			anyHTTP3 = true
+		}
+	}
+	if err := s.Firewall.validate(s.SSH.Port, anyHTTP3); err != nil {
+		return err
 	}
 	if !allowedWorkers[s.Workers] {
 		return fmt.Errorf("workers must be dormant or running (got %q)", s.Workers)
@@ -1110,6 +1123,114 @@ func (st *Site) validateQueueDaemons() error {
 		}
 		if d.Processes < 0 || d.Processes > 64 {
 			return fmt.Errorf("daemon %q: processes %d out of range (0-64)", d.Name, d.Processes)
+		}
+	}
+	return nil
+}
+
+var (
+	reFirewallRuleName    = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+	allowedFirewallProtos = map[string]bool{"": true, "tcp": true, "udp": true}
+)
+
+// ipv4CompatibleIPv6 reports whether ip is an IPv6 address glibc's inet_ntop
+// (hence ufw) prints with a dotted-quad tail, "::a.b.c.d": the first 96 bits
+// zero and the seventh 16-bit word non-zero (a zero seventh word makes the
+// zero run swallow it — "::1" and "::" print as themselves). Go prints these in
+// hex, so the two spellings could never agree.
+func ipv4CompatibleIPv6(ip net.IP) bool {
+	ip = ip.To16()
+	if ip == nil || ip.To4() != nil { // IPv4 and IPv4-mapped print as dotted quads in Go too
+		return false
+	}
+	for _, b := range ip[:12] {
+		if b != 0 {
+			return false
+		}
+	}
+	return ip[12] != 0 || ip[13] != 0
+}
+
+// ValidateFirewallFrom accepts "" (any source, both address families), a
+// canonical IP address or a canonical CIDR network — the spelling ufw prints
+// back from `show added`, so any other spelling would read as drift on every
+// run. Refused with the reason: /0 (ufw prints the short form; use no from),
+// /32 and /128 (ufw drops them), host bits set, non-canonical text, and the
+// IPv4-compatible IPv6 forms glibc prints with a dotted tail.
+func ValidateFirewallFrom(from string) error {
+	if from == "" {
+		return nil
+	}
+	if strings.Contains(from, "/") {
+		ip, ipnet, err := net.ParseCIDR(from)
+		if err != nil {
+			return fmt.Errorf("%q is not an IP address or CIDR network", from)
+		}
+		ones, bits := ipnet.Mask.Size()
+		if ones == 0 {
+			return fmt.Errorf("%q matches every address; omit `from` to allow from any source", from)
+		}
+		if ones == bits {
+			return fmt.Errorf("%q: write a single host as the bare address %s (ufw drops the /%d)", from, ip, ones)
+		}
+		if ipv4CompatibleIPv6(ipnet.IP) {
+			return fmt.Errorf("%q is an IPv4-compatible IPv6 network, which ufw prints differently; use the IPv4 network instead", from)
+		}
+		if ipnet.String() != from {
+			return fmt.Errorf("%q is not in canonical form; use %s (ufw normalizes addresses and berth compares the spelling it prints)", from, ipnet)
+		}
+		return nil
+	}
+	ip := net.ParseIP(from)
+	if ip == nil {
+		return fmt.Errorf("%q is not an IP address or CIDR network", from)
+	}
+	if ipv4CompatibleIPv6(ip) {
+		return fmt.Errorf("%q is an IPv4-compatible IPv6 address, which ufw prints differently; use the IPv4 address instead", from)
+	}
+	if ip.String() != from {
+		return fmt.Errorf("%q is not in canonical form; use %s (ufw normalizes addresses and berth compares the spelling it prints)", from, ip)
+	}
+	return nil
+}
+
+// validate checks the firewall block. sshPort and http3 identify the built-in
+// rules an entry may not duplicate: ufw keeps one rule per port/proto/source,
+// so berth's comment would land on the built-in rule and a later removal of
+// the entry would delete it (locking SSH out, or closing QUIC).
+func (f Firewall) validate(sshPort int, http3 bool) error {
+	if !f.IsEnabled() && len(f.Allow) > 0 {
+		return fmt.Errorf("firewall.allow lists %d rule(s) but firewall.enabled is false; remove the rules or enable the firewall", len(f.Allow))
+	}
+	seenName := map[string]bool{}
+	seenTuple := map[string]string{}
+	for i, r := range f.Allow {
+		if !reFirewallRuleName.MatchString(r.Name) {
+			return fmt.Errorf("firewall.allow[%d].name %q must match ^[a-z0-9-]{1,32}$ (it becomes the ufw comment %s<name>)", i, r.Name, FirewallCommentPrefix)
+		}
+		if seenName[r.Name] {
+			return fmt.Errorf("duplicate firewall.allow name %q", r.Name)
+		}
+		seenName[r.Name] = true
+		if r.Port < 1 || r.Port > 65535 {
+			return fmt.Errorf("firewall.allow[%s].port %d out of range (1-65535)", r.Name, r.Port)
+		}
+		if !allowedFirewallProtos[r.Proto] {
+			return fmt.Errorf("firewall.allow[%s].proto %q must be tcp or udp", r.Name, r.Proto)
+		}
+		if err := ValidateFirewallFrom(r.From); err != nil {
+			return fmt.Errorf("firewall.allow[%s].from: %w", r.Name, err)
+		}
+		tuple := FirewallRuleCommandBare(r)
+		if other, dup := seenTuple[tuple]; dup {
+			return fmt.Errorf("firewall.allow[%s] and [%s] describe the same rule (%s); ufw keeps one rule per port/proto/source", other, r.Name, tuple)
+		}
+		seenTuple[tuple] = r.Name
+		if r.From == "" && r.ProtoEff() == "tcp" && r.Port == sshPort {
+			return fmt.Errorf("firewall.allow[%s] duplicates berth's built-in SSH rule (%d/tcp); it is always open and must not carry a %s<name> comment (deleting it later would lock you out)", r.Name, sshPort, FirewallCommentPrefix)
+		}
+		if r.From == "" && r.ProtoEff() == "udp" && r.Port == 443 && http3 {
+			return fmt.Errorf("firewall.allow[%s] duplicates berth's built-in HTTP/3 rule (443/udp, opened for the http3 sites); drop the entry", r.Name)
 		}
 	}
 	return nil

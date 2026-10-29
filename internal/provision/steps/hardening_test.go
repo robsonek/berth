@@ -58,6 +58,7 @@ func TestHardeningApplyAllowsBeforeEnableAndGatesBeforeSshd(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("ufw allow 2222/tcp", bssh.Result{})
 	f.On("ufw allow 80,443/tcp", bssh.Result{})
+	f.On(ufwShowAddedCmd, showAdded())
 	f.On("ufw --force enable", bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 1})   // write-guard: absent
@@ -121,6 +122,7 @@ func TestHardeningApplyRefusesForeignSshdDropIn(t *testing.T) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
 	f.On("ufw allow 2222/tcp", bssh.Result{})
 	f.On("ufw allow 80,443/tcp", bssh.Result{})
+	f.On(ufwShowAddedCmd, showAdded())
 	f.On("ufw --force enable", bssh.Result{})
 	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 0, Stdout: "PermitRootLogin prohibit-password\n"}) // foreign
@@ -149,6 +151,7 @@ func TestHardeningApplyValidatesSshdBeforeReload(t *testing.T) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
 	f.On("ufw allow 2222/tcp", bssh.Result{})
 	f.On("ufw allow 80,443/tcp", bssh.Result{})
+	f.On(ufwShowAddedCmd, showAdded())
 	f.On("ufw --force enable", bssh.Result{})
 	f.On("sshd -t", bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 1})   // write-guard: absent
@@ -188,6 +191,7 @@ func TestHardeningApplyAbortsReloadWhenSshdConfigInvalid(t *testing.T) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
 	f.On("ufw allow 2222/tcp", bssh.Result{})
 	f.On("ufw allow 80,443/tcp", bssh.Result{})
+	f.On(ufwShowAddedCmd, showAdded())
 	f.On("ufw --force enable", bssh.Result{})
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 1}) // write-guard: absent
 	// Covers Apply's up-front SSHD_OPTS guard; the helper's sshd -T stub
@@ -216,6 +220,7 @@ func TestHardeningApplyAbortsWhenGateFails(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("ufw allow 2222/tcp", bssh.Result{})
 	f.On("ufw allow 80,443/tcp", bssh.Result{})
+	f.On(ufwShowAddedCmd, showAdded())
 	f.On("ufw --force enable", bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
 	f.On(sshdOptsProbe, bssh.Result{ExitCode: 0})
@@ -246,7 +251,8 @@ func TestHardeningApplyAbortsWhenGateFails(t *testing.T) {
 
 func TestHardeningCheckSatisfied(t *testing.T) {
 	f := bssh.NewFakeRunner()
-	f.On("ufw status", bssh.Result{Stdout: "Status: active\n", ExitCode: 0})
+	f.On(ufwStatusCmd, bssh.Result{Stdout: "Status: active\n", ExitCode: 0})
+	f.On(ufwShowAddedCmd, showAdded())
 	f.On("systemctl is-active fail2ban", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled fail2ban", bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{Stdout: sshdDropInBody, ExitCode: 0})
@@ -265,7 +271,8 @@ func TestHardeningCheckSatisfied(t *testing.T) {
 
 func TestHardeningCheckAbortsOnUnmanagedSshdDropIn(t *testing.T) {
 	f := bssh.NewFakeRunner()
-	f.On("ufw status", bssh.Result{Stdout: "Status: active\n", ExitCode: 0})
+	f.On(ufwStatusCmd, bssh.Result{Stdout: "Status: active\n", ExitCode: 0})
+	f.On(ufwShowAddedCmd, showAdded())
 	f.On("systemctl is-active fail2ban", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled fail2ban", bssh.Result{ExitCode: 0})
 	// Pre-existing, unmanaged drop-in (no berth marker).
@@ -292,7 +299,8 @@ func TestHardeningCheckAbortsOnUnmanagedSshdDropIn(t *testing.T) {
 
 func TestHardeningCheckUnsatisfiedWhenUfwInactive(t *testing.T) {
 	f := bssh.NewFakeRunner()
-	f.On("ufw status", bssh.Result{Stdout: "Status: inactive\n", ExitCode: 0})
+	f.On(ufwStatusCmd, bssh.Result{Stdout: "Status: inactive\n", ExitCode: 0})
+	f.On(ufwShowAddedCmd, showAdded())
 	f.On("systemctl is-active fail2ban", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled fail2ban", bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{Stdout: sshdDropInBody, ExitCode: 0})
@@ -316,6 +324,7 @@ func TestHardeningApplyOpensUDP443WhenHTTP3(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("ufw allow 2222/tcp", bssh.Result{})
 	f.On("ufw allow 80,443/tcp", bssh.Result{})
+	f.On(ufwShowAddedCmd, showAdded())
 	f.On("ufw allow 443/udp", bssh.Result{})
 	f.On("ufw --force enable", bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
@@ -348,7 +357,8 @@ func TestHardeningCheckRequiresUDP443WhenHTTP3(t *testing.T) {
 	s.Sites = []config.Site{{Domain: "a.example.com", HTTP3: true}}
 	f := bssh.NewFakeRunner()
 	// ufw active with 80,443/tcp but NOT 443/udp -> an http3 site is not satisfied.
-	f.On("ufw status", bssh.Result{Stdout: "Status: active\n80,443/tcp ALLOW Anywhere\n", ExitCode: 0})
+	f.On(ufwStatusCmd, bssh.Result{Stdout: "Status: active\n80,443/tcp ALLOW Anywhere\n", ExitCode: 0})
+	f.On(ufwShowAddedCmd, showAdded())
 	f.On("systemctl is-active fail2ban", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled fail2ban", bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{Stdout: sshdDropInBody, ExitCode: 0})
@@ -364,7 +374,8 @@ func TestHardeningCheckRequiresUDP443WhenHTTP3(t *testing.T) {
 		t.Error("expected unsatisfied: an http3 site needs 443/udp open")
 	}
 	// A decoy UDP rule whose port merely ends in 443 must NOT count as 443/udp.
-	f.On("ufw status", bssh.Result{Stdout: "Status: active\n80,443/tcp ALLOW Anywhere\n10443/udp ALLOW Anywhere\n", ExitCode: 0})
+	f.On(ufwStatusCmd, bssh.Result{Stdout: "Status: active\n80,443/tcp ALLOW Anywhere\n10443/udp ALLOW Anywhere\n", ExitCode: 0})
+	f.On(ufwShowAddedCmd, showAdded())
 	cr, err = Hardening().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -373,7 +384,8 @@ func TestHardeningCheckRequiresUDP443WhenHTTP3(t *testing.T) {
 		t.Error("expected unsatisfied: 10443/udp must not be mistaken for 443/udp")
 	}
 	// Once 443/udp is also allowed, it is satisfied.
-	f.On("ufw status", bssh.Result{Stdout: "Status: active\n80,443/tcp ALLOW Anywhere\n443/udp ALLOW Anywhere\n", ExitCode: 0})
+	f.On(ufwStatusCmd, bssh.Result{Stdout: "Status: active\n80,443/tcp ALLOW Anywhere\n443/udp ALLOW Anywhere\n", ExitCode: 0})
+	f.On(ufwShowAddedCmd, showAdded("ufw allow 443/udp"))
 	cr, err = Hardening().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -385,7 +397,8 @@ func TestHardeningCheckRequiresUDP443WhenHTTP3(t *testing.T) {
 
 func TestHardeningCheckUnsatisfiedWhenJailMissing(t *testing.T) {
 	f := bssh.NewFakeRunner()
-	f.On("ufw status", bssh.Result{Stdout: "Status: active\n", ExitCode: 0})
+	f.On(ufwStatusCmd, bssh.Result{Stdout: "Status: active\n", ExitCode: 0})
+	f.On(ufwShowAddedCmd, showAdded())
 	f.On("systemctl is-active fail2ban", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled fail2ban", bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{Stdout: sshdDropInBody, ExitCode: 0})
@@ -403,7 +416,8 @@ func TestHardeningCheckUnsatisfiedWhenJailMissing(t *testing.T) {
 
 func TestHardeningCheckUnsatisfiedWhenJailDrifted(t *testing.T) {
 	f := bssh.NewFakeRunner()
-	f.On("ufw status", bssh.Result{Stdout: "Status: active\n", ExitCode: 0})
+	f.On(ufwStatusCmd, bssh.Result{Stdout: "Status: active\n", ExitCode: 0})
+	f.On(ufwShowAddedCmd, showAdded())
 	f.On("systemctl is-active fail2ban", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled fail2ban", bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{Stdout: sshdDropInBody, ExitCode: 0})
@@ -426,6 +440,7 @@ func TestHardeningApplyWritesFail2banJail(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("ufw allow 2222/tcp", bssh.Result{})
 	f.On("ufw allow 80,443/tcp", bssh.Result{})
+	f.On(ufwShowAddedCmd, showAdded())
 	f.On("ufw --force enable", bssh.Result{})
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{ExitCode: 1})   // write-guard: absent
@@ -507,7 +522,8 @@ func TestHardeningDropInTargetsSortFirstPath(t *testing.T) {
 // stubCheckGreenBase stubs everything Check needs for a converged host EXCEPT
 // the SSHD_OPTS/sshd -T probes, which each test controls itself.
 func stubCheckGreenBase(f *bssh.FakeRunner) {
-	f.On("ufw status", bssh.Result{Stdout: "Status: active\n", ExitCode: 0})
+	f.On(ufwStatusCmd, bssh.Result{Stdout: "Status: active\n", ExitCode: 0})
+	f.On(ufwShowAddedCmd, showAdded())
 	f.On("systemctl is-active fail2ban", bssh.Result{ExitCode: 0})
 	f.On("systemctl is-enabled fail2ban", bssh.Result{ExitCode: 0})
 	f.On("cat "+shQuote(sshdDropInPath), bssh.Result{Stdout: sshdDropInBody, ExitCode: 0})
@@ -656,6 +672,7 @@ func stubApplyGreenBase(f *bssh.FakeRunner) {
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y ufw fail2ban", bssh.Result{})
 	f.On("ufw allow 2222/tcp", bssh.Result{})
 	f.On("ufw allow 80,443/tcp", bssh.Result{})
+	f.On(ufwShowAddedCmd, showAdded())
 	f.On("ufw --force enable", bssh.Result{})
 	f.On("cat "+shQuote(fail2banJailPath), bssh.Result{ExitCode: 1}) // write-guard: absent
 	f.On("fail2ban-client -t", bssh.Result{})

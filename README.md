@@ -104,7 +104,8 @@ A server is one YAML file in `servers/<name>.yml`. `berth init` can generate
 repos/packages, and backups, plus per-site queue/daemons and
 scheduler/Cloudflare/backups overrides) sit behind
 optional prompts, so the common path stays short — or you can write the file by
-hand. Ready-to-copy
+hand (the `firewall:` block is the one section `berth init` does not ask for;
+write it by hand). Ready-to-copy
 starting points live in [`examples/`](examples/) — e.g.
 `cp examples/minimal.yml servers/myserver.yml`. Every field, with its default
 and accepted values:
@@ -153,6 +154,14 @@ fail2ban:                      # optional — omit the block to use these defaul
   bantime: 1h
   findtime: 10m
   maxretry: 5
+
+firewall:                      # optional — omit the block for the default: ufw on with SSH + 80/443
+  enabled: true                # false = berth keeps ufw DISABLED (fail2ban and the sshd hardening stay)
+  allow:                       # extra inbound rules berth owns (see "Firewall rules" below)
+    - name: zabbix             # required, unique, ^[a-z0-9-]{1,32}$ — the ufw comment is berth:<name>
+      port: 10050              # required, 1-65535, one port
+      proto: tcp               # tcp (default) | udp
+      from: 203.0.113.10       # optional IPv4/IPv6 address or CIDR, canonical spelling; omitted = any
 
 tuning:                        # optional — omit any field to keep its default
   valkey_maxmemory: 256mb
@@ -693,7 +702,9 @@ scope):
   session tickets off); self-signed sites deliberately omit HSTS.
 - **Log rotation** — per-site PHP-FPM and Supervisor program (queue worker +
   daemon) logs are rotated so they never fill the disk.
-- **Firewall** — `ufw` allows only SSH and 80/443 (plus UDP/443 with HTTP/3).
+- **Firewall** — `ufw` allows only SSH and 80/443 (plus UDP/443 with HTTP/3);
+  extra inbound rules, and switching ufw off, are declared in the `firewall:`
+  block — see [Firewall rules](#firewall-rules-firewall).
 - **Break-glass console access** (`system.break_glass`, opt-in) — every berth
   account is created with a locked password, which makes the provider's
   console/VNC useless when SSH is down (only rescue mode remains). Setting
@@ -754,6 +765,79 @@ a maintenance window you choose:
    ```
 
    or, with `workers: running`, run `berth provision`, which starts them.
+
+### Firewall rules (`firewall:`)
+
+Every provision enables `ufw` with the built-in rules — your SSH port, `80,443/tcp`
+and, with an HTTP/3 site, `443/udp`. The `firewall:` block adds inbound rules
+berth owns, or switches ufw off altogether:
+
+```yaml
+firewall:
+  enabled: true              # default; false = berth keeps ufw disabled (see below)
+  allow:
+    - name: zabbix           # ^[a-z0-9-]{1,32}$, unique — the ufw comment becomes berth:zabbix
+      port: 10050            # one port, 1-65535
+      proto: tcp             # tcp (default) | udp
+      from: 203.0.113.10     # optional source address or CIDR; omitted = any source
+```
+
+Semantics:
+
+- Rules are fully declarative. Each entry is added as ONE ufw rule carrying the
+  comment `berth:<name>`, spelled the way `ufw show added` prints it back:
+  `ufw allow 10050/tcp comment 'berth:zabbix'` without `from`, or
+  `ufw allow from 203.0.113.10 to any port 10050 proto tcp comment 'berth:zabbix'`
+  with it. An entry removed from the config is deleted from the host on the next
+  run (`ufw delete` of exactly that line, comment included); changing an entry's
+  port, protocol or source deletes the old rule and adds the new one. Rules are
+  added after the built-in ones and before `ufw --force enable`, so a fresh
+  provision never closes the firewall on itself. `--dry-run` lists the exact
+  ufw commands the run would issue.
+- Ownership is the comment, on the two rule shapes above. A rule whose comment
+  does not start with `berth:` — one you added by hand, or berth's own built-in
+  rules, which carry no comment — is never selected for deletion; the one way
+  berth changes such a rule is the adoption described below. A `berth:` comment on any
+  other kind of rule (an application profile, a `route` rule, an interface
+  rule) stops the step until you delete or re-comment that rule yourself: ufw
+  deletes such rules by different keys, so berth refuses to guess.
+- The built-in rules may not be repeated under `allow` (an entry equal to the
+  SSH rule, or to `443/udp` while an HTTP/3 site exists, is refused: ufw keeps
+  one rule per port/protocol/source, and deleting such an entry later would take
+  the built-in rule with it). Two entries describing one port/protocol/source
+  under different names are refused for the same reason.
+- ufw keeps one rule per port, protocol and source. A rule already on the host
+  for that tuple — whatever its comment or action — is replaced by berth's rule
+  when the entry is added (ufw reports `Rule updated`), and from then on it is
+  berth's, removal included. `--dry-run` marks the entry as adopting the
+  existing rule when that rule is an `allow` for the same port, protocol and
+  source; a `deny`, `reject` or `limit` rule for that tuple is replaced all the
+  same but shows up as a plain add. The same replacement happens the other way round when a
+  leftover berth rule coincides with a built-in one (say you removed an own
+  `443/udp` entry while turning HTTP/3 on): the built-in `ufw allow` takes it
+  over, and the plan says so instead of promising a delete.
+- Spell `from` the way ufw prints it: a bare address for a single host (no
+  `/32` or `/128`), lowercase compressed IPv6, a network address with its host
+  bits zero (`203.0.113.0/24`, not `203.0.113.5/24`), no `/0` (omit `from`
+  instead) and no IPv4-compatible or IPv4-mapped IPv6 (`::a.b.c.d`,
+  `::ffff:a.b.c.d` — use the IPv4 address). Validation names the canonical
+  spelling; any other one would read as drift on every run, because berth
+  compares the exact text ufw prints.
+- A rule half-written by ufw (its IPv6 write failed while ufw still reported success — a transient I/O error on the host) or half-removed by hand is not detected: berth reconciles on `ufw show added`, which lists one line per rule for both families. Remedy: `ufw status numbered` → `ufw delete <n>` for the remaining family, then provision again.
+  A `ufw status` that fails or prints something berth does not recognize stops
+  the step instead of guessing.
+- `berth status --drift` reports a missing, extra or changed berth rule (and,
+  with `enabled: false`, an active ufw) as drift of the `hardening` step;
+  `berth provision --only hardening` is enough to apply a rule change.
+- **`enabled: false` keeps ufw disabled.** berth does not add rules or enable
+  ufw, and if ufw is installed and active it runs `ufw --force disable`. This
+  lowers the host's protection — every service bound to a public address is
+  reachable — so treat it as a deliberate choice (for example a provider
+  firewall in front of the host). fail2ban and the sshd hardening stay in
+  place either way. The ufw package is neither installed nor removed in this
+  mode (install-only, like `apt.packages`), and `allow` must be empty while
+  the firewall is off.
+- `berth init` does not ask about this block; write it by hand.
 
 ### Cloudflare origin lockdown (`cloudflare_only:`)
 
