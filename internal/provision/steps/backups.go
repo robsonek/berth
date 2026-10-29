@@ -69,27 +69,43 @@ func dumpClientBinary(engine string) string {
 // sidecar survives config changes alongside its archives. BerthVersion makes
 // the script change bytes on every berth upgrade, same accepted re-apply as
 // the directory manifest (see renderBackupManifest).
+//
+// With valkey_queue on, QueueSocket/ValkeyQueueData add the queue instance's
+// point-in-time RDB snapshot (`valkey-cli --rdb` over its socket — a SYNC
+// through the replication protocol, never a copy of live AOF files) as a
+// third artifact, taken BEFORE the sidecar so a failed snapshot (set -e)
+// leaves no sidecar for that timestamp, plus the data-dir fact in the
+// sidecar. Both are empty without the knob; the prune pattern for the
+// snapshot name is unconditional (berth's own artifact name — switching the
+// knob off must not strand old snapshots forever).
 func renderBackupScript(s *config.Server, site config.Site, eng dbpkg.Engine) ([]byte, error) {
+	queueSocket, queueData := "", ""
+	if s.ValkeyQueue {
+		queueSocket, queueData = valkeyQueueSocketPath(site.Domain), valkeyQueueDataDir(site.Domain)
+	}
 	return templates.Render("backup.sh.tmpl", struct {
 		Pool, DumpCommand, DBName, DeployPath, BackupDir, LogFile, LockFile string
 		ArtifactsLock                                                       string
 		BerthVersion, Domain, Engine, DBUser, SiteUser                      string
 		RetentionDays                                                       int
+		QueueSocket, ValkeyQueueData                                        string
 	}{
-		Pool:          poolName(site.Domain),
-		DumpCommand:   eng.DumpCommand(s.SiteDBName(site)),
-		DBName:        s.SiteDBName(site),
-		DeployPath:    site.DeployPath,
-		BackupDir:     backupDir(site.Domain),
-		LogFile:       backupLogPath(site.Domain),
-		LockFile:      backupLockPath(site.Domain),
-		ArtifactsLock: backupArtifactsLockPath,
-		BerthVersion:  version.Version,
-		Domain:        site.Domain,
-		Engine:        s.Database.Engine,
-		DBUser:        s.SiteDBUser(site),
-		SiteUser:      s.SiteUser(site),
-		RetentionDays: s.Backups.RetentionDaysEff(),
+		Pool:            poolName(site.Domain),
+		DumpCommand:     eng.DumpCommand(s.SiteDBName(site)),
+		DBName:          s.SiteDBName(site),
+		DeployPath:      site.DeployPath,
+		BackupDir:       backupDir(site.Domain),
+		LogFile:         backupLogPath(site.Domain),
+		LockFile:        backupLockPath(site.Domain),
+		ArtifactsLock:   backupArtifactsLockPath,
+		BerthVersion:    version.Version,
+		Domain:          site.Domain,
+		Engine:          s.Database.Engine,
+		DBUser:          s.SiteDBUser(site),
+		SiteUser:        s.SiteUser(site),
+		RetentionDays:   s.Backups.RetentionDaysEff(),
+		QueueSocket:     queueSocket,
+		ValkeyQueueData: queueData,
 	})
 }
 
@@ -113,17 +129,23 @@ func renderBackupLogrotate() ([]byte, error) {
 // is idempotent and attaches no reload; accepted in the spec (Codex review
 // corrected the earlier "just this one file" claim).
 func renderBackupManifest(s *config.Server, site config.Site) ([]byte, error) {
+	queueData := ""
+	if s.ValkeyQueue {
+		queueData = valkeyQueueDataDir(site.Domain)
+	}
 	return templates.Render("backup_manifest.tmpl", struct {
 		BerthVersion, Domain, Pool, Engine, DBName, DBUser, SiteUser, DeployPath string
+		ValkeyQueueData                                                          string
 	}{
-		BerthVersion: version.Version,
-		Domain:       site.Domain,
-		Pool:         poolName(site.Domain),
-		Engine:       s.Database.Engine,
-		DBName:       s.SiteDBName(site),
-		DBUser:       s.SiteDBUser(site),
-		SiteUser:     s.SiteUser(site),
-		DeployPath:   site.DeployPath,
+		BerthVersion:    version.Version,
+		Domain:          site.Domain,
+		Pool:            poolName(site.Domain),
+		Engine:          s.Database.Engine,
+		DBName:          s.SiteDBName(site),
+		DBUser:          s.SiteDBUser(site),
+		SiteUser:        s.SiteUser(site),
+		DeployPath:      site.DeployPath,
+		ValkeyQueueData: queueData,
 	})
 }
 
@@ -179,12 +201,16 @@ type backups struct{}
 // DB dump plus a tar of shared/, pruned by age, driven by one managed root cron +
 // script per site. ALWAYS in the pipeline (like System) so disabling backups — per
 // site or by removing a site — drift-removes the cron/script it left behind. It runs
-// after database (needs the DB) and appdirs (needs shared/); existing archives are
-// never deleted on disable.
+// after database (needs the DB), appdirs (needs shared/) and valkey (with
+// valkey_queue the script snapshots the queue instance through its socket, so
+// `--only backups` must find that fleet converged, not a script that fails at
+// valkey-cli on every cron run; without Valkey the prerequisite's disabled-mode
+// Check is satisfied at the cost of one ls); existing archives are never
+// deleted on disable.
 func Backups() provision.Step { return backups{} }
 
 func (backups) Name() string       { return "backups" }
-func (backups) Requires() []string { return []string{"appdirs", "database"} }
+func (backups) Requires() []string { return []string{"appdirs", "database", "valkey"} }
 
 func (b backups) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
 	eng, err := dbpkg.Get(s.Database.Engine)

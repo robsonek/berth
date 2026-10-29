@@ -72,6 +72,11 @@ func (h *huhPrompter) ServerCore(a *Answers) error {
 			huh.NewConfirm().Title("Default queue worker (Supervisor) for all sites?").Value(&a.Queue),
 			huh.NewConfirm().Title("Scheduler (cron) on by default?").Value(&a.Scheduler),
 		),
+		// Only meaningful with Valkey: the group is skipped otherwise, and
+		// ToServer drops a stale "yes" should the operator navigate back.
+		huh.NewGroup(
+			huh.NewConfirm().Title("Dedicated Valkey queue instance per site (noeviction, AOF)?").Value(&a.ValkeyQueue),
+		).WithHideFunc(func() bool { return !a.Valkey }),
 	)
 	if err := form.Run(); err != nil {
 		return err
@@ -100,6 +105,7 @@ func (h *huhPrompter) ServerAdvanced(a *Answers) error {
 		huh.NewGroup(
 			huh.NewInput().Title("Valkey maxmemory (e.g. 256mb, blank=default)").Value(&a.Tuning.ValkeyMaxmemory).Validate(optionalValkeyMem),
 			huh.NewSelect[string]().Title("Valkey eviction policy (blank=default)").Options(huh.NewOptions(policies...)...).Value(&a.Tuning.ValkeyMaxmemoryPolicy),
+			huh.NewInput().Title("Valkey queue instance maxmemory (with valkey_queue; e.g. 256mb, blank=default)").Value(&a.Tuning.ValkeyQueueMaxmemory).Validate(optionalValkeyMem),
 			huh.NewInput().Title("MariaDB innodb_buffer_pool (e.g. 256M, blank=default)").Value(&a.Tuning.MariaDBBufferPool).Validate(optionalMariaDBSize),
 			huh.NewConfirm().Title("MariaDB slow query log?").Value(&a.Tuning.MariaDBSlowQueryLog),
 			huh.NewInput().Title("MariaDB long_query_time (1-86400 s, blank/0=default 2; needs the slow log on)").Value(&longQuery).Validate(optionalInt("tuning.mariadb_long_query_time", 1, 86400)),

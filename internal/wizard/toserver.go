@@ -20,11 +20,16 @@ func (a Answers) ToServer() *config.Server {
 		Nginx:    config.Nginx{Source: a.NginxSource, Gzip: gzipKnob(a.Gzip)},
 		Database: config.Database{Engine: a.DBEngine, Source: a.DBSource}, // no top-level name/user
 		Valkey:   a.Valkey, Queue: a.Queue, Scheduler: a.Scheduler,
-		Workers:  a.Workers, // "" => omitted (dormant)
-		Fail2ban: config.Fail2ban{Bantime: a.Fail2ban.Bantime, Findtime: a.Fail2ban.Findtime, Maxretry: a.Fail2ban.Maxretry},
+		// The queue instance needs the cache one (Validate refuses it
+		// otherwise); the form hides the question without Valkey, and a
+		// back-navigated "yes" is dropped here rather than written out.
+		ValkeyQueue: a.Valkey && a.ValkeyQueue,
+		Workers:     a.Workers, // "" => omitted (dormant)
+		Fail2ban:    config.Fail2ban{Bantime: a.Fail2ban.Bantime, Findtime: a.Fail2ban.Findtime, Maxretry: a.Fail2ban.Maxretry},
 		Tuning: config.Tuning{
 			ValkeyMaxmemory:         a.Tuning.ValkeyMaxmemory,
 			ValkeyMaxmemoryPolicy:   a.Tuning.ValkeyMaxmemoryPolicy,
+			ValkeyQueueMaxmemory:    a.Tuning.ValkeyQueueMaxmemory,
 			MariaDBBufferPool:       a.Tuning.MariaDBBufferPool,
 			MariaDBSlowQueryLog:     a.Tuning.MariaDBSlowQueryLog,
 			MariaDBLongQueryTime:    a.Tuning.MariaDBLongQueryTime,

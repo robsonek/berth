@@ -33,6 +33,100 @@ func valkeySocketPath(domain string) string {
 }
 func valkeyDataDir(domain string) string { return valkeyStateBase + "/" + poolName(domain) }
 
+// The queue instance (valkey_queue: true): a second process per site for the
+// application's job queue, in the SAME 0700 runtime dir (its own socket leaf)
+// with its own state dir, unit and memory cap. Names come from config so the
+// status probe and the domain-length budget see the same strings.
+func valkeyQueueInstanceUnit(domain string) string { return config.ValkeyQueueInstanceUnit(domain) }
+func valkeyQueueUnitPath(domain string) string {
+	return valkeyUnitDir + "/" + valkeyQueueInstanceUnit(domain)
+}
+func valkeyQueueSocketPath(domain string) string {
+	return config.ValkeyQueueSocketPath(poolName(domain))
+}
+func valkeyQueueDataDir(domain string) string { return config.ValkeyQueueDataDir(poolName(domain)) }
+
+// valkeyInstance is one Valkey process the step manages: the cache instance
+// every site has, and — with valkey_queue on — the site's queue instance.
+// Check and Apply iterate instances, not sites, so both roles get the exact
+// same probes, writes, restarts and heal path with different values.
+type valkeyInstance struct {
+	site    config.Site
+	unit    string // berth-valkey-<pool>.service | berth-valkey-<pool>-queue.service
+	path    string // /etc/systemd/system/<unit>
+	socket  string // …/valkey.sock | …/queue.sock (same 0700 runtime dir)
+	dataDir string // StateDirectory=: …/<pool> | …/<pool>-queue
+	queue   bool
+}
+
+// valkeyInstances lists every desired instance in site order: a site's cache
+// instance first, then its queue instance when the knob is on.
+func valkeyInstances(s *config.Server) []valkeyInstance {
+	var out []valkeyInstance
+	for _, site := range s.Sites {
+		out = append(out, valkeyInstance{
+			site: site, unit: valkeyInstanceUnit(site.Domain), path: valkeyUnitPath(site.Domain),
+			socket: valkeySocketPath(site.Domain), dataDir: valkeyDataDir(site.Domain),
+		})
+		if s.ValkeyQueue {
+			out = append(out, valkeyInstance{
+				site: site, unit: valkeyQueueInstanceUnit(site.Domain), path: valkeyQueueUnitPath(site.Domain),
+				socket: valkeyQueueSocketPath(site.Domain), dataDir: valkeyQueueDataDir(site.Domain), queue: true,
+			})
+		}
+	}
+	return out
+}
+
+// renderValkeyInstanceUnit renders the unit for one instance of either role.
+func renderValkeyInstanceUnit(s *config.Server, in valkeyInstance) ([]byte, error) {
+	if in.queue {
+		return renderValkeyQueueUnit(s, in.site)
+	}
+	return renderValkeyUnit(s, in.site)
+}
+
+// valkeyDataOwnerCmd is the data-owner guard's probe: the same shape as
+// assertSiteTreeOwners (appdirs.go) — %U owner name, %u uid, %F type last
+// (it contains spaces), LC_ALL=C because %F is localized.
+func valkeyDataOwnerCmd(dir string) string {
+	return "LC_ALL=C stat -c '%U %u %F' " + shQuote(dir)
+}
+
+// assertValkeyDataOwners refuses when an EXISTING instance data dir (cache
+// or queue) is not a directory owned by the site user. A removed site keeps
+// its data on purpose, and systemd's StateDirectory= chowns a pre-existing
+// directory's contents recursively to User= on the next start — so a later
+// site whose derived dir name coincides (a re-added domain under another
+// sites[].user; app.example.com-queue's cache dir vs app.example.com's queue
+// dir) would silently inherit a previous tenant's dataset. Absent dirs pass
+// (a fresh provision creates them). Runs FIRST in Check and Apply, over every
+// instance of every site, and is deliberately not bypassable with --force:
+// after a deliberate migration the owner matches and the guard passes.
+func assertValkeyDataOwners(ctx context.Context, r bssh.Runner, s *config.Server) error {
+	for _, in := range valkeyInstances(s) {
+		res, err := r.Run(ctx, valkeyDataOwnerCmd(in.dataDir), nil)
+		if err != nil {
+			return err
+		}
+		if res.ExitCode != 0 {
+			continue // absent: nothing to adopt
+		}
+		fields := strings.Fields(strings.TrimSpace(res.Stdout))
+		if len(fields) < 3 {
+			return fmt.Errorf("unexpected stat output probing %s: %q", in.dataDir, strings.TrimSpace(res.Stdout))
+		}
+		owner, uid, ftype := fields[0], fields[1], strings.Join(fields[2:], " ")
+		if ftype != "directory" {
+			return fmt.Errorf("refusing to manage valkey for %s: %s exists but is not a directory (%s) — inspect and remove it before re-running; --force does not override this check", in.site.Domain, in.dataDir, ftype)
+		}
+		if user := s.SiteUser(in.site); owner != user {
+			return fmt.Errorf("refusing to manage valkey for %s: %s is owned by %s (uid %s) but the site user is %q; move or remove that directory (a removed site's data is kept on purpose), or pin sites[].user to its owner — --force does not override this check", in.site.Domain, in.dataDir, owner, uid, user)
+		}
+	}
+	return nil
+}
+
 // valkeyBinary is the path the instance units exec; probed for staleness after
 // unattended-upgrades replace the file under a running process.
 const valkeyBinary = "/usr/bin/valkey-server"
@@ -64,19 +158,54 @@ func valkeyExecCurrent(ctx context.Context, r bssh.Runner, unit string) (bool, e
 	return res.ExitCode == 0, nil
 }
 
-// renderValkeyUnit renders one site's managed instance unit. All configuration
-// travels as ExecStart args on purpose: nothing here is secret, and it keeps
-// the unit the single managed artifact per site. The maxmemory knobs are the
-// existing tuning.* config values — the cap is per instance.
+// valkeyUnitData is the render struct of berth_valkey.service.tmpl, shared by
+// the cache and the queue instance (one template, two value sets). Mirror any
+// field change in the test-local copy in internal/templates/templates_test.go.
+type valkeyUnitData struct {
+	Domain, User, Pool, Maxmemory, Policy string
+	// Queue selects the queue role: "queue" in the description and the fixed
+	// AOF arguments on ExecStart. Preserve adds RuntimeDirectoryPreserve=yes:
+	// both instances share one RuntimeDirectory, which systemd removes when
+	// EITHER unit stops unless preserved — so it is set on BOTH units while
+	// valkey_queue is on, and on neither otherwise (byte-identical to the
+	// pre-feature unit). StateSuffix/SocketName pick the per-role data dir
+	// and socket leaf.
+	Queue, Preserve         bool
+	StateSuffix, SocketName string
+}
+
+// renderValkeyUnit renders one site's managed CACHE instance unit. All
+// configuration travels as ExecStart args on purpose: nothing here is secret,
+// and it keeps the unit the single managed artifact per instance. The
+// maxmemory knobs are the existing tuning.* config values — the cap is per
+// instance.
 func renderValkeyUnit(s *config.Server, site config.Site) ([]byte, error) {
-	return templates.Render("berth_valkey.service.tmpl", struct {
-		Domain, User, Pool, Maxmemory, Policy string
-	}{
-		Domain:    site.Domain,
-		User:      s.SiteUser(site),
-		Pool:      poolName(site.Domain),
-		Maxmemory: s.Tuning.ValkeyMaxmemoryEff(),
-		Policy:    s.Tuning.ValkeyMaxmemoryPolicyEff(),
+	return templates.Render("berth_valkey.service.tmpl", valkeyUnitData{
+		Domain:     site.Domain,
+		User:       s.SiteUser(site),
+		Pool:       poolName(site.Domain),
+		Maxmemory:  s.Tuning.ValkeyMaxmemoryEff(),
+		Policy:     s.Tuning.ValkeyMaxmemoryPolicyEff(),
+		Preserve:   s.ValkeyQueue,
+		SocketName: "valkey.sock",
+	})
+}
+
+// renderValkeyQueueUnit renders one site's managed QUEUE instance unit: the
+// same template with the queue's own cap (tuning.valkey_queue_maxmemory), a
+// fixed noeviction policy (a queue must never drop jobs — a full instance
+// refuses writes instead) and fixed AOF persistence (appendfsync everysec).
+func renderValkeyQueueUnit(s *config.Server, site config.Site) ([]byte, error) {
+	return templates.Render("berth_valkey.service.tmpl", valkeyUnitData{
+		Domain:      site.Domain,
+		User:        s.SiteUser(site),
+		Pool:        poolName(site.Domain),
+		Maxmemory:   s.Tuning.ValkeyQueueMaxmemoryEff(),
+		Policy:      "noeviction",
+		Queue:       true,
+		Preserve:    true,
+		StateSuffix: "-queue",
+		SocketName:  "queue.sock",
 	})
 }
 
@@ -108,15 +237,17 @@ func listValkeyUnits(ctx context.Context, r bssh.Runner) ([]string, error) {
 
 func desiredValkeyUnitPaths(s *config.Server) map[string]bool {
 	desired := map[string]bool{}
-	for _, site := range s.Sites {
-		desired[valkeyUnitPath(site.Domain)] = true
+	for _, in := range valkeyInstances(s) {
+		desired[in.path] = true
 	}
 	return desired
 }
 
-// valkeyPingCmd probes an instance AS THE SITE USER over its socket: a PONG
-// proves both that the daemon answers and that the socket path admits the
-// tenant (owner-only runtime dir + socket perms) — the step's whole point.
+// valkeyPingOver probes an instance AS THE SITE USER over its socket
+// (valkey.sock or queue.sock — the read-only classifier in cmdclass_test.go
+// pins this exact shape and both leaves): a PONG proves both that the daemon
+// answers and that the socket path admits the tenant (owner-only runtime dir
+// + socket perms) — the step's whole point.
 //
 // setpriv, not runuser: runuser opens a PAM session, and pam_unix logs a
 // session open/close pair to the journal on every invocation — so a
@@ -126,10 +257,10 @@ func desiredValkeyUnitPaths(s *config.Server) map[string]bool {
 // zero journal lines). --init-groups is load-bearing: it grants the site
 // user's supplementary groups, which socket access can depend on — do not
 // "simplify" it away.
-func valkeyPingCmd(user, domain string) string {
+func valkeyPingOver(user, socket string) string {
 	qu := shQuote(user)
 	return "setpriv --reuid " + qu + " --regid " + qu + " --init-groups -- valkey-cli -s " +
-		shQuote(valkeySocketPath(domain)) + " ping"
+		shQuote(socket) + " ping"
 }
 
 // unitCacheFresh reports whether systemd's loaded copy of unit matches the
@@ -239,6 +370,12 @@ func (v valkey) Check(ctx context.Context, rc provision.RunCtx, s *config.Server
 	if !s.Valkey {
 		return v.checkDisabled(ctx, r)
 	}
+	// Safety preflight over every instance of every site before any drift
+	// verdict (also in dry-run): a foreign-owned data dir must fail the whole
+	// run loudly, never be adopted by systemd on the next start.
+	if err := assertValkeyDataOwners(ctx, r, s); err != nil {
+		return provision.CheckResult{}, err
+	}
 	ok := true
 	installed, err := pkgInstalled(ctx, r, "valkey-server")
 	if err != nil {
@@ -259,20 +396,20 @@ func (v valkey) Check(ctx context.Context, rc provision.RunCtx, s *config.Server
 	}
 	ok = ok && stockEnabled.ExitCode != 0 && stockActive.ExitCode != 0
 
-	for _, site := range s.Sites {
-		want, err := renderValkeyUnit(s, site)
+	for _, in := range valkeyInstances(s) {
+		want, err := renderValkeyInstanceUnit(s, in)
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
-		state, err := checkManagedFile(ctx, r, valkeyUnitPath(site.Domain), want)
+		state, err := checkManagedFile(ctx, r, in.path, want)
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
-		unitOK, err := managedFileSatisfied(state, valkeyUnitPath(site.Domain), rc.Force)
+		unitOK, err := managedFileSatisfied(state, in.path, rc.Force)
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
-		up, err := serviceUp(ctx, r, valkeyInstanceUnit(site.Domain))
+		up, err := serviceUp(ctx, r, in.unit)
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
@@ -281,21 +418,21 @@ func (v valkey) Check(ctx context.Context, rc provision.RunCtx, s *config.Server
 		// args running — the same window checkTuned closes for MariaDB), it
 		// must execute the CURRENT binary (unattended-upgrades replaces the
 		// file under the running process; only the stock unit gets a postinst
-		// restart), and the daemon must answer over the socket AS the site
+		// restart), and the daemon must answer over ITS socket AS the site
 		// user.
 		loaded, fresh, pong := false, false, false
 		execFresh := false
 		if unitOK && up {
-			if loaded, err = serviceConfigLoaded(ctx, r, valkeyInstanceUnit(site.Domain), valkeyUnitPath(site.Domain)); err != nil {
+			if loaded, err = serviceConfigLoaded(ctx, r, in.unit, in.path); err != nil {
 				return provision.CheckResult{}, err
 			}
-			if fresh, err = unitCacheFresh(ctx, r, valkeyInstanceUnit(site.Domain)); err != nil {
+			if fresh, err = unitCacheFresh(ctx, r, in.unit); err != nil {
 				return provision.CheckResult{}, err
 			}
-			if execFresh, err = valkeyExecCurrent(ctx, r, valkeyInstanceUnit(site.Domain)); err != nil {
+			if execFresh, err = valkeyExecCurrent(ctx, r, in.unit); err != nil {
 				return provision.CheckResult{}, err
 			}
-			if pong, err = valkeyPong(ctx, r, s.SiteUser(site), site.Domain); err != nil {
+			if pong, err = valkeyPongOver(ctx, r, s.SiteUser(in.site), in.socket); err != nil {
 				return provision.CheckResult{}, err
 			}
 		}
@@ -326,21 +463,30 @@ func (v valkey) Check(ctx context.Context, rc provision.RunCtx, s *config.Server
 	if ok {
 		return provision.CheckResult{Satisfied: true, Reason: "per-site valkey instances running, stock service off"}, nil
 	}
+	changes := []string{
+		"install valkey-server (valkey-cli comes via its valkey-tools dependency)",
+		"disable the stock shared valkey-server.service",
+		"per site: write berth-valkey-<pool>.service, enable --now, verify PONG over the socket",
+	}
+	if s.ValkeyQueue {
+		changes = append(changes, "per site: write berth-valkey-<pool>-queue.service (noeviction, AOF everysec), enable --now, verify PONG over queue.sock")
+	}
+	changes = append(changes, "remove orphan berth-valkey instances")
 	return provision.CheckResult{
 		Satisfied: false,
 		Reason:    "per-site valkey fleet not converged",
-		Changes: []string{
-			"install valkey-server (valkey-cli comes via its valkey-tools dependency)",
-			"disable the stock shared valkey-server.service",
-			"per site: write berth-valkey-<pool>.service, enable --now, verify PONG over the socket",
-			"remove orphan berth-valkey instances",
-		},
+		Changes:   changes,
 	}, nil
 }
 
 func (v valkey) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
 	if !s.Valkey {
 		return v.applyDisabled(ctx, r)
+	}
+	// Same preflight as Check, before the first mutation (--only valkey runs
+	// Apply without a passing Check having run on this exact state).
+	if err := assertValkeyDataOwners(ctx, r, s); err != nil {
+		return err
 	}
 	if err := aptInstall(ctx, r, "valkey-server"); err != nil {
 		return fmt.Errorf("install valkey-server: %w", err)
@@ -361,15 +507,17 @@ func (v valkey) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server
 		return err
 	}
 
-	// Per-site units: write when absent or drifted (writeManagedFile enforces
-	// the foreign-file abort), remember which changed for a targeted restart.
+	// Per-instance units: write when absent or drifted (writeManagedFile
+	// enforces the foreign-file abort), remember which changed for a targeted
+	// restart — keyed by unit, so a drifted queue unit never restarts the
+	// cache instance beside it.
 	changed := map[string]bool{}
-	for _, site := range s.Sites {
-		want, err := renderValkeyUnit(s, site)
+	for _, in := range valkeyInstances(s) {
+		want, err := renderValkeyInstanceUnit(s, in)
 		if err != nil {
 			return err
 		}
-		state, err := checkManagedFile(ctx, r, valkeyUnitPath(site.Domain), want)
+		state, err := checkManagedFile(ctx, r, in.path, want)
 		if err != nil {
 			return err
 		}
@@ -377,15 +525,15 @@ func (v valkey) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server
 			continue
 		}
 		if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
-			Path: valkeyUnitPath(site.Domain), Content: want,
+			Path: in.path, Content: want,
 			Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
 		}); err != nil {
-			return fmt.Errorf("write %s: %w", valkeyUnitPath(site.Domain), err)
+			return fmt.Errorf("write %s: %w", in.path, err)
 		}
 		// A replaced unit needs a restart to load the new ExecStart; a FRESH
 		// one does not — enable --now below starts it with current content.
 		if state != fileAbsent {
-			changed[site.Domain] = true
+			changed[in.unit] = true
 		}
 		needReload = true
 	}
@@ -398,8 +546,8 @@ func (v valkey) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server
 		}
 	}
 
-	for _, site := range s.Sites {
-		unit := valkeyInstanceUnit(site.Domain)
+	for _, in := range valkeyInstances(s) {
+		unit := in.unit
 		if res, err := r.Run(ctx, "systemctl enable --now "+unit, nil); err != nil {
 			return err
 		} else if res.ExitCode != 0 {
@@ -411,13 +559,13 @@ func (v valkey) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server
 		// between a past write and its restart (the loaded/NeedDaemonReload
 		// probes catch that).
 		restarted := false
-		if changed[site.Domain] {
+		if changed[unit] {
 			if err := restartValkey(ctx, r, unit); err != nil {
 				return err
 			}
 			restarted = true
 		} else {
-			loaded, err := serviceConfigLoaded(ctx, r, unit, valkeyUnitPath(site.Domain))
+			loaded, err := serviceConfigLoaded(ctx, r, unit, in.path)
 			if err != nil {
 				return err
 			}
@@ -449,7 +597,8 @@ func (v valkey) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server
 		// Heal-and-verify: an up-to-date unit whose daemon is wedged (or whose
 		// socket vanished) would otherwise never converge — Check unsatisfied,
 		// Apply all-no-op, forever. One restart, then fail loud.
-		pong, err := valkeyPong(ctx, r, s.SiteUser(site), site.Domain)
+		user := s.SiteUser(in.site)
+		pong, err := valkeyPongOver(ctx, r, user, in.socket)
 		if err != nil {
 			return err
 		}
@@ -457,21 +606,22 @@ func (v valkey) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server
 			if err := restartValkey(ctx, r, unit); err != nil {
 				return err
 			}
-			if pong, err = valkeyPong(ctx, r, s.SiteUser(site), site.Domain); err != nil {
+			if pong, err = valkeyPongOver(ctx, r, user, in.socket); err != nil {
 				return err
 			}
 		}
 		if !pong {
 			return fmt.Errorf("%s does not answer PONG on %s as %s (restart did not heal it); check `journalctl -u %s`",
-				unit, valkeySocketPath(site.Domain), s.SiteUser(site), unit)
+				unit, in.socket, user, unit)
 		}
 	}
 	return nil
 }
 
-// valkeyPong runs the per-site PONG probe (see valkeyPingCmd).
-func valkeyPong(ctx context.Context, r bssh.Runner, user, domain string) (bool, error) {
-	res, err := r.Run(ctx, valkeyPingCmd(user, domain), nil)
+// valkeyPongOver runs the PONG probe over one instance's socket (see
+// valkeyPingOver).
+func valkeyPongOver(ctx context.Context, r bssh.Runner, user, socket string) (bool, error) {
+	res, err := r.Run(ctx, valkeyPingOver(user, socket), nil)
 	if err != nil {
 		return false, err
 	}

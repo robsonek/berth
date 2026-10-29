@@ -1,5 +1,5 @@
 [Unit]
-Description=Valkey for {{ .Domain }} (berth)
+Description=Valkey{{ if .Queue }} queue{{ end }} for {{ .Domain }} (berth)
 After=network.target
 
 [Service]
@@ -8,9 +8,10 @@ User={{ .User }}
 Group={{ .User }}
 RuntimeDirectory=berth-valkey/{{ .Pool }}
 RuntimeDirectoryMode=0700
-StateDirectory=berth-valkey/{{ .Pool }}
+{{ if .Preserve }}RuntimeDirectoryPreserve=yes
+{{ end }}StateDirectory=berth-valkey/{{ .Pool }}{{ .StateSuffix }}
 StateDirectoryMode=0700
-ExecStart=/usr/bin/valkey-server --port 0 --unixsocket /run/berth-valkey/{{ .Pool }}/valkey.sock --unixsocketperm 600 --dir /var/lib/berth-valkey/{{ .Pool }} --maxmemory {{ .Maxmemory }} --maxmemory-policy {{ .Policy }} --supervised systemd --daemonize no
+ExecStart=/usr/bin/valkey-server --port 0 --unixsocket /run/berth-valkey/{{ .Pool }}/{{ .SocketName }} --unixsocketperm 600 --dir /var/lib/berth-valkey/{{ .Pool }}{{ .StateSuffix }} --maxmemory {{ .Maxmemory }} --maxmemory-policy {{ .Policy }}{{ if .Queue }} --appendonly yes --appendfsync everysec{{ end }} --supervised systemd --daemonize no
 Restart=always
 TimeoutStopSec=infinity
 

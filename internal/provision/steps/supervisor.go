@@ -25,15 +25,17 @@ const (
 
 // supervisorAfterUnits is the ordering the drop-in declares: the database
 // unit first, then each site's Valkey instance when Valkey is on (it is
-// server-wide, so every site has one), sorted so the bytes never depend on
-// the order of sites in the config. Ordering only — no Wants=/Requires=, so
-// a database or Valkey that fails to start never keeps supervisord down.
+// server-wide, so every site has one) — and its queue instance when
+// valkey_queue is on, since the workers consume exactly that one — sorted so
+// the bytes never depend on the order of sites in the config. Ordering only
+// — no Wants=/Requires=, so a database or Valkey that fails to start never
+// keeps supervisord down.
 func supervisorAfterUnits(s *config.Server) []string {
 	units := []string{config.DatabaseUnit(s.Database.Engine)}
 	if s.Valkey {
 		var valkeys []string
-		for _, site := range s.Sites {
-			valkeys = append(valkeys, valkeyInstanceUnit(site.Domain))
+		for _, in := range valkeyInstances(s) {
+			valkeys = append(valkeys, in.unit)
 		}
 		sort.Strings(valkeys)
 		units = append(units, valkeys...)

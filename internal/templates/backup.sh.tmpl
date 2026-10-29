@@ -8,8 +8,9 @@ flock -w 3600 -s 8 || { echo "[$(date -u +%FT%TZ)] berth backup {{ .Pool }}: giv
 ts="$(date -u +%Y%m%dT%H%M%SZ)"
 db_tmp=""
 files_tmp=""
-meta_tmp=""
-trap 'rm -f -- "$db_tmp" "$files_tmp" "$meta_tmp"' EXIT
+{{ if .QueueSocket }}queue_tmp=""
+{{ end }}meta_tmp=""
+trap 'rm -f -- "$db_tmp" "$files_tmp"{{ if .QueueSocket }} "$queue_tmp"{{ end }} "$meta_tmp"' EXIT
 find "{{ .BackupDir }}" -maxdepth 1 -type f -name '.tmp-*' -mmin +1440 -delete
 echo "[$(date -u +%FT%TZ)] berth backup {{ .Pool }}: start"
 db_tmp="$(mktemp "{{ .BackupDir }}/.tmp-XXXXXXXX")"
@@ -20,14 +21,23 @@ files_tmp="$(mktemp "{{ .BackupDir }}/.tmp-XXXXXXXX")"
 tar --exclude='shared/tmp' -czf "$files_tmp" -C "{{ .DeployPath }}" shared || [ $? -eq 1 ]
 chmod 0600 "$files_tmp"
 mv "$files_tmp" "{{ .BackupDir }}/{{ .Pool }}-files-$ts.tar.gz"
-meta_tmp="$(mktemp "{{ .BackupDir }}/.tmp-XXXXXXXX")"
+{{ if .QueueSocket }}queue_tmp="$(mktemp "{{ .BackupDir }}/.tmp-XXXXXXXX")"
+# Bounded to 300 s: the snapshot waits up to 5 s for the diskless SYNC and then streams at most maxmemory
+# (~1 s per 100 MB on a VPS disk), so 300 s is >10x a 1 GB queue, and the whole run stays well inside the
+# 15-minute wait the offsite script allows for this lock. A wedged instance fails this run instead of
+# holding the locks forever; -k sends SIGKILL 10 s after SIGTERM if valkey-cli ignores the latter.
+timeout -k 10 300 valkey-cli -s {{ .QueueSocket }} --rdb "$queue_tmp" || { rc=$?; echo "[$(date -u +%FT%TZ)] berth backup {{ .Pool }}: queue snapshot failed (exit $rc; 124 = timed out after 300 s)"; exit 1; }
+chmod 0600 "$queue_tmp"
+mv "$queue_tmp" "{{ .BackupDir }}/{{ .Pool }}-queue-$ts.rdb"
+{{ end }}meta_tmp="$(mktemp "{{ .BackupDir }}/.tmp-XXXXXXXX")"
 {
   printf 'BERTH_VERSION=%s\n' '{{ .BerthVersion }}'
   printf 'DOMAIN=%s\nPOOL=%s\nENGINE=%s\n' '{{ .Domain }}' '{{ .Pool }}' '{{ .Engine }}'
   printf 'DB_NAME=%s\nDB_USER=%s\nSITE_USER=%s\nDEPLOY_PATH=%s\n' '{{ .DBName }}' '{{ .DBUser }}' '{{ .SiteUser }}' '{{ .DeployPath }}'
-  printf 'TIMESTAMP=%s\n' "$ts"
+{{ if .ValkeyQueueData }}  printf 'VALKEY_QUEUE_DATA=%s\n' '{{ .ValkeyQueueData }}'
+{{ end }}  printf 'TIMESTAMP=%s\n' "$ts"
 } > "$meta_tmp"
 chmod 0600 "$meta_tmp"
 mv "$meta_tmp" "{{ .BackupDir }}/{{ .Pool }}-meta-$ts.manifest"
-find "{{ .BackupDir }}" -maxdepth 1 -type f \( -name '{{ .DBName }}-*.sql.gz' -o -name '{{ .Pool }}-files-*.tar.gz' -o -name '{{ .Pool }}-meta-*.manifest' \) -mtime +{{ .RetentionDays }} -delete
+find "{{ .BackupDir }}" -maxdepth 1 -type f \( -name '{{ .DBName }}-*.sql.gz' -o -name '{{ .Pool }}-files-*.tar.gz' -o -name '{{ .Pool }}-queue-*.rdb' -o -name '{{ .Pool }}-meta-*.manifest' \) -mtime +{{ .RetentionDays }} -delete
 echo "[$(date -u +%FT%TZ)] berth backup {{ .Pool }}: done"

@@ -811,10 +811,18 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 	// process still executes the current binary.
 	case cmd == valkeyExecProbeCmd(fixtureValkeyUnit):
 		return r.answerValkeyExec(fixtureValkeyUnit), true
+	case cmd == valkeyExecProbeCmd(fixtureValkeyQueueUnit):
+		return r.answerValkeyExec(fixtureValkeyQueueUnit), true
 
 	// valkeyPong PARSES stdout (trimmed "PONG") AND the exit code.
 	case cmd == valkeyPingProbeCmd("appuser", "app_example_com"):
 		if u, ok := r.h.unit(fixtureValkeyUnit); ok && u.active {
+			return bssh.Result{Stdout: "PONG\n"}, true
+		}
+		return bssh.Result{ExitCode: 1, Stderr: "Could not connect to Valkey"}, true
+	// The queue instance answers on its own socket, from ITS unit's state.
+	case cmd == valkeyQueuePingProbeCmd("appuser", "app_example_com"):
+		if u, ok := r.h.unit(fixtureValkeyQueueUnit); ok && u.active {
 			return bssh.Result{Stdout: "PONG\n"}, true
 		}
 		return bssh.Result{ExitCode: 1, Stderr: "Could not connect to Valkey"}, true
@@ -825,6 +833,8 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 		return r.answerServiceLoaded(fixtureMariaDBTuning, "mariadb.service"), true
 	case cmd == serviceLoadedProbeCmd(fixtureValkeyUnitPath, fixtureValkeyUnit):
 		return r.answerServiceLoaded(fixtureValkeyUnitPath, fixtureValkeyUnit), true
+	case cmd == serviceLoadedProbeCmd(fixtureValkeyQueueUnitPath, fixtureValkeyQueueUnit):
+		return r.answerServiceLoaded(fixtureValkeyQueueUnitPath, fixtureValkeyQueueUnit), true
 
 	// hostMemTotalBytes PARSES the kB figure (ParseUint), so the answer is a
 	// bare integer line from the modelled RAM size.
@@ -1037,7 +1047,10 @@ const (
 	fixtureSharedEnv      = "/var/www/app.example.com/shared/.env"
 	fixtureValkeyUnit     = "berth-valkey-app_example_com.service"
 	fixtureValkeyUnitPath = "/etc/systemd/system/berth-valkey-app_example_com.service"
-	fixtureMariaDBTuning  = "/etc/mysql/mariadb.conf.d/99-berth.cnf"
+	// The fixture's queue instance (valkey_queue, maximal variant).
+	fixtureValkeyQueueUnit     = "berth-valkey-app_example_com-queue.service"
+	fixtureValkeyQueueUnitPath = "/etc/systemd/system/berth-valkey-app_example_com-queue.service"
+	fixtureMariaDBTuning       = "/etc/mysql/mariadb.conf.d/99-berth.cnf"
 	// The fixture site's DB password: 32 alphanumeric chars, the exact shape
 	// secret.Generate produces and reDBPassword accepts. The identifier and
 	// value deliberately avoid gosec G101's name heuristics — this is
@@ -1195,12 +1208,20 @@ func mariadbUserGrantedProbe(user, db string) string {
 	return `mariadb --protocol=socket -N -e "SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA='` + db + `' AND GRANTEE='''` + user + `''@''localhost''' LIMIT 1"`
 }
 
-// valkeyPingProbeCmd mirrors valkeyPingCmd's composition (valkey.go) — a copy
+// valkeyPingProbeCmd mirrors valkeyPingOver's composition (valkey.go) — a copy
 // on purpose (see above).
 func valkeyPingProbeCmd(user, pool string) string {
 	qu := shQuote(user)
 	return "setpriv --reuid " + qu + " --regid " + qu + " --init-groups -- valkey-cli -s " +
 		shQuote("/run/berth-valkey/"+pool+"/valkey.sock") + " ping"
+}
+
+// valkeyQueuePingProbeCmd mirrors valkeyPingOver (valkey.go) the same
+// way: the same shape over the queue.sock leaf.
+func valkeyQueuePingProbeCmd(user, pool string) string {
+	qu := shQuote(user)
+	return "setpriv --reuid " + qu + " --regid " + qu + " --init-groups -- valkey-cli -s " +
+		shQuote("/run/berth-valkey/"+pool+"/queue.sock") + " ping"
 }
 
 // answerMariaDBScalar evaluates a probeSQL query whose modelled truth is hit:

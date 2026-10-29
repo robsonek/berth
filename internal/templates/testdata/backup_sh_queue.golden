@@ -1,0 +1,44 @@
+# managed by berth
+set -euo pipefail
+umask 077
+exec >>/var/log/berth/backup-app_example_com.log 2>&1
+exec 9>/var/backups/berth/app_example_com/.lock
+flock -n 9 || { echo "[$(date -u +%FT%TZ)] berth backup app_example_com: skipped (another run holds the lock)"; exit 0; }
+exec 8>/var/backups/berth/.artifacts.lock
+flock -w 3600 -s 8 || { echo "[$(date -u +%FT%TZ)] berth backup app_example_com: giving up (offsite still holds the artifacts lock)"; exit 1; }
+ts="$(date -u +%Y%m%dT%H%M%SZ)"
+db_tmp=""
+files_tmp=""
+queue_tmp=""
+meta_tmp=""
+trap 'rm -f -- "$db_tmp" "$files_tmp" "$queue_tmp" "$meta_tmp"' EXIT
+find "/var/backups/berth/app_example_com" -maxdepth 1 -type f -name '.tmp-*' -mmin +1440 -delete
+echo "[$(date -u +%FT%TZ)] berth backup app_example_com: start"
+db_tmp="$(mktemp "/var/backups/berth/app_example_com/.tmp-XXXXXXXX")"
+mariadb-dump --protocol=socket --single-transaction --no-tablespaces --routines --events 'myapp' | gzip -c > "$db_tmp"
+chmod 0600 "$db_tmp"
+mv "$db_tmp" "/var/backups/berth/app_example_com/myapp-$ts.sql.gz"
+files_tmp="$(mktemp "/var/backups/berth/app_example_com/.tmp-XXXXXXXX")"
+tar --exclude='shared/tmp' -czf "$files_tmp" -C "/home/deploy/myapp" shared || [ $? -eq 1 ]
+chmod 0600 "$files_tmp"
+mv "$files_tmp" "/var/backups/berth/app_example_com/app_example_com-files-$ts.tar.gz"
+queue_tmp="$(mktemp "/var/backups/berth/app_example_com/.tmp-XXXXXXXX")"
+# Bounded to 300 s: the snapshot waits up to 5 s for the diskless SYNC and then streams at most maxmemory
+# (~1 s per 100 MB on a VPS disk), so 300 s is >10x a 1 GB queue, and the whole run stays well inside the
+# 15-minute wait the offsite script allows for this lock. A wedged instance fails this run instead of
+# holding the locks forever; -k sends SIGKILL 10 s after SIGTERM if valkey-cli ignores the latter.
+timeout -k 10 300 valkey-cli -s /run/berth-valkey/app_example_com/queue.sock --rdb "$queue_tmp" || { rc=$?; echo "[$(date -u +%FT%TZ)] berth backup app_example_com: queue snapshot failed (exit $rc; 124 = timed out after 300 s)"; exit 1; }
+chmod 0600 "$queue_tmp"
+mv "$queue_tmp" "/var/backups/berth/app_example_com/app_example_com-queue-$ts.rdb"
+meta_tmp="$(mktemp "/var/backups/berth/app_example_com/.tmp-XXXXXXXX")"
+{
+  printf 'BERTH_VERSION=%s\n' 'v9.9.9'
+  printf 'DOMAIN=%s\nPOOL=%s\nENGINE=%s\n' 'app.example.com' 'app_example_com' 'mariadb'
+  printf 'DB_NAME=%s\nDB_USER=%s\nSITE_USER=%s\nDEPLOY_PATH=%s\n' 'myapp' 'myapp' 'b_appexamplecom_dd46c94b' '/home/deploy/myapp'
+  printf 'VALKEY_QUEUE_DATA=%s\n' '/var/lib/berth-valkey/app_example_com-queue'
+  printf 'TIMESTAMP=%s\n' "$ts"
+} > "$meta_tmp"
+chmod 0600 "$meta_tmp"
+mv "$meta_tmp" "/var/backups/berth/app_example_com/app_example_com-meta-$ts.manifest"
+find "/var/backups/berth/app_example_com" -maxdepth 1 -type f \( -name 'myapp-*.sql.gz' -o -name 'app_example_com-files-*.tar.gz' -o -name 'app_example_com-queue-*.rdb' -o -name 'app_example_com-meta-*.manifest' \) -mtime +7 -delete
+echo "[$(date -u +%FT%TZ)] berth backup app_example_com: done"

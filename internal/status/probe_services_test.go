@@ -206,3 +206,24 @@ func TestProbeServicesFailsOnNonZeroExit(t *testing.T) {
 		t.Errorf("error %q does not surface the host's stderr", err)
 	}
 }
+
+// TestUnitListWithValkeyQueue: the queue instances are listed AFTER every
+// cache instance (in site order), so existing rows keep their positions;
+// without the knob the list is exactly today's.
+func TestUnitListWithValkeyQueue(t *testing.T) {
+	s := srvFixture()
+	s.Sites = append(s.Sites, config.Site{Domain: "www.example.com"})
+	s.ValkeyQueue = true
+	got := unitList(s)
+	want := []string{"nginx", "php8.4-fpm", "mariadb", "fail2ban", "cron", "ssh",
+		"berth-valkey-app_example_com.service", "berth-valkey-www_example_com.service",
+		"berth-valkey-app_example_com-queue.service", "berth-valkey-www_example_com-queue.service"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("units with queue = %v, want %v", got, want)
+	}
+	s.ValkeyQueue = false
+	want = want[:8]
+	if got := unitList(s); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("units without queue = %v, want %v", got, want)
+	}
+}

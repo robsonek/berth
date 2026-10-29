@@ -19,6 +19,13 @@ func TestOnHostDefaultsAreFrozen(t *testing.T) {
 	if tn.ValkeyMaxmemoryEff() != "256mb" || tn.ValkeyMaxmemoryPolicyEff() != "allkeys-lru" {
 		t.Errorf("valkey defaults changed: %s %s", tn.ValkeyMaxmemoryEff(), tn.ValkeyMaxmemoryPolicyEff())
 	}
+	// The queue instance's cap renders into berth-valkey-<pool>-queue.service.
+	if tn.ValkeyQueueMaxmemoryEff() != "256mb" {
+		t.Errorf("valkey queue default changed: %s", tn.ValkeyQueueMaxmemoryEff())
+	}
+	if (&Server{}).ValkeyQueue {
+		t.Error("valkey_queue default changed: want off")
+	}
 	if tn.MariaDBBufferPoolEff() != "256M" || tn.MariaDBLongQueryTimeEff() != 2 {
 		t.Errorf("mariadb defaults changed: %s %d", tn.MariaDBBufferPoolEff(), tn.MariaDBLongQueryTimeEff())
 	}

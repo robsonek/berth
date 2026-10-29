@@ -319,6 +319,9 @@ func (s *Server) Validate() error {
 	if !allowedWorkers[s.Workers] {
 		return fmt.Errorf("workers must be dormant or running (got %q)", s.Workers)
 	}
+	if s.ValkeyQueue && !s.Valkey {
+		return fmt.Errorf("valkey_queue: true requires valkey: true (the queue instance is a second per-site Valkey beside the cache one)")
+	}
 	if err := s.Tuning.validate(); err != nil {
 		return err
 	}
@@ -365,6 +368,14 @@ func (s *Server) Validate() error {
 		}
 		if err := site.validate(); err != nil {
 			return fmt.Errorf("site %d: %w", i, err)
+		}
+		// With the queue instance on, a pool ending in "-queue" (reHostname
+		// allows a hyphenated last label, e.g. app.example.com-queue) would
+		// share its unit name and data dir with another site's queue
+		// instance (berth-valkey-<pool>-queue): two renderings of one file.
+		// Gated on the knob so configs without it are untouched.
+		if s.ValkeyQueue && strings.HasSuffix(PoolName(site.Domain), "-queue") {
+			return fmt.Errorf("site %s: with valkey_queue the pool name %q would collide with another site's queue instance name (berth-valkey-<pool>-queue); use a different domain", site.Domain, PoolName(site.Domain))
 		}
 		if !allowedWorkers[site.Workers] {
 			return fmt.Errorf("sites[%d].workers must be dormant or running (got %q)", i, site.Workers)
@@ -481,6 +492,9 @@ func (t Tuning) validate() error {
 	}
 	if t.ValkeyMaxmemoryPolicy != "" && !allowedValkeyPolicies[t.ValkeyMaxmemoryPolicy] {
 		return fmt.Errorf("tuning.valkey_maxmemory_policy %q is not a valid Valkey eviction policy", t.ValkeyMaxmemoryPolicy)
+	}
+	if t.ValkeyQueueMaxmemory != "" && !reValkeyMem.MatchString(t.ValkeyQueueMaxmemory) {
+		return fmt.Errorf("tuning.valkey_queue_maxmemory %q must be a number optionally suffixed b/kb/mb/gb (e.g. 256mb)", t.ValkeyQueueMaxmemory)
 	}
 	if t.MariaDBBufferPool != "" && !reMariaDBSize.MatchString(t.MariaDBBufferPool) {
 		return fmt.Errorf("tuning.mariadb_innodb_buffer_pool %q must be a number optionally suffixed K/M/G (e.g. 256M)", t.MariaDBBufferPool)
@@ -851,9 +865,11 @@ func (a Apt) validate() error {
 //
 //	unix sockets (sun_path, 107 usable bytes):
 //	  /run/berth-valkey/<pool>/valkey.sock -> 30 + len -> len <= 77 (tightest)
+//	  /run/berth-valkey/<pool>/queue.sock  -> 29 + len -> len <= 78
 //	  /run/php/berth-<pool>.sock           -> 20 + len -> len <= 87
 //	filenames (NAME_MAX, 255 bytes):
 //	  berth-valkey-<pool>.service          -> 21 + len -> len <= 234
+//	  berth-valkey-<pool>-queue.service    -> 27 + len -> len <= 228
 //	  berth-backup-<pool> (cron + script)  -> 13 + len
 //	  berth-site-<pool> (scheduler cron)   -> 11 + len
 //

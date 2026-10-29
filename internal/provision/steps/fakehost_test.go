@@ -312,6 +312,10 @@ func variantServer(t *testing.T, variant string) *config.Server {
 		// The original fixture, byte-for-byte: today's coverage preserved.
 	case "maximal":
 		srv.ID = "contract-maximal"
+		// The queue instance: a second berth-valkey unit per site, its own
+		// socket leaf in the shared runtime dir, the data-owner guard over
+		// two dirs, the supervisor After= entry and the status row.
+		srv.ValkeyQueue = true
 		// Every opt-in system knob ON: swap reaches the swapfile-size stat,
 		// swapon and swappiness probes; sysctl the drop-in + `sysctl -n`
 		// read-backs; timezone/hostname the timedatectl/hostnamectl queries
@@ -591,6 +595,9 @@ func populateInstalled(h *fakeHost, s *config.Server, profile string) {
 	}
 	for _, site := range s.Sites {
 		units = append(units, config.ValkeyInstanceUnit(site.Domain))
+		if s.ValkeyQueue {
+			units = append(units, config.ValkeyQueueInstanceUnit(site.Domain))
+		}
 	}
 	for _, u := range units {
 		h.units[u] = fakeUnit{active: true, enabled: true, props: map[string]string{
@@ -1061,6 +1068,13 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 			panic("render berth_valkey.service.tmpl: " + err.Error())
 		}
 		h.putManaged(valkeyUnitPath(st.Domain), unit, profile)
+		if s.ValkeyQueue {
+			queue, err := renderValkeyQueueUnit(s, st)
+			if err != nil {
+				panic("render berth_valkey.service.tmpl (queue): " + err.Error())
+			}
+			h.putManaged(valkeyQueueUnitPath(st.Domain), queue, profile)
+		}
 	}
 
 	// The site's shared/.env and ~/.my.cnf (~/.pgpass under postgres) are
