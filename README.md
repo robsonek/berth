@@ -927,7 +927,11 @@ that writes, into `/var/backups/berth/<pool>/` (**`root:root`, mode 0700**):
   `valkey-cli --rdb` over the queue socket (the replication protocol — never
   a copy of the live AOF files), written before the sidecar so a failed
   snapshot leaves no sidecar for that timestamp. With the server's default
-  diskless replication the snapshot waits ~5 s for the SYNC to start.
+  diskless replication the snapshot waits ~5 s for the SYNC to start; the
+  transfer is bounded to 5 minutes (`timeout -k 10 300`, well inside the
+  15-minute wait the offsite script allows for the shared lock), so a wedged
+  instance fails that run with a logged reason instead of holding the
+  per-site and box-wide backup locks forever.
 - `<pool>-meta-<UTC-timestamp>.manifest` — a per-pair sidecar written by the
   same run as its archives, recording the berth version, engine,
   database/user names, site user and `deploy_path` **as of that run** (plus

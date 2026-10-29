@@ -25,7 +25,9 @@ Notable changes to berth. Older releases are documented on the
   the first seed of a site's `shared/.env` adds `REDIS_QUEUE_HOST` /
   `REDIS_QUEUE_PORT=0` (seed-time only, never checked later). The per-site
   backup takes a point-in-time RDB snapshot of the queue instance
-  (`<pool>-queue-<ts>.rdb`, `valkey-cli --rdb` over the socket) before the
+  (`<pool>-queue-<ts>.rdb`, `valkey-cli --rdb` over the socket, bounded to
+  5 minutes so a wedged instance fails the run instead of holding the
+  backup locks) before the
   sidecar, records `VALKEY_QUEUE_DATA` in the manifests and prunes the
   snapshots with the other artifacts — the snapshot is diagnostic only,
   berth never restores a queue from it. `berth init` asks for the knob

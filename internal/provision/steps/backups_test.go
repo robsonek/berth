@@ -344,7 +344,11 @@ func TestRenderBackupScriptWithValkeyQueue(t *testing.T) {
 		`queue_tmp=""`,
 		`trap 'rm -f -- "$db_tmp" "$files_tmp" "$queue_tmp" "$meta_tmp"' EXIT`,
 		`queue_tmp="$(mktemp "/var/backups/berth/app_example_com/.tmp-XXXXXXXX")"`,
-		`valkey-cli -s /run/berth-valkey/app_example_com/queue.sock --rdb "$queue_tmp"`,
+		// Bounded: a wedged instance must not hold the per-site and the
+		// box-wide artifacts locks forever (coreutils timeout, SIGKILL 10 s
+		// after SIGTERM); a failure or timeout logs a line naming the cause
+		// and fails the run — never a silent skip.
+		`timeout -k 10 300 valkey-cli -s /run/berth-valkey/app_example_com/queue.sock --rdb "$queue_tmp" || { rc=$?; echo "[$(date -u +%FT%TZ)] berth backup app_example_com: queue snapshot failed (exit $rc; 124 = timed out after 300 s)"; exit 1; }`,
 		`chmod 0600 "$queue_tmp"`,
 		`mv "$queue_tmp" "/var/backups/berth/app_example_com/app_example_com-queue-$ts.rdb"`,
 		`printf 'VALKEY_QUEUE_DATA=%s\n' '/var/lib/berth-valkey/app_example_com-queue'`,

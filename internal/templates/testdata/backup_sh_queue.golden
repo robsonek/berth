@@ -23,7 +23,11 @@ tar --exclude='shared/tmp' -czf "$files_tmp" -C "/home/deploy/myapp" shared || [
 chmod 0600 "$files_tmp"
 mv "$files_tmp" "/var/backups/berth/app_example_com/app_example_com-files-$ts.tar.gz"
 queue_tmp="$(mktemp "/var/backups/berth/app_example_com/.tmp-XXXXXXXX")"
-valkey-cli -s /run/berth-valkey/app_example_com/queue.sock --rdb "$queue_tmp"
+# Bounded to 300 s: the snapshot waits up to 5 s for the diskless SYNC and then streams at most maxmemory
+# (~1 s per 100 MB on a VPS disk), so 300 s is >10x a 1 GB queue, and the whole run stays well inside the
+# 15-minute wait the offsite script allows for this lock. A wedged instance fails this run instead of
+# holding the locks forever; -k sends SIGKILL 10 s after SIGTERM if valkey-cli ignores the latter.
+timeout -k 10 300 valkey-cli -s /run/berth-valkey/app_example_com/queue.sock --rdb "$queue_tmp" || { rc=$?; echo "[$(date -u +%FT%TZ)] berth backup app_example_com: queue snapshot failed (exit $rc; 124 = timed out after 300 s)"; exit 1; }
 chmod 0600 "$queue_tmp"
 mv "$queue_tmp" "/var/backups/berth/app_example_com/app_example_com-queue-$ts.rdb"
 meta_tmp="$(mktemp "/var/backups/berth/app_example_com/.tmp-XXXXXXXX")"
