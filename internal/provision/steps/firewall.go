@@ -314,9 +314,10 @@ func runUfw(ctx context.Context, r bssh.Runner, cmd string) error {
 // firewall can never cut off the current connection; delete the berth-owned
 // rules the config no longer declares (by the exact printed line, comment
 // included — never a line equal to a built-in, which the built-in allow has
-// just taken over); issue every declared rule (idempotent, like the
-// built-ins: an identical rule is skipped by ufw, a rule for the same
-// port/proto/source is replaced and thereby adopted); enable.
+// just taken over); add the declared rules whose exact line is absent (a
+// rule for the same port/proto/source is replaced by ufw and thereby
+// adopted); enable. The deletes and adds are the SAME plan checkFirewall
+// prints, so --dry-run lists exactly the ufw commands this run issues.
 //
 // Firewall off: disable an active ufw and leave an inactive or absent one as
 // it is.
@@ -336,7 +337,7 @@ func applyFirewall(ctx context.Context, r bssh.Runner, s *config.Server) error {
 		return err
 	}
 	builtins := ufwBuiltins(s)
-	dels, _, _, err := ufwPlan(have, s.Firewall.Allow, builtins)
+	dels, adds, _, err := ufwPlan(have, s.Firewall.Allow, builtins)
 	if err != nil {
 		return err
 	}
@@ -350,8 +351,8 @@ func applyFirewall(ctx context.Context, r bssh.Runner, s *config.Server) error {
 			return err
 		}
 	}
-	for _, rule := range s.Firewall.Allow {
-		if err := runUfw(ctx, r, "ufw "+config.FirewallRuleCommand(rule)); err != nil {
+	for _, cmd := range adds {
+		if err := runUfw(ctx, r, cmd); err != nil {
 			return err
 		}
 	}

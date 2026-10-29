@@ -498,28 +498,48 @@ func TestHardeningApplyDeletesRuleDroppedFromConfig(t *testing.T) {
 	}
 }
 
-func TestHardeningApplyReissuesEveryDeclaredAllow(t *testing.T) {
-	stubGate(t, nil, nil)
-	s := firewallServer()
-	f := bssh.NewFakeRunner()
-	f.On(ufwInstallCmd, bssh.Result{})
-	f.On("ufw allow 2222/tcp", bssh.Result{})
-	f.On("ufw allow 80,443/tcp", bssh.Result{})
-	f.On(ufwShowAddedCmd, showAdded(ufwZabbixLine, ufwNodeExporterLine))
-	f.On(ufwZabbixLine, bssh.Result{Stdout: "Skipping adding existing rule\n"})
-	f.On(ufwNodeExporterLine, bssh.Result{Stdout: "Skipping adding existing rule\nSkipping adding existing rule (v6)\n"})
-	f.On("ufw --force enable", bssh.Result{})
-	stubApplyTail(f)
-	if err := Hardening().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
-		t.Fatalf("Apply() error = %v", err)
-	}
-	cmds := calls(f)
-	if ufwCmdIndex(cmds, ufwZabbixLine) < 0 || ufwCmdIndex(cmds, ufwNodeExporterLine) < 0 {
-		t.Errorf("every declared allow is issued, idempotently like the built-ins; calls=%q", cmds)
-	}
-	if hasCallContaining(f, "ufw delete") {
-		t.Errorf("nothing to delete on a converged host; calls=%q", cmds)
-	}
+// Apply issues exactly the adds Check plans — the declared rules whose exact
+// line is absent — so a dry-run never under-reports what the real run does
+// (Greptile on PR #105: re-issuing every declared allow listed one add while
+// issuing two). A converged host sees no owned-rule command at all.
+func TestHardeningApplyIssuesOnlyMissingAllows(t *testing.T) {
+	t.Run("converged: no owned-rule command", func(t *testing.T) {
+		stubGate(t, nil, nil)
+		f := bssh.NewFakeRunner()
+		f.On(ufwInstallCmd, bssh.Result{})
+		f.On("ufw allow 2222/tcp", bssh.Result{})
+		f.On("ufw allow 80,443/tcp", bssh.Result{})
+		f.On(ufwShowAddedCmd, showAdded(ufwZabbixLine, ufwNodeExporterLine))
+		f.On("ufw --force enable", bssh.Result{})
+		stubApplyTail(f)
+		if err := Hardening().Apply(context.Background(), provision.RunCtx{}, firewallServer(), f); err != nil {
+			t.Fatalf("Apply() error = %v", err)
+		}
+		if hasCallContaining(f, "comment 'berth:") || hasCallContaining(f, "ufw delete") {
+			t.Errorf("a converged ruleset must not be re-issued or deleted; calls=%q", calls(f))
+		}
+	})
+	t.Run("one missing: only that one, as the plan says", func(t *testing.T) {
+		stubGate(t, nil, nil)
+		f := bssh.NewFakeRunner()
+		f.On(ufwInstallCmd, bssh.Result{})
+		f.On("ufw allow 2222/tcp", bssh.Result{})
+		f.On("ufw allow 80,443/tcp", bssh.Result{})
+		f.On(ufwShowAddedCmd, showAdded(ufwZabbixLine))
+		f.On(ufwNodeExporterLine, bssh.Result{Stdout: "Rule added\nRule added (v6)\n"})
+		f.On("ufw --force enable", bssh.Result{})
+		stubApplyTail(f)
+		if err := Hardening().Apply(context.Background(), provision.RunCtx{}, firewallServer(), f); err != nil {
+			t.Fatalf("Apply() error = %v", err)
+		}
+		cmds := calls(f)
+		if ufwCmdIndex(cmds, ufwNodeExporterLine) < 0 {
+			t.Errorf("the missing rule must be added; calls=%q", cmds)
+		}
+		if ufwCmdIndex(cmds, ufwZabbixLine) >= 0 {
+			t.Errorf("a present rule must not be re-issued; calls=%q", cmds)
+		}
+	})
 }
 
 func TestHardeningApplyAdoptsUncommentedRule(t *testing.T) {
