@@ -281,6 +281,14 @@ func TestDomainCapMatchesPrefixArithmetic(t *testing.T) {
 		t.Errorf("FPM socket budget %d (from FPMSocketPrefix %q) is tighter than maxSiteDomainLen %d — recompute the cap",
 			fpmBudget, FPMSocketPrefix, maxSiteDomainLen)
 	}
+	// The queue socket shares the runtime dir with a shorter leaf, so it must
+	// never become the tightest budget; derive it from the live helper so a
+	// longer leaf fails here instead of silently shrinking the budget.
+	queueBudget := 107 - len(ValkeyQueueSocketPath("")) // "" pool: prefix + leaf only
+	if queueBudget < maxSiteDomainLen {
+		t.Errorf("queue socket budget %d (from %q) is tighter than maxSiteDomainLen %d — recompute the cap",
+			queueBudget, ValkeyQueueSocketPath("<pool>"), maxSiteDomainLen)
+	}
 }
 
 func TestValidateDeployPathDeniesEverySystemRoot(t *testing.T) {

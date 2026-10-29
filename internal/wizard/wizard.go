@@ -47,6 +47,7 @@ type Answers struct {
 	NginxSource string // debian | nginx
 	Gzip        bool   // nginx.gzip: the conf.d gzip drop-in (dynamic responses too); true = berth's default, written as unset
 	Valkey      bool
+	ValkeyQueue bool // valkey_queue: a second per-site instance for the app queue (asked only with Valkey; dropped without it)
 	Queue       bool // server-wide default worker
 	Scheduler   bool // server-wide default
 
@@ -88,6 +89,7 @@ type Fail2banAnswers struct {
 type TuningAnswers struct {
 	ValkeyMaxmemory         string
 	ValkeyMaxmemoryPolicy   string
+	ValkeyQueueMaxmemory    string
 	MariaDBBufferPool       string
 	MariaDBSlowQueryLog     bool
 	MariaDBLongQueryTime    int

@@ -1087,6 +1087,14 @@ func (d database) seedSharedEnv(ctx context.Context, r bssh.Runner, s *config.Se
 		kv["REDIS_PORT"] = "0"
 		kv["REDIS_DB"] = "0"
 		kv["REDIS_CACHE_DB"] = "1"
+		// With the queue instance on, point the app's queue connection at
+		// its socket (the app reads these with a fallback to REDIS_HOST /
+		// REDIS_PORT). Seed-time only, like every REDIS_* line: an existing
+		// .env is never rewritten and these keys are not checked later.
+		if s.ValkeyQueue {
+			kv["REDIS_QUEUE_HOST"] = valkeyQueueSocketPath(site.Domain)
+			kv["REDIS_QUEUE_PORT"] = "0"
+		}
 	}
 	// shared/.env sits inside shared/, which the site user owns, so the root
 	// write path could be redirected by a swapped symlink into creating a

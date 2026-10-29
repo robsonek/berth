@@ -1,0 +1,20 @@
+# managed by berth
+[Unit]
+Description=Valkey queue for app.example.com (berth)
+After=network.target
+
+[Service]
+Type=notify
+User=webuser
+Group=webuser
+RuntimeDirectory=berth-valkey/app_example_com
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+StateDirectory=berth-valkey/app_example_com-queue
+StateDirectoryMode=0700
+ExecStart=/usr/bin/valkey-server --port 0 --unixsocket /run/berth-valkey/app_example_com/queue.sock --unixsocketperm 600 --dir /var/lib/berth-valkey/app_example_com-queue --maxmemory 256mb --maxmemory-policy noeviction --appendonly yes --appendfsync everysec --supervised systemd --daemonize no
+Restart=always
+TimeoutStopSec=infinity
+
+[Install]
+WantedBy=multi-user.target

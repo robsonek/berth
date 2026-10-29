@@ -249,12 +249,47 @@ func TestRenderLogrotateGolden(t *testing.T) {
 	checkGolden(t, "logrotate.conf.tmpl", "logrotate.golden", nil)
 }
 
+// valkeyUnitGoldenData mirrors the valkey step's render struct for
+// berth_valkey.service.tmpl (test-local copy — keep the fields in sync).
+// Queue/Preserve/StateSuffix/SocketName select between the cache instance
+// (zero values: the pre-valkey_queue bytes, pinned by the unchanged golden)
+// and the queue instance.
+type valkeyUnitGoldenData struct {
+	Domain, User, Pool, Maxmemory, Policy string
+	Queue, Preserve                       bool
+	StateSuffix, SocketName               string
+}
+
 func TestRenderBerthValkeyServiceGolden(t *testing.T) {
-	checkGolden(t, "berth_valkey.service.tmpl", "berth_valkey.service.golden", struct {
-		Domain, User, Pool, Maxmemory, Policy string
-	}{
+	// The cache unit WITHOUT valkey_queue: this golden must never change —
+	// it is every provisioned host's current unit, byte for byte.
+	checkGolden(t, "berth_valkey.service.tmpl", "berth_valkey.service.golden", valkeyUnitGoldenData{
 		Domain: "app.example.com", User: "webuser", Pool: "app_example_com",
 		Maxmemory: "256mb", Policy: "allkeys-lru",
+		SocketName: "valkey.sock",
+	})
+}
+
+// TestRenderBerthValkeyServicePreserveGolden: the cache unit once
+// valkey_queue is on — identical to the plain one except for
+// RuntimeDirectoryPreserve=yes (the runtime dir is shared with the queue
+// instance's socket; systemd would otherwise remove it when either stops).
+func TestRenderBerthValkeyServicePreserveGolden(t *testing.T) {
+	checkGolden(t, "berth_valkey.service.tmpl", "berth_valkey_preserve.service.golden", valkeyUnitGoldenData{
+		Domain: "app.example.com", User: "webuser", Pool: "app_example_com",
+		Maxmemory: "256mb", Policy: "allkeys-lru",
+		Preserve: true, SocketName: "valkey.sock",
+	})
+}
+
+// TestRenderBerthValkeyQueueServiceGolden: the queue instance — same unit
+// shape, its own state dir and socket leaf, a fixed noeviction policy and
+// AOF persistence on the ExecStart line.
+func TestRenderBerthValkeyQueueServiceGolden(t *testing.T) {
+	checkGolden(t, "berth_valkey.service.tmpl", "berth_valkey_queue.service.golden", valkeyUnitGoldenData{
+		Domain: "app.example.com", User: "webuser", Pool: "app_example_com",
+		Maxmemory: "256mb", Policy: "noeviction",
+		Queue: true, Preserve: true, StateSuffix: "-queue", SocketName: "queue.sock",
 	})
 }
 
@@ -310,13 +345,20 @@ func TestRenderSysctlBerthGolden(t *testing.T) {
 	checkGolden(t, "sysctl_berth.conf.tmpl", "sysctl_berth.golden", nil)
 }
 
-func TestRenderBackupScriptGolden(t *testing.T) {
-	checkGolden(t, "backup.sh.tmpl", "backup_sh.golden", struct {
-		Pool, DumpCommand, DBName, DeployPath, BackupDir, LogFile, LockFile string
-		ArtifactsLock                                                       string
-		BerthVersion, Domain, Engine, DBUser, SiteUser                      string
-		RetentionDays                                                       int
-	}{
+// backupScriptGoldenData mirrors the backups step's render struct for
+// backup.sh.tmpl (test-local copy — keep the fields in sync). QueueSocket /
+// ValkeyQueueData are empty without valkey_queue and select the queue
+// snapshot block and the sidecar fact with it.
+type backupScriptGoldenData struct {
+	Pool, DumpCommand, DBName, DeployPath, BackupDir, LogFile, LockFile string
+	ArtifactsLock                                                       string
+	BerthVersion, Domain, Engine, DBUser, SiteUser                      string
+	RetentionDays                                                       int
+	QueueSocket, ValkeyQueueData                                        string
+}
+
+func backupScriptGoldenBase() backupScriptGoldenData {
+	return backupScriptGoldenData{
 		Pool:          "app_example_com",
 		DumpCommand:   "mariadb-dump --protocol=socket --single-transaction --no-tablespaces --routines --events 'myapp'",
 		DBName:        "myapp",
@@ -331,7 +373,20 @@ func TestRenderBackupScriptGolden(t *testing.T) {
 		DBUser:        "myapp",
 		SiteUser:      "b_appexamplecom_dd46c94b",
 		RetentionDays: 7,
-	})
+	}
+}
+
+func TestRenderBackupScriptGolden(t *testing.T) {
+	checkGolden(t, "backup.sh.tmpl", "backup_sh.golden", backupScriptGoldenBase())
+}
+
+// TestRenderBackupScriptQueueGolden: the same script with the queue
+// snapshot block (valkey_queue: true).
+func TestRenderBackupScriptQueueGolden(t *testing.T) {
+	d := backupScriptGoldenBase()
+	d.QueueSocket = "/run/berth-valkey/app_example_com/queue.sock"
+	d.ValkeyQueueData = "/var/lib/berth-valkey/app_example_com-queue"
+	checkGolden(t, "backup.sh.tmpl", "backup_sh_queue.golden", d)
 }
 
 // offsiteScriptGoldenData mirrors the offsite step's render struct for
@@ -420,10 +475,15 @@ func TestRenderBackupLogrotateGolden(t *testing.T) {
 	checkGolden(t, "backup_logrotate.conf.tmpl", "backup_logrotate.golden", nil)
 }
 
-func TestRenderBackupManifestGolden(t *testing.T) {
-	checkGolden(t, "backup_manifest.tmpl", "backup_manifest.golden", struct {
-		BerthVersion, Domain, Pool, Engine, DBName, DBUser, SiteUser, DeployPath string
-	}{
+// backupManifestGoldenData mirrors the backups step's manifest render struct
+// (test-local copy — keep the fields in sync).
+type backupManifestGoldenData struct {
+	BerthVersion, Domain, Pool, Engine, DBName, DBUser, SiteUser, DeployPath string
+	ValkeyQueueData                                                          string
+}
+
+func backupManifestGoldenBase() backupManifestGoldenData {
+	return backupManifestGoldenData{
 		BerthVersion: "v9.9.9",
 		Domain:       "app.example.com",
 		Pool:         "app_example_com",
@@ -432,7 +492,17 @@ func TestRenderBackupManifestGolden(t *testing.T) {
 		DBUser:       "myapp",
 		SiteUser:     "b_appexamplecom_dd46c94b",
 		DeployPath:   "/home/deploy/myapp",
-	})
+	}
+}
+
+func TestRenderBackupManifestGolden(t *testing.T) {
+	checkGolden(t, "backup_manifest.tmpl", "backup_manifest.golden", backupManifestGoldenBase())
+}
+
+func TestRenderBackupManifestQueueGolden(t *testing.T) {
+	d := backupManifestGoldenBase()
+	d.ValkeyQueueData = "/var/lib/berth-valkey/app_example_com-queue"
+	checkGolden(t, "backup_manifest.tmpl", "backup_manifest_queue.golden", d)
 }
 
 func TestRenderManifestGolden(t *testing.T) {

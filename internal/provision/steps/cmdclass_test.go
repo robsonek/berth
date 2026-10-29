@@ -249,7 +249,7 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{`sudo -i`, cmdRejected},
 		{`sudo -u postgres psql -X -tAc "SELECT 1 FROM pg_stat_file('/etc/shadow')"`, cmdRejected}, // parens: the metachar route, unregistered
 
-		// valkey's per-site liveness probe (valkeyPingCmd, valkey.go): PING
+		// valkey's per-site liveness probe (valkeyPingOver, valkey.go): PING
 		// over the tenant's own socket mutates nothing on the valkey side,
 		// and setpriv changes credentials without PAM, so — unlike the
 		// runuser wrapper it replaced — nothing reaches the journal (measured
@@ -267,6 +267,12 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		// leaf other than valkey.sock is not a socket berth composes.
 		{`setpriv --reuid 'appuser' --regid 'appuser' --init-groups -- valkey-cli -s '/run/berth-valkey/../../etc/x' ping`, cmdRejected},
 		{`setpriv --reuid 'appuser' --regid 'appuser' --init-groups -- valkey-cli -s '/run/berth-valkey/app_example_com/other.sock' ping`, cmdRejected},
+		// The queue instance (valkey_queue) answers on queue.sock in the same
+		// runtime dir: the second and only other leaf berth composes
+		// (valkeyPingOver); the verb pin applies to it unchanged.
+		{`setpriv --reuid 'appuser' --regid 'appuser' --init-groups -- valkey-cli -s '/run/berth-valkey/app_example_com/queue.sock' ping`, cmdReadOnly},
+		{`setpriv --reuid 'appuser' --regid 'appuser' --init-groups -- valkey-cli -s '/run/berth-valkey/app_example_com/queue.sock' flushall`, cmdRejected},
+		{`setpriv --reuid 'appuser' --regid 'appuser' --init-groups -- valkey-cli -s '/run/berth-valkey/app_example_com-queue/valkey.sock' ping`, cmdReadOnly}, // a pool may legitimately end in -queue; still one component, the valkey.sock leaf
 		// The identity operands are the shQuote'd site user, nothing else:
 		// production always quotes, so the unquoted spelling is not a shape
 		// berth issues (safe direction, as with swapon --show).
@@ -594,6 +600,11 @@ var auditedScripts = map[string]string{
 	// writes.
 	serviceLoadedProbeCmd(fixtureMariaDBTuning, "mariadb.service"):  "serviceConfigLoaded (tuning.go) for mariadb vs the tuning drop-in: stat %Y + systemctl show + tr + [ -le ] — reads only",
 	serviceLoadedProbeCmd(fixtureValkeyUnitPath, fixtureValkeyUnit): "serviceConfigLoaded (tuning.go) for the fixture valkey instance vs its unit file: stat %Y + systemctl show + tr + [ -le ] — reads only",
+
+	// The same two probes for the fixture's queue instance (valkey_queue in
+	// the maximal variant): identical shapes over the -queue unit and path.
+	valkeyExecProbeCmd(fixtureValkeyQueueUnit):                                "valkeyExecCmd (valkey.go) for the fixture queue instance: systemctl show MainPID + two stat -L inode reads compared with [ = ] — reads only",
+	serviceLoadedProbeCmd(fixtureValkeyQueueUnitPath, fixtureValkeyQueueUnit): "serviceConfigLoaded (tuning.go) for the fixture queue instance vs its unit file: stat %Y + systemctl show + tr + [ -le ] — reads only",
 
 	// tuning's RAM probe (memTotalCmd, tuning.go), a production const pasted
 	// literally. Audited: awk reads /proc/meminfo and prints field 2 of the
@@ -1200,7 +1211,7 @@ var simpleShapes = []simpleShape{
 	// another uid and rejects. runuser has NO table entry any more: no Check
 	// issues it, so it rejects as an unknown verb — see its policy rows.
 	{verb: "setpriv", allow: setprivIsValkeyPing, verdict: cmdReadOnly,
-		why: "pinned to valkeyPingCmd's shape (valkey.go): a credential change without PAM into valkey-cli PING on a berth socket"},
+		why: "pinned to valkeyPingOver's shape (valkey.go): a credential change without PAM into valkey-cli PING on a berth socket"},
 }
 
 // sedIsReadOnly pins the one sed shape the policy table blesses:
@@ -1341,7 +1352,7 @@ func mariadbIsReadOnlyProbe(args []string) bool {
 }
 
 // reValkeyPingSocket / reValkeyPingUser pin the two value slots of
-// valkeyPingCmd's shape (valkey.go), anchored end-to-end, quotes included.
+// valkeyPingOver's shape (valkey.go), anchored end-to-end, quotes included.
 // The socket is shQuote'd valkeySocketPath(domain): berth's runtime base,
 // ONE pool component, the literal valkey.sock leaf. PoolName maps the
 // domain's dots to underscores, so a pool component carries no dot at all —
@@ -1350,11 +1361,14 @@ func mariadbIsReadOnlyProbe(args []string) bool {
 // operands are the shQuote'd site user: config.Validate's reLinuxUser shape,
 // which DerivedSiteUser's b_<slug>_<8hex> form also fits.
 var (
-	reValkeyPingSocket = regexp.MustCompile(`^'/run/berth-valkey/[a-z0-9_-]+/valkey\.sock'$`)
+	// Two leaves, both composed by berth: valkey.sock (the cache instance)
+	// and queue.sock (the valkey_queue instance) — an allowlist of the exact
+	// names, not a wildcard leaf.
+	reValkeyPingSocket = regexp.MustCompile(`^'/run/berth-valkey/[a-z0-9_-]+/(valkey|queue)\.sock'$`)
 	reValkeyPingUser   = regexp.MustCompile(`^'[a-z_][a-z0-9_-]{0,31}'$`)
 )
 
-// setprivIsValkeyPing allows only valkeyPingCmd's shape (valkey.go):
+// setprivIsValkeyPing allows only valkeyPingOver's shape (valkey.go):
 // `setpriv --reuid <user> --regid <user> --init-groups -- valkey-cli -s
 // '/run/berth-valkey/<pool>/valkey.sock' ping`, argument by argument. The
 // trailing verb is pinned to `ping` (a PONG probe — the valkey side mutates

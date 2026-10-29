@@ -3,6 +3,63 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Added
+
+- **`valkey_queue`** (default off, requires `valkey: true`) gives every site a
+  second, dedicated Valkey instance for the application's job queue, kept
+  apart from the cache/session instance so memory pressure on the cache can
+  never evict jobs. It is the same unit template with different values:
+  `berth-valkey-<pool>-queue.service` running as the site user, socket
+  `/run/berth-valkey/<pool>/queue.sock` in the same owner-only runtime
+  directory as the cache socket, data under
+  `/var/lib/berth-valkey/<pool>-queue/`, `maxmemory` from the new
+  `tuning.valkey_queue_maxmemory` (default `256mb`), a fixed
+  `maxmemory-policy noeviction` and fixed `appendonly yes` /
+  `appendfsync everysec` persistence. The `valkey` step manages it exactly
+  like the cache instance (drift, liveness, binary freshness, PONG as the
+  site user, heal-restart, orphan sweep), `berth status` lists the queue
+  units after the cache ones, `status --drift` pings each queue socket,
+  the supervisor ordering drop-in waits for the queue instances too, and
+  the first seed of a site's `shared/.env` adds `REDIS_QUEUE_HOST` /
+  `REDIS_QUEUE_PORT=0` (seed-time only, never checked later). The per-site
+  backup takes a point-in-time RDB snapshot of the queue instance
+  (`<pool>-queue-<ts>.rdb`, `valkey-cli --rdb` over the socket) before the
+  sidecar, records `VALKEY_QUEUE_DATA` in the manifests and prunes the
+  snapshots with the other artifacts — the snapshot is diagnostic only,
+  berth never restores a queue from it. `berth init` asks for the knob
+  (only when Valkey is on) and for the queue limit. Because both instances
+  share one runtime directory, both units carry
+  `RuntimeDirectoryPreserve=yes` while the knob is on, so switching it on
+  or off re-renders the cache unit once and restarts that instance; a
+  config that never sets the knob renders byte-identical units. With the
+  knob on, a site whose pool name ends in `-queue` is refused (it would
+  share the queue instance's unit and data-directory names).
+
+### Changed
+
+- **The `valkey` step refuses a foreign-owned instance data directory.**
+  A removed site keeps its data under `/var/lib/berth-valkey/` on purpose,
+  and systemd's `StateDirectory=` re-owns an existing directory's contents
+  to the unit's user on the next start — so a later site whose derived
+  directory name coincided (a re-added domain under a different
+  `sites[].user`) silently inherited a previous tenant's dataset. The step
+  now checks, before anything is installed, swept or written, that an
+  existing `/var/lib/berth-valkey/<pool>` (and `<pool>-queue`) is a
+  directory owned by the site's user, and stops the run otherwise with the
+  way out (move or remove the directory, or pin `sites[].user` to its
+  owner); `--force` does not override it. A healthy host, where the
+  directories are absent or already the site user's, sees no change.
+- The per-site backup script's retention prune now also matches
+  `<pool>-queue-*.rdb`, berth's own queue-snapshot name, whether or not
+  `valkey_queue` is on (the script is re-rendered on every berth upgrade
+  anyway, with no reload attached).
+- The `backups` step now lists `valkey` among its prerequisites, so
+  `--only backups` refuses to run while the Valkey fleet is unconverged
+  (with `valkey_queue` the script snapshots the queue instance through its
+  socket); on a host without Valkey the prerequisite is satisfied as before.
+
 ## [0.34.0] — 2026-10-27
 
 ### Added

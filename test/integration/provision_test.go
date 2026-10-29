@@ -276,6 +276,10 @@ func assertServicesActive(ctx context.Context, t *testing.T, c *bssh.Client, srv
 		for _, site := range srv.Sites {
 			unit := "berth-valkey-" + config.PoolName(site.Domain) + ".service"
 			assertExitZero(ctx, t, c, "valkey instance "+site.Domain, "sudo systemctl is-active "+unit)
+			if srv.ValkeyQueue {
+				queue := "berth-valkey-" + config.PoolName(site.Domain) + "-queue.service"
+				assertExitZero(ctx, t, c, "valkey queue instance "+site.Domain, "sudo systemctl is-active "+queue)
+			}
 		}
 	}
 }

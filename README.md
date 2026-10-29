@@ -140,6 +140,8 @@ database:
   source: debian               # debian | mariadb (MariaDB) | pgdg (PostgreSQL)
 
 valkey: false                  # one Valkey instance per site (cache/session/queue)
+valkey_queue: false            # a second, dedicated Valkey instance per site for the app
+                               # queue (noeviction + AOF); requires valkey: true
 queue: false                   # server-wide default: a queue:work worker on every site
 workers: dormant               # dormant (default) | running — berth starts the
                                # Supervisor programs and they come back after a
@@ -155,6 +157,7 @@ fail2ban:                      # optional — omit the block to use these defaul
 tuning:                        # optional — omit any field to keep its default
   valkey_maxmemory: 256mb
   valkey_maxmemory_policy: allkeys-lru   # any Valkey eviction policy
+  valkey_queue_maxmemory: 256mb          # the queue instance's cap (its policy is always noeviction)
   mariadb_innodb_buffer_pool: 256M
   mariadb_slow_query_log: true # default off; log queries slower than the threshold
   mariadb_long_query_time: 2   # seconds (default 2); needs the slow log on
@@ -429,6 +432,40 @@ berth tunes the host for production Laravel out of the box:
   Instance data under `/var/lib/berth-valkey/` is kept; the package and the
   disabled stock service are left alone. Note `--only <other-step>` runs do
   not perform this cleanup.
+- **Dedicated queue instance** — with `valkey_queue: true` (requires
+  `valkey: true`) every site gets a *second* Valkey instance for the
+  application's job queue, kept apart from the cache/session one so a
+  cache under memory pressure can never evict jobs. It runs as the site's
+  user from the same unit template with its own values:
+  `berth-valkey-<pool>-queue.service`, socket
+  `/run/berth-valkey/<pool>/queue.sock` (the same owner-only directory as
+  the cache socket), data under `/var/lib/berth-valkey/<pool>-queue/`,
+  `maxmemory` from `tuning.valkey_queue_maxmemory` (default `256mb`), a
+  fixed `maxmemory-policy noeviction` (a full queue refuses writes instead
+  of dropping jobs) and fixed `appendonly yes` / `appendfsync everysec`
+  persistence. Because both instances share one runtime directory, both
+  units carry `RuntimeDirectoryPreserve=yes` while the knob is on —
+  switching it on (or off) therefore re-renders the cache unit once and
+  restarts that instance (its RDB snapshot is saved on shutdown). The first
+  seed of a site's `shared/.env` adds `REDIS_QUEUE_HOST=<queue socket>` and
+  `REDIS_QUEUE_PORT=0` for an application that reads them (with a fallback
+  to `REDIS_HOST`/`REDIS_PORT`); on an already-seeded host add the two
+  lines by hand — they are seed-time-only and never checked later. The
+  per-site backup takes an RDB snapshot of the queue instance (see
+  [Backups](#backups-opt-in)). `berth status` lists the queue units after
+  the cache ones and `status --drift` pings each queue socket as the site
+  user. `valkey_queue: false` stops and removes the queue units like
+  orphans (data under `/var/lib/berth-valkey/<pool>-queue/` is kept) —
+  remove the `REDIS_QUEUE_*` lines from the `.env` first, or the app keeps
+  dialling a socket that no longer exists. A site whose pool name ends in
+  `-queue` is refused while the knob is on, since it would share the queue
+  instance's unit and data-directory names with another site. Before
+  managing any instance berth also checks that an existing data directory
+  (`/var/lib/berth-valkey/<pool>` or `<pool>-queue`) belongs to the site's
+  user: systemd would otherwise re-own a previous tenant's dataset on the
+  next start, so a foreign-owned directory stops the run (not bypassable
+  with `--force`) until it is moved, removed or `sites[].user` is pinned
+  to its owner.
 - **HTTP/3 (QUIC)** is available per site with `http3: true` (requires `ssl` and
   `nginx.source: nginx`); berth also opens UDP/443.
 - **gzip** (`nginx.gzip`, default on): berth writes
@@ -464,6 +501,8 @@ berth applies conservative, managed tuning automatically:
   `maxmemory` and `maxmemory-policy` so its cache evicts instead of returning
   OOM errors once full (Valkey's default is `noeviction` with no `maxmemory`,
   so a full cache fails writes). The limits apply to each instance separately.
+  The optional queue instance (`valkey_queue: true`) takes only
+  `valkey_queue_maxmemory`; its policy is always `noeviction`.
 - **MariaDB** (when `database.engine: mariadb`) — a `mariadb.conf.d` drop-in
   sets `innodb_buffer_pool_size`, and opt-in `mariadb_slow_query_log` logs
   queries slower than `mariadb_long_query_time` seconds (default 2) to
@@ -494,6 +533,7 @@ Every value is overridable; omit a field to keep its default:
 tuning:
   valkey_maxmemory: 256mb              # default
   valkey_maxmemory_policy: allkeys-lru # default; any Valkey eviction policy
+  valkey_queue_maxmemory: 256mb        # default; the valkey_queue instance (policy fixed to noeviction)
   mariadb_innodb_buffer_pool: 256M     # default
   mariadb_slow_query_log: false        # default; opt-in slow query log
   mariadb_long_query_time: 2           # default; seconds, needs the slow log on
@@ -510,7 +550,8 @@ tuning:
 
 Each site's Valkey instance serves its cache, session and queue together, so
 `allkeys-lru` can evict queued jobs under memory pressure; use `volatile-lru`
-to evict only keys that carry a TTL.
+to evict only keys that carry a TTL, or `valkey_queue: true` to move the
+queue onto its own non-evicting, AOF-persisted instance.
 
 `php_max_execution_time` is capped at 300 s — berth's opinionated bound; work
 that runs longer belongs in queue workers, not web requests.
@@ -881,9 +922,16 @@ that writes, into `/var/backups/berth/<pool>/` (**`root:root`, mode 0700**):
 
 - `<db>-<UTC-timestamp>.sql.gz` — passwordless engine dump (MariaDB socket-root / Postgres peer)
 - `<pool>-files-<UTC-timestamp>.tar.gz` — a tar of the site's `shared/` (`.env` + `storage/`)
+- `<pool>-queue-<UTC-timestamp>.rdb` — with `valkey_queue: true`, a
+  point-in-time RDB snapshot of the site's queue instance, taken through
+  `valkey-cli --rdb` over the queue socket (the replication protocol — never
+  a copy of the live AOF files), written before the sidecar so a failed
+  snapshot leaves no sidecar for that timestamp. With the server's default
+  diskless replication the snapshot waits ~5 s for the SYNC to start.
 - `<pool>-meta-<UTC-timestamp>.manifest` — a per-pair sidecar written by the
-  same run as its two archives, recording the berth version, engine,
-  database/user names, site user and `deploy_path` **as of that run**.
+  same run as its archives, recording the berth version, engine,
+  database/user names, site user and `deploy_path` **as of that run** (plus
+  `VALKEY_QUEUE_DATA`, the queue instance's data directory, when one exists).
 - `manifest` — written by `berth provision` itself (not the cron): the same
   facts for the site's **current** configuration, so a copy of the directory
   stays self-describing. Archives created before a config change may predate
@@ -947,11 +995,19 @@ was made under; match the pair by its UTC timestamp and, for archives
 predating a config change, trust the pair's own `<pool>-meta-<ts>.manifest`
 sidecar over the directory manifest.
 
+**Queue snapshot is diagnostic only.** With `valkey_queue: true` each run also takes a
+point-in-time RDB snapshot of the site's queue instance (`<pool>-queue-<ts>.rdb`, via
+`valkey-cli --rdb` over the queue socket). berth never restores a queue from it. The
+instance keeps its own AOF under `/var/lib/berth-valkey/<pool>-queue/` and loads that at
+start when the directory survived; a fresh directory starts an empty queue (a `dump.rdb`
+placed there is not loaded while AOF is on). Re-creating lost jobs is the application's
+responsibility. Keep the snapshot for inspection rather than as a recovery path.
+
 **Limitations:** local by default (offsite is the opt-in below) — backups are root-owned
 so they survive a compromised *site*, but without `backups.offsite` a lost *host* loses
 them; the DB dump and files tar are independent, so a failed run may leave one without the
-other (match artifacts by UTC timestamp); the first dump runs at the next scheduled time
-(provisioning never runs a backup itself).
+other (match artifacts by UTC timestamp); the queue snapshot is not a recovery path (above);
+the first dump runs at the next scheduled time (provisioning never runs a backup itself).
 
 ### Offsite backups (restic)
 
@@ -1004,8 +1060,9 @@ is kept — remove `/root/.ssh/berth_offsite*` manually if unwanted.
 List several `sites:` to host multiple domains on one server. Each site runs
 under its **own dedicated OS user**, so a compromise of one site cannot read
 another's files (its `deploy_path` is owned by that user, traversable only by
-nginx; its PHP-FPM pool, queue worker and cron all run as that user), and each
-site gets **its own database + user**. Alongside the seeded `shared/.env`,
+nginx; its PHP-FPM pool, queue worker, cron and — with `valkey: true` — its
+Valkey instance, plus the queue instance under `valkey_queue: true`, all run
+as that user), and each site gets **its own database + user**. Alongside the seeded `shared/.env`,
 berth also seeds the site user's DB client-credentials file — `~/.my.cnf`
 (MariaDB) or `~/.pgpass` (PostgreSQL), `0600`, written once and never
 rewritten (single exception: when a provision run resets the database
@@ -1053,6 +1110,12 @@ what berth provisions for the site, and stops the run when it does not:
 | `REDIS_PASSWORD` (with `valkey: true`) | absent or empty: `REDIS_PASSWORD=`, `REDIS_PASSWORD=""`, `REDIS_PASSWORD=''`, `REDIS_PASSWORD=null` or `REDIS_PASSWORD=(null)` — the per-site instance has no password |
 | `REDIS_URL` (with `valkey: true`) | absent or empty, as for `DB_URL` — a URL would override the socket above |
 | `REDIS_CLIENT` (with `valkey: true`) | absent or `phpredis` — the client that takes the socket path with port `0` |
+
+`REDIS_QUEUE_HOST` and `REDIS_QUEUE_PORT` (seeded under `valkey_queue: true`)
+are deliberately not in this table: they are written only when berth first
+seeds the file and never checked afterwards, so an existing host gains them
+by hand (`REDIS_QUEUE_HOST=/run/berth-valkey/<pool>/queue.sock`,
+`REDIS_QUEUE_PORT=0`).
 
 A value may be written unquoted, in double quotes or in single quotes
 (`DB_USERNAME=appuser`, `DB_USERNAME="appuser"` and `DB_USERNAME='appuser'`
@@ -1108,8 +1171,13 @@ then reloaded. `--dry-run` previews every planned removal.
 > owner (when that owner is a valid, non-reserved site user — otherwise
 > migrate). To actually move a site to a new user: create the target account
 > first (`useradd -m -s /bin/bash <user>` — the derived account does not
-> exist yet at that point), stop the site's queue/daemon processes,
-> `chown -R` the deploy tree, then move the deploy key pair and re-own it —
+> exist yet at that point), stop the site's queue/daemon processes and —
+> with `valkey: true` — its Valkey instance(s) (`systemctl stop
+> berth-valkey-<pool>.service`, plus `berth-valkey-<pool>-queue.service`
+> under `valkey_queue`), `chown -R` the deploy tree AND the instance data
+> directories (`/var/lib/berth-valkey/<pool>` and `<pool>-queue`; the
+> `valkey` step refuses a data directory owned by anyone but the site's
+> user, `--force` included), then move the deploy key pair and re-own it —
 > `install -d -o <user> -g <user> -m 700 /home/<user>/.ssh`, move
 > `id_ed25519` and `id_ed25519.pub` there and `chown <user>:<user>` both (a
 > bare `mv` keeps the OLD owner, so the new user could not read its 0600
@@ -1140,14 +1208,17 @@ implicitly. Remove manually if you want them gone:
 - the OS account (its home also holds the git deploy key) and its sudoers
   entry: `deluser --remove-home <user>`, `rm /etc/sudoers.d/berth-<user>`
 - the application tree: `rm -rf <deploy_path>`
-- Valkey state (`/var/lib/berth-valkey/<pool>`) and backup archives
-  (`/var/backups/berth/<pool>/`) are likewise retained
+- Valkey state (`/var/lib/berth-valkey/<pool>`, and `<pool>-queue` for the
+  queue instance) and backup archives (`/var/backups/berth/<pool>/`) are
+  likewise retained
 
 Two related notes: the Valkey step always runs — while `valkey: true` a
-removed site's instance is swept as an orphan, and `valkey: false` stops and
+removed site's instances are swept as orphans, and `valkey: false` stops and
 removes every berth-managed instance (data under `/var/lib/berth-valkey/` is
-kept either way); and after changing `php.version`, the previous version's
-FPM unit and pool files are no longer managed — clean them up manually.
+kept either way; a kept directory that a later site under a different user
+would inherit makes that site's provision refuse until it is moved or
+removed); and after changing `php.version`, the previous version's FPM unit
+and pool files are no longer managed — clean them up manually.
 
 ## Beyond v1
 

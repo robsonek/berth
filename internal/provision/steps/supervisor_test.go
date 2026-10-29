@@ -341,3 +341,27 @@ func TestSupervisorRunningForeignDropInNeedsForce(t *testing.T) {
 		t.Errorf("--force must overwrite the foreign drop-in; writes %v", f.Writes())
 	}
 }
+
+// TestSupervisorAfterUnitsWithQueue: with valkey_queue on, every site's
+// queue instance joins the ordering too (workers consume it), sorted with
+// the cache units so the bytes never depend on site order; without the
+// knob the list is exactly today's.
+func TestSupervisorAfterUnitsWithQueue(t *testing.T) {
+	s := supervisorOrderServer("running")
+	s.ValkeyQueue = true
+	want := []string{
+		"mariadb.service",
+		"berth-valkey-app_example_com-queue.service",
+		"berth-valkey-app_example_com.service",
+		"berth-valkey-www_example_com-queue.service",
+		"berth-valkey-www_example_com.service",
+	}
+	if got := supervisorAfterUnits(s); !reflect.DeepEqual(got, want) {
+		t.Errorf("supervisorAfterUnits with queue = %v, want %v", got, want)
+	}
+	s.ValkeyQueue = false
+	want = []string{"mariadb.service", "berth-valkey-app_example_com.service", "berth-valkey-www_example_com.service"}
+	if got := supervisorAfterUnits(s); !reflect.DeepEqual(got, want) {
+		t.Errorf("supervisorAfterUnits without queue = %v, want %v", got, want)
+	}
+}

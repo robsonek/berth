@@ -25,8 +25,11 @@ func valkeyCacheFreshCmd(domain string) string {
 	return "systemctl show -p NeedDaemonReload --value " + valkeyInstanceUnit(domain)
 }
 
-// stubValkeyCheckGreen stubs every probe of a fully converged single-site host.
+// stubValkeyCheckGreen stubs every probe of a fully converged single-site host
+// (the data-owner guard reads "absent" — a host whose dirs systemd has not
+// created yet, or never adopted; see stubValkeyDataDirsAbsent).
 func stubValkeyCheckGreen(f *bssh.FakeRunner, s *config.Server) {
+	stubValkeyDataDirsAbsent(f, s)
 	f.On("dpkg -s valkey-server", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("systemctl is-enabled valkey-server.service", bssh.Result{ExitCode: 1, Stdout: "disabled\n"})
 	f.On("systemctl is-active valkey-server.service", bssh.Result{ExitCode: 3, Stdout: "inactive\n"})
@@ -38,7 +41,7 @@ func stubValkeyCheckGreen(f *bssh.FakeRunner, s *config.Server) {
 	f.On(valkeyLoadedCmd(site.Domain), bssh.Result{ExitCode: 0})
 	f.On(valkeyCacheFreshCmd(site.Domain), bssh.Result{ExitCode: 0, Stdout: "no\n"})
 	f.On(valkeyExecCmd(valkeyInstanceUnit(site.Domain)), bssh.Result{ExitCode: 0})
-	f.On(valkeyPingCmd("tenant1", site.Domain), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
+	f.On(valkeyPingOver("tenant1", valkeySocketPath(site.Domain)), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
 	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0, Stdout: valkeyUnitPath(site.Domain) + "\n"})
 }
 
@@ -52,6 +55,7 @@ func TestValkeyRequiresBaseAndAccounts(t *testing.T) {
 func TestValkeyCheckSatisfiedFleet(t *testing.T) {
 	s := valkeyServer()
 	f := bssh.NewFakeRunner()
+	stubValkeyDataDirsAbsent(f, s)
 	stubValkeyCheckGreen(f, s)
 	cr, err := Valkey().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
@@ -65,6 +69,7 @@ func TestValkeyCheckSatisfiedFleet(t *testing.T) {
 func TestValkeyCheckUnsatisfiedWhenStockEnabled(t *testing.T) {
 	s := valkeyServer()
 	f := bssh.NewFakeRunner()
+	stubValkeyDataDirsAbsent(f, s)
 	stubValkeyCheckGreen(f, s)
 	// Stock service re-enabled by hand: the unauthenticated 6379 listener is back.
 	f.On("systemctl is-enabled valkey-server.service", bssh.Result{ExitCode: 0, Stdout: "enabled\n"})
@@ -80,8 +85,9 @@ func TestValkeyCheckUnsatisfiedWhenStockEnabled(t *testing.T) {
 func TestValkeyCheckUnsatisfiedWhenPingFails(t *testing.T) {
 	s := valkeyServer()
 	f := bssh.NewFakeRunner()
+	stubValkeyDataDirsAbsent(f, s)
 	stubValkeyCheckGreen(f, s)
-	f.On(valkeyPingCmd("tenant1", "app.example.com"), bssh.Result{ExitCode: 1, Stderr: "Connection refused"})
+	f.On(valkeyPingOver("tenant1", valkeySocketPath("app.example.com")), bssh.Result{ExitCode: 1, Stderr: "Connection refused"})
 	cr, err := Valkey().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)
@@ -95,6 +101,7 @@ func TestValkeyCheckUnsatisfiedOnManagedOrphanUnit(t *testing.T) {
 	s := valkeyServer()
 	orphan := "/etc/systemd/system/berth-valkey-gone_example_com.service"
 	f := bssh.NewFakeRunner()
+	stubValkeyDataDirsAbsent(f, s)
 	stubValkeyCheckGreen(f, s)
 	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0,
 		Stdout: valkeyUnitPath("app.example.com") + "\n" + orphan + "\n"})
@@ -115,6 +122,7 @@ func TestValkeyCheckIgnoresForeignGlobMatch(t *testing.T) {
 	s := valkeyServer()
 	foreign := "/etc/systemd/system/berth-valkey-foreign_example_com.service"
 	f := bssh.NewFakeRunner()
+	stubValkeyDataDirsAbsent(f, s)
 	stubValkeyCheckGreen(f, s)
 	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0,
 		Stdout: valkeyUnitPath("app.example.com") + "\n" + foreign + "\n"})
@@ -134,6 +142,7 @@ func TestValkeyCheckUnsatisfiedWhenUnitNotLoaded(t *testing.T) {
 	// process. The mtime-vs-ActiveEnterTimestamp probe must flag it.
 	s := valkeyServer()
 	f := bssh.NewFakeRunner()
+	stubValkeyDataDirsAbsent(f, s)
 	stubValkeyCheckGreen(f, s)
 	f.On(valkeyLoadedCmd("app.example.com"), bssh.Result{ExitCode: 1})
 	cr, err := Valkey().Check(context.Background(), provision.RunCtx{}, s, f)
@@ -148,6 +157,7 @@ func TestValkeyCheckUnsatisfiedWhenUnitNotLoaded(t *testing.T) {
 func TestValkeyCheckUnsatisfiedWhenManagerCacheStale(t *testing.T) {
 	s := valkeyServer()
 	f := bssh.NewFakeRunner()
+	stubValkeyDataDirsAbsent(f, s)
 	stubValkeyCheckGreen(f, s)
 	f.On(valkeyCacheFreshCmd("app.example.com"), bssh.Result{ExitCode: 0, Stdout: "yes\n"})
 	cr, err := Valkey().Check(context.Background(), provision.RunCtx{}, s, f)
@@ -162,6 +172,7 @@ func TestValkeyCheckUnsatisfiedWhenManagerCacheStale(t *testing.T) {
 func TestValkeyCheckAbortsOnUnmanagedUnit(t *testing.T) {
 	s := valkeyServer()
 	f := bssh.NewFakeRunner()
+	stubValkeyDataDirsAbsent(f, s)
 	stubValkeyCheckGreen(f, s)
 	f.On("cat "+shQuote(valkeyUnitPath("app.example.com")), bssh.Result{ExitCode: 0, Stdout: "[Unit]\nDescription=hand-written\n"})
 	_, err := Valkey().Check(context.Background(), provision.RunCtx{}, s, f)
@@ -278,6 +289,7 @@ func TestRenderValkeyUnitPathsMatchConsts(t *testing.T) {
 func TestValkeyApplyConvergesFreshFleet(t *testing.T) {
 	s := valkeyServer()
 	f := bssh.NewFakeRunner()
+	stubValkeyDataDirsAbsent(f, s)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})
 	f.On("systemctl disable --now valkey-server.service", bssh.Result{})
 	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0})                                // no instances yet
@@ -288,7 +300,7 @@ func TestValkeyApplyConvergesFreshFleet(t *testing.T) {
 	f.On(valkeyLoadedCmd("app.example.com"), bssh.Result{ExitCode: 0})
 	f.On(valkeyCacheFreshCmd("app.example.com"), bssh.Result{ExitCode: 0, Stdout: "no\n"})
 	f.On(valkeyExecCmd(valkeyInstanceUnit("app.example.com")), bssh.Result{ExitCode: 0})
-	f.On(valkeyPingCmd("tenant1", "app.example.com"), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
+	f.On(valkeyPingOver("tenant1", valkeySocketPath("app.example.com")), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
 
 	if err := Valkey().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -347,6 +359,7 @@ func TestValkeyApplyConvergesFreshFleet(t *testing.T) {
 func TestValkeyApplyRestartsDriftedUnit(t *testing.T) {
 	s := valkeyServer()
 	f := bssh.NewFakeRunner()
+	stubValkeyDataDirsAbsent(f, s)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})
 	f.On("systemctl disable --now valkey-server.service", bssh.Result{})
 	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0, Stdout: valkeyUnitPath("app.example.com") + "\n"})
@@ -356,7 +369,7 @@ func TestValkeyApplyRestartsDriftedUnit(t *testing.T) {
 	f.On("systemctl daemon-reload", bssh.Result{})
 	f.On("systemctl enable --now "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
 	f.On("systemctl restart "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
-	f.On(valkeyPingCmd("tenant1", "app.example.com"), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
+	f.On(valkeyPingOver("tenant1", valkeySocketPath("app.example.com")), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
 
 	if err := Valkey().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -379,6 +392,7 @@ func TestValkeyApplyHealsWedgedInstance(t *testing.T) {
 	// re-probe.
 	s := valkeyServer()
 	f := bssh.NewFakeRunner()
+	stubValkeyDataDirsAbsent(f, s)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})
 	f.On("systemctl disable --now valkey-server.service", bssh.Result{})
 	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0, Stdout: valkeyUnitPath("app.example.com") + "\n"})
@@ -388,7 +402,7 @@ func TestValkeyApplyHealsWedgedInstance(t *testing.T) {
 	f.On(valkeyLoadedCmd("app.example.com"), bssh.Result{ExitCode: 0})
 	f.On(valkeyCacheFreshCmd("app.example.com"), bssh.Result{ExitCode: 0, Stdout: "no\n"})
 	f.On(valkeyExecCmd(valkeyInstanceUnit("app.example.com")), bssh.Result{ExitCode: 0})
-	f.OnSeq(valkeyPingCmd("tenant1", "app.example.com"),
+	f.OnSeq(valkeyPingOver("tenant1", valkeySocketPath("app.example.com")),
 		bssh.Result{ExitCode: 1, Stderr: "Connection refused"},
 		bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
 	f.On("systemctl restart "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
@@ -420,6 +434,7 @@ func TestValkeyApplyReloadsStaleManagerCache(t *testing.T) {
 	// Apply must daemon-reload first or the step never converges.
 	s := valkeyServer()
 	f := bssh.NewFakeRunner()
+	stubValkeyDataDirsAbsent(f, s)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})
 	f.On("systemctl disable --now valkey-server.service", bssh.Result{})
 	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0, Stdout: valkeyUnitPath("app.example.com") + "\n"})
@@ -431,7 +446,7 @@ func TestValkeyApplyReloadsStaleManagerCache(t *testing.T) {
 	f.On(valkeyExecCmd(valkeyInstanceUnit("app.example.com")), bssh.Result{ExitCode: 0})
 	f.On("systemctl daemon-reload", bssh.Result{})
 	f.On("systemctl restart "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
-	f.On(valkeyPingCmd("tenant1", "app.example.com"), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
+	f.On(valkeyPingOver("tenant1", valkeySocketPath("app.example.com")), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
 
 	if err := Valkey().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -458,6 +473,7 @@ func TestValkeyApplyReloadsStaleManagerCache(t *testing.T) {
 func TestValkeyApplyFailsLoudWhenInstanceStaysDead(t *testing.T) {
 	s := valkeyServer()
 	f := bssh.NewFakeRunner()
+	stubValkeyDataDirsAbsent(f, s)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})
 	f.On("systemctl disable --now valkey-server.service", bssh.Result{})
 	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0, Stdout: valkeyUnitPath("app.example.com") + "\n"})
@@ -467,7 +483,7 @@ func TestValkeyApplyFailsLoudWhenInstanceStaysDead(t *testing.T) {
 	f.On(valkeyLoadedCmd("app.example.com"), bssh.Result{ExitCode: 0})
 	f.On(valkeyCacheFreshCmd("app.example.com"), bssh.Result{ExitCode: 0, Stdout: "no\n"})
 	f.On(valkeyExecCmd(valkeyInstanceUnit("app.example.com")), bssh.Result{ExitCode: 0})
-	f.On(valkeyPingCmd("tenant1", "app.example.com"), bssh.Result{ExitCode: 1, Stderr: "Connection refused"})
+	f.On(valkeyPingOver("tenant1", valkeySocketPath("app.example.com")), bssh.Result{ExitCode: 1, Stderr: "Connection refused"})
 	f.On("systemctl restart "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
 
 	err := Valkey().Apply(context.Background(), provision.RunCtx{}, s, f)
@@ -489,6 +505,7 @@ func TestValkeyApplySweepsOrphan(t *testing.T) {
 	s := valkeyServer()
 	orphan := "/etc/systemd/system/berth-valkey-gone_example_com.service"
 	f := bssh.NewFakeRunner()
+	stubValkeyDataDirsAbsent(f, s)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})
 	f.On("systemctl disable --now valkey-server.service", bssh.Result{})
 	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0, Stdout: orphan + "\n"})
@@ -501,7 +518,7 @@ func TestValkeyApplySweepsOrphan(t *testing.T) {
 	f.On(valkeyLoadedCmd("app.example.com"), bssh.Result{ExitCode: 0})
 	f.On(valkeyCacheFreshCmd("app.example.com"), bssh.Result{ExitCode: 0, Stdout: "no\n"})
 	f.On(valkeyExecCmd(valkeyInstanceUnit("app.example.com")), bssh.Result{ExitCode: 0})
-	f.On(valkeyPingCmd("tenant1", "app.example.com"), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
+	f.On(valkeyPingOver("tenant1", valkeySocketPath("app.example.com")), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
 
 	if err := Valkey().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -521,6 +538,7 @@ func TestValkeyApplyLeavesForeignOrphanUnit(t *testing.T) {
 	s := valkeyServer()
 	orphan := "/etc/systemd/system/berth-valkey-foreign_example_com.service"
 	f := bssh.NewFakeRunner()
+	stubValkeyDataDirsAbsent(f, s)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})
 	f.On("systemctl disable --now valkey-server.service", bssh.Result{})
 	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0, Stdout: orphan + "\n"})
@@ -531,7 +549,7 @@ func TestValkeyApplyLeavesForeignOrphanUnit(t *testing.T) {
 	f.On(valkeyLoadedCmd("app.example.com"), bssh.Result{ExitCode: 0})
 	f.On(valkeyCacheFreshCmd("app.example.com"), bssh.Result{ExitCode: 0, Stdout: "no\n"})
 	f.On(valkeyExecCmd(valkeyInstanceUnit("app.example.com")), bssh.Result{ExitCode: 0})
-	f.On(valkeyPingCmd("tenant1", "app.example.com"), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
+	f.On(valkeyPingOver("tenant1", valkeySocketPath("app.example.com")), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
 
 	if err := Valkey().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -546,6 +564,7 @@ func TestValkeyApplyLeavesForeignOrphanUnit(t *testing.T) {
 func TestValkeyCheckUnsatisfiedWhenBinaryUpgraded(t *testing.T) {
 	s := valkeyServer()
 	f := bssh.NewFakeRunner()
+	stubValkeyDataDirsAbsent(f, s)
 	stubValkeyCheckGreen(f, s)
 	// Binary replaced under the running process (unattended-upgrades).
 	f.On(valkeyExecCmd(valkeyInstanceUnit("app.example.com")), bssh.Result{ExitCode: 1})
@@ -561,6 +580,7 @@ func TestValkeyCheckUnsatisfiedWhenBinaryUpgraded(t *testing.T) {
 func TestValkeyApplyRestartsStaleBinary(t *testing.T) {
 	s := valkeyServer()
 	f := bssh.NewFakeRunner()
+	stubValkeyDataDirsAbsent(f, s)
 	f.On("DEBIAN_FRONTEND=noninteractive apt-get install -y valkey-server", bssh.Result{})
 	f.On("systemctl disable --now valkey-server.service", bssh.Result{})
 	f.On(valkeyListUnitsCmd, bssh.Result{ExitCode: 0, Stdout: valkeyUnitPath("app.example.com") + "\n"})
@@ -571,7 +591,7 @@ func TestValkeyApplyRestartsStaleBinary(t *testing.T) {
 	f.On(valkeyCacheFreshCmd("app.example.com"), bssh.Result{ExitCode: 0, Stdout: "no\n"})
 	f.On(valkeyExecCmd(valkeyInstanceUnit("app.example.com")), bssh.Result{ExitCode: 1}) // binary stale
 	f.On("systemctl restart "+valkeyInstanceUnit("app.example.com"), bssh.Result{})
-	f.On(valkeyPingCmd("tenant1", "app.example.com"), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
+	f.On(valkeyPingOver("tenant1", valkeySocketPath("app.example.com")), bssh.Result{ExitCode: 0, Stdout: "PONG\n"})
 
 	if err := Valkey().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -596,6 +616,7 @@ func TestValkeyApplyRestartsStaleBinary(t *testing.T) {
 func TestValkeyDisabledCheckSatisfiedWhenNoInstances(t *testing.T) {
 	s := &config.Server{Valkey: false, Sites: []config.Site{{Domain: "app.example.com"}}}
 	f := bssh.NewFakeRunner()
+	stubValkeyDataDirsAbsent(f, s)
 	f.On(valkeyListUnitsCmd, bssh.Result{}) // empty listing
 	cr, err := Valkey().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
@@ -614,6 +635,7 @@ func TestValkeyDisabledCheckIgnoresForeignUnits(t *testing.T) {
 	s := &config.Server{Valkey: false, Sites: []config.Site{{Domain: "app.example.com"}}}
 	foreign := "/etc/systemd/system/berth-valkey-foreign.service"
 	f := bssh.NewFakeRunner()
+	stubValkeyDataDirsAbsent(f, s)
 	f.On(valkeyListUnitsCmd, bssh.Result{Stdout: foreign + "\n"})
 	f.On("cat "+shQuote(foreign), bssh.Result{Stdout: "[Unit]\nDescription=mine\n"}) // no marker
 	cr, err := Valkey().Check(context.Background(), provision.RunCtx{}, s, f)
@@ -630,6 +652,7 @@ func TestValkeyDisabledSweepsManagedInstances(t *testing.T) {
 	owned := "/etc/systemd/system/berth-valkey-app_example_com.service"
 	foreign := "/etc/systemd/system/berth-valkey-foreign.service"
 	f := bssh.NewFakeRunner()
+	stubValkeyDataDirsAbsent(f, s)
 	f.On(valkeyListUnitsCmd, bssh.Result{Stdout: owned + "\n" + foreign + "\n"})
 	f.On("cat "+shQuote(owned), bssh.Result{Stdout: string(managedMarker) + "\n[Unit]\n"})
 	f.On("cat "+shQuote(foreign), bssh.Result{Stdout: "[Unit]\n"})
@@ -640,6 +663,7 @@ func TestValkeyDisabledSweepsManagedInstances(t *testing.T) {
 	}
 
 	f2 := bssh.NewFakeRunner()
+	stubValkeyDataDirsAbsent(f2, s)
 	f2.On(valkeyListUnitsCmd, bssh.Result{Stdout: owned + "\n" + foreign + "\n"})
 	f2.On("cat "+shQuote(owned), bssh.Result{Stdout: string(managedMarker) + "\n[Unit]\n"})
 	f2.On("cat "+shQuote(foreign), bssh.Result{Stdout: "[Unit]\n"})
@@ -672,6 +696,7 @@ func TestValkeyDisabledSweepsManagedInstances(t *testing.T) {
 func TestValkeyDisabledApplyNoReloadWhenNothingRemoved(t *testing.T) {
 	s := &config.Server{Valkey: false, Sites: []config.Site{{Domain: "app.example.com"}}}
 	f := bssh.NewFakeRunner()
+	stubValkeyDataDirsAbsent(f, s)
 	f.On(valkeyListUnitsCmd, bssh.Result{})
 	if err := Valkey().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
 		t.Fatal(err)
@@ -687,6 +712,7 @@ func TestValkeyDisabledSweepFailureIsHardError(t *testing.T) {
 	s := &config.Server{Valkey: false, Sites: []config.Site{{Domain: "app.example.com"}}}
 	owned := "/etc/systemd/system/berth-valkey-app_example_com.service"
 	f := bssh.NewFakeRunner()
+	stubValkeyDataDirsAbsent(f, s)
 	f.On(valkeyListUnitsCmd, bssh.Result{Stdout: owned + "\n"})
 	f.On("cat "+shQuote(owned), bssh.Result{Stdout: string(managedMarker) + "\n[Unit]\n"})
 	f.On("systemctl disable --now berth-valkey-app_example_com.service", bssh.Result{ExitCode: 1, Stderr: "boom"})

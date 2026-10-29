@@ -30,5 +30,5 @@ meta_tmp="$(mktemp "/var/backups/berth/app_example_com/.tmp-XXXXXXXX")"
 } > "$meta_tmp"
 chmod 0600 "$meta_tmp"
 mv "$meta_tmp" "/var/backups/berth/app_example_com/app_example_com-meta-$ts.manifest"
-find "/var/backups/berth/app_example_com" -maxdepth 1 -type f \( -name 'myapp-*.sql.gz' -o -name 'app_example_com-files-*.tar.gz' -o -name 'app_example_com-meta-*.manifest' \) -mtime +7 -delete
+find "/var/backups/berth/app_example_com" -maxdepth 1 -type f \( -name 'myapp-*.sql.gz' -o -name 'app_example_com-files-*.tar.gz' -o -name 'app_example_com-queue-*.rdb' -o -name 'app_example_com-meta-*.manifest' \) -mtime +7 -delete
 echo "[$(date -u +%FT%TZ)] berth backup app_example_com: done"

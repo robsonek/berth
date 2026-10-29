@@ -49,6 +49,13 @@ func unitList(s *config.Server) []string {
 		for _, site := range s.Sites {
 			units = append(units, config.ValkeyInstanceUnit(site.Domain))
 		}
+		// The queue instances come AFTER every cache instance, so the rows a
+		// reader already knows keep their positions when the knob is on.
+		if s.ValkeyQueue {
+			for _, site := range s.Sites {
+				units = append(units, config.ValkeyQueueInstanceUnit(site.Domain))
+			}
+		}
 	}
 	return units
 }

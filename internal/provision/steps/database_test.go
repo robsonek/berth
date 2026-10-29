@@ -2698,3 +2698,55 @@ func TestDatabaseApplyRefusesMismatchedEnvBeforeMutating(t *testing.T) {
 		}
 	}
 }
+
+// TestSeedSharedEnvWithValkeyQueue: the first seed of a site under
+// valkey_queue: true also points the app's queue connection at the queue
+// instance's socket; without the knob the two keys are absent.
+func TestSeedSharedEnvWithValkeyQueue(t *testing.T) {
+	seed := func(t *testing.T, queue bool) string {
+		t.Helper()
+		s := &config.Server{
+			Valkey: true, ValkeyQueue: queue,
+			Sites: []config.Site{{Domain: "app.example.com", User: "tenant1", DeployPath: "/var/www/app"}},
+		}
+		f := bssh.NewFakeRunner()
+		d := database{redactor: secret.NewRedactor()}
+		stubEnvSeed(f, s)
+		if err := d.seedSharedEnv(context.Background(), f, s, s.Sites[0],
+			"appdb", "appuser", "pw123", "base64:key", "mysql", "127.0.0.1", "3306", "/run/mysqld/mysqld.sock"); err != nil {
+			t.Fatal(err)
+		}
+		return string(writtenContent(f, sharedEnvPath(s.Sites[0])))
+	}
+	with := seed(t, true)
+	for _, want := range []string{
+		"REDIS_QUEUE_HOST=/run/berth-valkey/app_example_com/queue.sock\n",
+		"REDIS_QUEUE_PORT=0\n",
+		"REDIS_HOST=/run/berth-valkey/app_example_com/valkey.sock\n", // the cache keys are untouched
+		"QUEUE_CONNECTION=redis\n",
+	} {
+		if !strings.Contains(with, want) {
+			t.Errorf(".env with valkey_queue missing %q:\n%s", want, with)
+		}
+	}
+	without := seed(t, false)
+	if strings.Contains(without, "REDIS_QUEUE") {
+		t.Errorf(".env without valkey_queue must not carry REDIS_QUEUE_*:\n%s", without)
+	}
+}
+
+// The database step checks only the keys it has always checked: the queue
+// keys are seed-time-only (an existing host adds them by hand), never a
+// condition for the run to continue.
+func TestBerthOwnedEnvIgnoresQueueKeys(t *testing.T) {
+	s := &config.Server{
+		Valkey: true, ValkeyQueue: true,
+		Sites: []config.Site{{Domain: "app.example.com", User: "tenant1", DeployPath: "/var/www/app",
+			Database: config.SiteDatabase{Name: "app", User: "app"}}},
+	}
+	for _, e := range berthOwnedEnv(s, s.Sites[0]) {
+		if strings.HasPrefix(e.Key, "REDIS_QUEUE") {
+			t.Errorf("berthOwnedEnv must not require %s", e.Key)
+		}
+	}
+}

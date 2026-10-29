@@ -490,6 +490,15 @@ func TestDerivationsAreFrozen(t *testing.T) {
 	if ValkeyStateBase != "/var/lib/berth-valkey" {
 		t.Fatalf("ValkeyStateBase changed: %s", ValkeyStateBase)
 	}
+	if got := ValkeyQueueInstanceUnit("app.example.com"); got != "berth-valkey-app_example_com-queue.service" {
+		t.Fatalf("ValkeyQueueInstanceUnit derivation changed: %s", got)
+	}
+	if got := ValkeyQueueSocketPath("app_example_com"); got != "/run/berth-valkey/app_example_com/queue.sock" {
+		t.Fatalf("ValkeyQueueSocketPath derivation changed: %s", got)
+	}
+	if got := ValkeyQueueDataDir("app_example_com"); got != "/var/lib/berth-valkey/app_example_com-queue" {
+		t.Fatalf("ValkeyQueueDataDir derivation changed: %s", got)
+	}
 	if got := SiteWorkerProgram("app.example.com"); got != "berth-app_example_com" {
 		t.Fatalf("SiteWorkerProgram derivation changed: %s", got)
 	}

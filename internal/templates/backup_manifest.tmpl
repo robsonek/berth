@@ -6,3 +6,5 @@ DB_NAME={{.DBName}}
 DB_USER={{.DBUser}}
 SITE_USER={{.SiteUser}}
 DEPLOY_PATH={{.DeployPath}}
+{{ if .ValkeyQueueData }}VALKEY_QUEUE_DATA={{.ValkeyQueueData}}
+{{ end -}}

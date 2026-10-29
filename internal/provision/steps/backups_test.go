@@ -317,3 +317,91 @@ func TestBackupsUnmanagedScriptAborts(t *testing.T) {
 		t.Fatalf("Check should abort on an unmanaged file without --force")
 	}
 }
+
+// TestRenderBackupScriptWithValkeyQueue: with valkey_queue on, the per-site
+// script also takes a point-in-time RDB snapshot of the queue instance
+// (valkey-cli --rdb over its socket) BEFORE the sidecar, into a
+// <pool>-queue-<ts>.rdb artifact; the prune pattern covers that artifact
+// whether or not the knob is on (berth's own name — switching the knob off
+// must not strand old snapshots forever).
+func TestRenderBackupScriptWithValkeyQueue(t *testing.T) {
+	eng, err := dbpkg.Get("mariadb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	render := func(t *testing.T, queue bool) string {
+		t.Helper()
+		s := backupServer()
+		s.Valkey, s.ValkeyQueue = true, queue
+		script, err := renderBackupScript(s, s.Sites[0], eng)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(script)
+	}
+	with := render(t, true)
+	for _, want := range []string{
+		`queue_tmp=""`,
+		`trap 'rm -f -- "$db_tmp" "$files_tmp" "$queue_tmp" "$meta_tmp"' EXIT`,
+		`queue_tmp="$(mktemp "/var/backups/berth/app_example_com/.tmp-XXXXXXXX")"`,
+		`valkey-cli -s /run/berth-valkey/app_example_com/queue.sock --rdb "$queue_tmp"`,
+		`chmod 0600 "$queue_tmp"`,
+		`mv "$queue_tmp" "/var/backups/berth/app_example_com/app_example_com-queue-$ts.rdb"`,
+		`printf 'VALKEY_QUEUE_DATA=%s\n' '/var/lib/berth-valkey/app_example_com-queue'`,
+		`-o -name 'app_example_com-queue-*.rdb'`,
+	} {
+		if !strings.Contains(with, want) {
+			t.Errorf("script with valkey_queue missing %q:\n%s", want, with)
+		}
+	}
+	// The snapshot lands before the sidecar is written, so a failed snapshot
+	// (set -e) leaves no sidecar for that timestamp.
+	if snap, meta := strings.Index(with, "--rdb"), strings.Index(with, "-meta-$ts.manifest"); snap < 0 || meta < 0 || snap > meta {
+		t.Errorf("the queue snapshot must precede the sidecar write (idx %d vs %d)", snap, meta)
+	}
+	without := render(t, false)
+	for _, reject := range []string{"valkey-cli", "queue_tmp", "VALKEY_QUEUE_DATA"} {
+		if strings.Contains(without, reject) {
+			t.Errorf("script without valkey_queue must not contain %q:\n%s", reject, without)
+		}
+	}
+	if !strings.Contains(without, `-o -name 'app_example_com-queue-*.rdb'`) {
+		t.Errorf("the prune pattern must always cover berth's queue snapshot name:\n%s", without)
+	}
+	if !strings.Contains(without, `trap 'rm -f -- "$db_tmp" "$files_tmp" "$meta_tmp"' EXIT`) {
+		t.Errorf("the trap line without the knob must be today's:\n%s", without)
+	}
+}
+
+func TestRenderBackupManifestWithValkeyQueue(t *testing.T) {
+	s := backupServer()
+	s.Valkey, s.ValkeyQueue = true, true
+	m, err := renderBackupManifest(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(m), "DEPLOY_PATH=/var/www/app\nVALKEY_QUEUE_DATA=/var/lib/berth-valkey/app_example_com-queue\n") {
+		t.Errorf("manifest with valkey_queue must record the queue data dir after DEPLOY_PATH:\n%s", m)
+	}
+	s.ValkeyQueue = false
+	m, err = renderBackupManifest(s, s.Sites[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(m), "VALKEY_QUEUE") {
+		t.Errorf("manifest without valkey_queue must be today's bytes:\n%s", m)
+	}
+}
+
+// TestBackupsRequiresValkey: the per-site script snapshots the queue instance
+// (valkey_queue) through its socket, so the --only gate must demand a
+// converged valkey step first — otherwise `--only backups` on a host whose
+// queue instance was never provisioned would install a script that fails at
+// valkey-cli on every run. Static, like every Requires(): on a host without
+// Valkey the step's disabled-mode Check is satisfied at the cost of one ls.
+func TestBackupsRequiresValkey(t *testing.T) {
+	want := []string{"appdirs", "database", "valkey"}
+	if got := Backups().Requires(); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("Backups().Requires() = %v, want %v", got, want)
+	}
+}
