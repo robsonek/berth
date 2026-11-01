@@ -14,6 +14,11 @@ type Options struct {
 	Only       string // run only this step (after verifying its transitive deps)
 	Force      bool   // overwrite resources not managed by berth (drift policy)
 	SSLStaging bool   // use Let's Encrypt staging in the TLS step
+	// AllowDowngrade lets a binary older than the host's recorded berth
+	// version run (deliberate rollback). Run-global: handed to every step,
+	// including the always-run steps ahead of an --only target, and never
+	// implied by Force (see RunCtx.AllowDowngrade).
+	AllowDowngrade bool
 	// Redact masks registered secrets in EVERY engine output: each event's
 	// Reason/Changes/Warnings, event errors, and the synchronous pre-flight
 	// error Run returns. Pass the SAME *secret.Redactor the steps were built
@@ -69,7 +74,7 @@ func New(steps ...Step) *Engine { return &Engine{steps: steps} }
 // dependency); per-step errors travel on the event stream and are surfaced by
 // the renderer (see internal/ui).
 func (e *Engine) Run(ctx context.Context, s *config.Server, r bssh.Runner, opt Options) (<-chan Event, error) {
-	rc := RunCtx{Force: opt.Force, SSLStaging: opt.SSLStaging, FullRun: opt.Only == ""}
+	rc := RunCtx{Force: opt.Force, SSLStaging: opt.SSLStaging, FullRun: opt.Only == "", AllowDowngrade: opt.AllowDowngrade}
 	// Unconverged marking is RUN-scoped (warnings are per-step): a step that
 	// knowingly leaves work undone marks the run, and every LATER step sees
 	// it — the terminal manifest step withholds its attestation. The closures

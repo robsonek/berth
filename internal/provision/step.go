@@ -28,8 +28,17 @@ type RunCtx struct {
 	// (and `--only identity --force` stays the narrow re-bind form the
 	// endpoint-mismatch advice prescribes). Full runs hand Force to every
 	// step unchanged.
-	Force      bool
-	SSLStaging bool // use Let's Encrypt staging in the TLS step
+	Force bool
+	// AllowDowngrade authorizes running a binary older than the berth version
+	// a host records as the newest that changed it (a deliberate rollback).
+	// Unlike Force it is RUN-GLOBAL: the engine deliberately does NOT scope it
+	// to the --only target, because its only reader is the always-run
+	// preflight step, which executes ahead of any target — scoping it would
+	// make `--only <step> --allow-downgrade` a dead flag. A bare --force never
+	// implies it: overwriting unmanaged files and rolling a host back to an
+	// older berth are separate authorizations.
+	AllowDowngrade bool
+	SSLStaging     bool // use Let's Encrypt staging in the TLS step
 	// FullRun is true when the whole registered pipeline executes (no --only
 	// target), i.e. every later step is guaranteed to run barring fail-fast.
 	// Steps that defer work to a later step (php/nginx defer a unit-wide

@@ -19,13 +19,14 @@ import (
 )
 
 type provisionFlags struct {
-	dryRun     bool
-	skipSSL    bool
-	sslStaging bool
-	only       string
-	force      bool
-	verbose    bool
-	noTTY      bool
+	dryRun         bool
+	skipSSL        bool
+	sslStaging     bool
+	only           string
+	force          bool
+	allowDowngrade bool
+	verbose        bool
+	noTTY          bool
 }
 
 func newProvisionCmd() *cobra.Command {
@@ -43,6 +44,7 @@ func newProvisionCmd() *cobra.Command {
 	c.Flags().BoolVar(&f.sslStaging, "ssl-staging", false, "use Let's Encrypt staging")
 	c.Flags().StringVar(&f.only, "only", "", "run only the named phase or step")
 	c.Flags().BoolVar(&f.force, "force", false, "overwrite resources not managed by berth; also re-bind the local secret cache after a deliberate endpoint (host/port) change; with --only it applies to the target step alone")
+	c.Flags().BoolVar(&f.allowDowngrade, "allow-downgrade", false, "run even though a newer berth version already changed this host (deliberate rollback); --force does not imply this")
 	c.Flags().BoolVarP(&f.verbose, "verbose", "v", false, "plain output with reasons for satisfied steps and changes for applied ones")
 	c.Flags().BoolVar(&f.noTTY, "no-tty", false, "force plain output (no live TUI)")
 	return c
@@ -78,6 +80,7 @@ func runProvision(cmd *cobra.Command, serverPath string, f *provisionFlags) erro
 	eng := provision.New(steps.Pipeline(srv, red, f.skipSSL)...)
 	events, err := eng.Run(ctx, srv, client, provision.Options{
 		DryRun: f.dryRun, Only: f.only, Force: f.force, SSLStaging: f.sslStaging, Redact: red,
+		AllowDowngrade: f.allowDowngrade,
 	})
 	if err != nil {
 		return err

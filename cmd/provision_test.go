@@ -59,6 +59,13 @@ func TestProvisionLoadsConfigAndAssemblesPipeline(t *testing.T) {
 	}
 }
 
+func TestProvisionHasAllowDowngradeFlag(t *testing.T) {
+	fl := newProvisionCmd().Flags().Lookup("allow-downgrade")
+	if fl == nil || fl.DefValue != "false" || !strings.Contains(fl.Usage, "--force does not imply") {
+		t.Fatalf("allow-downgrade flag = %+v", fl)
+	}
+}
+
 func TestProvisionRejectsInvalidConfigPath(t *testing.T) {
 	root := newRootCmd()
 	root.SetArgs([]string{"provision", "/no/such/file.yml"})
