@@ -3,6 +3,52 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Changed
+
+- **BREAKING: every config must declare `requires_berth:`**, the oldest berth
+  release the config works with (e.g. `requires_berth: v0.37.0`; raise it when
+  the config starts relying on something a newer release introduced). A
+  config without it no longer loads, and the error names the line to add,
+  with this binary's version. The key is checked right after the file is
+  read, before the rest is parsed, so a config written for a newer berth
+  fails with `requires berth >= vX.Y.Z, this binary is …` instead of listing
+  keys this binary does not know. Both spellings are accepted, `v0.37.0` and
+  `0.37.0`, and nothing else (no partial version, no pre-release or
+  `git describe` suffix). `berth init` writes the version it is itself (a
+  `make build` binary a few commits past a tag writes that tag). A
+  development build (`go build`, version `dev`) still requires the key but
+  skips the comparison; its `berth init` writes none and says so. berth
+  v0.36.0 and older do not know the key and reject it as unknown, so going
+  back to such a binary deliberately means removing the line from the
+  config. **To upgrade:** before the first v0.37.0 run, add
+  `requires_berth: v0.37.0` directly under the `id:` line of every config.
+
+### Added
+
+- **Host version floor.** `/var/lib/berth/version-floor` (root-owned, the
+  managed marker plus a `VERSION=vX.Y.Z` line) records the newest berth
+  release that has changed the host, so an older binary cannot quietly undo
+  what a newer one set up. The `preflight` step raises it to the running
+  binary's version on every real run, before any other change on the host —
+  under `--only` and `--skip-ssl` too, and even when the run later fails. A
+  run by the same version leaves the file alone; upgrading berth is never
+  blocked. Existing hosts have no floor yet, and their first v0.37.0 run
+  records it. A binary older than the floor stops in `preflight` before it
+  touches the host (`host was last changed by berth vX.Y.Z, this binary is …
+  — use vX.Y.Z or newer`), and so does an unreadable or malformed floor
+  file; `--dry-run` and `berth status --drift` report the same stop and never
+  write the floor. The new `provision --allow-downgrade` is the deliberate
+  rollback: the run goes ahead and lowers the floor to the running version
+  (or rewrites an unreadable file). It is run-global, so it reaches
+  `preflight` under `--only` as well. **`--force` never bypasses the stop** —
+  it authorizes overwriting files berth does not manage, never running an
+  older berth over a newer one. A development build neither reads nor writes
+  the floor (a real run warns that it was skipped). The file's path and its
+  `VERSION=` line are frozen by a contract test: every future berth reads
+  them.
+
 ## [0.36.0] — 2026-10-29
 
 ### Added
