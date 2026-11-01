@@ -8,8 +8,13 @@ import (
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
 	bssh "github.com/robsonek/berth/internal/ssh"
+	"github.com/robsonek/berth/internal/version"
 )
 
+// preflight verifies the OS and sudo, refreshes apt, and is the host's
+// version-floor gate: it refuses a berth older than the newest one that
+// already changed the host (unless --allow-downgrade) and raises the floor
+// before any other change of a real run (versionfloor.go).
 type preflight struct{}
 
 func Preflight() provision.Step { return preflight{} }
@@ -49,6 +54,18 @@ func (preflight) Check(ctx context.Context, rc provision.RunCtx, _ *config.Serve
 	if codename != "trixie" {
 		return provision.CheckResult{}, fmt.Errorf("unsupported OS: VERSION_CODENAME=%q, berth requires Debian 13 (trixie)", codename)
 	}
+	// The version floor is probed BEFORE the drop-in classification so the
+	// downgrade stop wins over every other refusal (--force bypasses those,
+	// never this one). A development build has no comparable version: it
+	// neither reads nor writes the floor.
+	var floorChange string
+	if bin, ok := version.Binary(); ok {
+		_, line, err := probeVersionFloor(ctx, r, bin, rc.AllowDowngrade)
+		if err != nil {
+			return provision.CheckResult{}, err
+		}
+		floorChange = line
+	}
 	// The lock-timeout drop-in carries the managed marker, so it obeys the
 	// standard drift policy like every other managed file: a FOREIGN file at
 	// its path aborts unless --force (preflight is always-run, so without this
@@ -61,7 +78,11 @@ func (preflight) Check(ctx context.Context, rc provision.RunCtx, _ *config.Serve
 	if _, err := managedFileSatisfied(state, aptLockTimeoutPath, rc.Force); err != nil {
 		return provision.CheckResult{}, err
 	}
-	changes := []string{"apt-get update"}
+	var changes []string
+	if floorChange != "" {
+		changes = append(changes, floorChange)
+	}
+	changes = append(changes, "apt-get update")
 	if state != fileUpToDate {
 		changes = append(changes, "write "+aptLockTimeoutPath)
 	}
@@ -86,6 +107,22 @@ func (preflight) Apply(ctx context.Context, rc provision.RunCtx, _ *config.Serve
 		return err
 	} else if res.ExitCode != 0 {
 		return fmt.Errorf("preflight \"sudo -n true\": %s", res.Stderr)
+	}
+	// The version floor is the run's FIRST change on the host, so a run that
+	// stops anywhere later still leaves it raised. Apply re-reads it instead
+	// of trusting Check: a refusal stops here, before anything is written.
+	if bin, ok := version.Binary(); !ok {
+		rc.Warnf("development build (%s): host version floor neither checked nor recorded", version.Version)
+	} else {
+		act, _, err := probeVersionFloor(ctx, r, bin, rc.AllowDowngrade)
+		if err != nil {
+			return err
+		}
+		if act != floorKeep {
+			if err := writeVersionFloor(ctx, r, bin); err != nil {
+				return fmt.Errorf("write version floor: %w", err)
+			}
+		}
 	}
 	// Install the dpkg-lock-wait config BEFORE the first apt call, so even this
 	// apt-get update (and every later install) tolerates a boot-time apt-daily

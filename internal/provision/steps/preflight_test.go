@@ -2,12 +2,14 @@ package steps
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
 	bssh "github.com/robsonek/berth/internal/ssh"
+	"github.com/robsonek/berth/internal/version/versiontest"
 )
 
 // stubTrixie stubs the OS-release probe every preflight Check starts with.
@@ -207,5 +209,258 @@ func TestPreflightApplyForceOverwritesForeignLockTimeout(t *testing.T) {
 	}
 	if len(f.Writes()) != 1 || f.Writes()[0].Path != aptLockTimeoutPath {
 		t.Errorf("forced Apply must overwrite the drop-in; writes = %+v", f.Writes())
+	}
+}
+
+// aptUpdateCmd is the apt-get update preflight.Apply runs last.
+const aptUpdateCmd = "sudo DEBIAN_FRONTEND=noninteractive apt-get update -y"
+
+// floorInstallDirCmd creates /var/lib/berth before the floor is written.
+const floorInstallDirCmd = "install -d -o root -g root -m 0755 /var/lib/berth"
+
+// touchedFloor reports whether any recorded command mentions the floor file.
+func touchedFloor(f *bssh.FakeRunner) bool {
+	for _, c := range f.Calls() {
+		if strings.Contains(c.Cmd, "version-floor") {
+			return true
+		}
+	}
+	return false
+}
+
+func TestPreflightCheckPlansFloorRecord(t *testing.T) {
+	versiontest.Set(t, "0.37.0")
+	f := bssh.NewFakeRunner()
+	stubTrixie(f)
+	f.On(versionFloorTestCmd, bssh.Result{ExitCode: 1})
+	f.On(lockTimeoutCatCmd(), bssh.Result{ExitCode: 1})
+	cr, err := Preflight().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
+	if err != nil || cr.Satisfied {
+		t.Fatalf("Check = %+v err=%v, want unsatisfied without error", cr, err)
+	}
+	want := "record version floor v0.37.0 in /var/lib/berth/version-floor"
+	if len(cr.Changes) == 0 || cr.Changes[0] != want {
+		t.Errorf("Changes = %q, want %q first", cr.Changes, want)
+	}
+	if len(f.Writes()) != 0 {
+		t.Error("Check must not write the floor (dry-run and status run Check only)")
+	}
+}
+
+func TestPreflightCheckRefusesDowngradeEvenWithForce(t *testing.T) {
+	versiontest.Set(t, "0.37.0")
+	stub := func() *bssh.FakeRunner {
+		f := bssh.NewFakeRunner()
+		stubTrixie(f)
+		f.On(versionFloorTestCmd, bssh.Result{})
+		f.On(versionFloorCatCmd, bssh.Result{Stdout: "VERSION=v0.38.0\n"})
+		f.On(lockTimeoutCatCmd(), bssh.Result{ExitCode: 1})
+		return f
+	}
+	want := "host was last changed by berth v0.38.0, this binary is v0.37.0 — use v0.38.0 or newer; to roll back deliberately, re-run with --allow-downgrade"
+	for _, rc := range []provision.RunCtx{{}, {Force: true}} {
+		f := stub()
+		_, err := Preflight().Check(context.Background(), rc, &config.Server{}, f)
+		if err == nil || err.Error() != want {
+			t.Errorf("Check(Force=%v) err = %v, want %q", rc.Force, err, want)
+		}
+		// The downgrade stop wins over every other refusal: the apt drop-in
+		// is never even classified.
+		if callIndex(f, lockTimeoutCatCmd()) >= 0 {
+			t.Errorf("Check(Force=%v) classified the apt drop-in; the downgrade stop must come first", rc.Force)
+		}
+	}
+	f := stub()
+	cr, err := Preflight().Check(context.Background(), provision.RunCtx{AllowDowngrade: true}, &config.Server{}, f)
+	if err != nil {
+		t.Fatalf("Check(AllowDowngrade) err = %v", err)
+	}
+	if !slices.Contains(cr.Changes, "lower version floor v0.38.0 → v0.37.0 (--allow-downgrade)") {
+		t.Errorf("Changes = %q, want the lowered floor planned", cr.Changes)
+	}
+}
+
+func TestPreflightCheckFloorReadFailureIsNotAbsence(t *testing.T) {
+	versiontest.Set(t, "0.37.0")
+	f := bssh.NewFakeRunner()
+	stubTrixie(f)
+	f.On(versionFloorTestCmd, bssh.Result{})
+	f.On(versionFloorCatCmd, bssh.Result{ExitCode: 1, Stderr: "Permission denied"})
+	f.On(lockTimeoutCatCmd(), bssh.Result{ExitCode: 1})
+	_, err := Preflight().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
+	if err == nil || !strings.Contains(err.Error(), "unreadable or malformed") {
+		t.Fatalf("a present but unreadable floor must refuse, never read as absent; got %v", err)
+	}
+}
+
+func TestPreflightCheckDevBuildSkipsFloor(t *testing.T) {
+	versiontest.Set(t, "dev")
+	f := bssh.NewFakeRunner()
+	stubTrixie(f)
+	f.On(lockTimeoutCatCmd(), bssh.Result{ExitCode: 1})
+	if _, err := Preflight().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if touchedFloor(f) {
+		t.Errorf("a development build probed the floor: %+v", f.Calls())
+	}
+}
+
+func TestPreflightApplyWritesFloorFirst(t *testing.T) {
+	versiontest.Set(t, "0.37.0")
+	f := bssh.NewFakeRunner()
+	f.On("sudo -n true", bssh.Result{})
+	f.On(versionFloorTestCmd, bssh.Result{ExitCode: 1})
+	f.On(floorInstallDirCmd, bssh.Result{})
+	f.On(lockTimeoutCatCmd(), bssh.Result{ExitCode: 1})
+	f.On(aptUpdateCmd, bssh.Result{})
+	if err := Preflight().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	w := f.Writes()
+	if len(w) != 2 {
+		t.Fatalf("writes = %+v, want the floor then the apt drop-in", w)
+	}
+	if w[0].Path != versionFloorPath || string(w[0].Content) != "# managed by berth\nVERSION=v0.37.0\n" ||
+		w[0].Owner != "root" || w[0].Group != "root" || w[0].Mode != 0o644 {
+		t.Errorf("first write = %s %q %s:%s %o, want %s root:root 644", w[0].Path, w[0].Content, w[0].Owner, w[0].Group, w[0].Mode, versionFloorPath)
+	}
+	if w[1].Path != aptLockTimeoutPath {
+		t.Errorf("second write = %s, want %s", w[1].Path, aptLockTimeoutPath)
+	}
+	// The floor is the host's first change: after sudo is proven, before apt.
+	if sudo, dir, apt := callIndex(f, "sudo -n true"), callIndex(f, floorInstallDirCmd), callIndex(f, aptUpdateCmd); sudo != 0 || dir < 0 || apt < 0 || dir > apt {
+		t.Errorf("call order sudo=%d install-dir=%d apt-get=%d, want sudo first and the floor dir before apt-get update: %+v", sudo, dir, apt, f.Calls())
+	}
+}
+
+func TestPreflightApplyEqualFloorWritesNothing(t *testing.T) {
+	versiontest.Set(t, "v0.37.0")
+	f := bssh.NewFakeRunner()
+	f.On("sudo -n true", bssh.Result{})
+	f.On(versionFloorTestCmd, bssh.Result{})
+	f.On(versionFloorCatCmd, bssh.Result{Stdout: "VERSION=0.37.0\n"})
+	f.On(lockTimeoutCatCmd(), bssh.Result{ExitCode: 1})
+	f.On(aptUpdateCmd, bssh.Result{})
+	if err := Preflight().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if w := f.Writes(); len(w) != 1 || w[0].Path != aptLockTimeoutPath {
+		t.Errorf("writes = %+v, want only the apt drop-in (an equal floor is never rewritten)", w)
+	}
+}
+
+func TestPreflightApplyRefusesDowngrade(t *testing.T) {
+	versiontest.Set(t, "0.37.0")
+	f := bssh.NewFakeRunner()
+	f.On("sudo -n true", bssh.Result{})
+	f.On(versionFloorTestCmd, bssh.Result{})
+	f.On(versionFloorCatCmd, bssh.Result{Stdout: "VERSION=v0.38.0\n"})
+	f.On(lockTimeoutCatCmd(), bssh.Result{ExitCode: 1})
+	f.On(aptUpdateCmd, bssh.Result{})
+	err := Preflight().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f)
+	if err == nil || !strings.Contains(err.Error(), "host was last changed by berth v0.38.0, this binary is v0.37.0") {
+		t.Fatalf("Apply must refuse the downgrade itself, not trust Check; got %v", err)
+	}
+	if len(f.Writes()) != 0 {
+		t.Errorf("the refused Apply wrote %+v", f.Writes())
+	}
+	if callIndex(f, aptUpdateCmd) >= 0 {
+		t.Error("apt-get update ran after the refusal")
+	}
+}
+
+func TestPreflightApplyDevBuildWarns(t *testing.T) {
+	versiontest.Set(t, "dev")
+	var warns []string
+	rc := provision.RunCtx{Warn: func(m string) { warns = append(warns, m) }}
+	f := bssh.NewFakeRunner()
+	f.On("sudo -n true", bssh.Result{})
+	f.On(lockTimeoutCatCmd(), bssh.Result{ExitCode: 1})
+	f.On(aptUpdateCmd, bssh.Result{})
+	if err := Preflight().Apply(context.Background(), rc, &config.Server{}, f); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0], "development build (dev): host version floor neither checked nor recorded") {
+		t.Errorf("warnings = %q, want exactly the development-build notice", warns)
+	}
+	if touchedFloor(f) {
+		t.Errorf("a development build touched the floor: %+v", f.Calls())
+	}
+}
+
+// Every row of the verdict table through BOTH Check and Apply: Apply re-reads
+// the floor itself, so it must reach Check's verdict without Check's help.
+func TestPreflightFloorVerdictInCheckAndApply(t *testing.T) {
+	versiontest.Set(t, "0.37.0")
+	present, absent := bssh.Result{}, bssh.Result{ExitCode: 1}
+	newer := bssh.Result{Stdout: "VERSION=v0.38.0\n"}
+	junk := bssh.Result{Stdout: "junk\n"}
+	denied := bssh.Result{ExitCode: 1, Stderr: "Permission denied"}
+	cases := []struct {
+		name      string
+		test, cat bssh.Result
+		allow     bool
+		change    string // the floor line Check plans first; "" = none
+		errSub    string // the refusal Check AND Apply give
+		writes    bool   // Apply writes the floor
+	}{
+		{"absent", absent, bssh.Result{}, false, "record version floor v0.37.0 in /var/lib/berth/version-floor", "", true},
+		{"older", present, bssh.Result{Stdout: managedMarker + "\nVERSION=v0.36.0\n"}, false, "raise version floor v0.36.0 → v0.37.0", "", true},
+		{"equal", present, bssh.Result{Stdout: managedMarker + "\nVERSION=v0.37.0\n"}, false, "", "", false},
+		{"newer", present, newer, false, "", "host was last changed by berth v0.38.0", false},
+		{"newer-allowed", present, newer, true, "lower version floor v0.38.0 → v0.37.0 (--allow-downgrade)", "", true},
+		{"malformed", present, junk, false, "", "unreadable or malformed", false},
+		{"malformed-allowed", present, junk, true, "rewrite version floor as v0.37.0 (--allow-downgrade)", "", true},
+		{"unreadable", present, denied, false, "", "unreadable or malformed (Permission denied", false},
+		{"unreadable-allowed", present, denied, true, "rewrite version floor as v0.37.0 (--allow-downgrade)", "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			stub := func() *bssh.FakeRunner {
+				f := bssh.NewFakeRunner()
+				stubTrixie(f)
+				f.On("sudo -n true", bssh.Result{})
+				f.On(versionFloorTestCmd, c.test)
+				f.On(versionFloorCatCmd, c.cat)
+				f.On(floorInstallDirCmd, bssh.Result{})
+				f.On(lockTimeoutCatCmd(), bssh.Result{ExitCode: 1})
+				f.On(aptUpdateCmd, bssh.Result{})
+				return f
+			}
+			rc := provision.RunCtx{AllowDowngrade: c.allow}
+
+			cr, err := Preflight().Check(context.Background(), rc, &config.Server{}, stub())
+			switch {
+			case c.errSub != "":
+				if err == nil || !strings.Contains(err.Error(), c.errSub) {
+					t.Errorf("Check err = %v, want %q", err, c.errSub)
+				}
+			case err != nil:
+				t.Errorf("Check err = %v", err)
+			case c.change != "" && (len(cr.Changes) == 0 || cr.Changes[0] != c.change):
+				t.Errorf("Check Changes = %q, want %q first", cr.Changes, c.change)
+			case c.change == "" && strings.Contains(strings.Join(cr.Changes, "\n"), "version floor"):
+				t.Errorf("Check Changes = %q, want no floor change", cr.Changes)
+			}
+
+			f := stub()
+			err = Preflight().Apply(context.Background(), rc, &config.Server{}, f)
+			if c.errSub != "" {
+				if err == nil || !strings.Contains(err.Error(), c.errSub) {
+					t.Errorf("Apply err = %v, want %q", err, c.errSub)
+				}
+			} else if err != nil {
+				t.Errorf("Apply err = %v", err)
+			}
+			w := f.Writes()
+			wrote := len(w) > 0 && w[0].Path == versionFloorPath
+			if wrote != c.writes {
+				t.Errorf("Apply wrote the floor = %v, want %v (writes %+v)", wrote, c.writes, w)
+			}
+			if wrote && string(w[0].Content) != managedMarker+"\nVERSION=v0.37.0\n" {
+				t.Errorf("floor content = %q, want this binary's version", w[0].Content)
+			}
+		})
 	}
 }

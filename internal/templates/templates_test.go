@@ -511,6 +511,10 @@ func TestRenderManifestGolden(t *testing.T) {
 	})
 }
 
+func TestRenderVersionFloorGolden(t *testing.T) {
+	checkGolden(t, "version_floor.tmpl", "version_floor.golden", struct{ Version string }{"v0.37.0"})
+}
+
 func TestRenderCertbotDeployHookGolden(t *testing.T) {
 	// Static POSIX-sh certbot deploy hook: certbot executes directory hooks via
 	// `sh -c <path>` (ENOEXEC fallback), so no shebang — the managed marker must

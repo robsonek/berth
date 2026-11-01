@@ -1308,6 +1308,42 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 			owner: "root", group: "root", mode: "644", kind: "regular file",
 			mtimeUnix: 1500000000}
 	}
+
+	// The version floor, per profile: converged/runtime-stale were last
+	// changed by THIS binary (equal floor: kept, so preflight's cat and parser
+	// are walked to a no-change verdict), drifted by an older berth (the floor
+	// is raised, never refused). A development build neither reads nor writes
+	// the floor, so a host it converged has none. foreign has none, for the
+	// manifest's reason: /var/lib/berth is berth-exclusive.
+	floor := ""
+	switch profile {
+	case "converged", "runtime-stale":
+		if _, ok := version.Binary(); ok {
+			floor = fixtureVersionFloor(version.Version)
+		}
+	case "drifted":
+		floor = fixtureVersionFloor("v0.0.1")
+	}
+	if floor != "" {
+		h.files[versionFloorPath] = fakeFile{content: floor,
+			owner: "root", group: "root", mode: "644", kind: "regular file",
+			mtimeUnix: 1500000000}
+	}
+}
+
+// fixtureVersionFloor renders /var/lib/berth/version-floor via the same
+// template preflight.Apply uses, for v in its canonical form (Apply writes
+// bin.String(), so a GoReleaser "0.37.0" is recorded as "v0.37.0").
+func fixtureVersionFloor(v string) string {
+	parsed, ok := version.ParseBuild(v)
+	if !ok {
+		panic("fixtureVersionFloor: not a berth version: " + v)
+	}
+	body, err := templates.Render("version_floor.tmpl", struct{ Version string }{parsed.String()})
+	if err != nil {
+		panic("render version_floor.tmpl: " + err.Error())
+	}
+	return string(body)
 }
 
 // fixtureManifest renders /var/lib/berth/manifest via the same template

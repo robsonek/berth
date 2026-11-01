@@ -11,6 +11,7 @@ import (
 
 	"github.com/robsonek/berth/internal/provision"
 	"github.com/robsonek/berth/internal/secret"
+	"github.com/robsonek/berth/internal/version/versiontest"
 )
 
 // expectedRefusals lists the ONLY steps allowed to return an error under the
@@ -208,6 +209,9 @@ func wantStepsFor(variant string) []string {
 // PAM session pair — setpriv does the same credential change without it —
 // which is why that one was engineered away rather than excused.
 func TestChecksAreReadOnly(t *testing.T) {
+	// A release version, so preflight's version-floor probe is part of the
+	// contract: under `go test` the version is "dev", which skips it.
+	versiontest.Set(t, "0.37.0")
 	for _, variant := range contractVariants {
 		t.Run(variant, func(t *testing.T) { checksAreReadOnly(t, variant) })
 	}
@@ -434,6 +438,9 @@ func checksAreReadOnly(t *testing.T, variant string) {
 // property, and contractServer now converges the local cache identity with
 // the step's own Apply.
 func TestConvergedIsGenuinelySatisfied(t *testing.T) {
+	// A release version, so preflight's version-floor probe is part of the
+	// contract: under `go test` the version is "dev", which skips it.
+	versiontest.Set(t, "0.37.0")
 	for _, variant := range contractVariants {
 		t.Run(variant, func(t *testing.T) {
 			srv := variantServer(t, variant)
@@ -475,6 +482,9 @@ func TestConvergedIsGenuinelySatisfied(t *testing.T) {
 // that suddenly records nothing would all be invisible to the five primary
 // runs, because they never take these branches.
 func TestChecksAreReadOnlyUnderForce(t *testing.T) {
+	// A release version, so preflight's version-floor probe is part of the
+	// contract: under `go test` the version is "dev", which skips it.
+	versiontest.Set(t, "0.37.0")
 	for _, variant := range contractVariants {
 		t.Run(variant, func(t *testing.T) { checksAreReadOnlyUnderForce(t, variant) })
 	}

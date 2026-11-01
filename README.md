@@ -40,8 +40,10 @@ berth site key servers/<name>.yml [domain]     # print each site's git deploy pu
 ```
 
 `provision` also takes `--only <step>` to run a single phase, `--force` to
-overwrite resources berth does not manage, and two TLS switches — `--ssl-staging`
-and `--skip-ssl` — both explained with the certificate handling further down.
+overwrite resources berth does not manage, `--allow-downgrade` to roll a host
+back to an older berth deliberately (see [Version floors](#version-floors)), and
+two TLS switches — `--ssl-staging` and `--skip-ssl` — both explained with the
+certificate handling further down.
 
 ### Checking a fleet
 
@@ -900,6 +902,36 @@ against a public CA.
 `cloudflare_only` requires `ssl_mode: selfsigned` (or `ssl: false`) —
 validation rejects Let's Encrypt because a proxied DNS record never points at
 the origin.
+
+### Version floors
+
+berth records on each host the newest berth release that has changed it, in
+`/var/lib/berth/version-floor` (root-owned, with a line such as
+`VERSION=v0.37.0`), so an older binary cannot quietly undo what a newer one set
+up. The `preflight` step reads and writes it:
+
+- Every real run raises the floor to the running binary's version before it
+  changes anything else on the host — under `--only` and `--skip-ssl` too, and
+  even when the run later fails or is interrupted. A run by the same version
+  leaves the file as it is. Upgrading berth is never blocked.
+- A binary older than the floor stops in `preflight`, before any change on the
+  host: `host was last changed by berth vX.Y.Z, this binary is … — use vX.Y.Z
+  or newer`. `--dry-run` and `berth status --drift` report the same stop (they
+  never write the floor). An unreadable or malformed floor file stops the run
+  the same way.
+- `--allow-downgrade` is the deliberate rollback: the run goes ahead and
+  lowers the floor to the running binary's version (or rewrites an unreadable
+  file). `--force` does not replace it — it authorizes overwriting files berth
+  does not manage, never running an older berth over a newer one.
+- Under `--only`, an older binary can first get a read-only refusal from the
+  prerequisite gate (`unmet prerequisites: …`) or from a prerequisite's check,
+  which run before the pipeline starts; nothing on the host changes either way.
+  A full run or `--dry-run` shows the version stop first.
+- A development build (`go build`, version `dev`) neither reads nor writes the
+  floor; a real run warns that it was skipped.
+- berth v0.36.0 and older do not know the file and leave it alone (they also
+  reject a config that sets `requires_berth`, see
+  [Minimum berth version](#minimum-berth-version-requires_berth)).
 
 ## Scheduler, queue workers & daemons
 
