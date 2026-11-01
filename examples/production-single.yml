@@ -6,6 +6,9 @@
 # Required; `berth init` generates one. A rename is refused; migrate deliberately per the error's recipe.
 id: prod-single-8c1d
 
+# Oldest berth release this config works with (required). berth refuses to run it with an older binary.
+requires_berth: v0.37.0
+
 host: 203.0.113.10
 
 ssh:

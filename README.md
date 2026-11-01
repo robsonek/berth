@@ -112,6 +112,7 @@ and accepted values:
 
 ```yaml
 id: myserver-1a2b3c4d          # required — stable machine identity (see below)
+requires_berth: v0.37.0        # required — oldest berth release this config works with (see below)
 host: 203.0.113.10             # required — server IP or DNS name
 
 ssh:
@@ -298,6 +299,30 @@ the same current `host:port`. Rules:
   unaffected and never bypassed.
 - Downgrading berth below this version after an `id`/envelope exists is not
   supported (older binaries reject both the config key and the cache format).
+
+### Minimum berth version (`requires_berth:`)
+
+Every config declares the oldest berth release it works with, e.g.
+`requires_berth: v0.37.0`. Raise it when the config starts relying on a key or
+a behavior introduced by a newer release.
+
+- It is **required**. A config without it does not load; the error names the
+  line to add (with this binary's version).
+- berth checks it right after reading the file, before parsing the rest: a
+  binary older than the declared release refuses the config with
+  `requires berth >= vX.Y.Z, this binary is …`. A config written for a newer
+  berth therefore tells you to upgrade instead of listing keys this binary
+  does not know.
+- Both spellings are accepted, `v0.37.0` and `0.37.0` (release binaries report
+  their version without the `v`, `make build` with it). Nothing else is: no
+  partial version, no pre-release or `git describe` suffix.
+- `berth init` writes the version it is itself (a `make build` binary a few
+  commits past a tag writes that tag).
+- A development build (`go build`, version `dev`) still requires the key but
+  skips the comparison. Its `berth init` writes no `requires_berth` and says
+  so: add the line by hand before provisioning.
+- berth v0.36.0 and older do not know the key and reject it as unknown. Going
+  back to such a binary deliberately means removing the line from the config.
 
 ### Deploy key from a file (`repository_key:`)
 

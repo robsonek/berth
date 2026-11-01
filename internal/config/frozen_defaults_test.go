@@ -60,6 +60,7 @@ func TestOnHostDefaultsAreFrozen(t *testing.T) {
 // defaults are baked into apt sources on the host.
 func TestLoadDefaultsAreFrozen(t *testing.T) {
 	s, err := Load(writeTmpConfig(t, `id: frozen-defaults
+requires_berth: v0.37.0
 host: 203.0.113.10
 php:
   version: "8.5"

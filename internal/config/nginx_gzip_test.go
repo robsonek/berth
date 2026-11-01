@@ -33,6 +33,7 @@ func TestLoadNginxGzipRoundTrip(t *testing.T) {
 		{"  gzip: true\n", true, true},
 	} {
 		s, err := Load(writeTmpConfig(t, `id: gzip-knob
+requires_berth: v0.37.0
 host: 203.0.113.10
 php:
   version: "8.5"

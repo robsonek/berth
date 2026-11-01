@@ -211,6 +211,17 @@ func (a Answers) SecretRecipe() string {
 	return b.String()
 }
 
+// VersionNote returns the note `berth init` prints after writing the config
+// when this is a development build — the config then has no requires_berth
+// and config.Load refuses it until the operator adds one — or "" for a
+// release build, which writes its own version.
+func (a Answers) VersionNote() string {
+	if requiresBerthForThisBuild() != "" {
+		return ""
+	}
+	return "Note: this is a development build, so the config has no requires_berth — add requires_berth: vX.Y.Z (the oldest release it works with) before provisioning.\n"
+}
+
 // validConfigName guards the RAW config name shared by the prompt validator
 // and the authoritative Write below: the name becomes servers/<name>.yml, so
 // path separators, dot-prefixes and a leading dash must never reach

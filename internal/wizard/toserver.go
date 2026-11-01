@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/robsonek/berth/internal/config"
+	"github.com/robsonek/berth/internal/version"
 )
 
 // ToServer maps collected answers into a *config.Server. It is a pure, total
@@ -13,13 +14,14 @@ import (
 // marshaled YAML always carries an explicit user:.
 func (a Answers) ToServer() *config.Server {
 	srv := &config.Server{
-		ID:       a.ID,
-		Host:     a.Host,
-		SSH:      config.SSH{User: a.SSHUser, Port: a.Port, Key: a.Key, Fingerprint: a.Fingerprint},
-		PHP:      config.PHP{Version: a.PHPVersion, Source: a.PHPSource},
-		Nginx:    config.Nginx{Source: a.NginxSource, Gzip: gzipKnob(a.Gzip)},
-		Database: config.Database{Engine: a.DBEngine, Source: a.DBSource}, // no top-level name/user
-		Valkey:   a.Valkey, Queue: a.Queue, Scheduler: a.Scheduler,
+		ID:            a.ID,
+		RequiresBerth: requiresBerthForThisBuild(),
+		Host:          a.Host,
+		SSH:           config.SSH{User: a.SSHUser, Port: a.Port, Key: a.Key, Fingerprint: a.Fingerprint},
+		PHP:           config.PHP{Version: a.PHPVersion, Source: a.PHPSource},
+		Nginx:         config.Nginx{Source: a.NginxSource, Gzip: gzipKnob(a.Gzip)},
+		Database:      config.Database{Engine: a.DBEngine, Source: a.DBSource}, // no top-level name/user
+		Valkey:        a.Valkey, Queue: a.Queue, Scheduler: a.Scheduler,
 		// The queue instance needs the cache one (Validate refuses it
 		// otherwise); the form hides the question without Valkey, and a
 		// back-navigated "yes" is dropped here rather than written out.
@@ -129,6 +131,18 @@ func (a Answers) ToServer() *config.Server {
 		srv.Sites = append(srv.Sites, site)
 	}
 	return srv
+}
+
+// requiresBerthForThisBuild is the requires_berth `berth init` writes: the
+// release this binary is (a git-describe build counts as its base tag), or
+// "" for a development build, which has no release to name — VersionNote
+// then tells the operator to add the key by hand before provisioning.
+func requiresBerthForThisBuild() string {
+	bin, ok := version.Binary()
+	if !ok {
+		return ""
+	}
+	return bin.Base()
 }
 
 // gzipKnob maps the wizard's gzip answer onto the tri-state config field:

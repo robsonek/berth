@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/robsonek/berth/internal/version"
 )
 
 var (
@@ -289,6 +291,13 @@ func (s *Server) Validate() error {
 	}
 	if err := ValidateServerID(s.ID); err != nil {
 		return err
+	}
+	// Format only: Load already required the key in the file, while a
+	// literal Server and the wizard's ToServer() may leave it empty.
+	if s.RequiresBerth != "" {
+		if _, err := version.ParseRelease(s.RequiresBerth); err != nil {
+			return fmt.Errorf("requires_berth %q is not a release version (want vMAJOR.MINOR.PATCH)", s.RequiresBerth)
+		}
 	}
 	if !reHostname.MatchString(s.Host) {
 		return fmt.Errorf("host %q is not a valid hostname or IP", s.Host)
