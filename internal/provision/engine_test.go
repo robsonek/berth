@@ -483,7 +483,10 @@ func TestEngineOnlyKeepsAllowDowngradeForAlwaysRun(t *testing.T) {
 func TestEngineForceDoesNotImplyAllowDowngrade(t *testing.T) {
 	var seen []bool
 	eng := New(&stepStub{name: "pre", alwaysRun: true, onApply: func(rc RunCtx) { seen = append(seen, rc.AllowDowngrade) }})
-	events, _ := eng.Run(context.Background(), &config.Server{}, bssh.NewFakeRunner(), Options{Force: true})
+	events, err := eng.Run(context.Background(), &config.Server{}, bssh.NewFakeRunner(), Options{Force: true})
+	if err != nil {
+		t.Fatal(err)
+	}
 	collect(events)
 	if len(seen) != 1 || seen[0] {
 		t.Errorf("AllowDowngrade = %v under a bare --force, want false", seen)

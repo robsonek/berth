@@ -21,8 +21,19 @@ func TestLoadRequiresBerthMissing(t *testing.T) {
 	}
 }
 
+// A key that is present but holds nothing is as missing as an absent one.
+func TestLoadRequiresBerthEmptyIsMissing(t *testing.T) {
+	versiontest.Set(t, "0.37.0")
+	for _, line := range []string{`requires_berth: ""`, "requires_berth: ''", "requires_berth: null", "requires_berth: ~", "requires_berth:"} {
+		body := strings.Replace(baseCfg, "requires_berth: v0.37.0", line, 1)
+		if _, err := Load(writeTmpConfig(t, body)); err == nil || !strings.Contains(err.Error(), "requires_berth is missing") {
+			t.Errorf("%s → err = %v, want the missing-key error", line, err)
+		}
+	}
+}
+
 func TestLoadRequiresBerthMalformed(t *testing.T) {
-	for _, raw := range []string{"0.37", "1", "v0.37", "v0.37.0-rc1", "v0.37.0-3-gabc1234", "latest", `" v0.37.0"`} {
+	for _, raw := range []string{"0.37", "1", "v0.37", "v0.37.0-rc1", "v0.37.0-3-gabc1234", "latest", `" v0.37.0"`, "[v0.37.0]", "{v: 1}"} {
 		body := strings.Replace(baseCfg, "requires_berth: v0.37.0", "requires_berth: "+raw, 1)
 		if _, err := Load(writeTmpConfig(t, body)); err == nil || !strings.Contains(err.Error(), "is not a release version") {
 			t.Errorf("requires_berth: %s → err = %v, want the format error", raw, err)

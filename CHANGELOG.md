@@ -28,24 +28,30 @@ Notable changes to berth. Older releases are documented on the
 ### Added
 
 - **Host version floor.** `/var/lib/berth/version-floor` (root-owned, the
-  managed marker plus a `VERSION=vX.Y.Z` line) records the newest berth
-  release that has changed the host, so an older binary cannot quietly undo
-  what a newer one set up. The `preflight` step raises it to the running
-  binary's version on every real run, before any other change on the host —
-  under `--only` and `--skip-ssl` too, and even when the run later fails. A
-  run by the same version leaves the file alone; upgrading berth is never
-  blocked. Existing hosts have no floor yet, and their first v0.37.0 run
-  records it. A binary older than the floor stops in `preflight` before it
-  touches the host (`host was last changed by berth vX.Y.Z, this binary is …
-  — use vX.Y.Z or newer`), and so does an unreadable or malformed floor
-  file; `--dry-run` and `berth status --drift` report the same stop and never
-  write the floor. The new `provision --allow-downgrade` is the deliberate
-  rollback: the run goes ahead and lowers the floor to the running version
-  (or rewrites an unreadable file). It is run-global, so it reaches
-  `preflight` under `--only` as well. **`--force` never bypasses the stop** —
-  it authorizes overwriting files berth does not manage, never running an
-  older berth over a newer one. A development build neither reads nor writes
-  the floor (a real run warns that it was skipped). The file's path and its
+  managed marker plus a `VERSION=` line such as `VERSION=v0.37.0`) records
+  the newest berth version — release or source build — that has changed the
+  host, so an older binary cannot quietly undo what a newer one set up. The
+  `preflight` step raises it to the running binary's version on every real
+  run, before any other change on the host — under `--only` and `--skip-ssl`
+  too, and even when the run later fails. A run by the same version leaves
+  the file alone; upgrading to a newer release is never blocked. A binary
+  built from source past a tag (`make build`, version `v0.37.0-3-gabc1234`)
+  records that full version and counts as newer than the `v0.37.0` release:
+  moving such a host to the release binary is a rollback and needs
+  `--allow-downgrade` (a source build stamped with
+  `make build VERSION=v0.37.0` records `v0.37.0` instead). Existing hosts
+  have no floor yet, and their first v0.37.0 run records it. A binary older
+  than the floor stops in `preflight` before it touches the host (`host was
+  last changed by berth vX.Y.Z, this binary is … — use vX.Y.Z or newer`),
+  and so does an unreadable or malformed floor file; `--dry-run` and
+  `berth status --drift` report the same stop and never write the floor.
+  The new `provision --allow-downgrade` is the deliberate rollback: the run
+  goes ahead and lowers the floor to the running version (or rewrites an
+  unreadable file). It is run-global, so it reaches `preflight` under
+  `--only` as well. **`--force` never bypasses the stop** — it authorizes
+  overwriting files berth does not manage, never running an older berth
+  over a newer one. A development build neither reads nor writes the floor
+  (a real run warns that it was skipped). The file's path and its
   `VERSION=` line are frozen by a contract test: every future berth reads
   them.
 

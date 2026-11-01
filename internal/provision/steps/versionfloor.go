@@ -59,8 +59,9 @@ func parseVersionFloor(content string) (version.V, error) {
 	return version.V{}, errors.New("no VERSION= line")
 }
 
-// decideVersionFloor is the spec's §5.3 verdict table. readFailure != "" means
-// the file exists but cat failed. Returns the action and its plan line ("" for keep).
+// decideVersionFloor is the floor's verdict table (the behavior README
+// "Version floors" documents). readFailure != "" means the file exists but
+// cat failed. Returns the action and its plan line ("" for keep).
 //
 //	absent                  -> record
 //	recorded <  binary      -> raise
@@ -87,7 +88,7 @@ func decideVersionFloor(present bool, content, readFailure string, bin version.V
 		if allowDowngrade {
 			return floorRewrite, fmt.Sprintf("rewrite version floor as %s (--allow-downgrade)", bin), nil
 		}
-		return floorKeep, "", fmt.Errorf("version floor %s is unreadable or malformed (%s) — re-run with --allow-downgrade to rewrite it as %s", versionFloorPath, detail, bin)
+		return floorKeep, "", fmt.Errorf("version floor %s is unreadable or malformed (%s) — re-run `berth provision` with --allow-downgrade to rewrite it as %s", versionFloorPath, detail, bin)
 	}
 	switch c := recorded.Compare(bin); {
 	case c == 0:
@@ -97,7 +98,7 @@ func decideVersionFloor(present bool, content, readFailure string, bin version.V
 	case allowDowngrade:
 		return floorLower, fmt.Sprintf("lower version floor %s → %s (--allow-downgrade)", recorded, bin), nil
 	default:
-		return floorKeep, "", fmt.Errorf("host was last changed by berth %s, this binary is %s — use %s or newer; to roll back deliberately, re-run with --allow-downgrade", recorded, bin, recorded)
+		return floorKeep, "", fmt.Errorf("host was last changed by berth %s, this binary is %s — use %s or newer; to roll back deliberately, re-run `berth provision` with --allow-downgrade", recorded, bin, recorded)
 	}
 }
 

@@ -905,15 +905,20 @@ the origin.
 
 ### Version floors
 
-berth records on each host the newest berth release that has changed it, in
-`/var/lib/berth/version-floor` (root-owned, with a line such as
-`VERSION=v0.37.0`), so an older binary cannot quietly undo what a newer one set
-up. The `preflight` step reads and writes it:
+berth records on each host the newest berth version — release or source
+build — that has changed it, in `/var/lib/berth/version-floor` (root-owned,
+with a line such as `VERSION=v0.37.0`), so an older binary cannot quietly undo
+what a newer one set up. The `preflight` step reads and writes it:
 
 - Every real run raises the floor to the running binary's version before it
   changes anything else on the host — under `--only` and `--skip-ssl` too, and
   even when the run later fails or is interrupted. A run by the same version
-  leaves the file as it is. Upgrading berth is never blocked.
+  leaves the file as it is. Upgrading to a newer release is never blocked.
+- A binary built from source past a tag (`make build`, version
+  `v0.37.0-3-gabc1234`) records that full version and counts as newer than the
+  `v0.37.0` release. Moving such a host to the release binary is a rollback and
+  needs `--allow-downgrade`; a source build stamped with
+  `make build VERSION=v0.37.0` records `v0.37.0` instead.
 - A binary older than the floor stops in `preflight`, before any change on the
   host: `host was last changed by berth vX.Y.Z, this binary is … — use vX.Y.Z
   or newer`. `--dry-run` and `berth status --drift` report the same stop (they

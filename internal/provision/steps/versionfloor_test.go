@@ -53,12 +53,15 @@ func TestDecideVersionFloor(t *testing.T) {
 		{"describe-over-tag", describe, true, "VERSION=v0.37.0\n", "", false, floorRaise, "raise version floor v0.37.0 → v0.37.0-3-gabc1234", ""},
 		{"tag-under-describe", bin, true, "VERSION=v0.37.0-3-gabc1234\n", "", false, 0, "", "host was last changed by berth v0.37.0-3-gabc1234"},
 	}
+	// The advice names the command: `berth status --drift` surfaces the same
+	// refusal and has no --allow-downgrade flag of its own.
+	const advice = "re-run `berth provision` with --allow-downgrade"
 	for _, c := range cases {
 		act, line, err := decideVersionFloor(c.present, c.content, c.fail, c.bin, c.allow)
 		switch {
 		case c.errSub != "":
-			if err == nil || !strings.Contains(err.Error(), c.errSub) || strings.Contains(err.Error(), "--force") {
-				t.Errorf("%s: err = %v, want %q and no mention of --force", c.name, err, c.errSub)
+			if err == nil || !strings.Contains(err.Error(), c.errSub) || !strings.Contains(err.Error(), advice) || strings.Contains(err.Error(), "--force") {
+				t.Errorf("%s: err = %v, want %q, %q and no mention of --force", c.name, err, c.errSub, advice)
 			}
 		case err != nil || act != c.act || line != c.line:
 			t.Errorf("%s: got (%v, %q, %v), want (%v, %q)", c.name, act, line, err, c.act, c.line)
@@ -69,7 +72,7 @@ func TestDecideVersionFloor(t *testing.T) {
 // Every future berth must read what this one writes (E5 stamp rule).
 func TestVersionFloorPathAndFormatAreFrozen(t *testing.T) {
 	if versionFloorPath != "/var/lib/berth/version-floor" {
-		t.Fatalf("versionFloorPath = %q — frozen, see spec §5.3", versionFloorPath)
+		t.Fatalf("versionFloorPath = %q — frozen (README \"Version floors\", AGENTS.md \"Frozen surfaces\")", versionFloorPath)
 	}
 	v, _ := version.ParseBuild("0.37.0")
 	body, err := templates.Render("version_floor.tmpl", struct{ Version string }{v.String()})

@@ -7,9 +7,11 @@ import (
 	"github.com/robsonek/berth/internal/version"
 )
 
-// ToServer maps collected answers into a *config.Server. It is a pure, total
-// mapping — no I/O, no mutation of server-level choices (HTTP/3↔nginx is resolved
-// during orchestration, not here). config.Server.Validate() remains authoritative.
+// ToServer maps collected answers into a *config.Server. It is a total mapping —
+// no I/O, no mutation of server-level choices (HTTP/3↔nginx is resolved during
+// orchestration, not here) — and not quite pure: requires_berth comes from this
+// binary's build version (version.Version), not from the answers.
+// config.Server.Validate() remains authoritative.
 // A site left without an OS user gets the domain-derived name filled in, so the
 // marshaled YAML always carries an explicit user:.
 func (a Answers) ToServer() *config.Server {

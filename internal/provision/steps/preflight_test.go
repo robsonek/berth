@@ -257,7 +257,7 @@ func TestPreflightCheckRefusesDowngradeEvenWithForce(t *testing.T) {
 		f.On(lockTimeoutCatCmd(), bssh.Result{ExitCode: 1})
 		return f
 	}
-	want := "host was last changed by berth v0.38.0, this binary is v0.37.0 — use v0.38.0 or newer; to roll back deliberately, re-run with --allow-downgrade"
+	want := "host was last changed by berth v0.38.0, this binary is v0.37.0 — use v0.38.0 or newer; to roll back deliberately, re-run `berth provision` with --allow-downgrade"
 	for _, rc := range []provision.RunCtx{{}, {Force: true}} {
 		f := stub()
 		_, err := Preflight().Check(context.Background(), rc, &config.Server{}, f)
@@ -350,23 +350,25 @@ func TestPreflightApplyEqualFloorWritesNothing(t *testing.T) {
 	}
 }
 
-func TestPreflightApplyRefusesDowngrade(t *testing.T) {
+func TestPreflightApplyRefusesDowngradeEvenWithForce(t *testing.T) {
 	versiontest.Set(t, "0.37.0")
-	f := bssh.NewFakeRunner()
-	f.On("sudo -n true", bssh.Result{})
-	f.On(versionFloorTestCmd, bssh.Result{})
-	f.On(versionFloorCatCmd, bssh.Result{Stdout: "VERSION=v0.38.0\n"})
-	f.On(lockTimeoutCatCmd(), bssh.Result{ExitCode: 1})
-	f.On(aptUpdateCmd, bssh.Result{})
-	err := Preflight().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f)
-	if err == nil || !strings.Contains(err.Error(), "host was last changed by berth v0.38.0, this binary is v0.37.0") {
-		t.Fatalf("Apply must refuse the downgrade itself, not trust Check; got %v", err)
-	}
-	if len(f.Writes()) != 0 {
-		t.Errorf("the refused Apply wrote %+v", f.Writes())
-	}
-	if callIndex(f, aptUpdateCmd) >= 0 {
-		t.Error("apt-get update ran after the refusal")
+	for _, rc := range []provision.RunCtx{{}, {Force: true}} {
+		f := bssh.NewFakeRunner()
+		f.On("sudo -n true", bssh.Result{})
+		f.On(versionFloorTestCmd, bssh.Result{})
+		f.On(versionFloorCatCmd, bssh.Result{Stdout: "VERSION=v0.38.0\n"})
+		f.On(lockTimeoutCatCmd(), bssh.Result{ExitCode: 1})
+		f.On(aptUpdateCmd, bssh.Result{})
+		err := Preflight().Apply(context.Background(), rc, &config.Server{}, f)
+		if err == nil || !strings.Contains(err.Error(), "host was last changed by berth v0.38.0, this binary is v0.37.0") {
+			t.Errorf("Apply(Force=%v) must refuse the downgrade itself, not trust Check; got %v", rc.Force, err)
+		}
+		if len(f.Writes()) != 0 {
+			t.Errorf("the refused Apply(Force=%v) wrote %+v", rc.Force, f.Writes())
+		}
+		if callIndex(f, aptUpdateCmd) >= 0 {
+			t.Errorf("apt-get update ran after the refusal (Force=%v)", rc.Force)
+		}
 	}
 }
 

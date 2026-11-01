@@ -1,9 +1,3 @@
-// Package version parses and orders berth versions: a release ("v0.37.0", or
-// GoReleaser's "0.37.0") and a `git describe --tags --always --dirty` build
-// ("v0.36.0-3-ge363573-dirty"). It deliberately does not use
-// golang.org/x/mod/semver: that package reads the describe suffix as a SemVer
-// pre-release and so sorts "v0.36.0-3-ge363573" BEFORE "v0.36.0", while that
-// build is v0.36.0 plus three commits and must sort after its tag.
 package version
 
 import (
@@ -13,6 +7,10 @@ import (
 	"strconv"
 )
 
+// These patterns deliberately replace golang.org/x/mod/semver: that package
+// reads the describe suffix as a SemVer pre-release and so sorts
+// "v0.36.0-3-ge363573" BEFORE "v0.36.0", while that build is v0.36.0 plus
+// three commits and must sort after its tag.
 var (
 	releaseRE = regexp.MustCompile(`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 	buildRE   = regexp.MustCompile(`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([1-9][0-9]*)-g([0-9a-f]{4,40}))?(?:-dirty)?$`)
