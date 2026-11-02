@@ -67,11 +67,13 @@ Notable changes to berth. Older releases are documented on the
   still report, and the exit code says it could not be fully probed); several
   configs of one `host` and `ssh.port` are scanned one after another. Plain
   `berth status` and `berth site key` take no lock. The lock frees itself
-  when the session ends, when berth crashes or its connection drops, and
-  after 90 seconds without berth's heartbeat (sent every 20 seconds); there
-  is no flag to break it, and `--force` never bypasses it. A run that loses
-  the lock midway stops with `lost the host session lock …` and sends no
-  further command to the host. The lock is `flock(2)` on
+  when the session ends, when berth crashes or its connection is closed, and
+  after 90 seconds without berth's heartbeat (sent every 20 seconds; this
+  also covers a connection that died silently); there is no flag to break
+  it, and `--force` never bypasses it. A run that loses the lock midway
+  stops with `lost the host session lock …` and sends no further command to
+  the host; stopping berth yourself (ctrl+c, SIGTERM, a `status` timeout) is
+  never reported as a lost lock. The lock is `flock(2)` on
   `/var/lib/berth/session.lock` (`root:root 0600`, so a site user cannot hold
   it), created by the first real `provision`; `--dry-run` and
   `status --drift` never create it and run unlocked on a host without it, but
