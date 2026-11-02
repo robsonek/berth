@@ -103,8 +103,9 @@ already-provisioned host or breaks a contract every running binary relies on:
   `VERSION=` line; every future berth must read it.
 - **The host session lock** — `/var/lib/berth/session.lock`, `root:root 0600`,
   taken with `flock(2)` through `flock -n -E 75` on that path; its content is
-  one line of free text for people, never parsed. Every future berth must take
-  exactly this lock.
+  one line of free text for people, or nothing (it is cleared on release, so
+  an empty file is the normal "no details" state), never parsed. Every future
+  berth must take exactly this lock.
 
 Always write managed files through `templates.Render` / `RenderINI` so the
 marker is prepended for you.

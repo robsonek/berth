@@ -32,10 +32,12 @@ func fixSeams(t *testing.T) {
 // between berth binaries (spec §5.1): the path, the root:root 0600 file
 // prepared only by a mutating run, the flock(2) mechanism through
 // `flock -n -E 75` on that exact path, and the content being one line of
-// free text. Every future berth binary must take exactly this lock this way —
+// free text or nothing (an empty file is a valid "no details" state). Every
+// future berth binary must take exactly this lock this way —
 // flock(2) and POSIX fcntl locks do not exclude each other on Linux, and a
 // replaced inode is a different lock — so changing any of that is a BREAKING
-// change. The rest (the ready and absent lines, the 90 s lease, the busy-path
+// change. The rest (the traps that clear the line in place when the held
+// command ends, the ready and absent lines, the 90 s lease, the busy-path
 // `cat`) is this binary's private protocol with its own held command: it may
 // be tuned, updating this pin, without a BREAKING entry.
 func TestLockScriptsAreFrozen(t *testing.T) {
@@ -43,7 +45,7 @@ func TestLockScriptsAreFrozen(t *testing.T) {
 		t.Fatalf("Path = %q — frozen", Path)
 	}
 	line := "berth v1.0.0 provision by ops@ws (pid 4711) since 2026-11-02T09:32:00Z"
-	const tail = `flock -n -E 75 /var/lib/berth/session.lock bash -c 'printf "%s\n" "$1" >/var/lib/berth/session.lock; echo locked; while read -r -t 90 _; do :; done' berth-session 'berth v1.0.0 provision by ops@ws (pid 4711) since 2026-11-02T09:32:00Z'; rc=$?; if [ "$rc" -eq 75 ]; then cat /var/lib/berth/session.lock; fi; exit "$rc"`
+	const tail = `flock -n -E 75 /var/lib/berth/session.lock bash -c 'trap ": >/var/lib/berth/session.lock" EXIT; trap "exit 1" HUP INT TERM; printf "%s\n" "$1" >/var/lib/berth/session.lock; echo locked; while read -r -t 90 _; do :; done' berth-session 'berth v1.0.0 provision by ops@ws (pid 4711) since 2026-11-02T09:32:00Z'; rc=$?; if [ "$rc" -eq 75 ]; then cat /var/lib/berth/session.lock; fi; exit "$rc"`
 	wantMut := `install -d -o root -g root -m 0755 /var/lib/berth && umask 077 && : >>/var/lib/berth/session.lock && chown root:root /var/lib/berth/session.lock && chmod 0600 /var/lib/berth/session.lock || exit 1; ` + tail
 	wantRO := `if [ ! -e /var/lib/berth/session.lock ]; then echo absent; exit 0; fi; ` + tail
 	if got := Script(Mutating, line); got != wantMut {

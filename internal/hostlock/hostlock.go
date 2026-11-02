@@ -38,7 +38,8 @@ const (
 // BusyError reports that another berth session holds the host. Holder is the
 // first non-empty line of the lock file (host-supplied free text, trimmed —
 // callers sanitize it for display like any other host output); "" when the
-// holder had not written it yet or it was unreadable.
+// file was empty — a new holder had not written its line yet, or the holder
+// ended and cleared it just before the read — or it was unreadable.
 type BusyError struct{ Holder string }
 
 func (e *BusyError) Error() string {

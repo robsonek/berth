@@ -957,8 +957,10 @@ error: host is busy: another berth session holds /var/lib/berth/session.lock —
 The holder line names the berth version, the command (`provision`,
 `provision --dry-run`, `provision --only <step>`,
 `provision --dry-run --only <step>`, `status --drift`), the workstation's
-`user@host`, its process id and the start time in UTC. If the holder has not
-written its line yet, or it could not be read, the message ends at the path
+`user@host`, its process id and the start time in UTC. If the lock file holds
+no line — in the instant after a session took the lock and before it wrote its
+line, or just as the holding session ends and clears it — or the line could
+not be read, the message ends at the path
 (`… holds /var/lib/berth/session.lock; wait for it to finish`). berth does not
 queue: wait for the other session to finish and run again. If the lock cannot
 be taken for another reason (sudo refused, a broken connection), the run stops
@@ -1015,9 +1017,12 @@ The lock is a `flock(2)` lock on `/var/lib/berth/session.lock`, owned
 `root:root` with mode `0600`. The mode is part of the security model, not
 cosmetics: `flock` needs only a file opened for reading, so a file a site user
 could open would let that tenant hold the lock indefinitely and keep berth off
-the host. The file holds one line of free text naming the current session — or,
-once it ended, the last one — and is never parsed. Do not delete it: the lock
-is tied to that very file, so a session started after it was removed would not
+the host. The file holds one line of free text naming the session that holds
+the lock, and is never parsed. A session clears its line when it releases the
+lock, so between sessions the file is empty; only a holding process killed
+with SIGKILL (or a host that went down mid-session) leaves its line behind,
+until the next session writes its own. Do not delete the file: the lock is
+tied to that very file, so a session started after it was removed would not
 see one still holding the old file. Leaving it in place costs nothing.
 
 - **A real `berth provision` creates it.** Every run without `--dry-run`
@@ -1025,16 +1030,17 @@ see one still holding the old file. Leaving it in place costs nothing.
   to `root:root 0600`) right after connecting, before the first step. A host
   refused later in that run (a local `identity` error about the secret cache,
   a system that is not Debian 13, a version floor newer than the binary)
-  therefore keeps `/var/lib/berth` and a root-only lock file holding that
-  run's holder line. The file is session bookkeeping, not configuration or
-  service state.
+  therefore keeps `/var/lib/berth` and a root-only lock file, left empty: the
+  run clears its holder line when it releases the lock. The file is session
+  bookkeeping, not configuration or service state.
 - **`--dry-run` and `status --drift` never create anything.** On a host without
   the lock file — a fresh one, or one provisioned only by berth v0.36.0 or
   older — they run without a lock: there is no berth state yet to protect.
   Where the file exists they take the same lock and write their own holder line
-  into it, so a provision they stop can say who holds the host. Besides the log
-  and journal lines described under [Checking a fleet](#checking-a-fleet), that
-  line is the only trace they leave on the host.
+  into it (clearing it again when they finish), so a provision they stop can
+  say who holds the host. Besides the log and journal lines described under
+  [Checking a fleet](#checking-a-fleet), writing and clearing that line is the
+  only change they make on the host.
 - **berth v0.36.0 and older do not know the lock**: they neither take it nor
   stop for it. They also reject any config that declares `requires_berth`,
   which every config for a newer berth must (see

@@ -44,17 +44,25 @@ const (
 // it prints absentLine and exits 0, and the caller runs without a lock.
 //
 // The holder line is written into the locked file (same inode, truncated in
-// place) as free text that only humans read. bash is explicit because
+// place) as free text that only humans read, and cleared again (truncated to
+// empty in place) when the held command ends — on EOF, at the end of the
+// lease, or on HUP/INT/TERM — while it still holds the lock, so a busy
+// message never names a session that has finished. The traps are set before
+// the line is written. SIGKILL cannot be trapped: a holder killed that way
+// (or a host that crashed) leaves its line until the next holder overwrites
+// it; the line is displayed, never parsed. An empty file is a valid "no
+// details" state — between sessions, and in the instant after a new holder
+// took the lock and before it wrote its line. bash is explicit because
 // `read -t` is not POSIX sh. Pinned byte for byte by TestLockScriptsAreFrozen;
-// only the path, the mode, the flock mechanism and the one-line content are a
-// contract between binaries (see Path) — the rest is this binary's own
-// protocol with its held command.
+// only the path, the mode, the flock mechanism and the content (one line of
+// free text, or none) are a contract between binaries (see Path) — the rest
+// is this binary's own protocol with its held command.
 func Script(mode Mode, holderLine string) string {
 	lease := strconv.Itoa(leaseSeconds)
 	busy := strconv.Itoa(busyCode)
 	tail := "flock -n -E " + busy + " " + Path +
-		` bash -c 'printf "%s\n" "$1" >` + Path + "; echo " + readyLine +
-		"; while read -r -t " + lease + " _; do :; done' " +
+		` bash -c 'trap ": >` + Path + `" EXIT; trap "exit 1" HUP INT TERM; printf "%s\n" "$1" >` + Path +
+		"; echo " + readyLine + "; while read -r -t " + lease + " _; do :; done' " +
 		scriptName + " " + shQuote(holderLine) +
 		`; rc=$?; if [ "$rc" -eq ` + busy + ` ]; then cat ` + Path + `; fi; exit "$rc"`
 	if mode == ReadOnly {
