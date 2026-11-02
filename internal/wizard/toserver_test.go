@@ -2,9 +2,11 @@ package wizard
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/robsonek/berth/internal/config"
+	"github.com/robsonek/berth/internal/version/versiontest"
 )
 
 func TestToServerOpsBlocks(t *testing.T) {
@@ -44,6 +46,26 @@ func TestToServerOpsBlocks(t *testing.T) {
 	}
 	if err := srv.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func TestToServerRequiresBerth(t *testing.T) {
+	for bin, want := range map[string]string{"0.37.0": "v0.37.0", "v0.37.0-3-gabc1234-dirty": "v0.37.0", "dev": ""} {
+		versiontest.Set(t, bin)
+		if got := (Answers{}).ToServer().RequiresBerth; got != want {
+			t.Errorf("binary %s: RequiresBerth = %q, want %q", bin, got, want)
+		}
+	}
+}
+
+func TestVersionNote(t *testing.T) {
+	versiontest.Set(t, "0.37.0")
+	if n := (Answers{}).VersionNote(); n != "" {
+		t.Errorf("release build: note = %q, want none", n)
+	}
+	versiontest.Set(t, "dev")
+	if n := (Answers{}).VersionNote(); !strings.Contains(n, "add requires_berth") {
+		t.Errorf("dev build: note = %q", n)
 	}
 }
 

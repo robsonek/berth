@@ -40,8 +40,10 @@ berth site key servers/<name>.yml [domain]     # print each site's git deploy pu
 ```
 
 `provision` also takes `--only <step>` to run a single phase, `--force` to
-overwrite resources berth does not manage, and two TLS switches — `--ssl-staging`
-and `--skip-ssl` — both explained with the certificate handling further down.
+overwrite resources berth does not manage, `--allow-downgrade` to roll a host
+back to an older berth deliberately (see [Version floors](#version-floors)), and
+two TLS switches — `--ssl-staging` and `--skip-ssl` — both explained with the
+certificate handling further down.
 
 ### Checking a fleet
 
@@ -112,6 +114,7 @@ and accepted values:
 
 ```yaml
 id: myserver-1a2b3c4d          # required — stable machine identity (see below)
+requires_berth: v0.37.0        # required — oldest berth release this config works with (see below)
 host: 203.0.113.10             # required — server IP or DNS name
 
 ssh:
@@ -298,6 +301,30 @@ the same current `host:port`. Rules:
   unaffected and never bypassed.
 - Downgrading berth below this version after an `id`/envelope exists is not
   supported (older binaries reject both the config key and the cache format).
+
+### Minimum berth version (`requires_berth:`)
+
+Every config declares the oldest berth release it works with, e.g.
+`requires_berth: v0.37.0`. Raise it when the config starts relying on a key or
+a behavior introduced by a newer release.
+
+- It is **required**. A config without it does not load; the error names the
+  line to add (with this binary's version).
+- berth checks it right after reading the file, before parsing the rest: a
+  binary older than the declared release refuses the config with
+  `requires berth >= vX.Y.Z, this binary is …`. A config written for a newer
+  berth therefore tells you to upgrade instead of listing keys this binary
+  does not know.
+- Both spellings are accepted, `v0.37.0` and `0.37.0` (release binaries report
+  their version without the `v`, `make build` with it). Nothing else is: no
+  partial version, no pre-release or `git describe` suffix.
+- `berth init` writes the version it is itself (a `make build` binary a few
+  commits past a tag writes that tag).
+- A development build (`go build`, version `dev`) still requires the key but
+  skips the comparison. Its `berth init` writes no `requires_berth` and says
+  so: add the line by hand before provisioning.
+- berth v0.36.0 and older do not know the key and reject it as unknown. Going
+  back to such a binary deliberately means removing the line from the config.
 
 ### Deploy key from a file (`repository_key:`)
 
@@ -875,6 +902,41 @@ against a public CA.
 `cloudflare_only` requires `ssl_mode: selfsigned` (or `ssl: false`) —
 validation rejects Let's Encrypt because a proxied DNS record never points at
 the origin.
+
+### Version floors
+
+berth records on each host the newest berth version — release or source
+build — that has changed it, in `/var/lib/berth/version-floor` (root-owned,
+with a line such as `VERSION=v0.37.0`), so an older binary cannot quietly undo
+what a newer one set up. The `preflight` step reads and writes it:
+
+- Every real run raises the floor to the running binary's version before it
+  changes anything else on the host — under `--only` and `--skip-ssl` too, and
+  even when the run later fails or is interrupted. A run by the same version
+  leaves the file as it is. Upgrading to a newer release is never blocked.
+- A binary built from source past a tag (`make build`, version
+  `v0.37.0-3-gabc1234`) records that full version and counts as newer than the
+  `v0.37.0` release. Moving such a host to the release binary is a rollback and
+  needs `--allow-downgrade`; a source build stamped with
+  `make build VERSION=v0.37.0` records `v0.37.0` instead.
+- A binary older than the floor stops in `preflight`, before any change on the
+  host: `host was last changed by berth vX.Y.Z, this binary is … — use vX.Y.Z
+  or newer`. `--dry-run` and `berth status --drift` report the same stop (they
+  never write the floor). An unreadable or malformed floor file stops the run
+  the same way.
+- `--allow-downgrade` is the deliberate rollback: the run goes ahead and
+  lowers the floor to the running binary's version (or rewrites an unreadable
+  file). `--force` does not replace it — it authorizes overwriting files berth
+  does not manage, never running an older berth over a newer one.
+- Under `--only`, an older binary can first get a read-only refusal from the
+  prerequisite gate (`unmet prerequisites: …`) or from a prerequisite's check,
+  which run before the pipeline starts; nothing on the host changes either way.
+  A full run or `--dry-run` shows the version stop first.
+- A development build (`go build`, version `dev`) neither reads nor writes the
+  floor; a real run warns that it was skipped.
+- berth v0.36.0 and older do not know the file and leave it alone (they also
+  reject a config that sets `requires_berth`, see
+  [Minimum berth version](#minimum-berth-version-requires_berth)).
 
 ## Scheduler, queue workers & daemons
 

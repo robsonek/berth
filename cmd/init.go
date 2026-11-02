@@ -21,6 +21,9 @@ func newInitCmd() *cobra.Command {
 				return err
 			}
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s — run: berth provision %s\n", path, path)
+			if note := a.VersionNote(); note != "" {
+				_, _ = fmt.Fprint(cmd.OutOrStdout(), note)
+			}
 			if recipe := a.SecretRecipe(); recipe != "" {
 				_, _ = fmt.Fprint(cmd.OutOrStdout(), recipe)
 			}

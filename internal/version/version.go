@@ -1,4 +1,6 @@
-// Package version exposes build metadata injected via -ldflags.
+// Package version exposes build metadata injected via -ldflags and parses
+// and orders berth versions: a release ("v0.37.0", or GoReleaser's "0.37.0")
+// and a `git describe --tags --always --dirty` build ("v0.36.0-3-ge363573-dirty").
 package version
 
 var (

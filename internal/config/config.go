@@ -1012,7 +1012,13 @@ type Server struct {
 	// CacheKey's host fallback survives only for pre-id tombstone handling.
 	// Immutable once set — the identity step refuses a renamed id (the host
 	// tombstone records the owning id) instead of orphaning the cache.
-	ID             string   `mapstructure:"id" yaml:"id,omitempty"`
+	ID string `mapstructure:"id" yaml:"id,omitempty"`
+	// RequiresBerth is the oldest berth release this config works with
+	// ("v0.37.0" or "0.37.0"). Required in the FILE — Load refuses a config
+	// without it, and one naming a newer release than this binary, before
+	// decoding the rest. Validate checks the format only: a literal Server
+	// and the wizard's ToServer() never pass through Load.
+	RequiresBerth  string   `mapstructure:"requires_berth" yaml:"requires_berth,omitempty"`
 	Host           string   `mapstructure:"host" yaml:"host"`
 	SSH            SSH      `mapstructure:"ssh" yaml:"ssh"`
 	PHP            PHP      `mapstructure:"php" yaml:"php"`
@@ -1047,6 +1053,9 @@ func Load(path string) (*Server, error) {
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
+	}
+	if err := checkRequiresBerth(path, v.Get("requires_berth")); err != nil {
+		return nil, err
 	}
 	var s Server
 	// UnmarshalExact, not Unmarshal: an unknown key must be an error, never a

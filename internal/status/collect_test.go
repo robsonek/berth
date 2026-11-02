@@ -202,7 +202,7 @@ func TestCollectIsolatesAFailedHost(t *testing.T) {
 	dir := t.TempDir()
 	good := filepath.Join(dir, "good.yml")
 	bad := filepath.Join(dir, "bad.yml")
-	body := "id: %s\nhost: 203.0.113.10\nssh:\n  user: berth\n  port: 22\n  key: ~/.ssh/id_ed25519\nphp:\n  version: \"8.4\"\ndatabase:\n  engine: mariadb\nsites:\n  - domain: app.example.com\n    deploy_path: /var/www/app\n    database:\n      name: app\n      user: app\n"
+	body := "id: %s\nrequires_berth: v0.37.0\nhost: 203.0.113.10\nssh:\n  user: berth\n  port: 22\n  key: ~/.ssh/id_ed25519\nphp:\n  version: \"8.4\"\ndatabase:\n  engine: mariadb\nsites:\n  - domain: app.example.com\n    deploy_path: /var/www/app\n    database:\n      name: app\n      user: app\n"
 	if err := os.WriteFile(good, []byte(fmt.Sprintf(body, "good")), 0o600); err != nil {
 		t.Fatal(err)
 	}

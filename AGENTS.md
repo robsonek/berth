@@ -58,6 +58,11 @@ permitted. Denylists of "bad flags" have failed repeatedly here: a flag can be
 spelled `-o value`, `-ovalue`, `--out=value`, or bundled, and one missed
 spelling silently permits a write.
 
+**`--force` never bypasses the version-floor stop**, and
+`RunCtx.AllowDowngrade` is deliberately NOT scoped to the `--only` target (its
+only reader is the always-run `preflight`). The floor is written by
+`preflight` Apply before any other host change — never by a Check.
+
 ## Frozen surfaces
 
 Each of these is pinned by a contract test. Changing one is a BREAKING change
@@ -77,6 +82,8 @@ already-provisioned host:
   are verified with Python on a host, never with `regexp` in a unit test.
   Never widen a pattern to `origin=` alone — `site` is what binds it to the
   host berth pins.
+- **The host version floor** — `/var/lib/berth/version-floor` and its
+  `VERSION=` line; every future berth must read it.
 
 Always write managed files through `templates.Render` / `RenderINI` so the
 marker is prepended for you.

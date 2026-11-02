@@ -62,6 +62,7 @@ func TestFirewallRuleCommand(t *testing.T) {
 
 func TestLoadFirewallRoundTrip(t *testing.T) {
 	s, err := Load(writeTmpConfig(t, `id: firewall-knob
+requires_berth: v0.37.0
 host: 203.0.113.10
 php:
   version: "8.5"
@@ -97,6 +98,7 @@ sites:
 	}
 
 	off, err := Load(writeTmpConfig(t, `id: firewall-off
+requires_berth: v0.37.0
 host: 203.0.113.10
 php:
   version: "8.5"
@@ -117,6 +119,7 @@ sites:
 	}
 
 	none, err := Load(writeTmpConfig(t, `id: firewall-none
+requires_berth: v0.37.0
 host: 203.0.113.10
 php:
   version: "8.5"

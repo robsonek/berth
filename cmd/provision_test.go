@@ -18,6 +18,7 @@ func writeValidConfig(t *testing.T) string {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "srv.yml")
 	cfg := `id: test-machine-0001
+requires_berth: v0.37.0
 host: 203.0.113.10
 ssh: {user: root, port: 22}
 php: {version: "8.5", source: auto}
@@ -55,6 +56,13 @@ func TestProvisionLoadsConfigAndAssemblesPipeline(t *testing.T) {
 	}
 	if !hasValkey {
 		t.Error("expected valkey step for a config with valkey: true")
+	}
+}
+
+func TestProvisionHasAllowDowngradeFlag(t *testing.T) {
+	fl := newProvisionCmd().Flags().Lookup("allow-downgrade")
+	if fl == nil || fl.DefValue != "false" || !strings.Contains(fl.Usage, "--force does not imply") {
+		t.Fatalf("allow-downgrade flag = %+v", fl)
 	}
 }
 

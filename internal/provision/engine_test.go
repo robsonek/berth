@@ -466,6 +466,33 @@ func TestEngineFullRunKeepsForceEverywhere(t *testing.T) {
 	}
 }
 
+func TestEngineOnlyKeepsAllowDowngradeForAlwaysRun(t *testing.T) {
+	var seen []bool
+	see := func(rc RunCtx) { seen = append(seen, rc.AllowDowngrade) }
+	eng := New(&stepStub{name: "pre", alwaysRun: true, onCheckRC: see, onApply: see}, &stepStub{name: "site"})
+	events, err := eng.Run(context.Background(), &config.Server{}, bssh.NewFakeRunner(), Options{Only: "site", AllowDowngrade: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collect(events)
+	if len(seen) != 2 || !seen[0] || !seen[1] {
+		t.Errorf("always-run step saw AllowDowngrade = %v, want true in Check and Apply under --only <other>", seen)
+	}
+}
+
+func TestEngineForceDoesNotImplyAllowDowngrade(t *testing.T) {
+	var seen []bool
+	eng := New(&stepStub{name: "pre", alwaysRun: true, onApply: func(rc RunCtx) { seen = append(seen, rc.AllowDowngrade) }})
+	events, err := eng.Run(context.Background(), &config.Server{}, bssh.NewFakeRunner(), Options{Force: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collect(events)
+	if len(seen) != 1 || seen[0] {
+		t.Errorf("AllowDowngrade = %v under a bare --force, want false", seen)
+	}
+}
+
 func TestEngineUnconvergedIsRunScoped(t *testing.T) {
 	// A step that marks the run unconverged makes RunUnconverged() true for
 	// every LATER step in the SAME run; a fresh run on the same engine starts

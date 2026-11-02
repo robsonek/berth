@@ -21,6 +21,7 @@ func writeSecretTestConfig(t *testing.T) string {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "srv.yml")
 	yaml := `id: cmd-secret-test-1
+requires_berth: v0.37.0
 host: 203.0.113.20
 ssh: {user: deploy, port: 22, key: ~/.ssh/id_rsa}
 php: {version: "8.4"}
