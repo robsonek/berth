@@ -21,7 +21,7 @@ import (
 	"strings"
 
 	"github.com/robsonek/berth/internal/secret"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // Answers is the data the wizard collects: server-level fields plus one or more sites.
