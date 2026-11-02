@@ -2,11 +2,14 @@ package status
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/robsonek/berth/internal/config"
+	"github.com/robsonek/berth/internal/hostlock"
 	"github.com/robsonek/berth/internal/provision"
 	"github.com/robsonek/berth/internal/provision/steps"
 	"github.com/robsonek/berth/internal/secret"
@@ -27,7 +30,9 @@ type Options struct {
 	// KnownHosts is the path used for host-key verification.
 	KnownHosts string
 	// Timeout bounds ONE host's whole collection, including the drift sweep.
-	// Zero means the defaults below.
+	// It starts when the host's turn comes: waiting for another config of the
+	// same endpoint (see Collect) is not charged to it. Zero means the
+	// defaults below.
 	//
 	// This is not optional polish. The ssh layer's keepalives only unblock a
 	// DEAD transport; a host that keeps answering slowly, or one command that
@@ -60,11 +65,13 @@ func (o Options) timeout() time.Duration {
 // not cost the operator the rest of the overview.
 //
 // pipeline nil skips the drift scan; offsite false skips the offsite query.
+// It takes no lock itself: Collect runs a drift scan under the host session
+// lock, and any other caller passing a pipeline must do the same.
 func CollectHost(ctx context.Context, cfgPath string, s *config.Server, r bssh.Runner, pipeline []provision.Step, red provision.Redactor, offsite bool) HostStatus {
 	h := HostStatus{
 		ID:         s.ID,
 		ConfigPath: cfgPath,
-		Endpoint:   fmt.Sprintf("%s:%d", s.Host, s.SSH.Port),
+		Endpoint:   endpoint(s),
 		ProbedAt:   time.Now().UTC(),
 	}
 	meta, err := probeHostMeta(ctx, r)
@@ -168,7 +175,7 @@ func CollectHost(ctx context.Context, cfgPath string, s *config.Server, r bssh.R
 // possible place to weaken host-key verification — it is run routinely and
 // inattentively, which is exactly when "yes" gets clicked. Only a pinned
 // fingerprint or a known_hosts entry is accepted.
-var dial = func(ctx context.Context, s *config.Server, knownHosts string) (bssh.Runner, func() error, error) {
+var dial = func(ctx context.Context, s *config.Server, knownHosts string) (bssh.Conn, func() error, error) {
 	c, err := bssh.Connect(ctx, s, bssh.HostKeyPolicy{
 		Pinned:     s.SSH.Fingerprint,
 		KnownHosts: knownHosts,
@@ -186,6 +193,12 @@ var dial = func(ctx context.Context, s *config.Server, knownHosts string) (bssh.
 // Unlike the provisioning pipeline this is NOT fail-fast: hosts are
 // independent, so one failure never costs the operator the rest of the
 // overview.
+//
+// With Drift, configs that share an endpoint are scanned one after another,
+// in input order: each scan holds that host's session lock, and running them
+// side by side would make the sweep report its own scans as "busy" (several
+// configs may describe one box). Each still gets its own result — they ask
+// different questions. Different endpoints stay parallel within Parallel.
 func Collect(ctx context.Context, paths []string, opt Options) []HostStatus {
 	parallel := opt.Parallel
 	if parallel <= 0 {
@@ -193,47 +206,118 @@ func Collect(ctx context.Context, paths []string, opt Options) []HostStatus {
 	}
 	out := make([]HostStatus, len(paths))
 	sem := make(chan struct{}, parallel)
+	// last maps an endpoint to the done channel of its latest config so far:
+	// the next config of that endpoint waits for it.
+	last := map[string]<-chan struct{}{}
 	var wg sync.WaitGroup
 	for i, p := range paths {
+		srv, err := config.Load(p)
+		if err != nil {
+			// Its own result, never chained: there is no endpoint to share.
+			out[i] = HostStatus{ConfigPath: p, Error: err.Error(), ProbedAt: time.Now().UTC()}
+			continue
+		}
+		var turn <-chan struct{}
+		done := make(chan struct{})
+		if opt.Drift {
+			key := endpointKey(srv)
+			turn = last[key]
+			last[key] = done
+		}
 		wg.Add(1)
-		go func(i int, p string) {
+		go func() {
 			defer wg.Done()
+			defer close(done)
+			// The turn comes BEFORE the semaphore: a config waiting for its
+			// endpoint must not sit on a slot another endpoint could use (with
+			// Parallel 1 that would deadlock), and before collectOne starts
+			// the per-host deadline, so the wait is not charged to its budget.
+			if turn != nil {
+				<-turn
+			}
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			out[i] = collectOne(ctx, p, opt)
-		}(i, p)
+			out[i] = collectOne(ctx, p, srv, opt)
+		}()
 	}
 	wg.Wait()
 	return out
 }
 
-func collectOne(ctx context.Context, path string, opt Options) HostStatus {
+// endpoint is the host:port a config declares (HostStatus.Endpoint).
+func endpoint(s *config.Server) string { return fmt.Sprintf("%s:%d", s.Host, s.SSH.Port) }
+
+// endpointKey groups configs of one host for Collect's turns. Host names are
+// case-insensitive, so the key is lower-cased. Two configs naming one box
+// differently (an IP and a name) still run side by side, and the second scan
+// then honestly reports the host busy.
+func endpointKey(s *config.Server) string { return strings.ToLower(endpoint(s)) }
+
+// lockCommand names a drift scan in the host session lock's holder line.
+const lockCommand = "status --drift"
+
+func collectOne(ctx context.Context, path string, srv *config.Server, opt Options) HostStatus {
 	// Every host gets its own deadline, so one slow-but-alive host cannot hold
 	// the sweep open indefinitely. ssh keepalives handle a DEAD transport;
 	// they do nothing for a host that keeps answering.
 	ctx, cancel := context.WithTimeout(ctx, opt.timeout())
 	defer cancel()
 
-	srv, err := config.Load(path)
-	if err != nil {
-		return HostStatus{ConfigPath: path, Error: err.Error(), ProbedAt: time.Now().UTC()}
-	}
-	r, closeConn, err := dial(ctx, srv, opt.KnownHosts)
+	conn, closeConn, err := dial(ctx, srv, opt.KnownHosts)
 	if err != nil {
 		return HostStatus{
-			ID: srv.ID, ConfigPath: path,
-			Endpoint: fmt.Sprintf("%s:%d", srv.Host, srv.SSH.Port),
-			Error:    err.Error(), ProbedAt: time.Now().UTC(),
+			ID: srv.ID, ConfigPath: path, Endpoint: endpoint(srv),
+			Error: err.Error(), ProbedAt: time.Now().UTC(),
 		}
 	}
 	defer func() { _ = closeConn() }()
 
 	red := secret.NewRedactor()
-	var pipeline []provision.Step
-	if opt.Drift {
-		// The FULL pipeline (skipSSL false): a scan inspects the whole declared
-		// config, and truncating it would hide the steps most worth inspecting.
-		pipeline = steps.Pipeline(srv, red, false)
+	if !opt.Drift {
+		// Plain status never takes the host session lock: it compares nothing
+		// against the config, and it must keep answering while a provision
+		// holds the host.
+		return CollectHost(ctx, path, srv, conn, nil, red, opt.Offsite)
 	}
-	return CollectHost(ctx, path, srv, r, pipeline, red, opt.Offsite)
+	// The FULL pipeline (skipSSL false): a scan inspects the whole declared
+	// config, and truncating it would hide the steps most worth inspecting.
+	pipeline := steps.Pipeline(srv, red, false)
+
+	// A drift scan reads the host to compare it against the config, so it
+	// holds the host session lock (ReadOnly: it never creates the lock file,
+	// and without one it runs unlocked). The whole collection happens inside
+	// fn, on the lock's context and Runner — neither is used after fn returns.
+	//
+	// ctx — the per-host deadline — is the parent hostlock.Run is given, so a
+	// timeout is a shutdown: the connection teardown it may cause is never
+	// reported as a lost lock, and the in-lock result (with its deadline
+	// errors) stands, as without the lock.
+	var h HostStatus
+	err = hostlock.Run(ctx, conn, hostlock.ReadOnly, lockCommand, func(lctx context.Context, r bssh.Runner) error {
+		h = CollectHost(lctx, path, srv, r, pipeline, red, opt.Offsite)
+		return nil
+	})
+	if err == nil {
+		return h
+	}
+	// Lost mid-scan: another session may have changed the host while it was
+	// compared, so no drift answer is trustworthy — a finished scan is
+	// discarded too. The cheap probes ran under the lock before the scan, so
+	// a reachable host keeps those facts (a probe the lost lock refused shows
+	// in ProbeErrors) and the report carries the lost-lock reason; probing
+	// again would hide that reason behind "unreachable" on a dead transport.
+	if errors.Is(err, hostlock.ErrLost) && h.Reachable {
+		h.Drift = &DriftReport{Error: err.Error()}
+		return h
+	}
+	// Busy or not taken (fn never ran), or lost before the host answered: no
+	// drift answer at all. The cheap probes are collected — outside the
+	// lock — so the host still reports every other fact, and the report
+	// carries the reason with no StoppedAt: the views render "scan did not
+	// run" and the exit code "could not be fully probed".
+	h = CollectHost(ctx, path, srv, conn, nil, red, opt.Offsite)
+	if h.Reachable {
+		h.Drift = &DriftReport{Error: err.Error()}
+	}
+	return h
 }

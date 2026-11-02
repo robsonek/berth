@@ -12,6 +12,7 @@ import (
 
 	"github.com/robsonek/berth/internal/config"
 	dbpkg "github.com/robsonek/berth/internal/database"
+	"github.com/robsonek/berth/internal/hostlock"
 	"github.com/robsonek/berth/internal/provision"
 	"github.com/robsonek/berth/internal/provision/steps"
 	"github.com/robsonek/berth/internal/secret"
@@ -325,30 +326,85 @@ func drillSite(srv *config.Server) config.Site {
 // drillRun executes one pipeline pass and returns each step's terminal event
 // (Satisfied / Planned / Applied) keyed by step name; any EventFailed is
 // fatal. It reuses the suite's engine and redactor so secrets registered by
-// earlier passes stay masked. Fatal mid-stream is safe: the engine's channel
-// is buffered for every event it can send, so its goroutine never blocks on
-// an abandoned consumer.
+// earlier passes stay masked. The pass runs under the host session lock like
+// any `berth provision` (see lockedPass): ReadOnly for the dry-run.
 func drillRun(ctx context.Context, t *testing.T, eng *provision.Engine, red *secret.Redactor, srv *config.Server, client *bssh.Client, dryRun bool, label string) map[string]provision.Event {
 	t.Helper()
-	events, err := eng.Run(ctx, srv, client, provision.Options{
+	terminal := map[string]provision.Event{}
+	lockedPass(ctx, t, client, eng, srv, provision.Options{
 		DryRun:     dryRun,
 		SSLStaging: os.Getenv("BERTH_TEST_SSL_STAGING") == "true",
 		Redact:     red,
-	})
-	if err != nil {
-		t.Fatalf("%s: pipeline pre-flight: %v", label, err)
-	}
-	terminal := map[string]provision.Event{}
-	for ev := range events {
-		switch ev.Kind {
-		case provision.EventFailed:
-			t.Fatalf("%s: step %q failed: %v", label, ev.Step, ev.Err)
-		case provision.EventStarted:
-		default:
+	}, label, func(ev provision.Event) {
+		if ev.Kind != provision.EventStarted {
 			terminal[ev.Step] = ev
 		}
-	}
+	})
 	return terminal
+}
+
+// integrationLockCommand names the suite's sessions in the lock's holder line,
+// so a busy host says who holds it.
+const integrationLockCommand = "provision (integration test)"
+
+// lockedPass runs one pipeline pass under the host session lock, taken with
+// the same helper and modes as `berth provision`: ReadOnly for a dry-run (it
+// never creates the lock file), Mutating otherwise. The engine run and its
+// event loop happen entirely inside the lock, on the context and guarded
+// Runner hostlock hands out; the lock is released when the pass ends — also
+// when onEvent calls t.Fatal, after the engine has stopped — so it is never
+// held across the suite's other assertions (assertStatus takes it itself,
+// over its own connection).
+//
+// onEvent sees every event (it may log or t.Error). A failed step, a busy
+// host, a pre-flight error or a lock lost mid-run is fatal, labelled.
+func lockedPass(ctx context.Context, t *testing.T, client *bssh.Client, eng *provision.Engine, srv *config.Server, opts provision.Options, label string, onEvent func(provision.Event)) {
+	t.Helper()
+	mode := hostlock.Mutating
+	if opts.DryRun {
+		mode = hostlock.ReadOnly
+	}
+	// The parent hostlock.Run is given: cancelling it is a shutdown, so the
+	// connection teardown it may cause is never reported as a lost lock.
+	runCtx, stop := context.WithCancel(ctx)
+	defer stop()
+	err := hostlock.Run(runCtx, client, mode, integrationLockCommand, func(lctx context.Context, r bssh.Runner) error {
+		events, err := eng.Run(lctx, srv, r, opts)
+		if err != nil {
+			return fmt.Errorf("pipeline pre-flight: %w", err)
+		}
+		finished := false
+		defer func() {
+			if finished {
+				return
+			}
+			// onEvent ended the pass mid-run (t.Fatal is runtime.Goexit,
+			// or it panicked): stop the engine and wait for it before the
+			// lock is released, as `berth provision` does after a TUI
+			// interrupt. Bounded: the ssh layer abandons an in-flight
+			// command on cancellation and the engine starts no further
+			// step.
+			stop()
+			for range events {
+			}
+		}()
+		for ev := range events {
+			onEvent(ev)
+			// EventFailed is the engine's last event (fail-fast): its
+			// goroutine has nothing left to send. Returning it lets
+			// hostlock.Run report a lost lock instead of the step's
+			// "interrupted" symptom.
+			if ev.Kind == provision.EventFailed {
+				finished = true
+				return fmt.Errorf("step %q failed: %w", ev.Step, ev.Err)
+			}
+		}
+		finished = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("%s: %v", label, err)
+	}
 }
 
 // dbProbeStdinCmd runs sql against dbName as the app's DB role, the way

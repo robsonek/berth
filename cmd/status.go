@@ -45,7 +45,7 @@ func newStatusCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error { return runStatus(cmd, args, f) },
 	}
 	c.Flags().StringVar(&f.configDir, "config-dir", "servers", "directory to scan when no configs are given")
-	c.Flags().BoolVar(&f.drift, "drift", false, "also run the full read-only Check sweep (slow)")
+	c.Flags().BoolVar(&f.drift, "drift", false, "also run the full read-only Check sweep (slow; takes the host session lock — the scan stops if another berth session holds the host)")
 	c.Flags().BoolVar(&f.offsite, "offsite", false, "also query the offsite backup repository")
 	c.Flags().IntVar(&f.parallel, "parallel", 4, "how many hosts to probe concurrently")
 	c.Flags().DurationVar(&f.timeout, "timeout", 0, "per-host budget (default 1m, or 10m with --drift)")

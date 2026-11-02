@@ -62,7 +62,9 @@ berth status --json | jq '.hosts[] | select(any(.sites[]?; .cert.days_left < 30)
 
 `--drift` additionally runs the same validators a provisioning run does. A few
 probes leave a line in a service log or the journal; no configuration, data,
-packages, services or certificates change.
+packages, services or certificates change. A drift scan also takes the host's
+session lock, so it does not run while another berth session holds the host —
+see [One berth session per host](#one-berth-session-per-host).
 
 Host-key verification is strict: only a pinned `ssh.fingerprint` or an existing
 `known_hosts` entry is accepted. There is no trust-on-first-use prompt, because
@@ -96,7 +98,8 @@ config. `berth provision <server>` then connects over SSH and brings the host to
 the desired state through an ordered pipeline of idempotent steps. Re-running is
 always safe; `--dry-run` shows what would change. berth keeps per-unit reload
 stamps under `/var/lib/berth/`, so a run interrupted between a config write and
-the service reload heals on the next run.
+the service reload heals on the next run. Only one berth session works on a
+host at a time (see [One berth session per host](#one-berth-session-per-host)).
 
 ## Configuration reference
 
@@ -936,6 +939,111 @@ what a newer one set up. The `preflight` step reads and writes it:
   floor; a real run warns that it was skipped.
 - berth v0.36.0 and older do not know the file and leave it alone (they also
   reject a config that sets `requires_berth`, see
+  [Minimum berth version](#minimum-berth-version-requires_berth)).
+
+### One berth session per host
+
+Only one berth session works on a host at a time. `berth provision` — in every
+form: `--dry-run`, `--only`, `--force`, `--skip-ssl`, `--allow-downgrade` — and
+`berth status --drift` take an exclusive lock on the host right after
+connecting, before the first step, and hold it until they finish. A second
+session, from any workstation or terminal, stops at once, before its first step
+and before it changes anything, and says who holds the host:
+
+```text
+error: host is busy: another berth session holds /var/lib/berth/session.lock — berth v0.37.0 provision by ops@ws (pid 4711) since 2026-11-02T09:32:00Z; wait for it to finish
+```
+
+The holder line names the berth version, the command (`provision`,
+`provision --dry-run`, `provision --only <step>`,
+`provision --dry-run --only <step>`, `status --drift`), the workstation's
+`user@host`, its process id and the start time in UTC. If the lock file holds
+no line — in the instant after a session took the lock and before it wrote its
+line, or just as the holding session ends and clears it — or the line could
+not be read, the message ends at the path
+(`… holds /var/lib/berth/session.lock; wait for it to finish`). berth does not
+queue: wait for the other session to finish and run again. If the lock cannot
+be taken for another reason (sudo refused, a broken connection), the run stops
+with an error naming the host session lock; it never goes ahead unlocked.
+
+Plain `berth status` (without `--drift`) and `berth site key` take no lock: they
+read a few facts without running the pipeline's checks, so you can look at a
+host while a provision runs.
+
+In `berth status --drift` (and the interactive view's `d` deep scan) a busy host
+is an incomplete scan, not a failed sweep: its drift column reads `scan did not
+run`, a `! drift: host is busy: …` line appears under it, every other probe —
+certificates, backups, services, disk — is still reported, and the exit code
+says the host could not be fully probed. Several configs of one host are
+scanned one after another, so a sweep never finds itself busy on configs it
+groups together (waiting for its turn does not count against `--timeout`),
+while different hosts still run in parallel (`--parallel`). Configs are
+grouped by their `host` value (ignoring letter case) and `ssh.port`: two
+configs that reach the same box through an IP address and a hostname are not
+grouped, their scans can run side by side, and then the one that comes second
+reports the host busy.
+
+The lock frees itself and never needs cleaning up on the host:
+
+- when the session ends — normally, with an error, or on ctrl+c. berth waits
+  up to 5 seconds for the host to drop it, so a run started right afterwards
+  from the same terminal does not find the host busy;
+- when berth crashes or is killed, or its connection is closed: the host sees
+  the session's channel close;
+- after 90 seconds of silence: berth sends a heartbeat every 20 seconds, and the
+  host drops a lock that has heard none for 90 seconds (a suspended berth, a
+  network that died without closing the connection).
+
+There is no flag to break the lock, and none is needed: a held lock means a
+berth session is really running, or went silent less than 90 seconds ago.
+`--force`, `--only`, `--allow-downgrade` and `--skip-ssl` never bypass it.
+
+If the lock ends while a run is still going — berth was suspended or the
+network stalled past the 90-second lease, or the holding process was killed on
+the host — another session may already have the host. berth then stops with
+`lost the host session lock /var/lib/berth/session.lock (the lease expired or
+the holding process ended); stopped before any further host change`. From the
+moment it notices, it sends no further command to the host, and a command
+already in flight is terminated (sent TERM, as on ctrl+c). What reached the
+host before berth noticed — for example while its process was suspended — has
+happened; run `berth provision` again once the host is free. Stopping berth
+yourself — ctrl+c, SIGTERM, or the per-host `--timeout` of `berth status` — is
+never reported as a lost lock, even when it closes the connection and the lock
+with it. A drift scan that loses the lock discards its drift result and
+reports the scan as not run, with the lost-lock message; the other probes it
+made under the lock are still reported.
+
+The lock is a `flock(2)` lock on `/var/lib/berth/session.lock`, owned
+`root:root` with mode `0600`. The mode is part of the security model, not
+cosmetics: `flock` needs only a file opened for reading, so a file a site user
+could open would let that tenant hold the lock indefinitely and keep berth off
+the host. The file holds one line of free text naming the session that holds
+the lock, and is never parsed. A session clears its line when it releases the
+lock, so between sessions the file is empty; only a holding process killed
+with SIGKILL (or a host that went down mid-session) leaves its line behind,
+until the next session writes its own. Do not delete the file: the lock is
+tied to that very file, so a session started after it was removed would not
+see one still holding the old file. Leaving it in place costs nothing.
+
+- **A real `berth provision` creates it.** Every run without `--dry-run`
+  creates `/var/lib/berth` and the lock file when missing (and resets the file
+  to `root:root 0600`) right after connecting, before the first step. A host
+  refused later in that run (a local `identity` error about the secret cache,
+  a system that is not Debian 13, a version floor newer than the binary)
+  therefore keeps `/var/lib/berth` and a root-only lock file, left empty: the
+  run clears its holder line when it releases the lock. The file is session
+  bookkeeping, not configuration or service state.
+- **`--dry-run` and `status --drift` never create anything.** On a host without
+  the lock file — a fresh one, or one provisioned only by berth v0.36.0 or
+  older — they run without a lock: there is no berth state yet to protect.
+  Where the file exists they take the same lock and write their own holder line
+  into it (clearing it again when they finish), so a provision they stop can
+  say who holds the host. Besides the log and journal lines described under
+  [Checking a fleet](#checking-a-fleet), writing and clearing that line is the
+  only change they make on the host.
+- **berth v0.36.0 and older do not know the lock**: they neither take it nor
+  stop for it. They also reject any config that declares `requires_berth`,
+  which every config for a newer berth must (see
   [Minimum berth version](#minimum-berth-version-requires_berth)).
 
 ## Scheduler, queue workers & daemons

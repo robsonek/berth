@@ -63,11 +63,28 @@ spelling silently permits a write.
 only reader is the always-run `preflight`). The floor is written by
 `preflight` Apply before any other host change — never by a Check.
 
+**The host session lock is a contract between binaries, and it lives on an
+inode.** Every berth takes `flock(2)` — `flock -n -E 75` — on
+`/var/lib/berth/session.lock`. `flock(2)` and `fcntl`/POSIX locks do not
+exclude each other on Linux, so a different mechanism or path means no mutual
+exclusion between berth versions. Never replace the file (`install`, `mv`,
+`rm`, a temp-file swap, `WriteFile`): a new inode lets two sessions hold "the"
+lock at once; only append-create (`: >>`), `chown`, `chmod` and an in-place
+`>` touch it. Its `root:root 0600` mode is security, not cosmetics — `flock`
+needs only a read descriptor, so a file a tenant can open lets that tenant hold
+berth off the host. Read-only sessions (`--dry-run`, `status --drift`) never
+create the file or `/var/lib/berth`. Steps and the engine never import
+`hostlock`: callers wrap the whole engine run in `hostlock.Run`, and steps only
+see the guarded `Runner` it hands out. To stop a locked run early, cancel the
+context passed to `hostlock.Run` (or a parent of it), never only one derived
+inside `fn`: the ssh layer's cancel may close the connection, which ends the
+lock too, and with a live parent that reads as a lost lock.
+
 ## Frozen surfaces
 
 Each of these is pinned by a contract test. Changing one is a BREAKING change
 and needs a deliberate changelog entry, because it reclassifies state on every
-already-provisioned host:
+already-provisioned host or breaks a contract every running binary relies on:
 
 - **The managed-marker text** (`# managed by berth`, `; managed by berth` for
   INI). It is part of the hashed content that drives drift detection, so editing
@@ -84,6 +101,11 @@ already-provisioned host:
   host berth pins.
 - **The host version floor** — `/var/lib/berth/version-floor` and its
   `VERSION=` line; every future berth must read it.
+- **The host session lock** — `/var/lib/berth/session.lock`, `root:root 0600`,
+  taken with `flock(2)` through `flock -n -E 75` on that path; its content is
+  one line of free text for people, or nothing (it is cleared on release, so
+  an empty file is the normal "no details" state), never parsed. Every future
+  berth must take exactly this lock.
 
 Always write managed files through `templates.Render` / `RenderINI` so the
 marker is prepended for you.
