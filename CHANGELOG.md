@@ -54,6 +54,30 @@ Notable changes to berth. Older releases are documented on the
   (a real run warns that it was skipped). The file's path and its
   `VERSION=` line are frozen by a contract test: every future berth reads
   them.
+- **Host session lock: one berth session per host.** `berth provision` (with
+  any flags, `--dry-run` included) and `berth status --drift` take an
+  exclusive lock on the host right after connecting and hold it until they
+  finish, so two workstations or terminals never interleave on one server —
+  and two berth versions started side by side can no longer leave the version
+  floor below the newer one. A second session stops at once, before its first
+  step and before any change: `host is busy: another berth session holds
+  /var/lib/berth/session.lock — berth v0.37.0 provision by ops@ws (pid 4711)
+  since 2026-11-02T09:32:00Z; wait for it to finish`. In `status --drift` a
+  busy host is reported as a drift scan that did not run (its other probes
+  still report, and the exit code says it could not be fully probed); several
+  configs of one `host` and `ssh.port` are scanned one after another. Plain
+  `berth status` and `berth site key` take no lock. The lock frees itself
+  when the session ends, when berth crashes or its connection drops, and
+  after 90 seconds without berth's heartbeat (sent every 20 seconds); there
+  is no flag to break it, and `--force` never bypasses it. A run that loses
+  the lock midway stops with `lost the host session lock …` and sends no
+  further command to the host. The lock is `flock(2)` on
+  `/var/lib/berth/session.lock` (`root:root 0600`, so a site user cannot hold
+  it), created by the first real `provision`; `--dry-run` and
+  `status --drift` never create it and run unlocked on a host without it, but
+  where it exists they write their own holder line into it. The path and the
+  `flock(2)` mechanism are frozen by a contract test: every future berth
+  takes exactly this lock. berth v0.36.0 and older do not know it.
 
 ## [0.36.0] — 2026-10-29
 
