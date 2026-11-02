@@ -203,35 +203,9 @@ func (c *Client) privileged(cmd string) string {
 // select either; with no session yet to TERM, cancellation there closes the
 // connection and reaps a late-materializing session.
 func (c *Client) exec(ctx context.Context, cmd string, stdin []byte) (Result, error) {
-	if err := ctx.Err(); err != nil {
+	sess, err := c.openSession(ctx)
+	if err != nil {
 		return Result{}, err
-	}
-	type sessResult struct {
-		sess *xssh.Session
-		err  error
-	}
-	sr := make(chan sessResult, 1) // buffered: the goroutine never leaks
-	go func() {
-		s, err := c.conn.NewSession()
-		sr <- sessResult{s, err}
-	}()
-	var sess *xssh.Session
-	select {
-	case r := <-sr:
-		if r.err != nil {
-			return Result{}, r.err
-		}
-		sess = r.sess
-	case <-ctx.Done():
-		// No session yet to TERM: close the connection to unblock the open,
-		// and reap the session if the open wins the race after all.
-		go func() {
-			if r := <-sr; r.err == nil {
-				_ = r.sess.Close()
-			}
-		}()
-		_ = c.conn.Close()
-		return Result{}, ctx.Err()
 	}
 	var out, errb bytes.Buffer
 	sess.Stdout = &out
@@ -270,6 +244,37 @@ func (c *Client) exec(ctx context.Context, cmd string, stdin []byte) (Result, er
 			}
 		}()
 		return Result{}, ctx.Err()
+	}
+}
+
+// openSession opens a new SSH session behind a goroutine+select, so a peer
+// that stalls channel opens cannot hang the caller past ctx. With no session
+// yet to TERM, cancellation closes the connection to unblock the open and
+// reaps a session that materializes late.
+func (c *Client) openSession(ctx context.Context) (*xssh.Session, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	type sessResult struct {
+		sess *xssh.Session
+		err  error
+	}
+	sr := make(chan sessResult, 1) // buffered: the goroutine never leaks
+	go func() {
+		s, err := c.conn.NewSession()
+		sr <- sessResult{s, err}
+	}()
+	select {
+	case r := <-sr:
+		return r.sess, r.err
+	case <-ctx.Done():
+		go func() {
+			if r := <-sr; r.err == nil {
+				_ = r.sess.Close()
+			}
+		}()
+		_ = c.conn.Close()
+		return nil, ctx.Err()
 	}
 }
 

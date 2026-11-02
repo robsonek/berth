@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,6 +27,17 @@ type testServer struct {
 	signals         chan string    // signal names observed by hanging execs
 	execStarted     chan struct{}  // one send per ACKed exec request
 	swallowSessions bool           // neither Accept nor Reject channel opens: NewSession blocks forever
+
+	mu       sync.Mutex
+	execCmds []string // command string of every exec request, in arrival order
+}
+
+// execCommands returns the command strings of the exec requests received so
+// far — the payload behaviors never see, needed to pin the sudo wrapping.
+func (s *testServer) execCommands() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.execCmds...)
 }
 
 func startTestServer(t *testing.T, behavior execBehavior, deaf bool) *testServer {
@@ -118,6 +130,13 @@ func (s *testServer) session(ch xssh.Channel, reqs <-chan *xssh.Request, behavio
 	defer func() { _ = ch.Close() }()
 	for req := range reqs {
 		if req.Type == "exec" {
+			// Recorded BEFORE the ACK, so it is visible once the client's
+			// exec request has returned.
+			var p struct{ Command string }
+			_ = xssh.Unmarshal(req.Payload, &p)
+			s.mu.Lock()
+			s.execCmds = append(s.execCmds, p.Command)
+			s.mu.Unlock()
 			_ = req.Reply(true, nil)
 			s.execStarted <- struct{}{}
 			behavior(s, ch, reqs)
