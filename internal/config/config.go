@@ -1014,7 +1014,7 @@ type Server struct {
 	// tombstone records the owning id) instead of orphaning the cache.
 	ID string `mapstructure:"id" yaml:"id,omitempty"`
 	// RequiresBerth is the oldest berth release this config works with
-	// ("v0.37.0" or "0.37.0"). Required in the FILE — Load refuses a config
+	// ("v1.0.0" or "1.0.0"). Required in the FILE — Load refuses a config
 	// without it, and one naming a newer release than this binary, before
 	// decoding the rest. Validate checks the format only: a literal Server
 	// and the wizard's ToServer() never pass through Load.

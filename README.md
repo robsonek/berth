@@ -117,7 +117,7 @@ and accepted values:
 
 ```yaml
 id: myserver-1a2b3c4d          # required — stable machine identity (see below)
-requires_berth: v0.37.0        # required — oldest berth release this config works with (see below)
+requires_berth: v1.0.0         # required — oldest berth release this config works with (see below)
 host: 203.0.113.10             # required — server IP or DNS name
 
 ssh:
@@ -308,7 +308,7 @@ the same current `host:port`. Rules:
 ### Minimum berth version (`requires_berth:`)
 
 Every config declares the oldest berth release it works with, e.g.
-`requires_berth: v0.37.0`. Raise it when the config starts relying on a key or
+`requires_berth: v1.0.0`. Raise it when the config starts relying on a key or
 a behavior introduced by a newer release.
 
 - It is **required**. A config without it does not load; the error names the
@@ -318,7 +318,7 @@ a behavior introduced by a newer release.
   `requires berth >= vX.Y.Z, this binary is …`. A config written for a newer
   berth therefore tells you to upgrade instead of listing keys this binary
   does not know.
-- Both spellings are accepted, `v0.37.0` and `0.37.0` (release binaries report
+- Both spellings are accepted, `v1.0.0` and `1.0.0` (release binaries report
   their version without the `v`, `make build` with it). Nothing else is: no
   partial version, no pre-release or `git describe` suffix.
 - `berth init` writes the version it is itself (a `make build` binary a few
@@ -361,6 +361,51 @@ installs it:
   is none and never replaces one.
 
 The git host's `known_hosts` entry is scanned exactly as for a generated key.
+
+## Versioning
+
+From 1.0.0 berth follows [Semantic Versioning](https://semver.org). A **major**
+release is one that can break an existing config, a script or a provisioned
+host; a **minor** release adds capability (config keys, commands, flags, files
+on the host); a **patch** release fixes bugs.
+
+Covered — an incompatible change to any of these needs a new major:
+
+- **The config file:** its keys, the values they accept, and what berth does
+  when a key is left out. A changed default would change every host whose
+  config does not set the key.
+- **The command line:** commands, flags, the step names `--only` accepts, and
+  the exit status — 0 on success, non-zero on failure. For `berth status`,
+  non-zero means a host could not be fully probed; drift, an expiring
+  certificate or a stale backup is an answer and keeps it 0.
+- **`berth status --json`:** field names and their meaning. A minor release may
+  add fields, so ignore the ones you do not know.
+- **What berth leaves on a host for later binaries to read back:** the managed
+  marker (`# managed by berth`, `; managed by berth` in INI files),
+  `/var/lib/berth/version-floor`, `/var/lib/berth/session.lock` and the
+  `flock(2)` lock taken on it, `/var/lib/berth/manifest`, the names berth
+  derives from a domain (site users, PHP-FPM pools and sockets, Supervisor
+  programs, Valkey units and sockets), and the `berth:<name>` comment on its
+  firewall rules.
+- **The local secret cache** (`~/.berth/<id>.secrets.json`): a versioned file
+  (`"version": 1`) that every 1.x release reads and writes, and the names of
+  the secrets in it. A binary refuses a cache from a newer format.
+
+Not covered: the wording and layout of human output (the plain table, the
+interactive screens, plan lines, messages — script against the exit status and
+`--json`); the exact content of the files berth renders on a host (a release
+may change a template, and the next `berth provision` re-renders that file once
+— drift being corrected, not a break); berth's Go code (it is a command, not a
+library: everything but the `cmd` entry point lives under `internal/`); and
+what building from source requires.
+
+`requires_berth` ties a config to this scheme. A config names the oldest
+release whose features it uses, so a config that starts using a key added in a
+later 1.x raises it to that release (see
+[Minimum berth version](#minimum-berth-version-requires_berth)). Upgrading the
+binary within a major never needs a config change. Compatibility runs forward
+only: an older binary refuses a config that names a newer release, and the
+[version floor](#version-floors) stops it on a host a newer berth has changed.
 
 ## Package sources
 
@@ -910,7 +955,7 @@ the origin.
 
 berth records on each host the newest berth version — release or source
 build — that has changed it, in `/var/lib/berth/version-floor` (root-owned,
-with a line such as `VERSION=v0.37.0`), so an older binary cannot quietly undo
+with a line such as `VERSION=v1.0.0`), so an older binary cannot quietly undo
 what a newer one set up. The `preflight` step reads and writes it:
 
 - Every real run raises the floor to the running binary's version before it
@@ -918,10 +963,10 @@ what a newer one set up. The `preflight` step reads and writes it:
   even when the run later fails or is interrupted. A run by the same version
   leaves the file as it is. Upgrading to a newer release is never blocked.
 - A binary built from source past a tag (`make build`, version
-  `v0.37.0-3-gabc1234`) records that full version and counts as newer than the
-  `v0.37.0` release. Moving such a host to the release binary is a rollback and
+  `v1.0.0-3-gabc1234`) records that full version and counts as newer than the
+  `v1.0.0` release. Moving such a host to the release binary is a rollback and
   needs `--allow-downgrade`; a source build stamped with
-  `make build VERSION=v0.37.0` records `v0.37.0` instead.
+  `make build VERSION=v1.0.0` records `v1.0.0` instead.
 - A binary older than the floor stops in `preflight`, before any change on the
   host: `host was last changed by berth vX.Y.Z, this binary is … — use vX.Y.Z
   or newer`. `--dry-run` and `berth status --drift` report the same stop (they
@@ -951,7 +996,7 @@ session, from any workstation or terminal, stops at once, before its first step
 and before it changes anything, and says who holds the host:
 
 ```text
-error: host is busy: another berth session holds /var/lib/berth/session.lock — berth v0.37.0 provision by ops@ws (pid 4711) since 2026-11-02T09:32:00Z; wait for it to finish
+error: host is busy: another berth session holds /var/lib/berth/session.lock — berth v1.0.0 provision by ops@ws (pid 4711) since 2026-11-02T09:32:00Z; wait for it to finish
 ```
 
 The holder line names the berth version, the command (`provision`,

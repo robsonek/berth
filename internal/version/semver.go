@@ -74,7 +74,7 @@ func (v V) Compare(o V) int {
 	)
 }
 
-// String renders "v0.37.0" for a release and "v0.36.0-3-ge363573" for a
+// String renders "v1.0.0" for a release and "v0.36.0-3-ge363573" for a
 // describe build.
 func (v V) String() string {
 	if v.Commits == 0 {

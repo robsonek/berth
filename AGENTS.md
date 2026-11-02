@@ -47,6 +47,13 @@ tag's `CHANGELOG.md` section (`.github/scripts/release-notes.sh`), and
 `release.yml` fails — before anything is published — when that section is
 missing or empty. Rename `[Unreleased]` to `[X.Y.Z] — <date>` first, then tag.
 
+**From v1.0.0 berth follows SemVer.** An incompatible change to any surface
+the README's "Versioning" section covers — config keys and defaults, commands
+and flags, exit status, `status --json`, the on-host files later binaries read
+back, the secret cache — needs a new major (2.0.0), and for this Go module that
+also means the `/v2` module path. Prefer the additive change: a new key, flag
+or field instead of a changed one.
+
 **A non-zero `Result.ExitCode` is data, not a Go error.** Many probes read
 "absent" from a non-zero exit. Check both the error and the code; returning a Go
 error where a real host would return exit 1 sends a step down a path it never

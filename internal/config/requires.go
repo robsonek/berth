@@ -26,12 +26,12 @@ func checkRequiresBerth(path string, raw any) error {
 		return fmt.Errorf("config %s: requires_berth is missing — declare the oldest berth version this config works with, e.g. \"requires_berth: %s\"%s", path, example, suffix)
 	}
 	if !isString {
-		// YAML reads an unquoted 0.37 or 1 as a number: never a release.
+		// YAML reads an unquoted 1.0 or 1 as a number: never a release.
 		s = fmt.Sprint(raw)
 	}
 	req, err := version.ParseRelease(s)
 	if !isString || err != nil {
-		return fmt.Errorf("config %s: requires_berth %q is not a release version (want vMAJOR.MINOR.PATCH, e.g. v0.37.0)", path, s)
+		return fmt.Errorf("config %s: requires_berth %q is not a release version (want vMAJOR.MINOR.PATCH, e.g. v1.0.0)", path, s)
 	}
 	if release && bin.Compare(req) < 0 {
 		return fmt.Errorf("config %s requires berth >= %s, this binary is %s — download a newer release", path, req.String(), bin.String())

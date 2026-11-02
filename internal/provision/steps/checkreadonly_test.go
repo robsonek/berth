@@ -211,7 +211,7 @@ func wantStepsFor(variant string) []string {
 func TestChecksAreReadOnly(t *testing.T) {
 	// A release version, so preflight's version-floor probe is part of the
 	// contract: under `go test` the version is "dev", which skips it.
-	versiontest.Set(t, "0.37.0")
+	versiontest.Set(t, "1.0.0")
 	for _, variant := range contractVariants {
 		t.Run(variant, func(t *testing.T) { checksAreReadOnly(t, variant) })
 	}
@@ -440,7 +440,7 @@ func checksAreReadOnly(t *testing.T, variant string) {
 func TestConvergedIsGenuinelySatisfied(t *testing.T) {
 	// A release version, so preflight's version-floor probe is part of the
 	// contract: under `go test` the version is "dev", which skips it.
-	versiontest.Set(t, "0.37.0")
+	versiontest.Set(t, "1.0.0")
 	for _, variant := range contractVariants {
 		t.Run(variant, func(t *testing.T) {
 			srv := variantServer(t, variant)
@@ -484,7 +484,7 @@ func TestConvergedIsGenuinelySatisfied(t *testing.T) {
 func TestChecksAreReadOnlyUnderForce(t *testing.T) {
 	// A release version, so preflight's version-floor probe is part of the
 	// contract: under `go test` the version is "dev", which skips it.
-	versiontest.Set(t, "0.37.0")
+	versiontest.Set(t, "1.0.0")
 	for _, variant := range contractVariants {
 		t.Run(variant, func(t *testing.T) { checksAreReadOnlyUnderForce(t, variant) })
 	}

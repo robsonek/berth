@@ -348,7 +348,7 @@ func TestFleetTableContinuationRowsDoNotWidenColumns(t *testing.T) {
 	long.ProbeErrors = []string{"services: connection reset by peer while listing units"}
 	long.Drift = &status.DriftReport{
 		StoppedAt: "preflight",
-		Error:     "preflight: check: host was last changed by berth v0.37.1, this binary is v0.37.0 — use v0.37.1 or newer",
+		Error:     "preflight: check: host was last changed by berth v1.0.1, this binary is v1.0.0 — use v1.0.1 or newer",
 	}
 	snap := long.HostTime.Add(-3 * time.Hour)
 	long.Offsite = &status.OffsiteStatus{Configured: true, LastSnapshot: &snap, SnapshotID: "a91f2c"}

@@ -50,7 +50,7 @@ func TestToServerOpsBlocks(t *testing.T) {
 }
 
 func TestToServerRequiresBerth(t *testing.T) {
-	for bin, want := range map[string]string{"0.37.0": "v0.37.0", "v0.37.0-3-gabc1234-dirty": "v0.37.0", "dev": ""} {
+	for bin, want := range map[string]string{"1.0.0": "v1.0.0", "v1.0.0-3-gabc1234-dirty": "v1.0.0", "dev": ""} {
 		versiontest.Set(t, bin)
 		if got := (Answers{}).ToServer().RequiresBerth; got != want {
 			t.Errorf("binary %s: RequiresBerth = %q, want %q", bin, got, want)
@@ -59,7 +59,7 @@ func TestToServerRequiresBerth(t *testing.T) {
 }
 
 func TestVersionNote(t *testing.T) {
-	versiontest.Set(t, "0.37.0")
+	versiontest.Set(t, "1.0.0")
 	if n := (Answers{}).VersionNote(); n != "" {
 		t.Errorf("release build: note = %q, want none", n)
 	}

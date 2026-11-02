@@ -3,13 +3,13 @@ package version
 import "testing"
 
 func TestParseRelease(t *testing.T) {
-	for _, ok := range []string{"v0.37.0", "0.37.0", "v10.2.30", "0.0.0"} {
+	for _, ok := range []string{"v1.0.0", "1.0.0", "v10.2.30", "0.0.0"} {
 		if _, err := ParseRelease(ok); err != nil {
 			t.Errorf("ParseRelease(%q) = %v, want ok", ok, err)
 		}
 	}
-	for _, bad := range []string{"", "v0.37", "0.37", "v0.37.0-rc1", "v0.37.0-3-gabc1234",
-		"latest", "v01.2.3", " v0.37.0", "V0.37.0", "v0.37.0-dirty"} {
+	for _, bad := range []string{"", "v1.0", "1.0", "v1.0.0-rc1", "v1.0.0-3-gabc1234",
+		"latest", "v01.2.3", " v1.0.0", "V1.0.0", "v1.0.0-dirty"} {
 		if _, err := ParseRelease(bad); err == nil {
 			t.Errorf("ParseRelease(%q) accepted, want error", bad)
 		}
@@ -52,7 +52,7 @@ func TestCompare(t *testing.T) {
 	if mk("0.36.0").Compare(mk("v0.36.0")) != 0 {
 		t.Error("0.36.0 and v0.36.0 must be equal")
 	}
-	order := []string{"v0.9.0", "v0.10.0", "v0.36.0", "v0.36.0-3-gabc1234", "v0.36.0-12-gdef5678", "v0.37.0", "v1.0.0"}
+	order := []string{"v0.9.0", "v0.10.0", "v0.36.0", "v0.36.0-3-gabc1234", "v0.36.0-12-gdef5678", "v1.0.0", "v2.0.0"}
 	for i := 1; i < len(order); i++ {
 		if mk(order[i-1]).Compare(mk(order[i])) >= 0 {
 			t.Errorf("%s must sort before %s", order[i-1], order[i])
@@ -63,8 +63,8 @@ func TestCompare(t *testing.T) {
 func TestBinary(t *testing.T) {
 	old := Version
 	t.Cleanup(func() { Version = old })
-	Version = "0.37.0"
-	if v, ok := Binary(); !ok || v.String() != "v0.37.0" {
+	Version = "1.0.0"
+	if v, ok := Binary(); !ok || v.String() != "v1.0.0" {
 		t.Errorf("Binary() = %v,%v", v, ok)
 	}
 	Version = "dev"

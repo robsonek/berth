@@ -229,7 +229,7 @@ func touchedFloor(f *bssh.FakeRunner) bool {
 }
 
 func TestPreflightCheckPlansFloorRecord(t *testing.T) {
-	versiontest.Set(t, "0.37.0")
+	versiontest.Set(t, "1.0.0")
 	f := bssh.NewFakeRunner()
 	stubTrixie(f)
 	f.On(versionFloorTestCmd, bssh.Result{ExitCode: 1})
@@ -238,7 +238,7 @@ func TestPreflightCheckPlansFloorRecord(t *testing.T) {
 	if err != nil || cr.Satisfied {
 		t.Fatalf("Check = %+v err=%v, want unsatisfied without error", cr, err)
 	}
-	want := "record version floor v0.37.0 in /var/lib/berth/version-floor"
+	want := "record version floor v1.0.0 in /var/lib/berth/version-floor"
 	if len(cr.Changes) == 0 || cr.Changes[0] != want {
 		t.Errorf("Changes = %q, want %q first", cr.Changes, want)
 	}
@@ -248,16 +248,16 @@ func TestPreflightCheckPlansFloorRecord(t *testing.T) {
 }
 
 func TestPreflightCheckRefusesDowngradeEvenWithForce(t *testing.T) {
-	versiontest.Set(t, "0.37.0")
+	versiontest.Set(t, "1.0.0")
 	stub := func() *bssh.FakeRunner {
 		f := bssh.NewFakeRunner()
 		stubTrixie(f)
 		f.On(versionFloorTestCmd, bssh.Result{})
-		f.On(versionFloorCatCmd, bssh.Result{Stdout: "VERSION=v0.38.0\n"})
+		f.On(versionFloorCatCmd, bssh.Result{Stdout: "VERSION=v1.1.0\n"})
 		f.On(lockTimeoutCatCmd(), bssh.Result{ExitCode: 1})
 		return f
 	}
-	want := "host was last changed by berth v0.38.0, this binary is v0.37.0 — use v0.38.0 or newer; to roll back deliberately, re-run `berth provision` with --allow-downgrade"
+	want := "host was last changed by berth v1.1.0, this binary is v1.0.0 — use v1.1.0 or newer; to roll back deliberately, re-run `berth provision` with --allow-downgrade"
 	for _, rc := range []provision.RunCtx{{}, {Force: true}} {
 		f := stub()
 		_, err := Preflight().Check(context.Background(), rc, &config.Server{}, f)
@@ -275,13 +275,13 @@ func TestPreflightCheckRefusesDowngradeEvenWithForce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Check(AllowDowngrade) err = %v", err)
 	}
-	if !slices.Contains(cr.Changes, "lower version floor v0.38.0 → v0.37.0 (--allow-downgrade)") {
+	if !slices.Contains(cr.Changes, "lower version floor v1.1.0 → v1.0.0 (--allow-downgrade)") {
 		t.Errorf("Changes = %q, want the lowered floor planned", cr.Changes)
 	}
 }
 
 func TestPreflightCheckFloorReadFailureIsNotAbsence(t *testing.T) {
-	versiontest.Set(t, "0.37.0")
+	versiontest.Set(t, "1.0.0")
 	f := bssh.NewFakeRunner()
 	stubTrixie(f)
 	f.On(versionFloorTestCmd, bssh.Result{})
@@ -307,7 +307,7 @@ func TestPreflightCheckDevBuildSkipsFloor(t *testing.T) {
 }
 
 func TestPreflightApplyWritesFloorFirst(t *testing.T) {
-	versiontest.Set(t, "0.37.0")
+	versiontest.Set(t, "1.0.0")
 	f := bssh.NewFakeRunner()
 	f.On("sudo -n true", bssh.Result{})
 	f.On(versionFloorTestCmd, bssh.Result{ExitCode: 1})
@@ -321,7 +321,7 @@ func TestPreflightApplyWritesFloorFirst(t *testing.T) {
 	if len(w) != 2 {
 		t.Fatalf("writes = %+v, want the floor then the apt drop-in", w)
 	}
-	if w[0].Path != versionFloorPath || string(w[0].Content) != "# managed by berth\nVERSION=v0.37.0\n" ||
+	if w[0].Path != versionFloorPath || string(w[0].Content) != "# managed by berth\nVERSION=v1.0.0\n" ||
 		w[0].Owner != "root" || w[0].Group != "root" || w[0].Mode != 0o644 {
 		t.Errorf("first write = %s %q %s:%s %o, want %s root:root 644", w[0].Path, w[0].Content, w[0].Owner, w[0].Group, w[0].Mode, versionFloorPath)
 	}
@@ -335,11 +335,11 @@ func TestPreflightApplyWritesFloorFirst(t *testing.T) {
 }
 
 func TestPreflightApplyEqualFloorWritesNothing(t *testing.T) {
-	versiontest.Set(t, "v0.37.0")
+	versiontest.Set(t, "v1.0.0")
 	f := bssh.NewFakeRunner()
 	f.On("sudo -n true", bssh.Result{})
 	f.On(versionFloorTestCmd, bssh.Result{})
-	f.On(versionFloorCatCmd, bssh.Result{Stdout: "VERSION=0.37.0\n"})
+	f.On(versionFloorCatCmd, bssh.Result{Stdout: "VERSION=1.0.0\n"})
 	f.On(lockTimeoutCatCmd(), bssh.Result{ExitCode: 1})
 	f.On(aptUpdateCmd, bssh.Result{})
 	if err := Preflight().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f); err != nil {
@@ -351,16 +351,16 @@ func TestPreflightApplyEqualFloorWritesNothing(t *testing.T) {
 }
 
 func TestPreflightApplyRefusesDowngradeEvenWithForce(t *testing.T) {
-	versiontest.Set(t, "0.37.0")
+	versiontest.Set(t, "1.0.0")
 	for _, rc := range []provision.RunCtx{{}, {Force: true}} {
 		f := bssh.NewFakeRunner()
 		f.On("sudo -n true", bssh.Result{})
 		f.On(versionFloorTestCmd, bssh.Result{})
-		f.On(versionFloorCatCmd, bssh.Result{Stdout: "VERSION=v0.38.0\n"})
+		f.On(versionFloorCatCmd, bssh.Result{Stdout: "VERSION=v1.1.0\n"})
 		f.On(lockTimeoutCatCmd(), bssh.Result{ExitCode: 1})
 		f.On(aptUpdateCmd, bssh.Result{})
 		err := Preflight().Apply(context.Background(), rc, &config.Server{}, f)
-		if err == nil || !strings.Contains(err.Error(), "host was last changed by berth v0.38.0, this binary is v0.37.0") {
+		if err == nil || !strings.Contains(err.Error(), "host was last changed by berth v1.1.0, this binary is v1.0.0") {
 			t.Errorf("Apply(Force=%v) must refuse the downgrade itself, not trust Check; got %v", rc.Force, err)
 		}
 		if len(f.Writes()) != 0 {
@@ -394,9 +394,9 @@ func TestPreflightApplyDevBuildWarns(t *testing.T) {
 // Every row of the verdict table through BOTH Check and Apply: Apply re-reads
 // the floor itself, so it must reach Check's verdict without Check's help.
 func TestPreflightFloorVerdictInCheckAndApply(t *testing.T) {
-	versiontest.Set(t, "0.37.0")
+	versiontest.Set(t, "1.0.0")
 	present, absent := bssh.Result{}, bssh.Result{ExitCode: 1}
-	newer := bssh.Result{Stdout: "VERSION=v0.38.0\n"}
+	newer := bssh.Result{Stdout: "VERSION=v1.1.0\n"}
 	junk := bssh.Result{Stdout: "junk\n"}
 	denied := bssh.Result{ExitCode: 1, Stderr: "Permission denied"}
 	cases := []struct {
@@ -407,15 +407,15 @@ func TestPreflightFloorVerdictInCheckAndApply(t *testing.T) {
 		errSub    string // the refusal Check AND Apply give
 		writes    bool   // Apply writes the floor
 	}{
-		{"absent", absent, bssh.Result{}, false, "record version floor v0.37.0 in /var/lib/berth/version-floor", "", true},
-		{"older", present, bssh.Result{Stdout: managedMarker + "\nVERSION=v0.36.0\n"}, false, "raise version floor v0.36.0 → v0.37.0", "", true},
-		{"equal", present, bssh.Result{Stdout: managedMarker + "\nVERSION=v0.37.0\n"}, false, "", "", false},
-		{"newer", present, newer, false, "", "host was last changed by berth v0.38.0", false},
-		{"newer-allowed", present, newer, true, "lower version floor v0.38.0 → v0.37.0 (--allow-downgrade)", "", true},
+		{"absent", absent, bssh.Result{}, false, "record version floor v1.0.0 in /var/lib/berth/version-floor", "", true},
+		{"older", present, bssh.Result{Stdout: managedMarker + "\nVERSION=v0.36.0\n"}, false, "raise version floor v0.36.0 → v1.0.0", "", true},
+		{"equal", present, bssh.Result{Stdout: managedMarker + "\nVERSION=v1.0.0\n"}, false, "", "", false},
+		{"newer", present, newer, false, "", "host was last changed by berth v1.1.0", false},
+		{"newer-allowed", present, newer, true, "lower version floor v1.1.0 → v1.0.0 (--allow-downgrade)", "", true},
 		{"malformed", present, junk, false, "", "unreadable or malformed", false},
-		{"malformed-allowed", present, junk, true, "rewrite version floor as v0.37.0 (--allow-downgrade)", "", true},
+		{"malformed-allowed", present, junk, true, "rewrite version floor as v1.0.0 (--allow-downgrade)", "", true},
 		{"unreadable", present, denied, false, "", "unreadable or malformed (Permission denied", false},
-		{"unreadable-allowed", present, denied, true, "rewrite version floor as v0.37.0 (--allow-downgrade)", "", true},
+		{"unreadable-allowed", present, denied, true, "rewrite version floor as v1.0.0 (--allow-downgrade)", "", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -460,7 +460,7 @@ func TestPreflightFloorVerdictInCheckAndApply(t *testing.T) {
 			if wrote != c.writes {
 				t.Errorf("Apply wrote the floor = %v, want %v (writes %+v)", wrote, c.writes, w)
 			}
-			if wrote && string(w[0].Content) != managedMarker+"\nVERSION=v0.37.0\n" {
+			if wrote && string(w[0].Content) != managedMarker+"\nVERSION=v1.0.0\n" {
 				t.Errorf("floor content = %q, want this binary's version", w[0].Content)
 			}
 		})

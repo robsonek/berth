@@ -205,7 +205,7 @@ func TestCollectIsolatesAFailedHost(t *testing.T) {
 	dir := t.TempDir()
 	good := filepath.Join(dir, "good.yml")
 	bad := filepath.Join(dir, "bad.yml")
-	body := "id: %s\nrequires_berth: v0.37.0\nhost: 203.0.113.10\nssh:\n  user: berth\n  port: 22\n  key: ~/.ssh/id_ed25519\nphp:\n  version: \"8.4\"\ndatabase:\n  engine: mariadb\nsites:\n  - domain: app.example.com\n    deploy_path: /var/www/app\n    database:\n      name: app\n      user: app\n"
+	body := "id: %s\nrequires_berth: v1.0.0\nhost: 203.0.113.10\nssh:\n  user: berth\n  port: 22\n  key: ~/.ssh/id_ed25519\nphp:\n  version: \"8.4\"\ndatabase:\n  engine: mariadb\nsites:\n  - domain: app.example.com\n    deploy_path: /var/www/app\n    database:\n      name: app\n      user: app\n"
 	if err := os.WriteFile(good, []byte(fmt.Sprintf(body, "good")), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +339,7 @@ func isolateHome(t *testing.T) {
 // backups on, so every probe stubHost answers has a fact to report.
 func writeCollectConfig(t *testing.T, dir, id, host string) string {
 	t.Helper()
-	body := fmt.Sprintf("id: %s\nrequires_berth: v0.37.0\nhost: %s\nssh:\n  user: berth\n  port: 22\n  key: ~/.ssh/id_ed25519\n"+
+	body := fmt.Sprintf("id: %s\nrequires_berth: v1.0.0\nhost: %s\nssh:\n  user: berth\n  port: 22\n  key: ~/.ssh/id_ed25519\n"+
 		"php:\n  version: \"8.4\"\ndatabase:\n  engine: mariadb\nbackups:\n  enabled: true\n"+
 		"sites:\n  - domain: app.example.com\n    deploy_path: /var/www/app\n    ssl: true\n    ssl_email: ops@example.com\n"+
 		"    database:\n      name: app\n      user: app\n", id, host)
@@ -430,7 +430,7 @@ func TestCollectWithoutDriftNeverTakesTheLock(t *testing.T) {
 func TestCollectDriftBusyReportsDriftErrorAndKeepsProbes(t *testing.T) {
 	isolateHome(t)
 	path := writeCollectConfig(t, t.TempDir(), "prod", "203.0.113.10")
-	const holder = "berth 0.37.0 provision by ops@ws (pid 4711) since 2026-11-02T09:32:00Z"
+	const holder = "berth 1.0.0 provision by ops@ws (pid 4711) since 2026-11-02T09:32:00Z"
 	lock := &answerLock{answer: func() (bssh.Lease, error) {
 		return nil, &bssh.HoldExitError{Code: 75, Stdout: holder + "\n"}
 	}}
@@ -697,7 +697,7 @@ func (h *endpointHold) Hold(ctx context.Context, _, _ string) (bssh.Lease, error
 	}
 	if cur := l.live[h.ep]; cur != nil && !leaseEnded(cur) {
 		l.busy++
-		return nil, &bssh.HoldExitError{Code: 75, Stdout: "berth 0.37.0 status --drift by ops@ws (pid 4711) since 2026-11-02T09:32:00Z\n"}
+		return nil, &bssh.HoldExitError{Code: 75, Stdout: "berth 1.0.0 status --drift by ops@ws (pid 4711) since 2026-11-02T09:32:00Z\n"}
 	}
 	lease := bssh.NewFakeLease()
 	l.live[h.ep] = lease

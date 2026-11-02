@@ -1333,7 +1333,7 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 
 // fixtureVersionFloor renders /var/lib/berth/version-floor via the same
 // template preflight.Apply uses, for v in its canonical form (Apply writes
-// bin.String(), so a GoReleaser "0.37.0" is recorded as "v0.37.0").
+// bin.String(), so a GoReleaser "1.0.0" is recorded as "v1.0.0").
 func fixtureVersionFloor(v string) string {
 	parsed, ok := version.ParseBuild(v)
 	if !ok {

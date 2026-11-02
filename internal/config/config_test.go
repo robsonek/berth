@@ -101,7 +101,7 @@ func writeTmpConfig(t *testing.T, body string) string {
 }
 
 const baseCfg = `id: test-machine-0001
-requires_berth: v0.37.0
+requires_berth: v1.0.0
 host: app.example.com
 ssh: {user: deploy, key: ~/.ssh/id_rsa}
 php: {version: "8.4"}
@@ -245,7 +245,7 @@ func TestSiteProgramNamesAndEnablement(t *testing.T) {
 
 func TestServerYAMLOmitsEmptyOptionalFields(t *testing.T) {
 	s := &Server{
-		ID: "test-machine-0001", RequiresBerth: "v0.37.0",
+		ID: "test-machine-0001", RequiresBerth: "v1.0.0",
 		Host: "h.example", SSH: SSH{User: "root", Port: 22, Key: "~/.ssh/id_ed25519"},
 		PHP: PHP{Version: "8.5", Source: "auto"}, Nginx: Nginx{Source: "debian"},
 		Database: Database{Engine: "mariadb", Source: "debian"},
@@ -367,7 +367,7 @@ func TestLoadRejectsUnknownKeys(t *testing.T) {
 	// levels are covered because viper flattens the tree and it is not obvious
 	// from the call site that every level is checked.
 	base := `id: test-machine-0001
-requires_berth: v0.37.0
+requires_berth: v1.0.0
 host: 203.0.113.10
 ssh:
   user: root
@@ -426,7 +426,7 @@ func TestLoadRejectsLegacyTopLevelDatabaseNameUser(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "legacy.yml")
 			yml := `id: test-machine-0001
-requires_berth: v0.37.0
+requires_berth: v1.0.0
 host: 203.0.113.10
 php:
   version: "8.5"

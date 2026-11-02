@@ -3,44 +3,50 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
-## [Unreleased]
+## [1.0.0] — 2026-11-02
+
+The first stable release. From 1.0.0 berth follows Semantic Versioning for the
+surfaces listed in the README's
+[Versioning](https://github.com/robsonek/berth/blob/v1.0.0/README.md#versioning)
+section. Upgrading from 0.36.0 takes one config change: the **BREAKING**
+`requires_berth` entry below.
 
 ### Changed
 
 - **BREAKING: every config must declare `requires_berth:`**, the oldest berth
-  release the config works with (e.g. `requires_berth: v0.37.0`; raise it when
+  release the config works with (e.g. `requires_berth: v1.0.0`; raise it when
   the config starts relying on something a newer release introduced). A
   config without it no longer loads, and the error names the line to add,
   with this binary's version. The key is checked right after the file is
   read, before the rest is parsed, so a config written for a newer berth
   fails with `requires berth >= vX.Y.Z, this binary is …` instead of listing
-  keys this binary does not know. Both spellings are accepted, `v0.37.0` and
-  `0.37.0`, and nothing else (no partial version, no pre-release or
+  keys this binary does not know. Both spellings are accepted, `v1.0.0` and
+  `1.0.0`, and nothing else (no partial version, no pre-release or
   `git describe` suffix). `berth init` writes the version it is itself (a
   `make build` binary a few commits past a tag writes that tag). A
   development build (`go build`, version `dev`) still requires the key but
   skips the comparison; its `berth init` writes none and says so. berth
   v0.36.0 and older do not know the key and reject it as unknown, so going
   back to such a binary deliberately means removing the line from the
-  config. **To upgrade:** before the first v0.37.0 run, add
-  `requires_berth: v0.37.0` directly under the `id:` line of every config.
+  config. **To upgrade:** before the first v1.0.0 run, add
+  `requires_berth: v1.0.0` directly under the `id:` line of every config.
 
 ### Added
 
 - **Host version floor.** `/var/lib/berth/version-floor` (root-owned, the
-  managed marker plus a `VERSION=` line such as `VERSION=v0.37.0`) records
+  managed marker plus a `VERSION=` line such as `VERSION=v1.0.0`) records
   the newest berth version — release or source build — that has changed the
   host, so an older binary cannot quietly undo what a newer one set up. The
   `preflight` step raises it to the running binary's version on every real
   run, before any other change on the host — under `--only` and `--skip-ssl`
   too, and even when the run later fails. A run by the same version leaves
   the file alone; upgrading to a newer release is never blocked. A binary
-  built from source past a tag (`make build`, version `v0.37.0-3-gabc1234`)
-  records that full version and counts as newer than the `v0.37.0` release:
+  built from source past a tag (`make build`, version `v1.0.0-3-gabc1234`)
+  records that full version and counts as newer than the `v1.0.0` release:
   moving such a host to the release binary is a rollback and needs
   `--allow-downgrade` (a source build stamped with
-  `make build VERSION=v0.37.0` records `v0.37.0` instead). Existing hosts
-  have no floor yet, and their first v0.37.0 run records it. A binary older
+  `make build VERSION=v1.0.0` records `v1.0.0` instead). Existing hosts
+  have no floor yet, and their first v1.0.0 run records it. A binary older
   than the floor stops in `preflight` before it touches the host (`host was
   last changed by berth vX.Y.Z, this binary is … — use vX.Y.Z or newer`),
   and so does an unreadable or malformed floor file; `--dry-run` and
@@ -61,7 +67,7 @@ Notable changes to berth. Older releases are documented on the
   and two berth versions started side by side can no longer leave the version
   floor below the newer one. A second session stops at once, before its first
   step and before any change: `host is busy: another berth session holds
-  /var/lib/berth/session.lock — berth v0.37.0 provision by ops@ws (pid 4711)
+  /var/lib/berth/session.lock — berth v1.0.0 provision by ops@ws (pid 4711)
   since 2026-11-02T09:32:00Z; wait for it to finish`. In `status --drift` a
   busy host is reported as a drift scan that did not run (its other probes
   still report, and the exit code says it could not be fully probed); several
@@ -80,6 +86,15 @@ Notable changes to berth. Older releases are documented on the
   where it exists they write their own holder line into it. The path and the
   `flock(2)` mechanism are frozen by a contract test: every future berth
   takes exactly this lock. berth v0.36.0 and older do not know it.
+
+### Fixed
+
+- In the plain `berth status` table (`--no-tty`, or any output that is not a
+  terminal) and in the table view of the interactive status screen, the rows
+  printed under a host — probe errors, the drift abort reason, the offsite
+  answer — no longer widen the HOST column or carry trailing spaces. A long
+  drift abort reason used to push BERTH and every later column far to the
+  right.
 
 ## [0.36.0] — 2026-10-29
 

@@ -21,7 +21,7 @@ func TestValkeyQueueRequiresValkey(t *testing.T) {
 	// Load path: the yaml key binds through mapstructure, and a config that
 	// never mentions the knob keeps it off.
 	loaded, err := Load(writeTmpConfig(t, `id: vq-test
-requires_berth: v0.37.0
+requires_berth: v1.0.0
 host: 203.0.113.10
 php:
   version: "8.5"
@@ -41,7 +41,7 @@ sites:
 		t.Error("valkey_queue: true did not bind to Server.ValkeyQueue")
 	}
 	plain, err := Load(writeTmpConfig(t, `id: vq-test-off
-requires_berth: v0.37.0
+requires_berth: v1.0.0
 host: 203.0.113.10
 php:
   version: "8.5"
@@ -60,7 +60,7 @@ sites:
 		t.Error("a config without valkey_queue must leave it off")
 	}
 	if _, err := Load(writeTmpConfig(t, `id: vq-test-bad
-requires_berth: v0.37.0
+requires_berth: v1.0.0
 host: 203.0.113.10
 php:
   version: "8.5"
@@ -113,7 +113,7 @@ func TestValkeyQueueMaxmemory(t *testing.T) {
 		t.Errorf("an invalid queue limit must be refused by name; got %v", err)
 	}
 	loaded, err := Load(writeTmpConfig(t, `id: vq-mem
-requires_berth: v0.37.0
+requires_berth: v1.0.0
 host: 203.0.113.10
 php:
   version: "8.5"

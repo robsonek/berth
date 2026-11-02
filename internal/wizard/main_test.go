@@ -11,6 +11,6 @@ import (
 // (a.Write → config.Load) would fail on the missing key; tests that need
 // another version swap it with versiontest.Set.
 func TestMain(m *testing.M) {
-	version.Version = "v0.37.0"
+	version.Version = "v1.0.0"
 	m.Run()
 }
