@@ -1,8 +1,10 @@
 package ui
 
 import (
+	"bytes"
 	"fmt"
 	"io"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -29,11 +31,18 @@ const (
 // the terminal. The cert/backup/disk/services cells are composed purely of
 // integers and berth string literals, so they carry nothing to sanitize.
 func WriteFleetTable(w io.Writer, hosts []status.HostStatus) error {
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	// Only the header and the host rows go through the tabwriter. The
+	// continuation rows under a host (detailRows) are not table cells: laid
+	// out as a row's first cell they sized the HOST column of the whole table
+	// to the longest message and padded each of them with trailing spaces.
+	// They are interleaved below their host row once the columns are fixed.
+	var table bytes.Buffer
+	tw := tabwriter.NewWriter(&table, 0, 0, 2, ' ', 0)
 	if _, err := fmt.Fprintln(tw, "HOST\tBERTH\tSITES\tDRIFT\tCERTS\tBACKUP\tDISK\tSERVICES"); err != nil {
 		return err
 	}
-	for _, h := range hosts {
+	details := make([][]string, len(hosts))
+	for i, h := range hosts {
 		if !h.Reachable {
 			if _, err := fmt.Fprintf(tw, "%s\tunreachable\t-\t-\t-\t-\t-\t%s\n", SanitizeCell(hostLabel(h)), SanitizeCell(h.Error)); err != nil {
 				return err
@@ -46,37 +55,61 @@ func WriteFleetTable(w io.Writer, hosts []status.HostStatus) error {
 			servicesCell(h)); err != nil {
 			return err
 		}
-		// A reachable host with partial probe failures previously rendered as
-		// fully healthy. Its errors must be visible, not only in --json.
-		for _, pe := range h.ProbeErrors {
-			if isOffsiteDuplicate(h, pe) {
-				continue
-			}
-			if _, err := fmt.Fprintf(tw, "  ! %s\t\t\t\t\t\t\t\n", SanitizeCell(pe)); err != nil {
-				return err
-			}
+		details[i] = detailRows(h)
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	// The tabwriter emits exactly one line per row written above: every cell
+	// went through SanitizeCell (or is a berth literal), which escapes \n.
+	rows := strings.SplitAfter(table.String(), "\n")
+	if len(rows) != len(hosts)+2 { // header, one row per host, "" after the last \n
+		return fmt.Errorf("fleet table: %d rendered rows for %d hosts", len(rows)-2, len(hosts))
+	}
+	if _, err := io.WriteString(w, rows[0]); err != nil {
+		return err
+	}
+	for i := range hosts {
+		if _, err := io.WriteString(w, rows[i+1]); err != nil {
+			return err
 		}
-		// The drift cell names only the abort point; the reason rides a
-		// continuation line because widening the cell would break the table's
-		// alignment. For the expected identity abort the reason IS the remedy
-		// (endpoint mismatch / renamed id -> `--only identity --force`).
-		if h.Drift != nil && h.Drift.Error != "" {
-			if _, err := fmt.Fprintf(tw, "  ! drift: %s\t\t\t\t\t\t\t\n", SanitizeCell(h.Drift.Error)); err != nil {
-				return err
-			}
-		}
-		// The --offsite answer also rides a continuation row, not a ninth
-		// column: the eight-field header is a fixed shape every row matches,
-		// and the flag is opt-in, so a column would sit blank on most runs.
-		// Without this line a SUCCESSFUL query was invisible in plain output —
-		// only failures showed, via the ProbeErrors rows above.
-		if h.Offsite != nil {
-			if _, err := fmt.Fprintf(tw, "  offsite: %s\t\t\t\t\t\t\t\n", SanitizeCell(offsiteLine(h))); err != nil {
+		for _, d := range details[i] {
+			if _, err := io.WriteString(w, d+"\n"); err != nil {
 				return err
 			}
 		}
 	}
-	return tw.Flush()
+	return nil
+}
+
+// detailRows returns the continuation rows printed under a reachable host's
+// table row, in display order.
+func detailRows(h status.HostStatus) []string {
+	var rows []string
+	// A reachable host with partial probe failures previously rendered as
+	// fully healthy. Its errors must be visible, not only in --json.
+	for _, pe := range h.ProbeErrors {
+		if isOffsiteDuplicate(h, pe) {
+			continue
+		}
+		rows = append(rows, "  ! "+SanitizeCell(pe))
+	}
+	// The drift cell names only the abort point; the reason rides a
+	// continuation row because widening the cell would break the table's
+	// alignment. For the expected identity abort the reason IS the remedy
+	// (endpoint mismatch / renamed id -> `--only identity --force`).
+	if h.Drift != nil && h.Drift.Error != "" {
+		rows = append(rows, "  ! drift: "+SanitizeCell(h.Drift.Error))
+	}
+	// The --offsite answer also rides a continuation row, not a ninth
+	// column: the eight-field header is a fixed shape every row matches,
+	// and the flag is opt-in, so a column would sit blank on most runs.
+	// Without this row a SUCCESSFUL query was invisible in plain output —
+	// only failures showed, via the ProbeErrors rows above.
+	if h.Offsite != nil {
+		rows = append(rows, "  offsite: "+SanitizeCell(offsiteLine(h)))
+	}
+	return rows
 }
 
 // isOffsiteDuplicate reports whether a ProbeErrors entry restates
