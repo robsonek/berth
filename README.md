@@ -957,8 +957,8 @@ error: host is busy: another berth session holds /var/lib/berth/session.lock —
 The holder line names the berth version, the command (`provision`,
 `provision --dry-run`, `provision --only <step>`,
 `provision --dry-run --only <step>`, `status --drift`), the workstation's
-`user@host`, its process id and the start time in UTC. If the
-holder has not written its line yet, the message ends at the path
+`user@host`, its process id and the start time in UTC. If the holder has not
+written its line yet, or it could not be read, the message ends at the path
 (`… holds /var/lib/berth/session.lock; wait for it to finish`). berth does not
 queue: wait for the other session to finish and run again. If the lock cannot
 be taken for another reason (sudo refused, a broken connection), the run stops
@@ -973,20 +973,21 @@ is an incomplete scan, not a failed sweep: its drift column reads `scan did not
 run`, a `! drift: host is busy: …` line appears under it, every other probe —
 certificates, backups, services, disk — is still reported, and the exit code
 says the host could not be fully probed. Several configs of one host are
-scanned one after another, so a sweep never finds itself busy (waiting for its
-turn does not count against `--timeout`), while different hosts still run in
-parallel (`--parallel`). Configs are grouped by their `host`
-value (ignoring letter case) and `ssh.port`: two configs that reach the same
-box through an IP address and a hostname are not grouped, their scans can run
-side by side, and then the one that comes second reports the host busy.
+scanned one after another, so a sweep never finds itself busy on configs it
+groups together (waiting for its turn does not count against `--timeout`),
+while different hosts still run in parallel (`--parallel`). Configs are
+grouped by their `host` value (ignoring letter case) and `ssh.port`: two
+configs that reach the same box through an IP address and a hostname are not
+grouped, their scans can run side by side, and then the one that comes second
+reports the host busy.
 
 The lock frees itself and never needs cleaning up on the host:
 
 - when the session ends — normally, with an error, or on ctrl+c. berth waits
   up to 5 seconds for the host to drop it, so a run started right afterwards
   from the same terminal does not find the host busy;
-- when berth crashes or is killed, or its connection drops: the host sees the
-  session's channel close;
+- when berth crashes or is killed, or its connection is closed: the host sees
+  the session's channel close;
 - after 90 seconds of silence: berth sends a heartbeat every 20 seconds, and the
   host drops a lock that has heard none for 90 seconds (a suspended berth, a
   network that died without closing the connection).
@@ -1003,8 +1004,12 @@ the holding process ended); stopped before any further host change`. From the
 moment it notices, it sends no further command to the host, and a command
 already in flight is terminated (sent TERM, as on ctrl+c). What reached the
 host before berth noticed — for example while its process was suspended — has
-happened; run `berth provision` again once the host is free. A drift scan that
-loses the lock discards its result and reports the scan as not run.
+happened; run `berth provision` again once the host is free. Stopping berth
+yourself — ctrl+c, SIGTERM, or the per-host `--timeout` of `berth status` — is
+never reported as a lost lock, even when it closes the connection and the lock
+with it. A drift scan that loses the lock discards its drift result and
+reports the scan as not run, with the lost-lock message; the other probes it
+made under the lock are still reported.
 
 The lock is a `flock(2)` lock on `/var/lib/berth/session.lock`, owned
 `root:root` with mode `0600`. The mode is part of the security model, not

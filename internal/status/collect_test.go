@@ -528,29 +528,133 @@ func TestCollectDriftAbsentLockScansWithoutLock(t *testing.T) {
 
 // A lock lost mid-scan means another session may have changed the host while
 // it was being compared: the scan's verdicts are discarded, never reported as
-// a (possibly mixed) drift answer, and the probe facts are collected afresh.
-func TestCollectDriftLostLockDiscardsTheScan(t *testing.T) {
+// a (possibly mixed) drift answer. The cheap probes ran under the lock before
+// the scan, so their facts are kept and the report carries the lost-lock
+// reason — no second probe round, which on a dead transport would turn the
+// reason into "unreachable".
+func TestCollectDriftLostLockKeepsTheProbesAndReportsTheLoss(t *testing.T) {
 	isolateHome(t)
 	path := writeCollectConfig(t, t.TempDir(), "prod", "203.0.113.10")
 	lease := bssh.NewFakeLease()
 	lock := &answerLock{answer: func() (bssh.Lease, error) { return lease, nil }}
-	var once sync.Once
+	var (
+		srv  *config.Server
+		r    *bssh.FakeRunner
+		once sync.Once
+	)
 	stubDial(t, func(s *config.Server) bssh.Conn {
-		// The held command ends on its own while the scan runs (lease
-		// expired, process killed on the host).
-		return &lockConn{FakeRunner: stubHost(s), lock: lock, gate: func(context.Context, string) { once.Do(lease.End) }}
+		srv, r = s, stubHost(s)
+		probes := map[string]bool{
+			hostMetaCmd:              true,
+			servicesCmd(unitList(s)): true,
+			certsCmd([]string{"/etc/letsencrypt/live/app.example.com/fullchain.pem"}): true,
+			backupsCmd([]string{"/var/backups/berth/app_example_com"}):                true,
+		}
+		// The held command ends on its own (lease expired, process killed on
+		// the host) once the probes are done, as the scan's first command
+		// goes out.
+		return &lockConn{FakeRunner: r, lock: lock, gate: func(_ context.Context, cmd string) {
+			if !probes[cmd] {
+				once.Do(lease.End)
+			}
+		}}
 	})
 
 	h := Collect(context.Background(), []string{path}, Options{Drift: true})[0]
 
-	if !h.Reachable || len(h.Sites) != 1 || !h.Sites[0].Cert.Present {
-		t.Fatalf("host = %+v, want reachable with the probe facts", h)
+	assertReadOnlyDriftHold(t, lock.calls())
+	if !h.Reachable || h.Error != "" {
+		t.Fatalf("host = %+v, want reachable — the lost lock only voids the drift scan", h)
 	}
 	if len(h.ProbeErrors) != 0 {
-		t.Errorf("ProbeErrors = %v, want the facts re-collected cleanly outside the lock", h.ProbeErrors)
+		t.Errorf("ProbeErrors = %v, want none — every probe ran under the lock", h.ProbeErrors)
 	}
-	if h.Drift == nil || h.Drift.Error != hostlock.ErrLost.Error() || h.Drift.StoppedAt != "" || len(h.Drift.Steps) != 0 {
+	if h.Provisioned == nil || h.Provisioned.Version != "0.27.1" || len(h.Disk) != 1 {
+		t.Errorf("host facts missing: manifest=%+v disk=%+v", h.Provisioned, h.Disk)
+	}
+	if len(h.Services) != len(unitList(srv)) {
+		t.Errorf("services = %d, want %d", len(h.Services), len(unitList(srv)))
+	}
+	if len(h.Sites) != 1 || !h.Sites[0].Cert.Present || h.Sites[0].Backup.Count != 7 {
+		t.Errorf("sites = %+v, want the probed cert and backups", h.Sites)
+	}
+	if h.Drift == nil || h.Drift.Error != hostlock.ErrLost.Error() || h.Drift.StoppedAt != "" || len(h.Drift.Steps) != 0 || h.Drift.Drifted != 0 {
 		t.Errorf("Drift = %+v, want only the lost-lock error", h.Drift)
+	}
+	metas := 0
+	for _, c := range r.Calls() {
+		if c.Cmd == hostMetaCmd {
+			metas++
+		}
+	}
+	if metas != 1 {
+		t.Errorf("host-meta probe ran %d times, want 1 — no second probe round after the loss", metas)
+	}
+	if !lease.Released() {
+		t.Error("the lost lease was not released")
+	}
+}
+
+// A sweep shut down mid-scan (ctrl+c, or the per-host deadline: both cancel
+// the context hostlock.Run is given) whose connection teardown also ends the
+// held command is a shutdown, not a lost lock: the in-lock result stands, as
+// without the lock, and the host is not re-probed into "unreachable".
+func TestCollectDriftShutdownIsNotALostLock(t *testing.T) {
+	isolateHome(t)
+	path := writeCollectConfig(t, t.TempDir(), "prod", "203.0.113.10")
+	lease := bssh.NewFakeLease()
+	lock := &answerLock{answer: func() (bssh.Lease, error) { return lease, nil }}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var (
+		r    *bssh.FakeRunner
+		once sync.Once
+	)
+	stubDial(t, func(s *config.Server) bssh.Conn {
+		r = stubHost(s)
+		probes := map[string]bool{
+			hostMetaCmd:              true,
+			servicesCmd(unitList(s)): true,
+			certsCmd([]string{"/etc/letsencrypt/live/app.example.com/fullchain.pem"}): true,
+			backupsCmd([]string{"/var/backups/berth/app_example_com"}):                true,
+		}
+		return &lockConn{FakeRunner: r, lock: lock, gate: func(cctx context.Context, cmd string) {
+			if probes[cmd] {
+				return
+			}
+			once.Do(func() {
+				cancel() // the operator interrupts the sweep during the scan
+				<-cctx.Done()
+				lease.End() // the cancel path closed the connection, and the held command with it
+			})
+		}}
+	})
+
+	h := Collect(ctx, []string{path}, Options{Drift: true})[0]
+
+	if !h.Reachable || h.Error != "" || len(h.ProbeErrors) != 0 {
+		t.Fatalf("host = %+v, want reachable with clean probes — the shutdown came after them", h)
+	}
+	if h.Provisioned == nil || len(h.Sites) != 1 || !h.Sites[0].Cert.Present {
+		t.Errorf("host facts missing: manifest=%+v sites=%+v", h.Provisioned, h.Sites)
+	}
+	if h.Drift == nil {
+		t.Fatal("Drift = nil, want the interrupted scan's report")
+	}
+	if strings.Contains(h.Drift.Error, "lost the host session lock") {
+		t.Errorf("Drift.Error = %q — a shutdown was reported as a lost lock", h.Drift.Error)
+	}
+	metas := 0
+	for _, c := range r.Calls() {
+		if c.Cmd == hostMetaCmd {
+			metas++
+		}
+	}
+	if metas != 1 {
+		t.Errorf("host-meta probe ran %d times, want 1 — no re-probe after a shutdown", metas)
+	}
+	if !lease.Released() {
+		t.Error("the lease was not released")
 	}
 }
 

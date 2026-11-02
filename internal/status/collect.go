@@ -2,6 +2,7 @@ package status
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -286,6 +287,11 @@ func collectOne(ctx context.Context, path string, srv *config.Server, opt Option
 	// holds the host session lock (ReadOnly: it never creates the lock file,
 	// and without one it runs unlocked). The whole collection happens inside
 	// fn, on the lock's context and Runner — neither is used after fn returns.
+	//
+	// ctx — the per-host deadline — is the parent hostlock.Run is given, so a
+	// timeout is a shutdown: the connection teardown it may cause is never
+	// reported as a lost lock, and the in-lock result (with its deadline
+	// errors) stands, as without the lock.
 	var h HostStatus
 	err = hostlock.Run(ctx, conn, hostlock.ReadOnly, lockCommand, func(lctx context.Context, r bssh.Runner) error {
 		h = CollectHost(lctx, path, srv, r, pipeline, red, opt.Offsite)
@@ -294,13 +300,21 @@ func collectOne(ctx context.Context, path string, srv *config.Server, opt Option
 	if err == nil {
 		return h
 	}
-	// Busy, not taken, or lost mid-scan: no drift answer is trustworthy (a
-	// lost lock means another session may have changed the host while it was
-	// compared, so a finished scan is discarded too). The cheap probes are
-	// collected — again, outside the lock — so the host still reports every
-	// other fact, and the report carries the reason with no StoppedAt: the
-	// views render "scan did not run" and the exit code "could not be fully
-	// probed".
+	// Lost mid-scan: another session may have changed the host while it was
+	// compared, so no drift answer is trustworthy — a finished scan is
+	// discarded too. The cheap probes ran under the lock before the scan, so
+	// a reachable host keeps those facts (a probe the lost lock refused shows
+	// in ProbeErrors) and the report carries the lost-lock reason; probing
+	// again would hide that reason behind "unreachable" on a dead transport.
+	if errors.Is(err, hostlock.ErrLost) && h.Reachable {
+		h.Drift = &DriftReport{Error: err.Error()}
+		return h
+	}
+	// Busy or not taken (fn never ran), or lost before the host answered: no
+	// drift answer at all. The cheap probes are collected — outside the
+	// lock — so the host still reports every other fact, and the report
+	// carries the reason with no StoppedAt: the views render "scan did not
+	// run" and the exit code "could not be fully probed".
 	h = CollectHost(ctx, path, srv, conn, nil, red, opt.Offsite)
 	if h.Reachable {
 		h.Drift = &DriftReport{Error: err.Error()}

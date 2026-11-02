@@ -19,10 +19,11 @@ const Path = "/var/lib/berth/session.lock"
 
 // The lock script's fixed words (spec §5.1/§5.2). The lease is the held
 // command's silence budget: it gives up after leaseSeconds without a
-// heartbeat. 4.5 x heartbeatInterval, so a couple of late heartbeats never
-// expire a live session; under the ~2 min the SSH transport itself needs to
-// declare a silent peer dead (30 s keepalives, 3 misses), so a vanished
-// workstation never holds the host longer than berth would wait for it.
+// heartbeat. lease = 4.5 x heartbeatInterval, so a couple of late heartbeats
+// never expire a live session; under the ~2 min the SSH transport itself
+// needs to declare a silent peer dead (30 s keepalives, 3 misses), so a
+// vanished workstation never holds the host longer than berth would wait for
+// it.
 const (
 	busyCode     = 75
 	readyLine    = "locked"
@@ -44,7 +45,10 @@ const (
 //
 // The holder line is written into the locked file (same inode, truncated in
 // place) as free text that only humans read. bash is explicit because
-// `read -t` is not POSIX sh. The surface is FROZEN (TestLockScriptsAreFrozen).
+// `read -t` is not POSIX sh. Pinned byte for byte by TestLockScriptsAreFrozen;
+// only the path, the mode, the flock mechanism and the one-line content are a
+// contract between binaries (see Path) — the rest is this binary's own
+// protocol with its held command.
 func Script(mode Mode, holderLine string) string {
 	lease := strconv.Itoa(leaseSeconds)
 	busy := strconv.Itoa(busyCode)

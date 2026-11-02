@@ -379,6 +379,34 @@ func TestRunParentCancelIsNotLoss(t *testing.T) {
 	}
 }
 
+// TestRunParentCancelThenLeaseEndIsNotLoss: a cancelled parent is the
+// caller's shutdown, and the ssh layer's cancel paths close the whole
+// connection, which also ends the held command. A lease that ends after the
+// parent was cancelled is that teardown, never loss — whether the watcher or
+// the backstop sees it.
+func TestRunParentCancelThenLeaseEndIsNotLoss(t *testing.T) {
+	fixSeams(t)
+	for i := range 200 {
+		conn := newTestConn()
+		lease := bssh.NewFakeLease()
+		conn.OnHold(lockScript(Mutating, "provision"), lease)
+		parent, cancel := context.WithCancel(context.Background())
+		err := Run(parent, conn, Mutating, "provision", func(ctx context.Context, _ bssh.Runner) error {
+			cancel()
+			<-ctx.Done()
+			lease.End() // the shutdown closed the connection, and the held command with it
+			return ctx.Err()
+		})
+		cancel()
+		if !errors.Is(err, context.Canceled) || errors.Is(err, ErrLost) {
+			t.Fatalf("iteration %d: Run = %v, want context.Canceled and not ErrLost", i, err)
+		}
+		if !lease.Released() {
+			t.Fatalf("iteration %d: lease not released", i)
+		}
+	}
+}
+
 func TestRunReleasesOnPanic(t *testing.T) {
 	fixSeams(t)
 	conn := newTestConn()

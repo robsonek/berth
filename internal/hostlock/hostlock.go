@@ -77,8 +77,16 @@ var (
 //
 // The result is a *BusyError when another session holds the lock, an error
 // naming the host session lock when it could not be taken (fail closed: fn
-// does not run), ErrLost when the lock ended before fn returned, and fn's
-// own error otherwise.
+// does not run), ErrLost when the lock ended before fn returned while ctx was
+// still live, and fn's own error otherwise.
+//
+// Shutdown contract: callers signal shutdown (an operator interrupt, a
+// deadline, a renderer that stopped early) by cancelling ctx — the context
+// passed to Run, or one of its parents — never only a context derived inside
+// fn. The ssh layer's cancel paths may close the whole connection, which ends
+// the held command too; a lease that ends once ctx is cancelled is that
+// teardown, never loss. Cancelling ctx before fn returns therefore also
+// waives the verdict on a loss Run had not yet observed.
 func Run(ctx context.Context, conn bssh.Conn, mode Mode, command string, fn func(ctx context.Context, r bssh.Runner) error) error {
 	lease, err := conn.Hold(ctx, Script(mode, HolderLine(command)), readyLine)
 	if err != nil {
@@ -96,16 +104,24 @@ func Run(ctx context.Context, conn bssh.Conn, mode Mode, command string, fn func
 	return holdWhile(ctx, lease, conn, heartbeatInterval, releaseWait, fn)
 }
 
-// holdWhile runs fn under lease. The loss verdict is decided only by Done:
-// the lease is lost iff it ended before release started. Both goroutines are
-// joined before the result is computed, so the verdict is final and nothing
-// touches the lease or the context after holdWhile returns.
+// holdWhile runs fn under lease. The loss verdict is decided only by Done
+// and the caller's ctx: the lease is lost iff it ended before release started
+// while ctx was still live. A cancelled ctx is the caller's shutdown (see Run),
+// and the connection teardown it may cause ends the lease without losing
+// anything. Both goroutines are joined before the result is computed, so the
+// verdict is final and nothing touches the lease or the context after
+// holdWhile returns.
 func holdWhile(ctx context.Context, lease bssh.Lease, conn bssh.Runner, beat, wait time.Duration, fn func(ctx context.Context, r bssh.Runner) error) (err error) {
 	lctx, cancel := context.WithCancelCause(ctx)
 	guard := &guardedRunner{next: conn}
 	// lose flags the Runner first, so whoever sees lctx cancelled also finds
-	// every further command refused. Idempotent.
+	// every further command refused. Idempotent. A no-op once the caller's
+	// ctx (the parent, not lctx) is cancelled: the lease ending then is the
+	// shutdown's teardown, not loss. Checked at both sites that observe Done.
 	lose := func() {
+		if ctx.Err() != nil {
+			return
+		}
 		guard.lost.Store(true)
 		cancel(ErrLost)
 	}
@@ -130,8 +146,9 @@ func holdWhile(ctx context.Context, lease bssh.Lease, conn bssh.Runner, beat, wa
 		close(stop)
 		<-watched // prompt: the watcher only selects
 		// A lease that ended before release started is lost even if the
-		// watcher picked stop or had not run yet. From here on Done closing
-		// is the release itself, never loss.
+		// watcher picked stop or had not run yet — unless the caller already
+		// shut down (lose checks ctx). From here on Done closing is the
+		// release itself, never loss.
 		select {
 		case <-lease.Done():
 			lose()
@@ -141,7 +158,11 @@ func holdWhile(ctx context.Context, lease bssh.Lease, conn bssh.Runner, beat, wa
 		// the check above, so a loss keeps ErrLost as the cause).
 		cancel(nil)
 		// A Release error (the command outlived wait and was torn down) is
-		// not loss: fn already ran under the lock.
+		// not loss: fn already ran under the lock. Its consequence: on a
+		// wedged transport the host may not have seen the release, and
+		// keeps the lock until it notices the closed channel or the lease
+		// runs out (up to leaseSeconds), so a run started right after from
+		// the same terminal can find the host busy.
 		_ = lease.Release(wait)
 		// Joined after Release: a heartbeat stuck in Send on a wedged
 		// transport is unblocked by Release's teardown, never the reverse.
@@ -155,7 +176,7 @@ func holdWhile(ctx context.Context, lease bssh.Lease, conn bssh.Runner, beat, wa
 
 // sendHeartbeats writes an empty line to the held command every beat until
 // stop closes or the lease ends. Send errors are expected near the end and
-// ignored: loss is Done's verdict alone.
+// ignored: loss is decided by Done and the caller's ctx alone (holdWhile).
 func sendHeartbeats(lease bssh.Lease, beat time.Duration, stop <-chan struct{}) {
 	t := time.NewTicker(beat)
 	defer t.Stop()

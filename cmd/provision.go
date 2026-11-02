@@ -75,6 +75,25 @@ var connectProvision = func(ctx context.Context, srv *config.Server, p bssh.Host
 	return c, nil
 }
 
+// renderRun renders the engine's events for this run and returns the run's
+// failure. A seam: tests substitute a renderer that stops before the engine
+// finishes, as a TUI interrupt does.
+var renderRun = func(cmd *cobra.Command, f *provisionFlags, events <-chan provision.Event) error {
+	return ui.New(cmd.OutOrStdout(), wantTUI(ui.IsTTY(os.Stdout), f), f.verbose).Render(events)
+}
+
+// engineStopped reports, without blocking, whether the engine has closed its
+// event channel — true after a renderer that read it to the end. It may
+// consume one pending event; the caller drains the rest anyway.
+func engineStopped(events <-chan provision.Event) bool {
+	select {
+	case _, ok := <-events:
+		return !ok
+	default:
+		return false
+	}
+}
+
 // sessionMode is the host session lock this run takes and the command its
 // holder line names. A dry-run only reads (ReadOnly never creates the lock
 // file); every other run changes the host. No other flag matters: --force,
@@ -127,13 +146,22 @@ func runProvision(cmd *cobra.Command, serverPath string, f *provisionFlags) erro
 		if err != nil {
 			return err
 		}
-		rerr := ui.New(cmd.OutOrStdout(), wantTUI(ui.IsTTY(os.Stdout), f), f.verbose).Render(events)
-		// Cancel explicitly BEFORE the lock's release and the deferred
-		// client.Close (LIFO would close the SSH connection first): the
-		// engine must not start another step once the renderer has
-		// returned, e.g. after a TUI interrupt. The ssh layer TERMs and
-		// abandons an in-flight remote command on cancellation.
-		cancel()
+		rerr := renderRun(cmd, f, events)
+		// A renderer that returned before the engine finished (a TUI
+		// interrupt, a renderer error) is a shutdown: cancel explicitly,
+		// BEFORE the lock's release and the deferred client.Close (LIFO would
+		// close the SSH connection first), so the engine starts no further
+		// step. The ssh layer TERMs and abandons an in-flight remote command
+		// on cancellation, and may close the whole connection — which also
+		// ends the held lock command. Cancelling ctx, the parent hostlock.Run
+		// was given (never a context derived inside this function), is what
+		// makes that teardown a shutdown rather than a lost lock. After a
+		// renderer that read to the end the engine has already stopped and
+		// nothing is cancelled here, so a loss the lock had not yet observed
+		// is still reported.
+		if !engineStopped(events) {
+			cancel()
+		}
 		// Then wait for the engine to stop (it closes the channel when its
 		// goroutine ends; a no-op after a renderer that read to the end), so
 		// nothing still holds the lock's Runner when the lock is released.
@@ -142,10 +170,12 @@ func runProvision(cmd *cobra.Command, serverPath string, f *provisionFlags) erro
 		return rerr
 	})
 	// err is the busy error (nothing ran), ErrLost when the lock ended
-	// mid-run (it outranks the renderer's "interrupted" symptom), or the
-	// run's own error. Defence in depth at the command boundary: cobra prints
-	// this error again, and renderer-internal errors never passed through the
-	// engine's masking.
+	// mid-run while the run was live (it outranks the renderer's
+	// "interrupted" symptom; an operator interrupt or SIGINT cancels ctx
+	// first, so its connection teardown is never reported as a lost lock),
+	// or the run's own error. Defence in depth at the command boundary: cobra
+	// prints this error again, and renderer-internal errors never passed
+	// through the engine's masking.
 	return provision.RedactError(red, err)
 }
 

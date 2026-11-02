@@ -27,13 +27,17 @@ func fixSeams(t *testing.T) {
 	})
 }
 
-// TestLockScriptsAreFrozen pins the host session lock surface (spec §5.1):
-// the path, the root:root 0600 file prepared only by a mutating run, the
-// flock(2) mechanism through `flock -n -E 75` on that exact path, the ready
-// and absent lines, the 90 s lease and the busy-path `cat`. Every future
-// berth binary must take exactly this lock this way: flock(2) and POSIX
-// fcntl locks do not exclude each other on Linux, and a replaced inode is a
-// different lock. Changing any of it is a BREAKING change.
+// TestLockScriptsAreFrozen pins both lock scripts byte for byte, so any
+// accidental drift fails here. Only part of what it pins is a contract
+// between berth binaries (spec §5.1): the path, the root:root 0600 file
+// prepared only by a mutating run, the flock(2) mechanism through
+// `flock -n -E 75` on that exact path, and the content being one line of
+// free text. Every future berth binary must take exactly this lock this way —
+// flock(2) and POSIX fcntl locks do not exclude each other on Linux, and a
+// replaced inode is a different lock — so changing any of that is a BREAKING
+// change. The rest (the ready and absent lines, the 90 s lease, the busy-path
+// `cat`) is this binary's private protocol with its own held command: it may
+// be tuned, updating this pin, without a BREAKING entry.
 func TestLockScriptsAreFrozen(t *testing.T) {
 	if Path != "/var/lib/berth/session.lock" {
 		t.Fatalf("Path = %q — frozen", Path)
@@ -51,7 +55,10 @@ func TestLockScriptsAreFrozen(t *testing.T) {
 }
 
 // TestLockTimingDefaultsAreFrozen pins the heartbeat and release wait the
-// 90 s lease in the script is sized against (lease >= 3 x heartbeat).
+// 90 s lease in the script is sized against (lease = 4.5 x heartbeat, so a
+// couple of late heartbeats never expire a live session). They are this
+// binary's private timing, not a contract between binaries: retuning them
+// together with the lease updates this pin, never a BREAKING entry.
 func TestLockTimingDefaultsAreFrozen(t *testing.T) {
 	if heartbeatInterval != 20*time.Second {
 		t.Errorf("heartbeatInterval = %s, want 20s", heartbeatInterval)

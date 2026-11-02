@@ -352,8 +352,9 @@ const integrationLockCommand = "provision (integration test)"
 // never creates the lock file), Mutating otherwise. The engine run and its
 // event loop happen entirely inside the lock, on the context and guarded
 // Runner hostlock hands out; the lock is released when the pass ends — also
-// when onEvent calls t.Fatal — so it is never held across the suite's other
-// assertions (assertStatus takes it itself, over its own connection).
+// when onEvent calls t.Fatal, after the engine has stopped — so it is never
+// held across the suite's other assertions (assertStatus takes it itself,
+// over its own connection).
 //
 // onEvent sees every event (it may log or t.Error). A failed step, a busy
 // host, a pre-flight error or a lock lost mid-run is fatal, labelled.
@@ -363,11 +364,30 @@ func lockedPass(ctx context.Context, t *testing.T, client *bssh.Client, eng *pro
 	if opts.DryRun {
 		mode = hostlock.ReadOnly
 	}
-	err := hostlock.Run(ctx, client, mode, integrationLockCommand, func(lctx context.Context, r bssh.Runner) error {
+	// The parent hostlock.Run is given: cancelling it is a shutdown, so the
+	// connection teardown it may cause is never reported as a lost lock.
+	runCtx, stop := context.WithCancel(ctx)
+	defer stop()
+	err := hostlock.Run(runCtx, client, mode, integrationLockCommand, func(lctx context.Context, r bssh.Runner) error {
 		events, err := eng.Run(lctx, srv, r, opts)
 		if err != nil {
 			return fmt.Errorf("pipeline pre-flight: %w", err)
 		}
+		finished := false
+		defer func() {
+			if finished {
+				return
+			}
+			// onEvent ended the pass mid-run (t.Fatal is runtime.Goexit,
+			// or it panicked): stop the engine and wait for it before the
+			// lock is released, as `berth provision` does after a TUI
+			// interrupt. Bounded: the ssh layer abandons an in-flight
+			// command on cancellation and the engine starts no further
+			// step.
+			stop()
+			for range events {
+			}
+		}()
 		for ev := range events {
 			onEvent(ev)
 			// EventFailed is the engine's last event (fail-fast): its
@@ -375,9 +395,11 @@ func lockedPass(ctx context.Context, t *testing.T, client *bssh.Client, eng *pro
 			// hostlock.Run report a lost lock instead of the step's
 			// "interrupted" symptom.
 			if ev.Kind == provision.EventFailed {
+				finished = true
 				return fmt.Errorf("step %q failed: %w", ev.Step, ev.Err)
 			}
 		}
+		finished = true
 		return nil
 	})
 	if err != nil {

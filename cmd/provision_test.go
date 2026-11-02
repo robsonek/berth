@@ -9,12 +9,15 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/hostlock"
+	"github.com/robsonek/berth/internal/provision"
 	"github.com/robsonek/berth/internal/provision/steps"
 	"github.com/robsonek/berth/internal/secret"
 	bssh "github.com/robsonek/berth/internal/ssh"
+	"github.com/robsonek/berth/internal/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -314,5 +317,82 @@ func TestProvisionReportsLostLock(t *testing.T) {
 	err := runProvisionCmd(writeValidConfig(t))
 	if !errors.Is(err, hostlock.ErrLost) {
 		t.Fatalf("error = %v, want hostlock.ErrLost", err)
+	}
+}
+
+// interruptConn is a provisionConn whose first remote command stays in flight
+// until the run's context is cancelled, then ends the held lock command and
+// returns the context's error — what the ssh layer does when its cancel path
+// closes the whole connection.
+type interruptConn struct {
+	*fakeProvisionConn
+	lease    *bssh.FakeLease
+	inFlight chan struct{}
+	once     sync.Once
+	t        *testing.T
+}
+
+func (c *interruptConn) Run(ctx context.Context, cmd string, stdin []byte) (bssh.Result, error) {
+	first := false
+	c.once.Do(func() { first = true })
+	if !first {
+		return c.fakeProvisionConn.Run(ctx, cmd, stdin)
+	}
+	close(c.inFlight)
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		c.t.Error("the run's context was never cancelled after the renderer stopped")
+	}
+	c.lease.End() // the cancel path closed the connection, and the held command with it
+	return bssh.Result{}, ctx.Err()
+}
+
+// An operator interrupt (the TUI's ctrl+c: the renderer returns before the
+// engine finished) is a shutdown, never a lost lock — even though the
+// connection teardown it causes also ends the held lock command.
+func TestProvisionInterruptIsNotALostLock(t *testing.T) {
+	lease := bssh.NewFakeLease()
+	conn := &interruptConn{
+		fakeProvisionConn: &fakeProvisionConn{FakeRunner: bssh.NewFakeRunner(), testHolder: &testHolder{lease: lease}},
+		lease:             lease,
+		inFlight:          make(chan struct{}),
+		t:                 t,
+	}
+	stubProvisionConn(t, conn)
+	orig := renderRun
+	t.Cleanup(func() { renderRun = orig })
+	renderRun = func(_ *cobra.Command, _ *provisionFlags, _ <-chan provision.Event) error {
+		select {
+		case <-conn.inFlight: // interrupted while a remote command runs
+		case <-time.After(5 * time.Second):
+			t.Error("the pipeline never sent a remote command")
+		}
+		return ui.ErrInterrupted
+	}
+
+	err := runProvisionCmd(writeValidConfig(t))
+
+	if !errors.Is(err, ui.ErrInterrupted) || errors.Is(err, hostlock.ErrLost) {
+		t.Fatalf("error = %v, want ui.ErrInterrupted and not hostlock.ErrLost", err)
+	}
+	if !lease.Released() {
+		t.Error("the lock was not released after the interrupt")
+	}
+}
+
+func TestEngineStopped(t *testing.T) {
+	closed := make(chan provision.Event)
+	close(closed)
+	if !engineStopped(closed) {
+		t.Error("closed channel: engineStopped = false, want true")
+	}
+	if engineStopped(make(chan provision.Event)) {
+		t.Error("open empty channel: engineStopped = true, want false")
+	}
+	pending := make(chan provision.Event, 1)
+	pending <- provision.Event{}
+	if engineStopped(pending) {
+		t.Error("open channel with a pending event: engineStopped = true, want false")
 	}
 }

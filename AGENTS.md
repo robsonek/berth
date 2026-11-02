@@ -75,13 +75,16 @@ needs only a read descriptor, so a file a tenant can open lets that tenant hold
 berth off the host. Read-only sessions (`--dry-run`, `status --drift`) never
 create the file or `/var/lib/berth`. Steps and the engine never import
 `hostlock`: callers wrap the whole engine run in `hostlock.Run`, and steps only
-see the guarded `Runner` it hands out.
+see the guarded `Runner` it hands out. To stop a locked run early, cancel the
+context passed to `hostlock.Run` (or a parent of it), never only one derived
+inside `fn`: the ssh layer's cancel may close the connection, which ends the
+lock too, and with a live parent that reads as a lost lock.
 
 ## Frozen surfaces
 
 Each of these is pinned by a contract test. Changing one is a BREAKING change
 and needs a deliberate changelog entry, because it reclassifies state on every
-already-provisioned host:
+already-provisioned host or breaks a contract every running binary relies on:
 
 - **The managed-marker text** (`# managed by berth`, `; managed by berth` for
   INI). It is part of the hashed content that drives drift detection, so editing
