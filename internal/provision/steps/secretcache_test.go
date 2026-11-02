@@ -96,3 +96,17 @@ func TestSaveSecretsWritesEnvelopeUnderID(t *testing.T) {
 		t.Fatalf("saved envelope wrong: %+v err=%v", env, err)
 	}
 }
+
+// The secret names the steps store in the local cache are part of its frozen
+// format (README "Versioning", AGENTS.md "Frozen surfaces"): renaming one
+// orphans that secret in every live cache. The bare "<dbUser>" key for a
+// site's database password has no helper; the database tests that seed
+// {dbUser: …} and expect it reused pin it.
+func TestSecretCacheKeyNamesAreFrozen(t *testing.T) {
+	if consoleCacheKey != "console:berth" {
+		t.Errorf("consoleCacheKey = %q, want console:berth", consoleCacheKey)
+	}
+	if got := appKeyCacheKey("app"); got != "appkey:app" {
+		t.Errorf("appKeyCacheKey(app) = %q, want appkey:app", got)
+	}
+}

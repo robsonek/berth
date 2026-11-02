@@ -383,10 +383,13 @@ Covered — an incompatible change to any of these needs a new major:
 - **What berth leaves on a host for later binaries to read back:** the managed
   marker (`# managed by berth`, `; managed by berth` in INI files),
   `/var/lib/berth/version-floor`, `/var/lib/berth/session.lock` and the
-  `flock(2)` lock taken on it, `/var/lib/berth/manifest`, the names berth
-  derives from a domain (site users, PHP-FPM pools and sockets, Supervisor
-  programs, Valkey units and sockets), and the `berth:<name>` comment on its
-  firewall rules.
+  `flock(2)` lock taken on it, `/var/lib/berth/manifest`, the names and paths
+  berth derives for each site (site users, PHP-FPM pools and sockets,
+  Supervisor programs, Valkey units and sockets, the deploy key
+  `/home/<user>/.ssh/id_ed25519` whose public half `berth site key` prints, the
+  certificate directories `/etc/letsencrypt/live/<domain>` and
+  `/etc/ssl/berth/<domain>`), and the `berth:<name>` comment on its firewall
+  rules.
 - **The local secret cache** (`~/.berth/<id>.secrets.json`): a versioned file
   (`"version": 1`) that every 1.x release reads and writes, and the names of
   the secrets in it. A binary refuses a cache from a newer format.
@@ -1525,7 +1528,7 @@ and pool files are no longer managed — clean them up manually.
 
 ## Beyond v1
 
-`berth site:add` (incremental add) and package-manager distribution are planned
+`berth site add` (incremental add) and package-manager distribution are planned
 for later releases.
 
 ## License

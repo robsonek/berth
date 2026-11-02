@@ -97,7 +97,9 @@ already-provisioned host or breaks a contract every running binary relies on:
   INI). It is part of the hashed content that drives drift detection, so editing
   it makes every managed file on every host read as unmanaged.
 - **The name-derivation functions** — OS user, FPM pool, socket, supervisor
-  program, database names. Never re-derive these ad hoc; call the helpers.
+  program, and the rest `TestDerivationsAreFrozen` lists. Never re-derive these
+  ad hoc; call the helpers. (Database names and users are config values, not
+  derived.)
 - **The on-host default values.**
 - **The upstream repos' unattended-upgrades identity** — each built-in
   repo's pinned `Origin`, codename (`Suite`) and site (URI host), which
@@ -108,6 +110,13 @@ already-provisioned host or breaks a contract every running binary relies on:
   host berth pins.
 - **The host version floor** — `/var/lib/berth/version-floor` and its
   `VERSION=` line; every future berth must read it.
+- **The provisioning manifest** — `/var/lib/berth/manifest` and its
+  `VERSION=` / `PROVISIONED_AT=` lines, which `berth status` reads back.
+- **The local secret cache** — `~/.berth/<id>.secrets.json`: its JSON member
+  names (`version`, `endpoint.host`, `endpoint.port`, `secrets`, and
+  `migratedTo` on a tombstone), `"version": 1`, and the secret names inside
+  it (`console:berth`, `appkey:<dbUser>`, the bare `<dbUser>`, and the three
+  `offsite_*` names `berth secret set` takes).
 - **The host session lock** — `/var/lib/berth/session.lock`, `root:root 0600`,
   taken with `flock(2)` through `flock -n -E 75` on that path; its content is
   one line of free text for people, or nothing (it is cleared on release, so

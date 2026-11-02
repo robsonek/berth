@@ -8,6 +8,7 @@ import (
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
 	bssh "github.com/robsonek/berth/internal/ssh"
+	"github.com/robsonek/berth/internal/templates"
 )
 
 func manifestServer() *config.Server {
@@ -148,5 +149,23 @@ func TestManifestApplyWritesVersionAndTimestamp(t *testing.T) {
 	}
 	if ws[0].Owner != "root" || ws[0].Mode != 0o644 || !ws[0].Sudo {
 		t.Fatalf("manifest must be root:root 0644 sudo, got %+v", ws[0])
+	}
+}
+
+// /var/lib/berth/manifest is read back by `berth status` of every later berth
+// (internal/status parseManifest → "provisioned" in --json; the read side is
+// pinned by TestManifestReadBackIsFrozen there). README "Versioning" and
+// AGENTS.md "Frozen surfaces" promise both the path and these two lines.
+// Expectations are literals: a pin that calls the code it pins proves nothing.
+func TestManifestPathAndFormatAreFrozen(t *testing.T) {
+	if manifestPath != "/var/lib/berth/manifest" {
+		t.Fatalf("manifestPath = %q — frozen (README \"Versioning\", AGENTS.md \"Frozen surfaces\")", manifestPath)
+	}
+	body, err := templates.Render("manifest.tmpl", struct{ Version, ProvisionedAt string }{"1.0.0", "2026-11-02T09:32:00Z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "# managed by berth\nVERSION=1.0.0\nPROVISIONED_AT=2026-11-02T09:32:00Z\n" {
+		t.Fatalf("rendered manifest = %q", body)
 	}
 }
