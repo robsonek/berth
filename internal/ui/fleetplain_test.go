@@ -335,3 +335,64 @@ func TestFleetTableBackupReportsOldestSite(t *testing.T) {
 		t.Errorf("want the oldest site's age plus the stale count:\n%s", out)
 	}
 }
+
+// Continuation rows (probe errors, the drift abort reason, the offsite answer)
+// sit under their host row but are not table cells. Rendered as the first
+// cell of a tab-aligned row, a long drift reason widened the HOST column of
+// the whole table to the reason's length (and padded the row with trailing
+// spaces). The columns must size to the host labels alone, every host row
+// must stay aligned with the header across continuation rows, and the rows
+// themselves must carry the full text with no trailing padding.
+func TestFleetTableContinuationRowsDoNotWidenColumns(t *testing.T) {
+	long := hostFixture()
+	long.ProbeErrors = []string{"services: connection reset by peer while listing units"}
+	long.Drift = &status.DriftReport{
+		StoppedAt: "preflight",
+		Error:     "preflight: check: host was last changed by berth v0.37.1, this binary is v0.37.0 — use v0.37.1 or newer",
+	}
+	snap := long.HostTime.Add(-3 * time.Hour)
+	long.Offsite = &status.OffsiteStatus{Configured: true, LastSnapshot: &snap, SnapshotID: "a91f2c"}
+	second := hostFixture()
+	second.ID = "web-2"
+
+	var buf bytes.Buffer
+	if err := WriteFleetTable(&buf, []status.HostStatus{long, second}); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(buf.String(), "\n"), "\n")
+
+	// Widest first-column cell is "web-2" (5); tabwriter padding is 2.
+	const berthCol = len("web-2") + 2
+	if got := strings.Index(lines[0], "BERTH"); got != berthCol {
+		t.Errorf("BERTH header at column %d, want %d (HOST sized to the host labels):\n%s", got, berthCol, buf.String())
+	}
+	for _, label := range []string{"prod ", "web-2 "} {
+		var row string
+		for _, l := range lines {
+			if strings.HasPrefix(l, label) {
+				row = l
+			}
+		}
+		if row == "" {
+			t.Fatalf("no host row for %q:\n%s", label, buf.String())
+		}
+		if got := strings.Index(row, "0.27.1"); got != berthCol {
+			t.Errorf("host row %q has its version at column %d, want %d:\n%s", label, got, berthCol, buf.String())
+		}
+	}
+	for _, want := range []string{
+		"  ! " + long.ProbeErrors[0],
+		"  ! drift: " + long.Drift.Error,
+		"  offsite: last snapshot 3h ago (a91f2c)",
+	} {
+		found := false
+		for _, l := range lines {
+			if l == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("missing continuation row %q (exact, no trailing padding):\n%s", want, buf.String())
+		}
+	}
+}
