@@ -2,6 +2,7 @@ package status
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,5 +124,19 @@ func TestProbeHostMetaMalformedOffsetIsAnError(t *testing.T) {
 		if _, err := probeHostMeta(context.Background(), f); err == nil {
 			t.Errorf("offset %q: expected an error", bad)
 		}
+	}
+}
+
+// The read side of the frozen provisioning manifest (the write side is
+// TestManifestPathAndFormatAreFrozen in the steps package): every later berth
+// status must find the file at this path and read these two lines, or the
+// "provisioned" field of --json goes blank on hosts an older berth provisioned.
+func TestManifestReadBackIsFrozen(t *testing.T) {
+	if !strings.Contains(hostMetaCmd, "cat /var/lib/berth/manifest 2>/dev/null") {
+		t.Fatalf("hostMetaCmd no longer reads /var/lib/berth/manifest: %s", hostMetaCmd)
+	}
+	m := parseManifest("# managed by berth\nVERSION=1.0.0\nPROVISIONED_AT=2026-11-02T09:32:00Z\n")
+	if m == nil || m.Version != "1.0.0" || !m.ProvisionedAt.Equal(time.Date(2026, 11, 2, 9, 32, 0, 0, time.UTC)) {
+		t.Fatalf("parseManifest = %+v, want version 1.0.0 provisioned 2026-11-02T09:32:00Z", m)
 	}
 }

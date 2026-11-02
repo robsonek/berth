@@ -47,6 +47,13 @@ tag's `CHANGELOG.md` section (`.github/scripts/release-notes.sh`), and
 `release.yml` fails — before anything is published — when that section is
 missing or empty. Rename `[Unreleased]` to `[X.Y.Z] — <date>` first, then tag.
 
+**From v1.0.0 berth follows SemVer.** An incompatible change to any surface
+the README's "Versioning" section covers — config keys and defaults, commands
+and flags, exit status, `status --json`, the on-host files later binaries read
+back, the secret cache — needs a new major (2.0.0), and for this Go module that
+also means the `/v2` module path. Prefer the additive change: a new key, flag
+or field instead of a changed one.
+
 **A non-zero `Result.ExitCode` is data, not a Go error.** Many probes read
 "absent" from a non-zero exit. Check both the error and the code; returning a Go
 error where a real host would return exit 1 sends a step down a path it never
@@ -90,7 +97,9 @@ already-provisioned host or breaks a contract every running binary relies on:
   INI). It is part of the hashed content that drives drift detection, so editing
   it makes every managed file on every host read as unmanaged.
 - **The name-derivation functions** — OS user, FPM pool, socket, supervisor
-  program, database names. Never re-derive these ad hoc; call the helpers.
+  program, and the rest `TestDerivationsAreFrozen` lists. Never re-derive these
+  ad hoc; call the helpers. (Database names and users are config values, not
+  derived.)
 - **The on-host default values.**
 - **The upstream repos' unattended-upgrades identity** — each built-in
   repo's pinned `Origin`, codename (`Suite`) and site (URI host), which
@@ -101,6 +110,13 @@ already-provisioned host or breaks a contract every running binary relies on:
   host berth pins.
 - **The host version floor** — `/var/lib/berth/version-floor` and its
   `VERSION=` line; every future berth must read it.
+- **The provisioning manifest** — `/var/lib/berth/manifest` and its
+  `VERSION=` / `PROVISIONED_AT=` lines, which `berth status` reads back.
+- **The local secret cache** — `~/.berth/<id>.secrets.json`: its JSON member
+  names (`version`, `endpoint.host`, `endpoint.port`, `secrets`, and
+  `migratedTo` on a tombstone), `"version": 1`, and the secret names inside
+  it (`console:berth`, `appkey:<dbUser>`, the bare `<dbUser>`, and the three
+  `offsite_*` names `berth secret set` takes).
 - **The host session lock** — `/var/lib/berth/session.lock`, `root:root 0600`,
   taken with `flock(2)` through `flock -n -E 75` on that path; its content is
   one line of free text for people, or nothing (it is cleared on release, so

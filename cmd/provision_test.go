@@ -26,7 +26,7 @@ func writeValidConfig(t *testing.T) string {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "srv.yml")
 	cfg := `id: test-machine-0001
-requires_berth: v0.37.0
+requires_berth: v1.0.0
 host: 203.0.113.10
 ssh: {user: root, port: 22}
 php: {version: "8.5", source: auto}

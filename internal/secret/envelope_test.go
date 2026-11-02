@@ -317,3 +317,68 @@ func TestMigrateCacheRefusesForeignEndpointSource(t *testing.T) {
 		t.Fatalf("no id-keyed file may appear on refusal: %+v err=%v", env, err)
 	}
 }
+
+// Every 1.x binary reads the cache any other 1.x binary wrote (README
+// "Versioning", AGENTS.md "Frozen surfaces"): the file name, the JSON member
+// names and the version number are frozen. Renaming a member orphans every
+// live cache. Only presence and type are pinned — a new member is a
+// compatible addition (older binaries ignore it) — and every expectation is a
+// literal.
+func TestEnvelopeFormatIsFrozen(t *testing.T) {
+	if envelopeVersion != 1 {
+		t.Fatalf("envelopeVersion = %d — frozen at 1 for every 1.x release", envelopeVersion)
+	}
+	berth := cacheHome(t)
+	if err := SaveEnvelope("app-1a2b", Envelope{
+		Endpoint: &Endpoint{Host: "app.example.com", Port: 2222},
+		Secrets:  map[string]string{"console:berth": "pw"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(berth, "app-1a2b.secrets.json"))
+	if err != nil {
+		t.Fatalf("cache file name changed: %v", err)
+	}
+	var top map[string]any
+	if err := json.Unmarshal(b, &top); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := top["version"].(float64); !ok || v != 1 {
+		t.Errorf(`"version" = %v, want the number 1`, top["version"])
+	}
+	ep, ok := top["endpoint"].(map[string]any)
+	if !ok || ep["host"] != "app.example.com" || ep["port"] != float64(2222) {
+		t.Errorf(`"endpoint" = %v, want {"host": "app.example.com", "port": 2222}`, top["endpoint"])
+	}
+	if sec, ok := top["secrets"].(map[string]any); !ok || sec["console:berth"] != "pw" {
+		t.Errorf(`"secrets" = %v, want {"console:berth": "pw"}`, top["secrets"])
+	}
+
+	// A tombstone left at a host-keyed path names the id that owns the cache.
+	if err := SaveEnvelope("app.example.com", Envelope{
+		Endpoint:   &Endpoint{Host: "app.example.com", Port: 2222},
+		MigratedTo: "app-1a2b",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	b, err = os.ReadFile(filepath.Join(berth, "app.example.com.secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tomb map[string]any
+	if err := json.Unmarshal(b, &tomb); err != nil {
+		t.Fatal(err)
+	}
+	if tomb["migratedTo"] != "app-1a2b" {
+		t.Errorf(`tombstone "migratedTo" = %v, want "app-1a2b"`, tomb["migratedTo"])
+	}
+}
+
+// The `berth secret set` names double as cache keys: renaming one orphans the
+// stored offsite credentials on every workstation.
+func TestSettableSecretNamesAreFrozen(t *testing.T) {
+	got := strings.Join(SettableNames(), ",")
+	if want := "offsite_s3_access_key,offsite_s3_secret_key,offsite_restic_password"; got != want {
+		t.Fatalf("SettableNames() = %s, want %s", got, want)
+	}
+}

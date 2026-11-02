@@ -10,7 +10,7 @@
 id: prod-multisite-3e7b
 
 # Oldest berth release this config works with (required). berth refuses to run it with an older binary.
-requires_berth: v0.37.0
+requires_berth: v1.0.0
 
 host: 203.0.113.20
 

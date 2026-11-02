@@ -65,7 +65,7 @@ func parseVersionFloor(content string) (version.V, error) {
 //
 //	absent                  -> record
 //	recorded <  binary      -> raise
-//	recorded == binary      -> keep (by parsed value: VERSION=0.37.0 equals v0.37.0)
+//	recorded == binary      -> keep (by parsed value: VERSION=1.0.0 equals v1.0.0)
 //	recorded >  binary      -> refuse; lower with --allow-downgrade
 //	unreadable or malformed -> refuse; rewrite with --allow-downgrade
 //
