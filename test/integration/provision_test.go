@@ -81,18 +81,15 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	// must leave the file exactly as found — asserted in assertManifests.
 	preManifest := snapshotHostManifest(ctx, t, client)
 
-	// Run the full pipeline.
+	// Run the full pipeline, under the host session lock like `berth
+	// provision` (released when the pass ends; a failed step is fatal).
 	red := secret.NewRedactor()
 	eng := provision.New(steps.Pipeline(srv, red, skipSSL)...)
-	events, err := eng.Run(ctx, srv, client, provision.Options{
+	lockedPass(ctx, t, client, eng, srv, provision.Options{
 		Force:      os.Getenv("BERTH_TEST_FORCE") == "true",
 		SSLStaging: sslStaging,
 		Redact:     red,
-	})
-	if err != nil {
-		t.Fatalf("pipeline pre-flight: %v", err)
-	}
-	for ev := range events {
+	}, "first run", func(ev provision.Event) {
 		// Warnings ride on terminal events (e.g. a unit-validation failure
 		// deferred to the site step); surface them so a live run's log shows
 		// the deferral happened.
@@ -100,14 +97,12 @@ func TestProvisionFreshDebian13(t *testing.T) {
 			t.Logf("warning %s: %s", ev.Step, w)
 		}
 		switch ev.Kind {
-		case provision.EventFailed:
-			t.Fatalf("step %q failed: %v", ev.Step, ev.Err)
 		case provision.EventApplied:
 			t.Logf("applied %s", ev.Step)
 		case provision.EventSatisfied:
 			t.Logf("satisfied %s", ev.Step)
 		}
-	}
+	})
 
 	// Assert the documented end state over the same connection.
 	assertServicesActive(ctx, t, client, srv)
@@ -187,7 +182,8 @@ func TestProvisionFreshDebian13(t *testing.T) {
 	// The status collector's gate, deliberately right after the idempotency
 	// proof: the engine just showed the host converged, so `berth status
 	// --drift` (the same collection path) must read it as clean — and before
-	// the restore drill, which diverges live state on purpose.
+	// the restore drill, which diverges live state on purpose. No session
+	// lock is held here: every pass above released its own.
 	assertStatus(t, cfgPath, skipSSL, sslStaging)
 
 	// LAST on purpose: the restore drill deliberately diverges live state
@@ -198,30 +194,22 @@ func TestProvisionFreshDebian13(t *testing.T) {
 }
 
 // assertSecondRunIdempotent runs the pipeline a SECOND time over the same
-// connection and asserts berth's defining contract: every step is already
-// satisfied. The SOLE exception is `preflight`, the only AlwaysRun step (it
-// re-runs `apt-get update` every run by design). Any other EventApplied, or any
-// EventFailed, on the second run is an idempotency regression and fails the test.
+// connection (under its own host session lock) and asserts berth's defining
+// contract: every step is already satisfied. The SOLE exception is
+// `preflight`, the only AlwaysRun step (it re-runs `apt-get update` every run
+// by design). Any other EventApplied, or any EventFailed, on the second run is
+// an idempotency regression and fails the test.
 func assertSecondRunIdempotent(t *testing.T, eng *provision.Engine, red *secret.Redactor, srv *config.Server, client *bssh.Client) {
 	t.Helper()
 	// Fresh deadline: the shared test context may be nearly exhausted by a slow
 	// first provision; the second run is read-only Checks + preflight apt and is fast.
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
-	events, err := eng.Run(ctx, srv, client, provision.Options{SSLStaging: os.Getenv("BERTH_TEST_SSL_STAGING") == "true", Redact: red})
-	if err != nil {
-		t.Fatalf("second run pre-flight: %v", err)
-	}
-	for ev := range events {
-		switch ev.Kind {
-		case provision.EventFailed:
-			t.Fatalf("second run: step %q failed: %v", ev.Step, ev.Err)
-		case provision.EventApplied:
-			if ev.Step != "preflight" {
-				t.Errorf("second run: step %q re-applied — berth is not idempotent (only preflight may re-apply)", ev.Step)
-			}
+	lockedPass(ctx, t, client, eng, srv, provision.Options{SSLStaging: os.Getenv("BERTH_TEST_SSL_STAGING") == "true", Redact: red}, "second run", func(ev provision.Event) {
+		if ev.Kind == provision.EventApplied && ev.Step != "preflight" {
+			t.Errorf("second run: step %q re-applied — berth is not idempotent (only preflight may re-apply)", ev.Step)
 		}
-	}
+	})
 }
 
 // anySiteSSL reports whether any configured site enables TLS.

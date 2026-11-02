@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/robsonek/berth/internal/config"
+	"github.com/robsonek/berth/internal/hostlock"
 	"github.com/robsonek/berth/internal/provision"
 	"github.com/robsonek/berth/internal/provision/steps"
 	"github.com/robsonek/berth/internal/secret"
@@ -57,6 +58,39 @@ func wantTUI(stdoutIsTTY bool, f *provisionFlags) bool {
 	return stdoutIsTTY && !f.verbose && !f.noTTY && !f.dryRun
 }
 
+// provisionConn is the connection `berth provision` drives: remote commands,
+// the held session-lock command, and Close when the run ends.
+type provisionConn interface {
+	bssh.Conn
+	Close() error
+}
+
+// connectProvision dials the server for `berth provision`. A seam: tests
+// substitute a connection without a host.
+var connectProvision = func(ctx context.Context, srv *config.Server, p bssh.HostKeyPolicy) (provisionConn, error) {
+	c, err := bssh.Connect(ctx, srv, p)
+	if err != nil {
+		return nil, err // never a nil *Client inside a non-nil interface
+	}
+	return c, nil
+}
+
+// sessionMode is the host session lock this run takes and the command its
+// holder line names. A dry-run only reads (ReadOnly never creates the lock
+// file); every other run changes the host. No other flag matters: --force,
+// --allow-downgrade and --skip-ssl never bypass or weaken the lock, and
+// --only merely names the target in the holder line.
+func sessionMode(f *provisionFlags) (hostlock.Mode, string) {
+	mode, command := hostlock.Mutating, "provision"
+	if f.dryRun {
+		mode, command = hostlock.ReadOnly, command+" --dry-run"
+	}
+	if f.only != "" {
+		command += " --only " + f.only
+	}
+	return mode, command
+}
+
 func runProvision(cmd *cobra.Command, serverPath string, f *provisionFlags) error {
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
@@ -65,7 +99,7 @@ func runProvision(cmd *cobra.Command, serverPath string, f *provisionFlags) erro
 		return err
 	}
 	red := secret.NewRedactor()
-	client, err := bssh.Connect(ctx, srv, bssh.HostKeyPolicy{
+	client, err := connectProvision(ctx, srv, bssh.HostKeyPolicy{
 		Pinned: srv.SSH.Fingerprint, KnownHosts: defaultKnownHosts(),
 		AllowTOFU: ui.IsTTY(os.Stdin), ConfirmTOFU: confirmFingerprint(cmd),
 	})
@@ -74,27 +108,45 @@ func runProvision(cmd *cobra.Command, serverPath string, f *provisionFlags) erro
 	}
 	defer func() { _ = client.Close() }()
 
-	// The SAME redactor instance feeds the steps (they register secrets on
-	// acquisition) and the engine's output policy (it masks every event and
-	// the pre-flight error).
-	eng := provision.New(steps.Pipeline(srv, red, f.skipSSL)...)
-	events, err := eng.Run(ctx, srv, client, provision.Options{
-		DryRun: f.dryRun, Only: f.only, Force: f.force, SSLStaging: f.sslStaging, Redact: red,
-		AllowDowngrade: f.allowDowngrade,
+	// One berth session per host: the lock is taken right after connecting,
+	// before the engine's first step (identity, preflight), and held until the
+	// run ends. A busy host stops here — no pipeline command reaches it.
+	mode, command := sessionMode(f)
+	err = hostlock.Run(ctx, client, mode, command, func(lctx context.Context, r bssh.Runner) error {
+		// The whole run happens in here, on the lock's context and guarded
+		// Runner: neither may be used once this function returns.
+		//
+		// The SAME redactor instance feeds the steps (they register secrets
+		// on acquisition) and the engine's output policy (it masks every
+		// event and the pre-flight error).
+		eng := provision.New(steps.Pipeline(srv, red, f.skipSSL)...)
+		events, err := eng.Run(lctx, srv, r, provision.Options{
+			DryRun: f.dryRun, Only: f.only, Force: f.force, SSLStaging: f.sslStaging, Redact: red,
+			AllowDowngrade: f.allowDowngrade,
+		})
+		if err != nil {
+			return err
+		}
+		rerr := ui.New(cmd.OutOrStdout(), wantTUI(ui.IsTTY(os.Stdout), f), f.verbose).Render(events)
+		// Cancel explicitly BEFORE the lock's release and the deferred
+		// client.Close (LIFO would close the SSH connection first): the
+		// engine must not start another step once the renderer has
+		// returned, e.g. after a TUI interrupt. The ssh layer TERMs and
+		// abandons an in-flight remote command on cancellation.
+		cancel()
+		// Then wait for the engine to stop (it closes the channel when its
+		// goroutine ends; a no-op after a renderer that read to the end), so
+		// nothing still holds the lock's Runner when the lock is released.
+		for range events {
+		}
+		return rerr
 	})
-	if err != nil {
-		return err
-	}
-	r := ui.New(cmd.OutOrStdout(), wantTUI(ui.IsTTY(os.Stdout), f), f.verbose)
-	rerr := r.Render(events)
-	// Cancel explicitly BEFORE the deferred client.Close (LIFO would close the
-	// SSH connection first): the engine must not start another step once the
-	// renderer has returned, e.g. after a TUI interrupt. The ssh layer TERMs
-	// and abandons an in-flight remote command on cancellation.
-	cancel()
-	// Defence in depth at the command boundary: cobra prints this error again,
-	// and renderer-internal errors never passed through the engine's masking.
-	return provision.RedactError(red, rerr)
+	// err is the busy error (nothing ran), ErrLost when the lock ended
+	// mid-run (it outranks the renderer's "interrupted" symptom), or the
+	// run's own error. Defence in depth at the command boundary: cobra prints
+	// this error again, and renderer-internal errors never passed through the
+	// engine's masking.
+	return provision.RedactError(red, err)
 }
 
 // defaultKnownHosts returns the conventional path to the user's known_hosts file.
