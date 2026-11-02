@@ -3,6 +3,16 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Changed
+
+- `berth init` now writes the config with `go.yaml.in/yaml/v3`, the
+  maintained successor of the archived `gopkg.in/yaml.v3` (the library viper
+  already used to read configs). The written file is byte-identical: every
+  example, test and local config tried serialises the same with both
+  libraries. The binary now carries a single YAML library.
+
 ## [1.0.0] — 2026-11-02
 
 The first stable release. From 1.0.0 berth follows Semantic Versioning for the
