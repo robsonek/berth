@@ -3,6 +3,17 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Security
+
+- **Go 1.27.3 → 1.27.4, clearing one standard-library advisory.**
+  GO-2026-6859 (`net/http`: an HTTP/1 server crash through a
+  `MaxBytesReader` header race) is fixed in 1.27.4. berth is an HTTP client
+  only, so the server-side fault was not reachable in practice; the scheduled
+  govulncheck run flagged it because `net/http` is linked in. A toolchain
+  change only, with no code change.
+
 ## [1.0.1] — 2026-11-02
 
 ### Changed
