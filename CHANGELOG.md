@@ -3,7 +3,7 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
-## [Unreleased]
+## [1.0.2] — 2026-11-16
 
 ### Security
 
