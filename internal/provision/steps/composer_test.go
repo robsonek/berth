@@ -26,27 +26,236 @@ func TestComposerRequiresPHP(t *testing.T) {
 	}
 }
 
-func TestComposerCheckSatisfiedWhenPresent(t *testing.T) {
+// composerCronCat is the one read Check and Apply make of the cron file.
+var composerCronCat = "cat " + shQuote(composerUpdateCronPath)
+
+// renderedComposerCron is berth's own rendered cron content.
+func renderedComposerCron(t *testing.T) string {
+	t.Helper()
+	b, err := renderComposerUpdateCron()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// stubComposerMissing makes the host read back with no composer on PATH and
+// no cron file: Apply takes the install path, then writes the cron.
+func stubComposerMissing(f *bssh.FakeRunner) {
+	f.On("command -v composer", bssh.Result{ExitCode: 1})
+	f.On(composerCronCat, bssh.Result{ExitCode: 1})
+}
+
+func composerAutoUpdateOff() *config.Server {
+	off := false
+	return &config.Server{Composer: config.Composer{AutoUpdate: &off}}
+}
+
+const foreignCron = "0 3 * * * root /opt/ops/update-composer\n"
+
+func TestComposerCheckSatisfiedWhenPresentAndCronCurrent(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("command -v composer", bssh.Result{ExitCode: 0})
+	f.On(composerCronCat, bssh.Result{Stdout: renderedComposerCron(t)})
 	cr, err := Composer().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !cr.Satisfied {
-		t.Errorf("expected satisfied when composer is present; got %+v", cr)
+		t.Errorf("expected satisfied with composer present and the cron current; got %+v", cr)
 	}
 }
 
 func TestComposerCheckUnsatisfiedWhenAbsent(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On("command -v composer", bssh.Result{ExitCode: 1})
+	f.On(composerCronCat, bssh.Result{Stdout: renderedComposerCron(t)})
 	cr, err := Composer().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cr.Satisfied {
 		t.Error("expected unsatisfied when composer is absent")
+	}
+	if got := strings.Join(cr.Changes, "\n"); !strings.Contains(got, "install composer") || strings.Contains(got, composerUpdateCronPath) {
+		t.Errorf("Changes must plan the install only; got %q", got)
+	}
+}
+
+func TestComposerCheckUnsatisfiedWhenCronAbsent(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("command -v composer", bssh.Result{ExitCode: 0})
+	f.On(composerCronCat, bssh.Result{ExitCode: 1})
+	cr, err := Composer().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Fatalf("expected unsatisfied with the cron absent; got %+v", cr)
+	}
+	if got := strings.Join(cr.Changes, "\n"); !strings.Contains(got, "write "+composerUpdateCronPath) || strings.Contains(got, "install composer") {
+		t.Errorf("Changes must plan the cron write only; got %q", got)
+	}
+}
+
+func TestComposerCheckUnsatisfiedWhenCronDrifted(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("command -v composer", bssh.Result{ExitCode: 0})
+	f.On(composerCronCat, bssh.Result{Stdout: managedMarker + "\n# stale content from an older berth\n"})
+	cr, err := Composer().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Fatalf("expected unsatisfied with a drifted cron; got %+v", cr)
+	}
+}
+
+func TestComposerCheckRefusesForeignCron(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("command -v composer", bssh.Result{ExitCode: 0})
+	f.On(composerCronCat, bssh.Result{Stdout: foreignCron})
+	_, err := Composer().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
+	if err == nil || !strings.Contains(err.Error(), composerUpdateCronPath) {
+		t.Fatalf("a foreign cron must refuse naming the path; got %v", err)
+	}
+	cr, err := Composer().Check(context.Background(), provision.RunCtx{Force: true}, &config.Server{}, f)
+	if err != nil {
+		t.Fatalf("--force must not refuse; got %v", err)
+	}
+	if cr.Satisfied {
+		t.Error("--force over a foreign cron must plan the overwrite, not report satisfied")
+	}
+}
+
+func TestComposerCheckKnobOff(t *testing.T) {
+	cases := []struct {
+		name      string
+		cron      bssh.Result
+		satisfied bool
+	}{
+		{"no file", bssh.Result{ExitCode: 1}, true},
+		{"berth-managed file lingers", bssh.Result{Stdout: managedMarker + "\nanything\n"}, false},
+		{"foreign file is left alone", bssh.Result{Stdout: foreignCron}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := bssh.NewFakeRunner()
+			f.On("command -v composer", bssh.Result{ExitCode: 0})
+			f.On(composerCronCat, c.cron)
+			cr, err := Composer().Check(context.Background(), provision.RunCtx{}, composerAutoUpdateOff(), f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cr.Satisfied != c.satisfied {
+				t.Errorf("Satisfied = %v, want %v (%+v)", cr.Satisfied, c.satisfied, cr)
+			}
+			if !c.satisfied && !strings.Contains(strings.Join(cr.Changes, "\n"), "remove "+composerUpdateCronPath) {
+				t.Errorf("Changes must plan the removal; got %v", cr.Changes)
+			}
+		})
+	}
+}
+
+// ranAny reports whether any recorded command starts with one of the prefixes.
+func ranAny(f *bssh.FakeRunner, prefixes ...string) string {
+	for _, c := range f.Calls() {
+		for _, p := range prefixes {
+			if strings.HasPrefix(c.Cmd, p) {
+				return c.Cmd
+			}
+		}
+	}
+	return ""
+}
+
+// The state of every host provisioned before the cron existed: composer is
+// installed, the cron is not. Apply writes the cron and must not touch the
+// installer (an unstubbed installer command would also fail the FakeRunner).
+func TestComposerApplyWritesCronWithoutReinstalling(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("command -v composer", bssh.Result{ExitCode: 0})
+	f.On(composerCronCat, bssh.Result{ExitCode: 1})
+	if err := Composer().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if cmd := ranAny(f, "mktemp", "php "); cmd != "" {
+		t.Errorf("the installer must not run when composer is present; ran %q", cmd)
+	}
+	w := f.Writes()
+	if len(w) != 1 {
+		t.Fatalf("want exactly one write, got %d", len(w))
+	}
+	if w[0].Path != composerUpdateCronPath || string(w[0].Content) != renderedComposerCron(t) || w[0].Mode != 0o644 || w[0].Owner != "root" || w[0].Group != "root" {
+		t.Errorf("unexpected cron write: %+v", w[0])
+	}
+}
+
+func TestComposerApplyKnobOffRemovesManagedCron(t *testing.T) {
+	rm := "rm -f " + shQuote(composerUpdateCronPath)
+	cases := []struct {
+		name   string
+		cron   bssh.Result
+		force  bool
+		wantRm bool
+	}{
+		{"berth-managed file", bssh.Result{Stdout: managedMarker + "\nanything\n"}, false, true},
+		{"absent", bssh.Result{ExitCode: 1}, false, false},
+		{"foreign, even with --force", bssh.Result{Stdout: foreignCron}, true, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := bssh.NewFakeRunner()
+			f.On("command -v composer", bssh.Result{ExitCode: 0})
+			f.On(composerCronCat, c.cron)
+			f.On(rm, bssh.Result{})
+			if err := Composer().Apply(context.Background(), provision.RunCtx{Force: c.force}, composerAutoUpdateOff(), f); err != nil {
+				t.Fatalf("Apply() error = %v", err)
+			}
+			if got := ranAny(f, "rm ") != ""; got != c.wantRm {
+				t.Errorf("rm ran = %v, want %v", got, c.wantRm)
+			}
+			if len(f.Writes()) != 0 {
+				t.Errorf("knob off must write nothing; got %+v", f.Writes())
+			}
+		})
+	}
+}
+
+func TestComposerApplyRefusesForeignCron(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("command -v composer", bssh.Result{ExitCode: 0})
+	f.On(composerCronCat, bssh.Result{Stdout: foreignCron})
+	err := Composer().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f)
+	if err == nil || !strings.Contains(err.Error(), composerUpdateCronPath) {
+		t.Fatalf("a foreign cron must refuse naming the path; got %v", err)
+	}
+	if len(f.Writes()) != 0 {
+		t.Errorf("nothing may be written over a foreign cron; got %+v", f.Writes())
+	}
+}
+
+// Composer missing and the knob off: the installer still runs, no cron.
+func TestComposerApplyKnobOffStillInstalls(t *testing.T) {
+	const sig = "abc123def456"
+	stubComposerSig(t, sig)
+	setup := fakeComposerDir + "/composer-setup.php"
+	installCmd := fmt.Sprintf("php %s --install-dir=/usr/local/bin --filename=composer", setup)
+	f := bssh.NewFakeRunner()
+	stubComposerMissing(f)
+	f.On("mktemp -d /tmp/berth-composer.XXXXXXXXXX", bssh.Result{Stdout: fakeComposerDir + "\n"})
+	f.On(fmt.Sprintf("php -r \"copy('%s', '%s');\"", composerInstallerURL, setup), bssh.Result{})
+	f.On(fmt.Sprintf("php -r \"echo hash_file('sha384', '%s');\"", setup), bssh.Result{Stdout: sig})
+	f.On(installCmd, bssh.Result{})
+	f.On("rm -rf "+shQuote(fakeComposerDir), bssh.Result{})
+	if err := Composer().Apply(context.Background(), provision.RunCtx{}, composerAutoUpdateOff(), f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if ranAny(f, installCmd) == "" {
+		t.Error("the installer must run when composer is missing, knob off or not")
+	}
+	if len(f.Writes()) != 0 {
+		t.Errorf("knob off must write no cron; got %+v", f.Writes())
 	}
 }
 
@@ -63,6 +272,7 @@ func TestComposerApplyInstallsOnMatchingHash(t *testing.T) {
 	cleanupCmd := "rm -rf " + shQuote(fakeComposerDir)
 
 	f := bssh.NewFakeRunner()
+	stubComposerMissing(f)
 	f.On("mktemp -d /tmp/berth-composer.XXXXXXXXXX", bssh.Result{Stdout: fakeComposerDir + "\n"})
 	f.On(fmt.Sprintf("php -r \"copy('%s', '%s');\"", composerInstallerURL, setup), bssh.Result{})
 	f.On(hashCmd, bssh.Result{Stdout: sig})
@@ -83,6 +293,10 @@ func TestComposerApplyInstallsOnMatchingHash(t *testing.T) {
 			t.Errorf("Apply did not run %q; calls:\n%s", want, joined)
 		}
 	}
+	// A fresh host gets the self-update cron right after the install.
+	if w := f.Writes(); len(w) != 1 || w[0].Path != composerUpdateCronPath {
+		t.Errorf("want the cron written after the install; writes: %+v", w)
+	}
 }
 
 func TestComposerApplyAbortsOnHashMismatch(t *testing.T) {
@@ -94,6 +308,7 @@ func TestComposerApplyAbortsOnHashMismatch(t *testing.T) {
 	cleanupCmd := "rm -rf " + shQuote(fakeComposerDir)
 
 	f := bssh.NewFakeRunner()
+	stubComposerMissing(f)
 	f.On("mktemp -d /tmp/berth-composer.XXXXXXXXXX", bssh.Result{Stdout: fakeComposerDir + "\n"})
 	f.On(fmt.Sprintf("php -r \"copy('%s', '%s');\"", composerInstallerURL, setup), bssh.Result{})
 	f.On(hashCmd, bssh.Result{Stdout: "a-different-hash"})
@@ -119,6 +334,10 @@ func TestComposerApplyAbortsOnHashMismatch(t *testing.T) {
 	}
 	if !ranCleanup {
 		t.Errorf("deferred cleanup %q did not run after the mismatch", cleanupCmd)
+	}
+	// No cron for a Composer that was never installed.
+	if len(f.Writes()) != 0 {
+		t.Errorf("a failed install must not write the cron; got %+v", f.Writes())
 	}
 }
 
@@ -147,6 +366,7 @@ func TestComposerApplyCleanupSurvivesCancelAndIsBounded(t *testing.T) {
 
 	f := bssh.NewFakeRunner()
 	f.On("mktemp -d /tmp/berth-composer.XXXXXXXXXX", bssh.Result{Stdout: fakeComposerDir + "\n"})
+	stubComposerMissing(f)
 	f.On(dlCmd, bssh.Result{})
 	f.On(fmt.Sprintf("php -r \"echo hash_file('sha384', '%s');\"", setup), bssh.Result{Stdout: sig})
 	f.On(fmt.Sprintf("php %s --install-dir=/usr/local/bin --filename=composer", setup), bssh.Result{})
@@ -192,6 +412,7 @@ func TestComposerApplyRejectsUnexpectedMktempOutput(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := bssh.NewFakeRunner()
+			stubComposerMissing(f)
 			f.On("mktemp -d /tmp/berth-composer.XXXXXXXXXX", bssh.Result{Stdout: c.stdout})
 
 			err := Composer().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f)
@@ -208,5 +429,16 @@ func TestComposerApplyRejectsUnexpectedMktempOutput(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The cron updates exactly the binary berth's installer wrote, by absolute
+// path and behind an -x guard — never whatever `composer` resolves to on PATH.
+func TestComposerCronTargetsBerthsOwnBinary(t *testing.T) {
+	cron := renderedComposerCron(t)
+	for _, want := range []string{"[ -x " + composerBin + " ]", composerBin + " self-update --stable"} {
+		if !strings.Contains(cron, want) {
+			t.Errorf("cron must contain %q; got:\n%s", want, cron)
+		}
 	}
 }

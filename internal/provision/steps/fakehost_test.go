@@ -957,6 +957,15 @@ func populateManagedFiles(h *fakeHost, s *config.Server, profile string) {
 		}
 		h.putManaged(nginxGzipPath, gz, profile)
 	}
+	// composer's daily self-update cron (composer.auto_update on, the default
+	// for every variant) — the step's own render, per the rendered-bytes rule.
+	if s.Composer.AutoUpdateEnabled() {
+		cron, err := renderComposerUpdateCron()
+		if err != nil {
+			panic("render the fixture composer cron: " + err.Error())
+		}
+		h.putManaged(composerUpdateCronPath, cron, profile)
+	}
 	// accounts' artifacts. The sudoers bodies come from the same sources the
 	// step compares against: the berth grant is the step's own const, the site
 	// grant the same renderer, and authorized_keys the same composer over the
