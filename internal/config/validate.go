@@ -68,7 +68,7 @@ var (
 // these allow-lists hard-fails Load() for an existing pinned config of a
 // live host that cannot migrate (php.version is immutable on a provisioned
 // host). Add new values freely; deletions need a deprecation path.
-var allowedPHPVersions = map[string]bool{"8.2": true, "8.3": true, "8.4": true, "8.5": true}
+var allowedPHPVersions = map[string]bool{"8.2": true, "8.3": true, "8.4": true, "8.5": true, "8.6": true}
 var allowedPHPSources = map[string]bool{"auto": true, "sury": true, "debian": true}
 var allowedNginxSources = map[string]bool{"debian": true, "nginx": true}
 

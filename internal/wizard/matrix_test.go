@@ -1648,7 +1648,7 @@ func addGapScenarios(
 
 	// ---- Gap 2: non-default PHP version/source ----
 
-	for _, ver := range []string{"8.2", "8.3", "8.4"} {
+	for _, ver := range []string{"8.2", "8.3", "8.4", "8.6"} {
 		t.Run("gap-php-version-"+ver+"-roundtrips", func(t *testing.T) {
 			a := base("gap-php-"+strings.ReplaceAll(ver, ".", ""), "203.0.113.10")
 			a.PHPVersion = ver
