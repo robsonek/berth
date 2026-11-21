@@ -134,8 +134,8 @@ ssh:
                                # prompt / mismatch errors (e.g. ecdsa-sha2-nistp256).
 
 php:
-  version: "8.5"               # 8.2 | 8.3 | 8.4 | 8.5
-  source: auto                 # auto | sury | debian  (Debian ships 8.4; Surý → 8.5)
+  version: "8.5"               # 8.2 | 8.3 | 8.4 | 8.5 | 8.6
+  source: auto                 # auto | sury | debian  (Debian ships 8.4; Surý → the others)
 
 nginx:
   source: debian               # debian | nginx  (nginx.org mainline; needed for HTTP/3)

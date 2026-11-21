@@ -1017,3 +1017,16 @@ func TestOffsiteValidate(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateAcceptsEveryAllowedPHPVersion pins the supported php.version
+// set from the outside: the list is grow-only (see allowedPHPVersions), so a
+// value dropped by accident fails here.
+func TestValidateAcceptsEveryAllowedPHPVersion(t *testing.T) {
+	for _, ver := range []string{"8.2", "8.3", "8.4", "8.5", "8.6"} {
+		s := base()
+		s.PHP.Version = ver
+		if err := s.Validate(); err != nil {
+			t.Errorf("php.version %q must be accepted, got %v", ver, err)
+		}
+	}
+}

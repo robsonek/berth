@@ -3,6 +3,16 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Added
+
+- **PHP 8.6** is an accepted `php.version` (`"8.6"`), installed from the Surý
+  repository like every version other than Debian's stock 8.4, and offered by
+  `berth init`. The wizard default stays 8.5. `php.version` is still immutable
+  on a provisioned host: moving an existing host to 8.6 follows the manual
+  migration recipe in the README.
+
 ## [1.0.2] — 2026-11-16
 
 ### Security
