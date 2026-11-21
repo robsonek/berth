@@ -3,6 +3,24 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Added
+
+- **Composer keeps itself up to date.** The `composer` step now manages
+  `/etc/cron.d/berth-composer-update`, which runs
+  `composer self-update --stable` every day at 04:17 as root against
+  `/usr/local/bin/composer` and logs to the journal
+  (`journalctl -t berth-composer`). Until now Composer stayed at whatever
+  version was current on the day of the first provision. **Existing hosts
+  receive the cron on their next provision** and from then on follow
+  Composer's stable channel, a future major release included; the installed
+  binary itself is not touched by the provision. Opt out with the new
+  `composer.auto_update: false`, which removes berth's cron (a file berth did
+  not write at that path is left alone) and leaves updating to you.
+  `berth init` asks for it. A provision still never updates Composer itself,
+  so a new Composer release is never reported as drift.
+
 ## [1.0.2] — 2026-11-16
 
 ### Security
