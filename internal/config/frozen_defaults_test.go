@@ -117,6 +117,17 @@ func TestNginxGzipDefaultIsFrozen(t *testing.T) {
 	}
 }
 
+// composer.auto_update gates the daily self-update cron the composer step
+// owns: unset means ON, so a config that never mentions it gets the cron
+// written and its host follows Composer's stable channel. Flipping this
+// default adds or removes a managed file on every host — a BREAKING entry,
+// like every pin above.
+func TestComposerAutoUpdateDefaultIsFrozen(t *testing.T) {
+	if !(Composer{}).AutoUpdateEnabled() {
+		t.Error("composer.auto_update default changed: want on (unset = self-update cron written)")
+	}
+}
+
 // firewall.enabled gates ufw itself: unset means ON (today's ufw with the
 // built-in SSH/80,443 rules), so a config that never mentions it keeps its
 // firewall. Flipping this default would disable the firewall on every host
