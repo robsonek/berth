@@ -61,7 +61,7 @@ func (h *huhPrompter) ServerCore(a *Answers) error {
 				Value(&a.Fingerprint).Validate(config.ValidFingerprint),
 		),
 		huh.NewGroup(
-			huh.NewSelect[string]().Title("PHP version").Options(huh.NewOptions("8.5", "8.4", "8.3", "8.2")...).Value(&a.PHPVersion),
+			huh.NewSelect[string]().Title("PHP version").Options(huh.NewOptions("8.6", "8.5", "8.4", "8.3", "8.2")...).Value(&a.PHPVersion),
 			huh.NewSelect[string]().Title("PHP source").Options(huh.NewOptions("auto", "sury", "debian")...).Value(&a.PHPSource),
 			huh.NewConfirm().Title("Keep Composer updated automatically (daily self-update)?").Value(&a.ComposerAutoUpdate),
 			huh.NewSelect[config.DatabaseChoice]().Title("Database engine + source").Options(dbOpts...).Value(&choice),
