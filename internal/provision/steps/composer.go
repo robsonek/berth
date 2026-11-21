@@ -109,6 +109,12 @@ func ensureComposerCron(ctx context.Context, rc provision.RunCtx, s *config.Serv
 		}
 		return nil
 	}
+	// A cron.d file is inert without the daemon, and no other step
+	// guarantees one here (site ensures it only for scheduler crons, backups
+	// only when enabled): ensure it before writing the file that needs it.
+	if err := ensureCron(ctx, r); err != nil {
+		return err
+	}
 	want, err := renderComposerUpdateCron()
 	if err != nil {
 		return err
@@ -152,7 +158,15 @@ func (composer) Check(ctx context.Context, rc provision.RunCtx, s *config.Server
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	if installed && cronOK {
+	// The cron is inert without a running cron daemon; the auto-update
+	// promise depends on it, so probe it (Apply heals via ensureCron).
+	daemonOK := true
+	if s.Composer.AutoUpdateEnabled() {
+		if daemonOK, err = serviceUp(ctx, r, "cron"); err != nil {
+			return provision.CheckResult{}, err
+		}
+	}
+	if installed && cronOK && daemonOK {
 		reason := "composer installed; daily self-update cron in place"
 		if !s.Composer.AutoUpdateEnabled() {
 			reason = "composer installed; auto-update not managed (composer.auto_update: false)"
@@ -169,6 +183,9 @@ func (composer) Check(ctx context.Context, rc provision.RunCtx, s *config.Server
 		} else {
 			changes = append(changes, "remove "+composerUpdateCronPath+" (composer.auto_update: false)")
 		}
+	}
+	if !daemonOK {
+		changes = append(changes, "install and enable the cron daemon (the self-update cron is inert without it)")
 	}
 	return provision.CheckResult{Satisfied: false, Changes: changes}, nil
 }

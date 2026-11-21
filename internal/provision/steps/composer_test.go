@@ -46,6 +46,12 @@ func stubComposerMissing(f *bssh.FakeRunner) {
 	f.On(composerCronCat, bssh.Result{ExitCode: 1})
 }
 
+// stubCronDaemonUp makes the cron daemon read back active and enabled.
+func stubCronDaemonUp(f *bssh.FakeRunner) {
+	f.On("systemctl is-active cron", bssh.Result{})
+	f.On("systemctl is-enabled cron", bssh.Result{})
+}
+
 func composerAutoUpdateOff() *config.Server {
 	off := false
 	return &config.Server{Composer: config.Composer{AutoUpdate: &off}}
@@ -55,6 +61,7 @@ const foreignCron = "0 3 * * * root /opt/ops/update-composer\n"
 
 func TestComposerCheckSatisfiedWhenPresentAndCronCurrent(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	stubCronDaemonUp(f)
 	f.On("command -v composer", bssh.Result{ExitCode: 0})
 	f.On(composerCronCat, bssh.Result{Stdout: renderedComposerCron(t)})
 	cr, err := Composer().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
@@ -68,6 +75,7 @@ func TestComposerCheckSatisfiedWhenPresentAndCronCurrent(t *testing.T) {
 
 func TestComposerCheckUnsatisfiedWhenAbsent(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	stubCronDaemonUp(f)
 	f.On("command -v composer", bssh.Result{ExitCode: 1})
 	f.On(composerCronCat, bssh.Result{Stdout: renderedComposerCron(t)})
 	cr, err := Composer().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
@@ -84,6 +92,7 @@ func TestComposerCheckUnsatisfiedWhenAbsent(t *testing.T) {
 
 func TestComposerCheckUnsatisfiedWhenCronAbsent(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	stubCronDaemonUp(f)
 	f.On("command -v composer", bssh.Result{ExitCode: 0})
 	f.On(composerCronCat, bssh.Result{ExitCode: 1})
 	cr, err := Composer().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
@@ -100,6 +109,7 @@ func TestComposerCheckUnsatisfiedWhenCronAbsent(t *testing.T) {
 
 func TestComposerCheckUnsatisfiedWhenCronDrifted(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	stubCronDaemonUp(f)
 	f.On("command -v composer", bssh.Result{ExitCode: 0})
 	f.On(composerCronCat, bssh.Result{Stdout: managedMarker + "\n# stale content from an older berth\n"})
 	cr, err := Composer().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
@@ -113,6 +123,7 @@ func TestComposerCheckUnsatisfiedWhenCronDrifted(t *testing.T) {
 
 func TestComposerCheckRefusesForeignCron(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	stubCronDaemonUp(f)
 	f.On("command -v composer", bssh.Result{ExitCode: 0})
 	f.On(composerCronCat, bssh.Result{Stdout: foreignCron})
 	_, err := Composer().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
@@ -141,6 +152,7 @@ func TestComposerCheckKnobOff(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := bssh.NewFakeRunner()
+			stubCronDaemonUp(f)
 			f.On("command -v composer", bssh.Result{ExitCode: 0})
 			f.On(composerCronCat, c.cron)
 			cr, err := Composer().Check(context.Background(), provision.RunCtx{}, composerAutoUpdateOff(), f)
@@ -149,6 +161,9 @@ func TestComposerCheckKnobOff(t *testing.T) {
 			}
 			if cr.Satisfied != c.satisfied {
 				t.Errorf("Satisfied = %v, want %v (%+v)", cr.Satisfied, c.satisfied, cr)
+			}
+			if cmd := ranAny(f, "systemctl"); cmd != "" {
+				t.Errorf("knob off must not probe the cron daemon; ran %q", cmd)
 			}
 			if !c.satisfied && !strings.Contains(strings.Join(cr.Changes, "\n"), "remove "+composerUpdateCronPath) {
 				t.Errorf("Changes must plan the removal; got %v", cr.Changes)
@@ -174,6 +189,7 @@ func ranAny(f *bssh.FakeRunner, prefixes ...string) string {
 // installer (an unstubbed installer command would also fail the FakeRunner).
 func TestComposerApplyWritesCronWithoutReinstalling(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	stubCronDaemonUp(f)
 	f.On("command -v composer", bssh.Result{ExitCode: 0})
 	f.On(composerCronCat, bssh.Result{ExitCode: 1})
 	if err := Composer().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f); err != nil {
@@ -206,6 +222,7 @@ func TestComposerApplyKnobOffRemovesManagedCron(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := bssh.NewFakeRunner()
+			stubCronDaemonUp(f)
 			f.On("command -v composer", bssh.Result{ExitCode: 0})
 			f.On(composerCronCat, c.cron)
 			f.On(rm, bssh.Result{})
@@ -218,12 +235,16 @@ func TestComposerApplyKnobOffRemovesManagedCron(t *testing.T) {
 			if len(f.Writes()) != 0 {
 				t.Errorf("knob off must write nothing; got %+v", f.Writes())
 			}
+			if cmd := ranAny(f, "systemctl", "apt"); cmd != "" {
+				t.Errorf("knob off must not touch the cron daemon; ran %q", cmd)
+			}
 		})
 	}
 }
 
 func TestComposerApplyRefusesForeignCron(t *testing.T) {
 	f := bssh.NewFakeRunner()
+	stubCronDaemonUp(f)
 	f.On("command -v composer", bssh.Result{ExitCode: 0})
 	f.On(composerCronCat, bssh.Result{Stdout: foreignCron})
 	err := Composer().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, f)
@@ -242,6 +263,7 @@ func TestComposerApplyKnobOffStillInstalls(t *testing.T) {
 	setup := fakeComposerDir + "/composer-setup.php"
 	installCmd := fmt.Sprintf("php %s --install-dir=/usr/local/bin --filename=composer", setup)
 	f := bssh.NewFakeRunner()
+	stubCronDaemonUp(f)
 	stubComposerMissing(f)
 	f.On("mktemp -d /tmp/berth-composer.XXXXXXXXXX", bssh.Result{Stdout: fakeComposerDir + "\n"})
 	f.On(fmt.Sprintf("php -r \"copy('%s', '%s');\"", composerInstallerURL, setup), bssh.Result{})
@@ -272,6 +294,7 @@ func TestComposerApplyInstallsOnMatchingHash(t *testing.T) {
 	cleanupCmd := "rm -rf " + shQuote(fakeComposerDir)
 
 	f := bssh.NewFakeRunner()
+	stubCronDaemonUp(f)
 	stubComposerMissing(f)
 	f.On("mktemp -d /tmp/berth-composer.XXXXXXXXXX", bssh.Result{Stdout: fakeComposerDir + "\n"})
 	f.On(fmt.Sprintf("php -r \"copy('%s', '%s');\"", composerInstallerURL, setup), bssh.Result{})
@@ -308,6 +331,7 @@ func TestComposerApplyAbortsOnHashMismatch(t *testing.T) {
 	cleanupCmd := "rm -rf " + shQuote(fakeComposerDir)
 
 	f := bssh.NewFakeRunner()
+	stubCronDaemonUp(f)
 	stubComposerMissing(f)
 	f.On("mktemp -d /tmp/berth-composer.XXXXXXXXXX", bssh.Result{Stdout: fakeComposerDir + "\n"})
 	f.On(fmt.Sprintf("php -r \"copy('%s', '%s');\"", composerInstallerURL, setup), bssh.Result{})
@@ -365,6 +389,7 @@ func TestComposerApplyCleanupSurvivesCancelAndIsBounded(t *testing.T) {
 	cleanupCmd := "rm -rf " + shQuote(fakeComposerDir)
 
 	f := bssh.NewFakeRunner()
+	stubCronDaemonUp(f)
 	f.On("mktemp -d /tmp/berth-composer.XXXXXXXXXX", bssh.Result{Stdout: fakeComposerDir + "\n"})
 	stubComposerMissing(f)
 	f.On(dlCmd, bssh.Result{})
@@ -412,6 +437,7 @@ func TestComposerApplyRejectsUnexpectedMktempOutput(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := bssh.NewFakeRunner()
+			stubCronDaemonUp(f)
 			stubComposerMissing(f)
 			f.On("mktemp -d /tmp/berth-composer.XXXXXXXXXX", bssh.Result{Stdout: c.stdout})
 
@@ -440,5 +466,74 @@ func TestComposerCronTargetsBerthsOwnBinary(t *testing.T) {
 		if !strings.Contains(cron, want) {
 			t.Errorf("cron must contain %q; got:\n%s", want, cron)
 		}
+	}
+}
+
+// A cron.d file is inert without a running cron daemon, and nothing else
+// guarantees one (scheduler off, no backups): the step probes it itself.
+func TestComposerCheckUnsatisfiedWhenCronDaemonDown(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("command -v composer", bssh.Result{ExitCode: 0})
+	f.On(composerCronCat, bssh.Result{Stdout: renderedComposerCron(t)})
+	f.On("systemctl is-active cron", bssh.Result{ExitCode: 3})
+	f.On("systemctl is-enabled cron", bssh.Result{ExitCode: 1})
+	cr, err := Composer().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied {
+		t.Fatalf("expected unsatisfied with the cron daemon down; got %+v", cr)
+	}
+	if got := strings.Join(cr.Changes, "\n"); !strings.Contains(got, "cron daemon") {
+		t.Errorf("Changes must plan the cron daemon; got %q", got)
+	}
+}
+
+// lenientRunner answers every unstubbed command with success, so a test can
+// assert on the order of commands whose exact strings it does not own (apt).
+type lenientRunner struct {
+	*bssh.FakeRunner
+	order []string
+}
+
+func (l *lenientRunner) Run(ctx context.Context, cmd string, stdin []byte) (bssh.Result, error) {
+	l.order = append(l.order, cmd)
+	res, err := l.FakeRunner.Run(ctx, cmd, stdin)
+	if err != nil && strings.Contains(err.Error(), "unstubbed command") {
+		return bssh.Result{}, nil
+	}
+	return res, err
+}
+
+// Apply installs and enables the cron daemon BEFORE writing the cron file
+// that depends on it. The file's write-guard cat is the observable proxy for
+// the write (WriteFile calls are not interleaved with Run calls).
+func TestComposerApplyEnsuresCronDaemonBeforeTheCron(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On("command -v composer", bssh.Result{ExitCode: 0})
+	f.On(composerCronCat, bssh.Result{ExitCode: 1})
+	f.On("systemctl is-active cron", bssh.Result{ExitCode: 3})
+	f.On("systemctl is-enabled cron", bssh.Result{ExitCode: 1})
+	l := &lenientRunner{FakeRunner: f}
+	if err := Composer().Apply(context.Background(), provision.RunCtx{}, &config.Server{}, l); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	enable, guard := -1, -1
+	for i, cmd := range l.order {
+		switch cmd {
+		case "systemctl enable --now cron":
+			enable = i
+		case composerCronCat:
+			guard = i
+		}
+	}
+	if enable < 0 {
+		t.Fatalf("Apply must enable the cron daemon; ran:\n%s", strings.Join(l.order, "\n"))
+	}
+	if guard < enable {
+		t.Errorf("the cron daemon must be ensured before the cron file is written; ran:\n%s", strings.Join(l.order, "\n"))
+	}
+	if len(f.Writes()) != 1 {
+		t.Errorf("want the cron written; writes: %+v", f.Writes())
 	}
 }
