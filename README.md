@@ -467,7 +467,9 @@ anyone logging in.
 - `berth provision` installs Composer when it is missing and never updates an
   installed one; a new Composer release is not drift.
 - The cron only ever runs `/usr/local/bin/composer`. A Composer berth did not
-  install (the Debian package in `/usr/bin`, say) is never touched.
+  install (the Debian package in `/usr/bin`, say) is never touched. When that
+  is the `composer` on the host's `PATH`, every run — and
+  `berth status --drift` — warns that the cron does nothing for it.
 - Each run logs to the journal: `journalctl -t berth-composer`.
 - To undo an update: `sudo composer self-update --rollback` (one previous
   version is kept). The next nightly run updates again, so also set

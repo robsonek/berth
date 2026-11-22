@@ -135,13 +135,28 @@ func Composer() provision.Step { return composer{} }
 func (composer) Name() string       { return "composer" }
 func (composer) Requires() []string { return []string{"php"} }
 
-// composerOnPath reports whether a composer binary resolves on PATH.
-func composerOnPath(ctx context.Context, r bssh.Runner) (bool, error) {
+// composerOnPath reports whether a composer binary resolves on PATH, and
+// where (the path `command -v` prints; empty when it printed none).
+func composerOnPath(ctx context.Context, r bssh.Runner) (path string, installed bool, err error) {
 	res, err := r.Run(ctx, "command -v composer", nil)
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
-	return res.ExitCode == 0, nil
+	return strings.TrimSpace(res.Stdout), res.ExitCode == 0, nil
+}
+
+// foreignComposerNote is the warning for a host whose `composer` is not the
+// binary berth installs: berth leaves such a Composer alone, and the
+// self-update cron — which names composerBin by absolute path — does nothing
+// for it. Without the note the step would report the cron "in place" and the
+// operator would believe Composer is being kept current. Empty when there is
+// nothing to say: auto-update is off (nothing is promised), the lookup
+// printed no path, or the path is berth's own.
+func foreignComposerNote(s *config.Server, path string) string {
+	if !s.Composer.AutoUpdateEnabled() || path == "" || path == composerBin {
+		return ""
+	}
+	return "composer on this host is " + path + ", not the one berth installs (" + composerBin + "), so the daily self-update cron does nothing for it — update it the way it was installed, or remove it and run berth provision again to get berth's"
 }
 
 func (composer) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
@@ -154,9 +169,13 @@ func (composer) Check(ctx context.Context, rc provision.RunCtx, s *config.Server
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	installed, err := composerOnPath(ctx, r)
+	path, installed, err := composerOnPath(ctx, r)
 	if err != nil {
 		return provision.CheckResult{}, err
+	}
+	var notes []string
+	if note := foreignComposerNote(s, path); installed && note != "" {
+		notes = append(notes, note)
 	}
 	// The cron is inert without a running cron daemon; the auto-update
 	// promise depends on it, so probe it (Apply heals via ensureCron).
@@ -171,7 +190,7 @@ func (composer) Check(ctx context.Context, rc provision.RunCtx, s *config.Server
 		if !s.Composer.AutoUpdateEnabled() {
 			reason = "composer installed; auto-update not managed (composer.auto_update: false)"
 		}
-		return provision.CheckResult{Satisfied: true, Reason: reason}, nil
+		return provision.CheckResult{Satisfied: true, Reason: reason, Warnings: notes}, nil
 	}
 	var changes []string
 	if !installed {
@@ -187,14 +206,14 @@ func (composer) Check(ctx context.Context, rc provision.RunCtx, s *config.Server
 	if !daemonOK {
 		changes = append(changes, "install and enable the cron daemon (the self-update cron is inert without it)")
 	}
-	return provision.CheckResult{Satisfied: false, Changes: changes}, nil
+	return provision.CheckResult{Satisfied: false, Changes: changes, Warnings: notes}, nil
 }
 
 func (composer) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
 	// Apply also runs for the cron alone (every host provisioned before the
 	// cron existed), so the install is gated on its own probe: an installed
 	// Composer is never re-installed — updating it is the cron's job.
-	installed, err := composerOnPath(ctx, r)
+	path, installed, err := composerOnPath(ctx, r)
 	if err != nil {
 		return err
 	}
@@ -202,6 +221,8 @@ func (composer) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server
 		if err := installComposer(ctx, r); err != nil {
 			return err
 		}
+	} else if note := foreignComposerNote(s, path); note != "" {
+		rc.Warnf("%s", note)
 	}
 	// After the install, never before: no cron for a Composer that failed
 	// to install.

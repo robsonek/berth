@@ -537,3 +537,54 @@ func TestComposerApplyEnsuresCronDaemonBeforeTheCron(t *testing.T) {
 		t.Errorf("want the cron written; writes: %+v", f.Writes())
 	}
 }
+
+// A Composer that berth did not install (a distro package in /usr/bin) is
+// never touched — and the self-update cron, which names berth's own binary,
+// does nothing for it. Saying "cron in place" and nothing else would be a
+// promise the host does not keep, so the step says it in a warning.
+func TestComposerWarnsWhenTheComposerOnPathIsNotBerths(t *testing.T) {
+	cases := []struct {
+		name     string
+		path     string // what `command -v composer` prints
+		server   *config.Server
+		wantWarn bool
+	}{
+		{"berth's own binary", "/usr/local/bin/composer\n", &config.Server{}, false},
+		{"a foreign composer", "/usr/bin/composer\n", &config.Server{}, true},
+		{"a foreign composer, auto-update off: nothing is promised", "/usr/bin/composer\n", composerAutoUpdateOff(), false},
+		{"no path printed (cannot tell)", "", &config.Server{}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := bssh.NewFakeRunner()
+			stubCronDaemonUp(f)
+			f.On("command -v composer", bssh.Result{Stdout: c.path})
+			cron := bssh.Result{Stdout: renderedComposerCron(t)}
+			if !c.server.Composer.AutoUpdateEnabled() {
+				cron = bssh.Result{ExitCode: 1}
+			}
+			f.On(composerCronCat, cron)
+			cr, err := Composer().Check(context.Background(), provision.RunCtx{}, c.server, f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !cr.Satisfied {
+				t.Fatalf("a foreign composer is not drift; got %+v", cr)
+			}
+			if got := len(cr.Warnings) == 1; got != c.wantWarn {
+				t.Fatalf("warnings = %q, want one: %v", cr.Warnings, c.wantWarn)
+			}
+			if c.wantWarn && (!strings.Contains(cr.Warnings[0], "/usr/bin/composer") || !strings.Contains(cr.Warnings[0], composerBin)) {
+				t.Errorf("the warning must name both binaries; got %q", cr.Warnings[0])
+			}
+			var applied []string
+			rc := provision.RunCtx{Warn: func(m string) { applied = append(applied, m) }}
+			if err := Composer().Apply(context.Background(), rc, c.server, f); err != nil {
+				t.Fatal(err)
+			}
+			if got := len(applied) == 1; got != c.wantWarn {
+				t.Errorf("Apply warnings = %q, want one: %v", applied, c.wantWarn)
+			}
+		})
+	}
+}
