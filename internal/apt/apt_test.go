@@ -6,8 +6,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
@@ -597,5 +599,65 @@ func TestEnsureRepoGuardWaitsOutAptLock(t *testing.T) {
 
 	if err := New(f).EnsureRepo(context.Background(), Sury()); err != nil {
 		t.Fatalf("EnsureRepo must wait out apt-lock contention in the guard; got %v", err)
+	}
+}
+
+func TestKeyExpiry(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	day := int64(86400)
+	at := func(d int64) string { return strconv.FormatInt(now.Unix()+d*day, 10) }
+	pub := func(exp string) string {
+		return "pub:-:4096:1:AAAAAAAAAAAAAAAA:1552900000:" + exp + "::-:::scESC::::::23::0:\n"
+	}
+	sub := func(validity, exp string) string {
+		return "sub:" + validity + ":4096:1:BBBBBBBBBBBBBBBB:1552900000:" + exp + ":::::e::::::23:\n"
+	}
+	cases := []struct {
+		name   string
+		colons string
+		want   int64 // days from now; 0 = never
+		never  bool
+	}{
+		{"no expiry anywhere", pub("") + sub("-", ""), 0, true},
+		{"primary expiry", pub(at(400)) + sub("-", ""), 400, false},
+		{"earlier live subkey wins", pub(at(400)) + sub("-", at(100)), 100, false},
+		{"already expired subkey is ignored (superseded)", pub(at(400)) + sub("e", at(-30)), 400, false},
+		{"revoked subkey is ignored", pub(at(400)) + sub("r", at(50)), 400, false},
+		{"expired primary is reported", pub(at(-5)), -5, false},
+		{"unparsable expiry is ignored", pub("soon"), 0, true},
+		{"empty output", "", 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := keyExpiry(tc.colons, now)
+			if tc.never {
+				if !got.IsZero() {
+					t.Fatalf("keyExpiry() = %v, want zero (never)", got)
+				}
+				return
+			}
+			if want := now.Unix() + tc.want*day; got.Unix() != want {
+				t.Fatalf("keyExpiry() = %d, want %d", got.Unix(), want)
+			}
+		})
+	}
+}
+
+func TestKeyringReportsExactnessAndExpiry(t *testing.T) {
+	repo := Sury()
+	now := time.Unix(1_800_000_000, 0)
+	exp := now.Add(90 * 24 * time.Hour)
+	gpgCmd := "gpg --no-options --no-keyring --trust-model always --show-keys --with-colons " + repo.KeyringPath()
+	f := bssh.NewFakeRunner()
+	f.On(gpgCmd, bssh.Result{Stdout: "pub:-:4096:1:AAAAAAAAAAAAAAAA:1552900000:" + strconv.FormatInt(exp.Unix(), 10) + "::-:::scESC::::::23::0:\nfpr:::::::::" + repo.Fingerprint + ":\n"})
+	info, err := New(f).Keyring(context.Background(), repo, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Exact || info.Expires.Unix() != exp.Unix() {
+		t.Fatalf("Keyring() = %+v, want exact with expiry %d", info, exp.Unix())
+	}
+	if len(f.Calls()) != 1 {
+		t.Errorf("Keyring must cost exactly one probe, got %d", len(f.Calls()))
 	}
 }

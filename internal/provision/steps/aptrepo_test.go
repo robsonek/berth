@@ -2,8 +2,10 @@ package steps
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/robsonek/berth/internal/apt"
 	"github.com/robsonek/berth/internal/provision"
@@ -182,5 +184,151 @@ func TestRemoveOwnRepoLeavesForeign(t *testing.T) {
 	}
 	if len(warns) != 0 {
 		t.Fatalf("no warning expected for the foreign-file no-op, got %v", warns)
+	}
+}
+
+// gpgColonsExpiring is gpgColonsFor with an expiry on the primary key.
+func gpgColonsExpiring(fp string, expires time.Time) string {
+	return "pub:-:4096:1:0000000000000000:1552900000:" + strconv.FormatInt(expires.Unix(), 10) + "::-:::scESC::::::23::0:\nfpr:::::::::" + fp + ":\n"
+}
+
+// stubNow pins the clock the key-refresh policy reads.
+func stubNow(t *testing.T, now time.Time) {
+	t.Helper()
+	prev := timeNow
+	timeNow = func() time.Time { return now }
+	t.Cleanup(func() { timeNow = prev })
+}
+
+// The host keeps the copy of the signing key fetched at the first provision.
+// Upstreams extend a key's validity under the same fingerprint, so a copy
+// nearing its expiry is re-fetched — but at most once per interval, so a
+// host whose upstream has not published the extension yet stays converged
+// between attempts.
+func TestOwnRepoUpToDateRefreshesAnExpiringKey(t *testing.T) {
+	repo := apt.Sury()
+	now := time.Unix(1_800_000_000, 0)
+	stubNow(t, now)
+	day := 24 * time.Hour
+	managed := string(mustRepoContent(t, repo))
+	catCmd := "cat '" + repo.SourceListPath() + "'"
+	keyCmd := "gpg --no-options --no-keyring --trust-model always --show-keys --with-colons " + repo.KeyringPath()
+	mtimeCmd := "stat -c %Y " + shQuote(repo.KeyringPath())
+	mtime := func(age time.Duration) bssh.Result {
+		return bssh.Result{Stdout: strconv.FormatInt(now.Add(-age).Unix(), 10) + "\n"}
+	}
+	cases := []struct {
+		name      string
+		expires   time.Duration // from now
+		mtime     *bssh.Result  // nil = the probe must not run
+		want      bool
+		wantProbe bool
+	}{
+		{"far from expiry: converged, mtime never read", 400 * day, nil, true, false},
+		{"just outside the window", keyRefreshWindow + day, nil, true, false},
+		{"inside the window, copy older than the interval: refresh", 100 * day, ptr(mtime(30 * day)), false, true},
+		{"inside the window, copy fetched recently: converged", 100 * day, ptr(mtime(2 * day)), true, true},
+		{"already expired, copy old: refresh", -3 * day, ptr(mtime(60 * day)), false, true},
+		{"already expired, copy fetched recently: converged until the next attempt", -3 * day, ptr(mtime(time.Hour)), true, true},
+		{"mtime unreadable: refresh", 100 * day, ptr(bssh.Result{ExitCode: 1}), false, true},
+		{"mtime garbage: refresh", 100 * day, ptr(bssh.Result{Stdout: "?\n"}), false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := bssh.NewFakeRunner()
+			f.On(catCmd, bssh.Result{Stdout: managed})
+			f.On(keyCmd, bssh.Result{Stdout: gpgColonsExpiring(repo.Fingerprint, now.Add(tc.expires))})
+			if tc.mtime != nil {
+				f.On(mtimeCmd, *tc.mtime)
+			}
+			got, err := ownRepoUpToDate(context.Background(), f, repo, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("ownRepoUpToDate() = %v, want %v", got, tc.want)
+			}
+			probed := false
+			for _, c := range f.Calls() {
+				probed = probed || c.Cmd == mtimeCmd
+			}
+			if probed != tc.wantProbe {
+				t.Errorf("keyring mtime probed = %v, want %v", probed, tc.wantProbe)
+			}
+		})
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
+// lenientApt answers every unstubbed command with success and accepts every
+// write: EnsureRepo's own command strings are pinned in the apt package.
+type lenientApt struct {
+	*bssh.FakeRunner
+	order []string
+}
+
+func (l *lenientApt) Run(ctx context.Context, cmd string, stdin []byte) (bssh.Result, error) {
+	l.order = append(l.order, cmd)
+	res, err := l.FakeRunner.Run(ctx, cmd, stdin)
+	if err != nil && strings.Contains(err.Error(), "unstubbed command") {
+		return bssh.Result{}, nil
+	}
+	return res, err
+}
+
+// A refresh that still leaves the key inside the window means the upstream
+// has not published an extension yet: Apply re-fetches, says so, and the
+// operator learns the date while there is time to act.
+func TestEnsureOwnRepoRefetchesAndWarnsWhenTheKeyIsStillExpiring(t *testing.T) {
+	repo := apt.Sury()
+	now := time.Unix(1_800_000_000, 0)
+	stubNow(t, now)
+	expires := now.Add(40 * 24 * time.Hour)
+	f := bssh.NewFakeRunner()
+	f.On("cat '"+repo.SourceListPath()+"'", bssh.Result{Stdout: string(mustRepoContent(t, repo))})
+	f.On("gpg --no-options --no-keyring --trust-model always --show-keys --with-colons "+repo.KeyringPath(), bssh.Result{Stdout: gpgColonsExpiring(repo.Fingerprint, expires)})
+	f.On("stat -c %Y "+shQuote(repo.KeyringPath()), bssh.Result{Stdout: strconv.FormatInt(now.Add(-30*24*time.Hour).Unix(), 10) + "\n"})
+	f.On("gpg --show-keys --with-colons /run/berth/pinned-"+repo.Name+".gpg", bssh.Result{Stdout: gpgColonsExpiring(repo.Fingerprint, expires)})
+	l := &lenientApt{FakeRunner: f}
+	var warnings []string
+	rc := provision.RunCtx{Warn: func(msg string) { warnings = append(warnings, msg) }}
+	if err := ensureOwnRepo(context.Background(), rc, l, repo); err != nil {
+		t.Fatal(err)
+	}
+	fetched := false
+	for _, cmd := range l.order {
+		fetched = fetched || strings.HasPrefix(cmd, "curl ")
+	}
+	if !fetched {
+		t.Fatalf("an expiring key must be re-fetched; ran:\n%s", strings.Join(l.order, "\n"))
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], repo.Name) || !strings.Contains(warnings[0], expires.UTC().Format("2006-01-02")) {
+		t.Errorf("want one warning naming the repo and the expiry date; got %q", warnings)
+	}
+}
+
+// The same refresh with an upstream that DID extend the key: no warning.
+func TestEnsureOwnRepoRefetchIsQuietWhenTheKeyWasExtended(t *testing.T) {
+	repo := apt.Sury()
+	now := time.Unix(1_800_000_000, 0)
+	stubNow(t, now)
+	keyCmd := "gpg --no-options --no-keyring --trust-model always --show-keys --with-colons " + repo.KeyringPath()
+	f := bssh.NewFakeRunner()
+	f.On("cat '"+repo.SourceListPath()+"'", bssh.Result{Stdout: string(mustRepoContent(t, repo))})
+	f.OnSeq(keyCmd,
+		bssh.Result{Stdout: gpgColonsExpiring(repo.Fingerprint, now.Add(40*24*time.Hour))},
+		bssh.Result{Stdout: gpgColonsExpiring(repo.Fingerprint, now.Add(800*24*time.Hour))},
+	)
+	f.On("stat -c %Y "+shQuote(repo.KeyringPath()), bssh.Result{Stdout: strconv.FormatInt(now.Add(-30*24*time.Hour).Unix(), 10) + "\n"})
+	f.On("gpg --show-keys --with-colons /run/berth/pinned-"+repo.Name+".gpg", bssh.Result{Stdout: gpgColonsExpiring(repo.Fingerprint, now.Add(800*24*time.Hour))})
+	l := &lenientApt{FakeRunner: f}
+	var warnings []string
+	rc := provision.RunCtx{Warn: func(msg string) { warnings = append(warnings, msg) }}
+	if err := ensureOwnRepo(context.Background(), rc, l, repo); err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("an extended key must not warn; got %q", warnings)
 	}
 }

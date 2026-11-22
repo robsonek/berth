@@ -433,6 +433,14 @@ database:
                       # postgres engine: debian | pgdg   (apt.postgresql.org / PGDG)
 ```
 
+Each repository's signing key is fetched once, verified against the pinned
+fingerprint and stored on the host. Upstreams extend a key's validity under
+the same fingerprint, so a provision fetches the key again when the copy on
+the host is within 180 days of its expiry (at most once every 7 days, and
+only a key matching the pinned fingerprint is accepted). If the upstream has
+not published an extended key yet, the run warns with the expiry date. The
+same applies to repositories declared under `apt.repos`.
+
 ### Composer
 
 Composer is not an apt package: berth downloads the official installer,

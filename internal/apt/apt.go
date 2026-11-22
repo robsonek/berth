@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -232,12 +233,51 @@ func primaryFingerprints(colons string) []string {
 	return out
 }
 
-// KeyringHoldsExactly reports whether the repo's installed keyring exists and
-// holds EXACTLY the pinned primary key. Part of every Check's repo
-// convergence: a config fingerprint change, a truncated/extra-key keyring, or
-// a crash between the keyring and list writes must re-trigger EnsureRepo —
-// never read as satisfied.
-func (m *Manager) KeyringHoldsExactly(ctx context.Context, repo Repo) (bool, error) {
+// KeyringInfo is what one read of a repo's installed keyring tells berth.
+type KeyringInfo struct {
+	// Exact is true when the keyring exists and holds EXACTLY the pinned
+	// primary key.
+	Exact bool
+	// Expires is the earliest expiry among the primary keys and their live
+	// subkeys (see keyExpiry); the zero time means none of them expires.
+	Expires time.Time
+}
+
+// keyExpiry returns the earliest expiry in `gpg --show-keys --with-colons`
+// output that matters for signature verification at now: every primary key's
+// (an expired primary is reported, in the past), and each subkey's unless it
+// is revoked or already expired — an expired subkey beside a live key is a
+// superseded one, and counting it would make the keyring look permanently
+// stale. Field 7 of a pub/sub record is the expiry in seconds since the
+// epoch (empty = never); anything else is ignored. Zero time = no expiry.
+func keyExpiry(colons string, now time.Time) time.Time {
+	var earliest time.Time
+	for _, line := range strings.Split(colons, "\n") {
+		f := strings.Split(line, ":")
+		if len(f) < 7 || (f[0] != "pub" && f[0] != "sub") {
+			continue
+		}
+		secs, err := strconv.ParseInt(f[6], 10, 64)
+		if err != nil || secs <= 0 {
+			continue
+		}
+		exp := time.Unix(secs, 0)
+		if f[0] == "sub" && (f[1] == "r" || !exp.After(now)) {
+			continue
+		}
+		if earliest.IsZero() || exp.Before(earliest) {
+			earliest = exp
+		}
+	}
+	return earliest
+}
+
+// Keyring reads the repo's installed keyring once and reports whether it
+// holds exactly the pinned key and when that key expires. Part of every
+// Check's repo convergence: a config fingerprint change, a truncated/
+// extra-key keyring, or a crash between the keyring and list writes must
+// re-trigger EnsureRepo — never read as satisfied.
+func (m *Manager) Keyring(ctx context.Context, repo Repo, now time.Time) (KeyringInfo, error) {
 	// Read ONLY the given keyring and touch nothing in root's ~/.gnupg. Bare
 	// gpg initialises its default keybox AND its trust database, so this
 	// read-only Check was creating files on every provision run.
@@ -248,21 +288,28 @@ func (m *Manager) KeyringHoldsExactly(ctx context.Context, repo Repo) (bool, err
 	// do not trim it on the assumption that a shorter form is equivalent.
 	res, err := m.r.Run(ctx, "gpg --no-options --no-keyring --trust-model always --show-keys --with-colons "+repo.KeyringPath(), nil)
 	if err != nil {
-		return false, err
+		return KeyringInfo{}, err
 	}
 	if res.ExitCode != 0 {
-		return false, nil // absent or unreadable keyring: not converged
+		return KeyringInfo{}, nil // absent or unreadable keyring: not converged
 	}
 	prims := primaryFingerprints(res.Stdout)
 	if len(prims) == 0 {
-		return false, nil
+		return KeyringInfo{}, nil
 	}
 	for _, fp := range prims {
 		if fp != repo.Fingerprint {
-			return false, nil
+			return KeyringInfo{}, nil
 		}
 	}
-	return true, nil
+	return KeyringInfo{Exact: true, Expires: keyExpiry(res.Stdout, now)}, nil
+}
+
+// KeyringHoldsExactly reports whether the repo's installed keyring exists and
+// holds EXACTLY the pinned primary key (see Keyring).
+func (m *Manager) KeyringHoldsExactly(ctx context.Context, repo Repo) (bool, error) {
+	info, err := m.Keyring(ctx, repo, time.Now())
+	return info.Exact, err
 }
 
 // shQuote single-quotes s for safe interpolation into a root shell command
