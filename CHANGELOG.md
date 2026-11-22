@@ -5,6 +5,12 @@ Notable changes to berth. Older releases are documented on the
 
 ## [Unreleased]
 
+### Changed
+
+- **The YAML library moved to its v4 major release** (`go.yaml.in/yaml/v4`).
+  berth uses it to write the config `berth init` produces; the output is
+  byte-identical to before. Reading configs is unaffected.
+
 ### Fixed
 
 - **The "left for a reboot" warning no longer points at a command that is not
