@@ -661,9 +661,10 @@ func TestRestartsApplyReportsTheWorkerAlongsideALaterFailure(t *testing.T) {
 }
 
 // The warning about services berth does not restart ends with the command
-// that restarts them — and keeps dbus out of it: restarting dbus on a live
-// system breaks systemd's own services, so only a reboot gives it the new
-// library and it gets a warning of its own that says so.
+// that restarts them — and keeps out of it what must not be restarted from an
+// SSH session: dbus (restarting it on a live system breaks systemd's own
+// services) and the network managers (the operator's own connection may go
+// with them). Those get a warning of their own that leaves them to a reboot.
 func TestRestartNotesGiveACommandAndSetDbusApart(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -676,11 +677,11 @@ func TestRestartNotesGiveACommandAndSetDbusApart(t *testing.T) {
 		{"restartable only", []string{"ssh", "exim4", "getty@tty1"}, false,
 			[]string{"restart them with: sudo systemctl restart ssh exim4 getty@tty1"}, []string{"reboot"}},
 		{"dbus only", []string{"dbus"}, false,
-			[]string{"dbus still runs a replaced library; only a reboot"}, []string{"systemctl restart"}},
-		{"dbus-broker counts too", []string{"dbus-broker"}, false,
-			[]string{"dbus-broker still runs"}, []string{"systemctl restart"}},
-		{"both, and a pending reboot", []string{"dbus", "ssh"}, true,
-			[]string{"sudo systemctl restart ssh", "dbus still runs", "a reboot is pending"}, []string{"restart ssh dbus", "restart dbus"}},
+			[]string{"left for a reboot: dbus"}, []string{"systemctl restart"}},
+		{"dbus-broker and the network managers count too", []string{"dbus-broker", "systemd-networkd", "NetworkManager", "networking"}, false,
+			[]string{"left for a reboot: dbus-broker, systemd-networkd, NetworkManager, networking"}, []string{"systemctl restart"}},
+		{"both, and a pending reboot", []string{"dbus", "ssh", "systemd-networkd"}, true,
+			[]string{"sudo systemctl restart ssh", "left for a reboot: dbus, systemd-networkd", "a reboot is pending"}, []string{"restart ssh dbus", "restart dbus", "restart ssh systemd-networkd"}},
 		{"a name the shell would mangle is quoted", []string{`systemd-fsck@dev-disk-by\x2duuid-1`}, false,
 			[]string{`sudo systemctl restart 'systemd-fsck@dev-disk-by\x2duuid-1'`}, nil},
 	}

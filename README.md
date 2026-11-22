@@ -929,9 +929,10 @@ Supervisor, cron and fail2ban, in that order.
   and neither is a Supervisor or Valkey the config does not make berth run.
   Every run names the ones still on a replaced library in a warning that ends
   with the `sudo systemctl restart …` command for them, ready to paste.
-- dbus is the exception: restarting it on a live system breaks systemd's own
-  services, so it is never part of that command. It gets a warning of its own
-  and picks up the new library at the next reboot.
+- dbus and the network managers (systemd-networkd, NetworkManager, …) are the
+  exception: restarting them on a live host can break systemd's own services
+  or cut your connection, so they are never part of that command. They get a
+  warning of their own and pick up the new library at the next reboot.
 - berth never reboots the host. While a reboot is pending (a new kernel only
   takes effect after one) every run says so in a warning.
 

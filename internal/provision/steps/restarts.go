@@ -165,12 +165,20 @@ func splitStale(s *config.Server, stale []staleUnit) (plan []plannedRestart, oth
 	return plan, others
 }
 
-// rebootOnlyServices are the services that cannot be restarted on a live
-// system: dbus carries systemd's own conversations with its services
-// (logind, resolved, …) and restarting it breaks them, which is why Debian
-// never restarts it on an upgrade either. Only a reboot gives it the new
-// library, so it must not appear in a "restart these" command.
-var rebootOnlyServices = map[string]bool{"dbus": true, "dbus-broker": true}
+// leftForReboot are the services berth never tells the operator to restart
+// by hand, because the command is pasted into an SSH session on a live host:
+//
+//   - dbus carries systemd's own conversations with its services (logind,
+//     resolved, …); restarting it breaks them, which is why Debian never
+//     restarts it on an upgrade either.
+//   - the network managers may take the operator's own connection with them.
+//
+// They pick up the new library at the next reboot and get a note of their
+// own, so they never appear in the "restart these" command.
+var leftForReboot = map[string]bool{
+	"dbus": true, "dbus-broker": true,
+	"systemd-networkd": true, "networking": true, "NetworkManager": true, "wpa_supplicant": true,
+}
 
 // plainUnitName matches the names that need no quoting in a shell command.
 var plainUnitName = regexp.MustCompile(`^[A-Za-z0-9@._:-]+$`)
@@ -181,12 +189,12 @@ var plainUnitName = regexp.MustCompile(`^[A-Za-z0-9@._:-]+$`)
 // waiting for a reboot would otherwise never converge.
 //
 // The services the operator can restart come with the command that does it,
-// ready to paste; the reboot-only ones get their own note, so that command
-// is always safe to run as printed.
+// ready to paste; the leftForReboot ones get their own note and are never in
+// that command.
 func restartNotes(others []string, reboot bool) []string {
 	var restartable, rebootOnly, args []string
 	for _, name := range others {
-		if rebootOnlyServices[name] {
+		if leftForReboot[name] {
 			rebootOnly = append(rebootOnly, name)
 			continue
 		}
@@ -202,7 +210,7 @@ func restartNotes(others []string, reboot bool) []string {
 		notes = append(notes, "these services still run a library or binary that was replaced on disk and berth does not restart them: "+strings.Join(restartable, ", ")+" — restart them with: sudo systemctl restart "+strings.Join(args, " "))
 	}
 	if len(rebootOnly) > 0 {
-		notes = append(notes, strings.Join(rebootOnly, ", ")+" still runs a replaced library; only a reboot gives it the new one (restarting it on a live system breaks systemd's own services, so do not), and berth never reboots the host")
+		notes = append(notes, "also on a replaced library, but left for a reboot: "+strings.Join(rebootOnly, ", ")+" — restarting these on a live host can break systemd's own services or cut your connection, so they are not in the command above; berth never reboots the host")
 	}
 	if reboot {
 		notes = append(notes, "a reboot is pending (/run/reboot-required): a new kernel only takes effect after it; berth never reboots the host")
