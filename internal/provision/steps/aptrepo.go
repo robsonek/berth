@@ -91,19 +91,36 @@ func keyringConverged(ctx context.Context, r bssh.Runner, repo apt.Repo) (conver
 	return !due, due, nil
 }
 
-// warnIfKeyStillExpiring runs after a key refresh: when the freshly fetched
-// key still expires inside the window, the upstream has not published an
-// extension yet — the operator is warned with the date, and berth tries
-// again after keyRefreshInterval.
-func warnIfKeyStillExpiring(ctx context.Context, rc provision.RunCtx, r bssh.Runner, repo apt.Repo) error {
+// refreshRepoKey is the Apply side of a due key refresh. It replaces ONLY the
+// keyring (apt.RefreshKey): the repository is registered and working, and a
+// short upstream outage must not cost it — EnsureRepo's failed index check
+// removes the list and the keyring, which is right for a first registration
+// and wrong here. A refresh that fails is therefore a warning, not an error:
+// the copy on the host stays in place, and since its mtime did not move the
+// next provision tries again. A refresh that succeeds but still leaves the
+// key inside the window means the upstream has not published an extension
+// yet — also a warning, with the date, and berth tries again after
+// keyRefreshInterval. A dead transport still fails the run: the keyring
+// read below returns its error.
+func refreshRepoKey(ctx context.Context, rc provision.RunCtx, r bssh.Runner, repo apt.Repo) error {
+	m := apt.New(r)
+	refreshErr := m.RefreshKey(ctx, repo)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	now := timeNow()
-	info, err := apt.New(r).Keyring(ctx, repo, now)
+	info, err := m.Keyring(ctx, repo, now)
 	if err != nil {
 		return err
 	}
-	if keyExpiringSoon(info, now) {
+	expires := info.Expires.UTC().Format("2006-01-02")
+	switch {
+	case refreshErr != nil:
+		rc.Warnf("could not refresh the %s repository signing key (%v); the copy on this host is unchanged and expires on %s — berth tries again on the next provision; once the key expires, apt rejects this repository",
+			repo.Name, refreshErr, expires)
+	case keyExpiringSoon(info, now):
 		rc.Warnf("the %s repository signing key on this host expires on %s and the upstream has not published an extended key yet; berth fetches it again on a provision after %d days — once the key expires, apt rejects this repository",
-			repo.Name, info.Expires.UTC().Format("2006-01-02"), int(keyRefreshInterval.Hours()/24))
+			repo.Name, expires, int(keyRefreshInterval.Hours()/24))
 	}
 	return nil
 }
@@ -142,22 +159,17 @@ func ownRepoUpToDate(ctx context.Context, r bssh.Runner, repo apt.Repo, force bo
 // the live state immediately before writing (the writeManagedFile doctrine —
 // Check's verdict may be stale, and Apply often runs for UNRELATED drift, so
 // the write path must enforce the abort-unless---force contract itself) and
-// runs EnsureRepo only when the repo is not converged. When the run was a
-// key refresh and the freshly fetched key still expires inside the window,
-// the upstream has not published an extension yet: the operator is warned
-// with the date, and berth tries again after keyRefreshInterval.
+// runs EnsureRepo only when the repo is not converged. A repo whose only
+// gap is a due key refresh takes refreshRepoKey instead.
 func ensureOwnRepo(ctx context.Context, rc provision.RunCtx, r bssh.Runner, repo apt.Repo) error {
 	ok, refresh, err := ownRepoState(ctx, r, repo, rc.Force)
 	if err != nil || ok {
 		return err
 	}
-	if err := apt.New(r).EnsureRepo(ctx, repo); err != nil {
-		return err
+	if refresh {
+		return refreshRepoKey(ctx, rc, r, repo)
 	}
-	if !refresh {
-		return nil
-	}
-	return warnIfKeyStillExpiring(ctx, rc, r, repo)
+	return apt.New(r).EnsureRepo(ctx, repo)
 }
 
 // ownRepoLingers reports whether a berth-OWNED upstream source list sits at

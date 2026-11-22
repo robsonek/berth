@@ -243,31 +243,60 @@ type KeyringInfo struct {
 	Expires time.Time
 }
 
-// keyExpiry returns the earliest expiry in `gpg --show-keys --with-colons`
-// output that matters for signature verification at now: every primary key's
-// (an expired primary is reported, in the past), and each subkey's unless it
-// is revoked or already expired — an expired subkey beside a live key is a
-// superseded one, and counting it would make the keyring look permanently
-// stale. Field 7 of a pub/sub record is the expiry in seconds since the
-// epoch (empty = never); anything else is ignored. Zero time = no expiry.
+// keyExpiry returns the expiry that decides whether apt can still verify a
+// repository with the keys in `gpg --show-keys --with-colons` output at now.
+// Zero time = nothing relevant expires.
+//
+// Relevant are the primary keys and the SIGNING-capable subkeys that are not
+// revoked (field 12 holds a key's own capabilities in lowercase; an
+// encryption subkey's expiry means nothing to apt). Field 7 of a pub/sub
+// record is the expiry in seconds since the epoch (empty = never; anything
+// unparsable is ignored).
+//
+//   - While some signing-capable key is still live, the answer is the
+//     earliest expiry among the primaries (an expired primary is reported,
+//     in the past — it invalidates the whole key) and the live signing
+//     subkeys. An expired signing subkey beside a live signing key is a
+//     superseded one, and counting it would make the keyring look
+//     permanently stale.
+//   - With NO live signing key left, the latest expiry among the expired
+//     ones is reported (in the past): the upstream may have extended that
+//     very subkey, and only a re-fetch can tell.
 func keyExpiry(colons string, now time.Time) time.Time {
-	var earliest time.Time
-	for _, line := range strings.Split(colons, "\n") {
-		f := strings.Split(line, ":")
-		if len(f) < 7 || (f[0] != "pub" && f[0] != "sub") {
-			continue
-		}
-		secs, err := strconv.ParseInt(f[6], 10, 64)
-		if err != nil || secs <= 0 {
-			continue
-		}
-		exp := time.Unix(secs, 0)
-		if f[0] == "sub" && (f[1] == "r" || !exp.After(now)) {
-			continue
-		}
+	var earliest, latestDead time.Time
+	liveSigner := false
+	consider := func(exp time.Time) {
 		if earliest.IsZero() || exp.Before(earliest) {
 			earliest = exp
 		}
+	}
+	for _, line := range strings.Split(colons, "\n") {
+		f := strings.Split(line, ":")
+		if len(f) < 12 || (f[0] != "pub" && f[0] != "sub") {
+			continue
+		}
+		primary, signs := f[0] == "pub", strings.Contains(f[11], "s")
+		if !primary && (!signs || f[1] == "r") {
+			continue
+		}
+		var exp time.Time
+		if secs, err := strconv.ParseInt(f[6], 10, 64); err == nil && secs > 0 {
+			exp = time.Unix(secs, 0)
+		}
+		live := exp.IsZero() || exp.After(now)
+		if signs && live {
+			liveSigner = true
+		}
+		switch {
+		case exp.IsZero():
+		case primary || live:
+			consider(exp)
+		case latestDead.IsZero() || exp.After(latestDead):
+			latestDead = exp // an expired signing subkey
+		}
+	}
+	if !liveSigner && !latestDead.IsZero() && (earliest.IsZero() || latestDead.Before(earliest)) {
+		return latestDead
 	}
 	return earliest
 }
@@ -340,14 +369,10 @@ func (m *Manager) RemoveRepo(ctx context.Context, repo Repo) error {
 	return m.runAptWaitingForLock(ctx, "apt-get update", "apt-get update after removing "+repo.Name)
 }
 
-// EnsureRepo installs the signing key, verifies it against the pinned
-// fingerprint, and writes the source with signed-by. The trusted keyring ends
-// up holding EXACTLY the pinned key: signed-by trusts every key in the file,
-// so a multi-key bundle (e.g. MariaDB publishes a rotation key alongside the
-// release key) must not land in it wholesale — an extra key smuggled into the
-// published bundle would otherwise sign Release files unnoticed. A future key
-// rotation therefore fails loud until the pin is updated, by design.
-func (m *Manager) EnsureRepo(ctx context.Context, repo Repo) error {
+// fetchPinnedKeyring downloads the repo's key, verifies that it is exactly
+// the pinned one and only then installs it at the trusted keyring path. On
+// any failure the previously installed keyring is left untouched.
+func (m *Manager) fetchPinnedKeyring(ctx context.Context, repo Repo) error {
 	keyring := repo.KeyringPath()
 	// Temp files live in a root-owned 0700 workdir under /run: predictable names
 	// in world-writable /tmp would let a local user pre-create or symlink them
@@ -408,6 +433,30 @@ func (m *Manager) EnsureRepo(ctx context.Context, repo Repo) error {
 	}
 	// Temp cleanup; only a transport error matters (leftover tmp files are inert).
 	if _, err := m.r.Run(ctx, "rm -f "+tmpKey+" "+tmpRing+" "+tmpOut, nil); err != nil {
+		return err
+	}
+	return nil
+}
+
+// RefreshKey re-fetches and re-installs the repo's keyring and nothing else:
+// the source list is not rewritten, the index is not re-verified and nothing
+// is rolled back. It is the upkeep path for a repository that is already
+// registered and working — unlike EnsureRepo, whose failed index check
+// removes the list and the keyring, a failed refresh must never cost a
+// working repository. apt reads the new keyring on its next update.
+func (m *Manager) RefreshKey(ctx context.Context, repo Repo) error {
+	return m.fetchPinnedKeyring(ctx, repo)
+}
+
+// EnsureRepo installs the signing key, verifies it against the pinned
+// fingerprint, and writes the source with signed-by. The trusted keyring ends
+// up holding EXACTLY the pinned key: signed-by trusts every key in the file,
+// so a multi-key bundle (e.g. MariaDB publishes a rotation key alongside the
+// release key) must not land in it wholesale — an extra key smuggled into the
+// published bundle would otherwise sign Release files unnoticed. A future key
+// rotation therefore fails loud until the pin is updated, by design.
+func (m *Manager) EnsureRepo(ctx context.Context, repo Repo) error {
+	if err := m.fetchPinnedKeyring(ctx, repo); err != nil {
 		return err
 	}
 	src, err := repo.SourceContent()

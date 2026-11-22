@@ -332,3 +332,62 @@ func TestEnsureOwnRepoRefetchIsQuietWhenTheKeyWasExtended(t *testing.T) {
 		t.Errorf("an extended key must not warn; got %q", warnings)
 	}
 }
+
+// A due refresh replaces only the keyring: no source-list write, no apt run
+// and — above all — no rollback that could remove a working repository.
+func TestEnsureOwnRepoRefreshTouchesOnlyTheKeyring(t *testing.T) {
+	repo := apt.Sury()
+	now := time.Unix(1_800_000_000, 0)
+	stubNow(t, now)
+	expires := now.Add(800 * 24 * time.Hour)
+	f := bssh.NewFakeRunner()
+	f.On("cat '"+repo.SourceListPath()+"'", bssh.Result{Stdout: string(mustRepoContent(t, repo))})
+	f.OnSeq("gpg --no-options --no-keyring --trust-model always --show-keys --with-colons "+repo.KeyringPath(),
+		bssh.Result{Stdout: gpgColonsExpiring(repo.Fingerprint, now.Add(40*24*time.Hour))},
+		bssh.Result{Stdout: gpgColonsExpiring(repo.Fingerprint, expires)})
+	f.On("stat -c %Y "+shQuote(repo.KeyringPath()), bssh.Result{Stdout: strconv.FormatInt(now.Add(-30*24*time.Hour).Unix(), 10) + "\n"})
+	f.On("gpg --show-keys --with-colons /run/berth/pinned-"+repo.Name+".gpg", bssh.Result{Stdout: gpgColonsExpiring(repo.Fingerprint, expires)})
+	l := &lenientApt{FakeRunner: f}
+	if err := ensureOwnRepo(context.Background(), provision.RunCtx{}, l, repo); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Writes()) != 0 {
+		t.Errorf("a key refresh must not rewrite the source list; writes: %+v", f.Writes())
+	}
+	for _, cmd := range l.order {
+		if strings.HasPrefix(cmd, "apt-get") || (strings.HasPrefix(cmd, "rm ") && strings.Contains(cmd, repo.SourceListPath())) {
+			t.Errorf("a key refresh must not run apt or remove the repository; ran %q", cmd)
+		}
+	}
+}
+
+// A refresh that cannot reach the upstream is a warning, never an error and
+// never a removal: the repository keeps working on the copy it has.
+func TestEnsureOwnRepoFailedRefreshWarnsAndKeepsTheRepository(t *testing.T) {
+	repo := apt.Sury()
+	now := time.Unix(1_800_000_000, 0)
+	stubNow(t, now)
+	expires := now.Add(40 * 24 * time.Hour)
+	f := bssh.NewFakeRunner()
+	f.On("cat '"+repo.SourceListPath()+"'", bssh.Result{Stdout: string(mustRepoContent(t, repo))})
+	f.On("gpg --no-options --no-keyring --trust-model always --show-keys --with-colons "+repo.KeyringPath(), bssh.Result{Stdout: gpgColonsExpiring(repo.Fingerprint, expires)})
+	f.On("stat -c %Y "+shQuote(repo.KeyringPath()), bssh.Result{Stdout: strconv.FormatInt(now.Add(-30*24*time.Hour).Unix(), 10) + "\n"})
+	f.On("install -d -m 700 /run/berth", bssh.Result{})
+	f.On("curl -fsSL -o /run/berth/key-"+repo.Name+" -- '"+repo.KeyURL+"'", bssh.Result{ExitCode: 6, Stderr: "curl: (6) Could not resolve host"})
+	var warnings []string
+	rc := provision.RunCtx{Warn: func(msg string) { warnings = append(warnings, msg) }}
+	if err := ensureOwnRepo(context.Background(), rc, f, repo); err != nil {
+		t.Fatalf("a failed refresh must not fail the step; got %v", err)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "could not refresh") || !strings.Contains(warnings[0], expires.UTC().Format("2006-01-02")) {
+		t.Errorf("want one warning naming the failure and the expiry date; got %q", warnings)
+	}
+	for _, c := range f.Calls() {
+		if strings.HasPrefix(c.Cmd, "rm ") || strings.HasPrefix(c.Cmd, "install -m") {
+			t.Errorf("a failed refresh must not remove or replace anything; ran %q", c.Cmd)
+		}
+	}
+	if len(f.Writes()) != 0 {
+		t.Errorf("a failed refresh must write nothing; got %+v", f.Writes())
+	}
+}

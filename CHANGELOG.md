@@ -25,9 +25,10 @@ Notable changes to berth. Older releases are documented on the
   on 2028-02-04, and from that day apt would have rejected the repository on
   every host provisioned before the extension. A provision now fetches the
   key again (still verified against the pinned fingerprint) once the copy on
-  the host is within 180 days of its expiry, at most once every 7 days. If
-  the upstream has not published an extended key yet, the run warns with the
-  expiry date. This covers berth's own repositories and the ones declared
+  the host is within 180 days of its expiry, at most once every 7 days. The
+  refresh replaces the keyring only and never unregisters the repository: if
+  the upstream cannot be reached, or has not published an extended key yet,
+  the run continues and warns with the expiry date. This covers berth's own repositories and the ones declared
   under `apt.repos`. Keys without an expiry date are left alone.
 
 ### Changed

@@ -228,7 +228,6 @@ func (a aptExtras) Apply(ctx context.Context, rc provision.RunCtx, s *config.Ser
 		if err != nil {
 			return err
 		}
-		refresh := false
 		if ok {
 			keyOK, due, err := keyringConverged(ctx, r, repo)
 			if err != nil {
@@ -237,15 +236,17 @@ func (a aptExtras) Apply(ctx context.Context, rc provision.RunCtx, s *config.Ser
 			if keyOK {
 				continue
 			}
-			refresh = due
+			if due {
+				// A registered, working repo whose key copy nears its
+				// expiry: replace the keyring only (aptrepo.go).
+				if err := refreshRepoKey(ctx, rc, r, repo); err != nil {
+					return err
+				}
+				continue
+			}
 		}
 		if err := m.EnsureRepo(ctx, repo); err != nil {
 			return fmt.Errorf("register apt repo %s: %w", cfg.Name, err)
-		}
-		if refresh {
-			if err := warnIfKeyStillExpiring(ctx, rc, r, repo); err != nil {
-				return err
-			}
 		}
 	}
 	// 3. Packages — install-only by design.
