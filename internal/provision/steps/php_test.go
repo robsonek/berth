@@ -896,7 +896,7 @@ func TestPHPCheckUnsatisfiedWhenDropInsNewerThanStamp(t *testing.T) {
 	f.On("test -d "+shQuote(phpLogDir), bssh.Result{ExitCode: 0})
 	f.On("dpkg -s php8.4-mysql", bssh.Result{ExitCode: 0, Stdout: "Status: install ok installed\n"})
 	f.On("systemctl is-active php8.4-fpm", bssh.Result{})
-	f.On(reloadedSinceCmd("php8.4-fpm", opcacheDropInPath("8.4"), phpTuningDropInPath("8.4")), bssh.Result{ExitCode: 1})
+	stubNotReloaded(f, "php8.4-fpm", opcacheDropInPath("8.4"), phpTuningDropInPath("8.4"))
 	cr, err := PHP().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {
 		t.Fatal(err)

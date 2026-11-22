@@ -3,6 +3,29 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Fixed
+
+- **A package upgrade no longer reads as a pending reload.** When
+  unattended-upgrades (or an operator) upgrades nginx or PHP-FPM, the package
+  bumps the modification time of a config directory berth watches and
+  restarts the service. berth compared that directory only against its own
+  reload stamp, so `provision --dry-run` and `status --drift` reported the
+  `site` step (or `nginx`, `php`, `hardening`) as changed on a healthy host
+  until the next provision. The check now also accepts a service that is
+  running and was started after the newest watched file: a start loads the
+  whole configuration on disk. A plain reload berth did not make, a stopped
+  service, and an interrupted provision still read as pending.
+
+### Changed
+
+- **`provision --dry-run -v` says why a step is planned.** A planned step's
+  change list is often everything the step can do (`site` lists its whole
+  repertoire), which hides what actually differs. With `-v` the plan line is
+  now followed by `      why: <reason>` when the step gives one. Output
+  without `-v` is unchanged.
+
 ## [1.1.0] — 2026-11-22
 
 A config that sets `composer.auto_update` or `php.version: "8.6"` should raise

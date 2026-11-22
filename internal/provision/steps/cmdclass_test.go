@@ -559,8 +559,10 @@ var auditedScripts = map[string]string{
 	// reloadedSince's stamp comparisons (reloadstamp.go), issued by
 	// hardening.Check for the ssh and fail2ban units. Audited: `[ -e ]`
 	// existence test and `[ ! … -nt … ]` mtime comparisons — reads only.
-	reloadedSinceCmd("ssh", "/etc/ssh/sshd_config.d/00-berth.conf"):    "reloadedSince (reloadstamp.go) for ssh vs the sshd drop-in: [ -e ] + [ -nt ] — reads only",
-	reloadedSinceCmd("fail2ban", "/etc/fail2ban/jail.d/99-berth.conf"): "reloadedSince (reloadstamp.go) for fail2ban vs the managed jail: [ -e ] + [ -nt ] — reads only",
+	reloadedSinceCmd("ssh", "/etc/ssh/sshd_config.d/00-berth.conf"):     "reloadedSince (reloadstamp.go) for ssh vs the sshd drop-in: [ -e ] + [ -nt ] — reads only",
+	restartedSinceCmd("ssh", "/etc/ssh/sshd_config.d/00-berth.conf"):    "restartedSince (reloadstamp.go), the fallback for ssh vs the sshd drop-in: systemctl show + tr + [ -n ] + [ -e ] + systemctl is-active --quiet + stat %Y + [ -le ] — reads only",
+	reloadedSinceCmd("fail2ban", "/etc/fail2ban/jail.d/99-berth.conf"):  "reloadedSince (reloadstamp.go) for fail2ban vs the managed jail: [ -e ] + [ -nt ] — reads only",
+	restartedSinceCmd("fail2ban", "/etc/fail2ban/jail.d/99-berth.conf"): "restartedSince (reloadstamp.go), the fallback for fail2ban vs the managed jail: systemctl show + tr + [ -n ] + [ -e ] + systemctl is-active --quiet + stat %Y + [ -le ] — reads only",
 
 	// Wave 3 (nginx, php, valkey, tuning, database), same discipline: pasted
 	// literals for production consts, test-local mirror generators for the
@@ -569,22 +571,27 @@ var auditedScripts = map[string]string{
 	// reloadedSince's stamp comparisons for the two units whose core config
 	// nginx.Check and php.Check own. Audited: `[ -e ]` existence test and
 	// `[ ! … -nt … ]` mtime comparisons — reads only.
-	reloadedSinceCmd("nginx", "/etc/nginx/nginx.conf"): "reloadedSince (reloadstamp.go) for nginx vs its core config: [ -e ] + [ -nt ] — reads only",
-	reloadedSinceCmd("php8.4-fpm", "/etc/php/8.4/fpm/conf.d/99-berth-opcache.ini", "/etc/php/8.4/fpm/conf.d/99-berth-tuning.ini"): "reloadedSince (reloadstamp.go) for php8.4-fpm vs the two managed drop-ins: [ -e ] + [ -nt ] — reads only",
+	reloadedSinceCmd("nginx", "/etc/nginx/nginx.conf"):                                                                             "reloadedSince (reloadstamp.go) for nginx vs its core config: [ -e ] + [ -nt ] — reads only",
+	restartedSinceCmd("nginx", "/etc/nginx/nginx.conf"):                                                                            "restartedSince (reloadstamp.go), the fallback for nginx vs its core config: systemctl show + tr + [ -n ] + [ -e ] + systemctl is-active --quiet + stat %Y + [ -le ] — reads only",
+	reloadedSinceCmd("php8.4-fpm", "/etc/php/8.4/fpm/conf.d/99-berth-opcache.ini", "/etc/php/8.4/fpm/conf.d/99-berth-tuning.ini"):  "reloadedSince (reloadstamp.go) for php8.4-fpm vs the two managed drop-ins: [ -e ] + [ -nt ] — reads only",
+	restartedSinceCmd("php8.4-fpm", "/etc/php/8.4/fpm/conf.d/99-berth-opcache.ini", "/etc/php/8.4/fpm/conf.d/99-berth-tuning.ini"): "restartedSince (reloadstamp.go), the fallback for php8.4-fpm vs the two managed drop-ins: systemctl show + tr + [ -n ] + [ -e ] + systemctl is-active --quiet + stat %Y + [ -le ] — reads only",
 
 	// The same comparison over nginx.org's owned set (nginxOwnedConfigFiles,
 	// nginx.go): with nginx.source=nginx (the upstream variant) the managed
 	// conf.d sites bridge joins the core config. Audited: one more
 	// `[ ! … -nt … ]` mtime comparison in the same && chain — reads only.
-	reloadedSinceCmd("nginx", "/etc/nginx/nginx.conf", "/etc/nginx/conf.d/berth-sites.conf"): "reloadedSince (reloadstamp.go) for nginx vs its core config + the nginx.org sites bridge: [ -e ] + [ -nt ] — reads only",
+	reloadedSinceCmd("nginx", "/etc/nginx/nginx.conf", "/etc/nginx/conf.d/berth-sites.conf"):  "reloadedSince (reloadstamp.go) for nginx vs its core config + the nginx.org sites bridge: [ -e ] + [ -nt ] — reads only",
+	restartedSinceCmd("nginx", "/etc/nginx/nginx.conf", "/etc/nginx/conf.d/berth-sites.conf"): "restartedSince (reloadstamp.go), the fallback for nginx vs its core config + the nginx.org sites bridge: systemctl show + tr + [ -n ] + [ -e ] + systemctl is-active --quiet + stat %Y + [ -le ] — reads only",
 
 	// With nginx.gzip on (the default) the gzip drop-in joins the core config
 	// (nginxOwnedConfigFiles, nginx.go) — after the bridge under the upstream
 	// variant, alone with nginx.conf otherwise; the two shapes above are what
 	// a gzip: false config still issues. Audited: one more `[ ! … -nt … ]`
 	// mtime comparison in the same && chain — reads only.
-	reloadedSinceCmd("nginx", "/etc/nginx/nginx.conf", "/etc/nginx/conf.d/berth-gzip.conf"):                                       "reloadedSince (reloadstamp.go) for nginx vs its core config + the gzip drop-in: [ -e ] + [ -nt ] — reads only",
-	reloadedSinceCmd("nginx", "/etc/nginx/nginx.conf", "/etc/nginx/conf.d/berth-sites.conf", "/etc/nginx/conf.d/berth-gzip.conf"): "reloadedSince (reloadstamp.go) for nginx vs its core config + the nginx.org sites bridge + the gzip drop-in: [ -e ] + [ -nt ] — reads only",
+	reloadedSinceCmd("nginx", "/etc/nginx/nginx.conf", "/etc/nginx/conf.d/berth-gzip.conf"):                                        "reloadedSince (reloadstamp.go) for nginx vs its core config + the gzip drop-in: [ -e ] + [ -nt ] — reads only",
+	restartedSinceCmd("nginx", "/etc/nginx/nginx.conf", "/etc/nginx/conf.d/berth-gzip.conf"):                                       "restartedSince (reloadstamp.go), the fallback for nginx vs its core config + the gzip drop-in: systemctl show + tr + [ -n ] + [ -e ] + systemctl is-active --quiet + stat %Y + [ -le ] — reads only",
+	reloadedSinceCmd("nginx", "/etc/nginx/nginx.conf", "/etc/nginx/conf.d/berth-sites.conf", "/etc/nginx/conf.d/berth-gzip.conf"):  "reloadedSince (reloadstamp.go) for nginx vs its core config + the nginx.org sites bridge + the gzip drop-in: [ -e ] + [ -nt ] — reads only",
+	restartedSinceCmd("nginx", "/etc/nginx/nginx.conf", "/etc/nginx/conf.d/berth-sites.conf", "/etc/nginx/conf.d/berth-gzip.conf"): "restartedSince (reloadstamp.go), the fallback for nginx vs its core config + the nginx.org sites bridge + the gzip drop-in: systemctl show + tr + [ -n ] + [ -e ] + systemctl is-active --quiet + stat %Y + [ -le ] — reads only",
 
 	// nginxRunsAsWWWData's worker-user probe (nginx.go), reached only under
 	// nginx.source=nginx (the upstream variant), pasted literally — the
@@ -722,8 +729,10 @@ var auditedScripts = map[string]string{
 	// covers link topology drift), php-fpm vs the fixture pool + the pool.d
 	// directory. Audited: `[ -e ]` existence test and `[ ! … -nt … ]` mtime
 	// comparisons — reads only.
-	reloadedSinceCmd("nginx", "/etc/nginx/sites-available/app.example.com", "/etc/nginx/sites-enabled"):       "reloadedSince (reloadstamp.go) for nginx vs the fixture vhost + sites-enabled dir: [ -e ] + [ -nt ] — reads only",
-	reloadedSinceCmd("php8.4-fpm", "/etc/php/8.4/fpm/pool.d/app_example_com.conf", "/etc/php/8.4/fpm/pool.d"): "reloadedSince (reloadstamp.go) for php8.4-fpm vs the fixture pool + pool.d dir: [ -e ] + [ -nt ] — reads only",
+	reloadedSinceCmd("nginx", "/etc/nginx/sites-available/app.example.com", "/etc/nginx/sites-enabled"):        "reloadedSince (reloadstamp.go) for nginx vs the fixture vhost + sites-enabled dir: [ -e ] + [ -nt ] — reads only",
+	restartedSinceCmd("nginx", "/etc/nginx/sites-available/app.example.com", "/etc/nginx/sites-enabled"):       "restartedSince (reloadstamp.go), the fallback for nginx vs the fixture vhost + sites-enabled dir: systemctl show + tr + [ -n ] + [ -e ] + systemctl is-active --quiet + stat %Y + [ -le ] — reads only",
+	reloadedSinceCmd("php8.4-fpm", "/etc/php/8.4/fpm/pool.d/app_example_com.conf", "/etc/php/8.4/fpm/pool.d"):  "reloadedSince (reloadstamp.go) for php8.4-fpm vs the fixture pool + pool.d dir: [ -e ] + [ -nt ] — reads only",
+	restartedSinceCmd("php8.4-fpm", "/etc/php/8.4/fpm/pool.d/app_example_com.conf", "/etc/php/8.4/fpm/pool.d"): "restartedSince (reloadstamp.go), the fallback for php8.4-fpm vs the fixture pool + pool.d dir: systemctl show + tr + [ -n ] + [ -e ] + systemctl is-active --quiet + stat %Y + [ -le ] — reads only",
 
 	// The glob-gate cascade (2026-07 remediation): filename expansion rewrites
 	// argv before the verb sees it, so * ? [ ] became metacharacters and the
