@@ -36,13 +36,13 @@ func Drift(ctx context.Context, s *config.Server, r bssh.Runner, pipeline []prov
 	for e := range events {
 		switch e.Kind {
 		case provision.EventSatisfied:
-			rep.Steps = append(rep.Steps, StepState{Step: e.Step, Satisfied: true})
+			rep.Steps = append(rep.Steps, StepState{Step: e.Step, Satisfied: true, Warnings: e.Warnings})
 		case provision.EventPlanned:
 			changes := e.Changes
 			if e.Sensitive {
 				changes = []string{"[redacted]"}
 			}
-			rep.Steps = append(rep.Steps, StepState{Step: e.Step, Satisfied: false, Changes: changes})
+			rep.Steps = append(rep.Steps, StepState{Step: e.Step, Satisfied: false, Changes: changes, Warnings: e.Warnings})
 			if !exempt[e.Step] {
 				rep.Drifted++
 			}

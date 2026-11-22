@@ -125,6 +125,13 @@ func writeHostDetail(w *bytes.Buffer, h status.HostStatus) {
 			}
 			fmt.Fprintf(w, "  %s: %v\n", SanitizeCell(st.Step), sanitizeAll(st.Changes))
 		}
+		// Check warnings are not drift, so they are listed for satisfied
+		// steps too — a clean host can still be waiting for a reboot.
+		for _, st := range h.Drift.Steps {
+			for _, wn := range st.Warnings {
+				fmt.Fprintf(w, "  ! %s: %s\n", SanitizeCell(st.Step), SanitizeCell(wn))
+			}
+		}
 	}
 	if h.Offsite != nil {
 		// A repository failure is rendered explicitly: showing it as an

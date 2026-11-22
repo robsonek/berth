@@ -99,3 +99,41 @@ func TestDriftRecordsWhereItStopped(t *testing.T) {
 		}
 	}
 }
+
+// noteStep is a step whose Check has something to say that is not drift.
+type noteStep struct {
+	name      string
+	satisfied bool
+	notes     []string
+}
+
+func (s noteStep) Name() string       { return s.name }
+func (s noteStep) Requires() []string { return nil }
+func (s noteStep) Check(context.Context, provision.RunCtx, *config.Server, bssh.Runner) (provision.CheckResult, error) {
+	return provision.CheckResult{Satisfied: s.satisfied, Changes: []string{"change"}, Warnings: s.notes}, nil
+}
+func (s noteStep) Apply(context.Context, provision.RunCtx, *config.Server, bssh.Runner) error {
+	return nil
+}
+
+// A step can be converged and still have something the operator must hear
+// (a pending reboot, a service berth does not restart). The scan carries
+// those warnings — per step, whatever its verdict — and they are not drift.
+func TestDriftCarriesCheckWarningsWithoutCountingThemAsDrift(t *testing.T) {
+	pipeline := []provision.Step{
+		noteStep{name: "restarts", satisfied: true, notes: []string{"a reboot is pending"}},
+		noteStep{name: "site", satisfied: false, notes: []string{"heads up"}},
+		noteStep{name: "nginx", satisfied: true},
+	}
+	rep := Drift(context.Background(), &config.Server{}, bssh.NewFakeRunner(), pipeline, nil)
+	if rep.Drifted != 1 {
+		t.Errorf("Drifted = %d, want 1 (warnings are not drift)", rep.Drifted)
+	}
+	got := map[string][]string{}
+	for _, st := range rep.Steps {
+		got[st.Step] = st.Warnings
+	}
+	if len(got["restarts"]) != 1 || got["restarts"][0] != "a reboot is pending" || len(got["site"]) != 1 || len(got["nginx"]) != 0 {
+		t.Errorf("warnings per step = %v", got)
+	}
+}

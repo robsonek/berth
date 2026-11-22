@@ -101,6 +101,16 @@ func detailRows(h status.HostStatus) []string {
 	if h.Drift != nil && h.Drift.Error != "" {
 		rows = append(rows, "  ! drift: "+SanitizeCell(h.Drift.Error))
 	}
+	// Check warnings (a pending reboot, services berth does not restart) are
+	// not drift — the DRIFT cell may well say clean — but the fleet view is
+	// where hosts are checked, so each one rides its own continuation row.
+	if h.Drift != nil {
+		for _, st := range h.Drift.Steps {
+			for _, wn := range st.Warnings {
+				rows = append(rows, "  ! "+SanitizeCell(st.Step)+": "+SanitizeCell(wn))
+			}
+		}
+	}
 	// The --offsite answer also rides a continuation row, not a ninth
 	// column: the eight-field header is a fixed shape every row matches,
 	// and the flag is opt-in, so a column would sit blank on most runs.

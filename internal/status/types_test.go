@@ -31,7 +31,10 @@ func sampleFleet() []HostStatus {
 			}},
 			Services: []Service{{Name: "nginx", Active: true, Enabled: true}},
 			Disk:     []Mount{{Path: "/", UsedPct: 41, FreeBytes: 22000000000}},
-			Drift:    &DriftReport{Steps: []StepState{{Step: "site", Satisfied: true}}, Drifted: 0},
+			Drift: &DriftReport{Steps: []StepState{
+				{Step: "site", Satisfied: true},
+				{Step: "restarts", Satisfied: true, Warnings: []string{"a reboot is pending (/run/reboot-required)"}},
+			}, Drifted: 0},
 			Offsite:  &OffsiteStatus{Configured: true, LastSnapshot: &snap, SnapshotID: "a91f2c"},
 			ProbedAt: at, HostTime: at,
 		},

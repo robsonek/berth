@@ -150,3 +150,14 @@ func TestFleetProgramResultIsTheRefreshedSlice(t *testing.T) {
 		t.Fatalf("result = %+v, want the refreshed slice", got)
 	}
 }
+
+func TestFleetModelDetailShowsDriftWarnings(t *testing.T) {
+	hosts := twoHosts()
+	hosts[0].Drift = &status.DriftReport{Steps: []status.StepState{
+		{Step: "restarts", Satisfied: true, Warnings: []string{"a reboot is pending"}},
+	}}
+	view := newFleetModel(hosts).toggleDetail().View()
+	if !strings.Contains(view, "restarts: a reboot is pending") {
+		t.Errorf("detail view missing the warning:\n%s", view)
+	}
+}
