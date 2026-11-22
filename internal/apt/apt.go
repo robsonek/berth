@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -232,12 +233,80 @@ func primaryFingerprints(colons string) []string {
 	return out
 }
 
-// KeyringHoldsExactly reports whether the repo's installed keyring exists and
-// holds EXACTLY the pinned primary key. Part of every Check's repo
-// convergence: a config fingerprint change, a truncated/extra-key keyring, or
-// a crash between the keyring and list writes must re-trigger EnsureRepo —
-// never read as satisfied.
-func (m *Manager) KeyringHoldsExactly(ctx context.Context, repo Repo) (bool, error) {
+// KeyringInfo is what one read of a repo's installed keyring tells berth.
+type KeyringInfo struct {
+	// Exact is true when the keyring exists and holds EXACTLY the pinned
+	// primary key.
+	Exact bool
+	// Expires is the earliest expiry among the primary keys and their live
+	// subkeys (see keyExpiry); the zero time means none of them expires.
+	Expires time.Time
+}
+
+// keyExpiry returns the expiry that decides whether apt can still verify a
+// repository with the keys in `gpg --show-keys --with-colons` output at now.
+// Zero time = nothing relevant expires.
+//
+// Relevant are the primary keys and the SIGNING-capable subkeys that are not
+// revoked (field 12 holds a key's own capabilities in lowercase; an
+// encryption subkey's expiry means nothing to apt). Field 7 of a pub/sub
+// record is the expiry in seconds since the epoch (empty = never; anything
+// unparsable is ignored).
+//
+//   - While some signing-capable key is still live, the answer is the
+//     earliest expiry among the primaries (an expired primary is reported,
+//     in the past — it invalidates the whole key) and the live signing
+//     subkeys. An expired signing subkey beside a live signing key is a
+//     superseded one, and counting it would make the keyring look
+//     permanently stale.
+//   - With NO live signing key left, the latest expiry among the expired
+//     ones is reported (in the past): the upstream may have extended that
+//     very subkey, and only a re-fetch can tell.
+func keyExpiry(colons string, now time.Time) time.Time {
+	var earliest, latestDead time.Time
+	liveSigner := false
+	consider := func(exp time.Time) {
+		if earliest.IsZero() || exp.Before(earliest) {
+			earliest = exp
+		}
+	}
+	for _, line := range strings.Split(colons, "\n") {
+		f := strings.Split(line, ":")
+		if len(f) < 12 || (f[0] != "pub" && f[0] != "sub") {
+			continue
+		}
+		primary, signs := f[0] == "pub", strings.Contains(f[11], "s")
+		if !primary && (!signs || f[1] == "r") {
+			continue
+		}
+		var exp time.Time
+		if secs, err := strconv.ParseInt(f[6], 10, 64); err == nil && secs > 0 {
+			exp = time.Unix(secs, 0)
+		}
+		live := exp.IsZero() || exp.After(now)
+		if signs && live {
+			liveSigner = true
+		}
+		switch {
+		case exp.IsZero():
+		case primary || live:
+			consider(exp)
+		case latestDead.IsZero() || exp.After(latestDead):
+			latestDead = exp // an expired signing subkey
+		}
+	}
+	if !liveSigner && !latestDead.IsZero() && (earliest.IsZero() || latestDead.Before(earliest)) {
+		return latestDead
+	}
+	return earliest
+}
+
+// Keyring reads the repo's installed keyring once and reports whether it
+// holds exactly the pinned key and when that key expires. Part of every
+// Check's repo convergence: a config fingerprint change, a truncated/
+// extra-key keyring, or a crash between the keyring and list writes must
+// re-trigger EnsureRepo — never read as satisfied.
+func (m *Manager) Keyring(ctx context.Context, repo Repo, now time.Time) (KeyringInfo, error) {
 	// Read ONLY the given keyring and touch nothing in root's ~/.gnupg. Bare
 	// gpg initialises its default keybox AND its trust database, so this
 	// read-only Check was creating files on every provision run.
@@ -248,21 +317,28 @@ func (m *Manager) KeyringHoldsExactly(ctx context.Context, repo Repo) (bool, err
 	// do not trim it on the assumption that a shorter form is equivalent.
 	res, err := m.r.Run(ctx, "gpg --no-options --no-keyring --trust-model always --show-keys --with-colons "+repo.KeyringPath(), nil)
 	if err != nil {
-		return false, err
+		return KeyringInfo{}, err
 	}
 	if res.ExitCode != 0 {
-		return false, nil // absent or unreadable keyring: not converged
+		return KeyringInfo{}, nil // absent or unreadable keyring: not converged
 	}
 	prims := primaryFingerprints(res.Stdout)
 	if len(prims) == 0 {
-		return false, nil
+		return KeyringInfo{}, nil
 	}
 	for _, fp := range prims {
 		if fp != repo.Fingerprint {
-			return false, nil
+			return KeyringInfo{}, nil
 		}
 	}
-	return true, nil
+	return KeyringInfo{Exact: true, Expires: keyExpiry(res.Stdout, now)}, nil
+}
+
+// KeyringHoldsExactly reports whether the repo's installed keyring exists and
+// holds EXACTLY the pinned primary key (see Keyring).
+func (m *Manager) KeyringHoldsExactly(ctx context.Context, repo Repo) (bool, error) {
+	info, err := m.Keyring(ctx, repo, time.Now())
+	return info.Exact, err
 }
 
 // shQuote single-quotes s for safe interpolation into a root shell command
@@ -293,14 +369,10 @@ func (m *Manager) RemoveRepo(ctx context.Context, repo Repo) error {
 	return m.runAptWaitingForLock(ctx, "apt-get update", "apt-get update after removing "+repo.Name)
 }
 
-// EnsureRepo installs the signing key, verifies it against the pinned
-// fingerprint, and writes the source with signed-by. The trusted keyring ends
-// up holding EXACTLY the pinned key: signed-by trusts every key in the file,
-// so a multi-key bundle (e.g. MariaDB publishes a rotation key alongside the
-// release key) must not land in it wholesale — an extra key smuggled into the
-// published bundle would otherwise sign Release files unnoticed. A future key
-// rotation therefore fails loud until the pin is updated, by design.
-func (m *Manager) EnsureRepo(ctx context.Context, repo Repo) error {
+// fetchPinnedKeyring downloads the repo's key, verifies that it is exactly
+// the pinned one and only then installs it at the trusted keyring path. On
+// any failure the previously installed keyring is left untouched.
+func (m *Manager) fetchPinnedKeyring(ctx context.Context, repo Repo) error {
 	keyring := repo.KeyringPath()
 	// Temp files live in a root-owned 0700 workdir under /run: predictable names
 	// in world-writable /tmp would let a local user pre-create or symlink them
@@ -361,6 +433,30 @@ func (m *Manager) EnsureRepo(ctx context.Context, repo Repo) error {
 	}
 	// Temp cleanup; only a transport error matters (leftover tmp files are inert).
 	if _, err := m.r.Run(ctx, "rm -f "+tmpKey+" "+tmpRing+" "+tmpOut, nil); err != nil {
+		return err
+	}
+	return nil
+}
+
+// RefreshKey re-fetches and re-installs the repo's keyring and nothing else:
+// the source list is not rewritten, the index is not re-verified and nothing
+// is rolled back. It is the upkeep path for a repository that is already
+// registered and working — unlike EnsureRepo, whose failed index check
+// removes the list and the keyring, a failed refresh must never cost a
+// working repository. apt reads the new keyring on its next update.
+func (m *Manager) RefreshKey(ctx context.Context, repo Repo) error {
+	return m.fetchPinnedKeyring(ctx, repo)
+}
+
+// EnsureRepo installs the signing key, verifies it against the pinned
+// fingerprint, and writes the source with signed-by. The trusted keyring ends
+// up holding EXACTLY the pinned key: signed-by trusts every key in the file,
+// so a multi-key bundle (e.g. MariaDB publishes a rotation key alongside the
+// release key) must not land in it wholesale — an extra key smuggled into the
+// published bundle would otherwise sign Release files unnoticed. A future key
+// rotation therefore fails loud until the pin is updated, by design.
+func (m *Manager) EnsureRepo(ctx context.Context, repo Repo) error {
+	if err := m.fetchPinnedKeyring(ctx, repo); err != nil {
 		return err
 	}
 	src, err := repo.SourceContent()

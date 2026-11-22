@@ -9,6 +9,8 @@ import (
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
 	bssh "github.com/robsonek/berth/internal/ssh"
+	"strconv"
+	"time"
 )
 
 const aptFindCmd = "find /etc/apt/sources.list.d -maxdepth 1 -name 'berth-*.list' -print0"
@@ -274,5 +276,59 @@ func TestAptStepIdentity(t *testing.T) {
 	req := s.Requires()
 	if len(req) != 1 || req[0] != "base" {
 		t.Fatalf("Requires() = %v, want [base]", req)
+	}
+}
+
+// Declared repos follow the same key-refresh policy as berth's own: a copy
+// of the signing key nearing its expiry is fetched again.
+func TestAptCheckPlansARefreshOfAnExpiringDeclaredKey(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	stubNow(t, now)
+	cfg := signalRepoCfg()
+	repo := userRepo(cfg)
+	f := bssh.NewFakeRunner().
+		On(aptFindCmd, noLists).
+		On("cat '"+repo.SourceListPath()+"'", bssh.Result{Stdout: string(mustRepoContent(t, repo))}).
+		On("gpg --no-options --no-keyring --trust-model always --show-keys --with-colons "+repo.KeyringPath(), bssh.Result{Stdout: gpgColonsExpiring(repo.Fingerprint, now.Add(20*24*time.Hour))}).
+		On("stat -c %Y "+shQuote(repo.KeyringPath()), bssh.Result{Stdout: strconv.FormatInt(now.Add(-30*24*time.Hour).Unix(), 10) + "\n"})
+	res, err := Apt().Check(context.Background(), provision.RunCtx{}, aptTestServer(config.Apt{Repos: []config.AptRepo{cfg}}), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Satisfied {
+		t.Fatal("an expiring key whose copy is old must be unsatisfied")
+	}
+	if len(res.Changes) != 1 || !strings.Contains(res.Changes[0], "refresh the signing key") || !strings.Contains(res.Changes[0], cfg.Name) {
+		t.Fatalf("changes must announce the key refresh: %v", res.Changes)
+	}
+}
+
+func TestAptApplyRefetchesAnExpiringDeclaredKeyAndWarns(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	stubNow(t, now)
+	cfg := signalRepoCfg()
+	repo := userRepo(cfg)
+	expires := now.Add(20 * 24 * time.Hour)
+	f := bssh.NewFakeRunner().
+		On(aptFindCmd, noLists).
+		On("cat '"+repo.SourceListPath()+"'", bssh.Result{Stdout: string(mustRepoContent(t, repo))}).
+		On("gpg --no-options --no-keyring --trust-model always --show-keys --with-colons "+repo.KeyringPath(), bssh.Result{Stdout: gpgColonsExpiring(repo.Fingerprint, expires)}).
+		On("stat -c %Y "+shQuote(repo.KeyringPath()), bssh.Result{Stdout: strconv.FormatInt(now.Add(-30*24*time.Hour).Unix(), 10) + "\n"}).
+		On("gpg --show-keys --with-colons /run/berth/pinned-"+repo.Name+".gpg", bssh.Result{Stdout: gpgColonsExpiring(repo.Fingerprint, expires)})
+	l := &lenientApt{FakeRunner: f}
+	var warnings []string
+	rc := provision.RunCtx{Warn: func(msg string) { warnings = append(warnings, msg) }}
+	if err := Apt().Apply(context.Background(), rc, aptTestServer(config.Apt{Repos: []config.AptRepo{cfg}}), l); err != nil {
+		t.Fatal(err)
+	}
+	fetched := false
+	for _, cmd := range l.order {
+		fetched = fetched || strings.HasPrefix(cmd, "curl ")
+	}
+	if !fetched {
+		t.Fatalf("an expiring declared key must be re-fetched; ran:\n%s", strings.Join(l.order, "\n"))
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], expires.UTC().Format("2006-01-02")) {
+		t.Errorf("want one warning with the expiry date; got %q", warnings)
 	}
 }

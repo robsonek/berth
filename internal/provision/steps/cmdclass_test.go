@@ -30,6 +30,7 @@ func TestClassifyCommandPolicy(t *testing.T) {
 		{"cat '/etc/systemd/system/supervisor.service.d/berth-after.conf'", cmdReadOnly},
 		{"test -e '/var/www/app/shared'", cmdReadOnly},
 		{"stat -c '%U %u %F' '/var/www/app'", cmdReadOnly},
+		{"stat -c %Y '/usr/share/keyrings/sury-php.gpg'", cmdReadOnly}, // keyRefreshDue (aptrepo.go): the keyring's mtime
 		{"dpkg -s nginx", cmdReadOnly},
 		{"systemctl is-active nginx", cmdReadOnly},
 		{"systemctl is-enabled php8.4-fpm", cmdReadOnly},

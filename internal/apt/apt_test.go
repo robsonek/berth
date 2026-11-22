@@ -6,8 +6,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	bssh "github.com/robsonek/berth/internal/ssh"
 )
@@ -597,5 +599,112 @@ func TestEnsureRepoGuardWaitsOutAptLock(t *testing.T) {
 
 	if err := New(f).EnsureRepo(context.Background(), Sury()); err != nil {
 		t.Fatalf("EnsureRepo must wait out apt-lock contention in the guard; got %v", err)
+	}
+}
+
+func TestKeyExpiry(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	day := int64(86400)
+	at := func(d int64) string { return strconv.FormatInt(now.Unix()+d*day, 10) }
+	// caps is field 12: the key's own capabilities in lowercase (s = sign).
+	pub := func(exp, caps string) string {
+		return "pub:-:4096:1:AAAAAAAAAAAAAAAA:1552900000:" + exp + "::-:::" + caps + "::::::23::0:\n"
+	}
+	sub := func(validity, exp, caps string) string {
+		return "sub:" + validity + ":4096:1:BBBBBBBBBBBBBBBB:1552900000:" + exp + ":::::" + caps + "::::::23:\n"
+	}
+	cases := []struct {
+		name   string
+		colons string
+		want   int64 // days from now
+		never  bool
+	}{
+		{"no expiry anywhere", pub("", "scESC") + sub("-", "", "e"), 0, true},
+		{"primary expiry", pub(at(400), "scESC") + sub("-", "", "e"), 400, false},
+		{"earlier live signing subkey wins", pub(at(400), "cSC") + sub("-", at(100), "s"), 100, false},
+		{"an encryption subkey's expiry is irrelevant to apt", pub(at(400), "scESC") + sub("-", at(10), "e"), 400, false},
+		{"expired signing subkey beside a live one is superseded", pub("", "cSC") + sub("e", at(-30), "s") + sub("-", at(300), "s"), 300, false},
+		{"expired signing subkey beside a signing primary is superseded", pub(at(400), "scESC") + sub("e", at(-30), "s"), 400, false},
+		{"sole signing subkey expired, primary never expires: reported", pub("", "cC") + sub("e", at(-30), "s"), -30, false},
+		{"several expired signing subkeys, none live: the latest is reported", pub("", "cC") + sub("e", at(-90), "s") + sub("e", at(-30), "s"), -30, false},
+		{"revoked signing subkey is ignored", pub(at(400), "scESC") + sub("r", at(50), "s"), 400, false},
+		{"expired primary is reported", pub(at(-5), "scESC"), -5, false},
+		{"unparsable expiry is ignored", pub("soon", "scESC"), 0, true},
+		{"empty output", "", 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := keyExpiry(tc.colons, now)
+			if tc.never {
+				if !got.IsZero() {
+					t.Fatalf("keyExpiry() = %v, want zero (never)", got)
+				}
+				return
+			}
+			if want := now.Unix() + tc.want*day; got.Unix() != want {
+				t.Fatalf("keyExpiry() = %d (%+d days), want %+d days", got.Unix(), (got.Unix()-now.Unix())/day, tc.want)
+			}
+		})
+	}
+}
+
+// RefreshKey replaces only the keyring: the source list is not rewritten and
+// nothing is rolled back, so a failed refresh leaves a working repository
+// exactly as it was.
+func TestRefreshKeyTouchesOnlyTheKeyring(t *testing.T) {
+	repo := Sury()
+	f := bssh.NewFakeRunner()
+	tmpOut := "/run/berth/pinned-" + repo.Name + ".gpg"
+	f.On("install -d -m 700 /run/berth", bssh.Result{})
+	f.On("curl -fsSL -o /run/berth/key-"+repo.Name+" -- '"+repo.KeyURL+"'", bssh.Result{})
+	f.On("gpg --yes -o /run/berth/keyring-"+repo.Name+".gpg --dearmor /run/berth/key-"+repo.Name, bssh.Result{})
+	f.On("gpg --no-default-keyring --keyring /run/berth/keyring-"+repo.Name+".gpg --yes -o "+tmpOut+" --export "+repo.Fingerprint, bssh.Result{})
+	f.On("gpg --show-keys --with-colons "+tmpOut, bssh.Result{Stdout: "pub:-:4096:1:AAAAAAAAAAAAAAAA:1:::-:::scESC::::::23::0:\nfpr:::::::::" + repo.Fingerprint + ":\n"})
+	f.On("install -m 0644 "+tmpOut+" "+repo.KeyringPath(), bssh.Result{})
+	f.On("rm -f /run/berth/key-"+repo.Name+" /run/berth/keyring-"+repo.Name+".gpg "+tmpOut, bssh.Result{})
+	if err := New(f).RefreshKey(context.Background(), repo); err != nil {
+		t.Fatalf("RefreshKey() error = %v", err)
+	}
+	if len(f.Writes()) != 0 {
+		t.Errorf("RefreshKey must not rewrite the source list; writes: %+v", f.Writes())
+	}
+	for _, c := range f.Calls() {
+		if strings.HasPrefix(c.Cmd, "apt-get") || strings.Contains(c.Cmd, repo.SourceListPath()) {
+			t.Errorf("RefreshKey must not touch apt or the source list; ran %q", c.Cmd)
+		}
+	}
+}
+
+func TestRefreshKeyFailureLeavesTheRepositoryAlone(t *testing.T) {
+	repo := Sury()
+	f := bssh.NewFakeRunner()
+	f.On("install -d -m 700 /run/berth", bssh.Result{})
+	f.On("curl -fsSL -o /run/berth/key-"+repo.Name+" -- '"+repo.KeyURL+"'", bssh.Result{ExitCode: 6, Stderr: "curl: (6) Could not resolve host"})
+	if err := New(f).RefreshKey(context.Background(), repo); err == nil {
+		t.Fatal("a failed download must be an error")
+	}
+	for _, c := range f.Calls() {
+		if strings.HasPrefix(c.Cmd, "rm ") || strings.HasPrefix(c.Cmd, "install -m") {
+			t.Errorf("a failed refresh must not remove or replace anything; ran %q", c.Cmd)
+		}
+	}
+}
+
+func TestKeyringReportsExactnessAndExpiry(t *testing.T) {
+	repo := Sury()
+	now := time.Unix(1_800_000_000, 0)
+	exp := now.Add(90 * 24 * time.Hour)
+	gpgCmd := "gpg --no-options --no-keyring --trust-model always --show-keys --with-colons " + repo.KeyringPath()
+	f := bssh.NewFakeRunner()
+	f.On(gpgCmd, bssh.Result{Stdout: "pub:-:4096:1:AAAAAAAAAAAAAAAA:1552900000:" + strconv.FormatInt(exp.Unix(), 10) + "::-:::scESC::::::23::0:\nfpr:::::::::" + repo.Fingerprint + ":\n"})
+	info, err := New(f).Keyring(context.Background(), repo, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Exact || info.Expires.Unix() != exp.Unix() {
+		t.Fatalf("Keyring() = %+v, want exact with expiry %d", info, exp.Unix())
+	}
+	if len(f.Calls()) != 1 {
+		t.Errorf("Keyring must cost exactly one probe, got %d", len(f.Calls()))
 	}
 }

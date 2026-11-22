@@ -117,7 +117,6 @@ func (aptExtras) sweepCandidates(ctx context.Context, r bssh.Runner, s *config.S
 }
 
 func (a aptExtras) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
-	m := apt.New(r)
 	var changes []string
 	sweep, _, err := a.sweepCandidates(ctx, r, s)
 	if err != nil {
@@ -146,11 +145,16 @@ func (a aptExtras) Check(ctx context.Context, rc provision.RunCtx, s *config.Ser
 		}
 		// Semantic keyring probe (not mere existence): a fingerprint change
 		// in the config or a half-written keyring must re-trigger Apply.
-		keyOK, err := m.KeyringHoldsExactly(ctx, repo)
+		// The same read also decides the key refresh: a copy nearing its
+		// expiry is fetched again (aptrepo.go, keyringConverged).
+		keyOK, refresh, err := keyringConverged(ctx, r, repo)
 		if err != nil {
 			return provision.CheckResult{}, err
 		}
-		if !keyOK {
+		switch {
+		case refresh:
+			changes = append(changes, "refresh the signing key of repo "+cfg.Name+" (the copy on this host expires soon)")
+		case !keyOK:
 			changes = append(changes, "restore keyring for repo "+cfg.Name)
 		}
 	}
@@ -225,11 +229,19 @@ func (a aptExtras) Apply(ctx context.Context, rc provision.RunCtx, s *config.Ser
 			return err
 		}
 		if ok {
-			keyOK, err := m.KeyringHoldsExactly(ctx, repo)
+			keyOK, due, err := keyringConverged(ctx, r, repo)
 			if err != nil {
 				return err
 			}
 			if keyOK {
+				continue
+			}
+			if due {
+				// A registered, working repo whose key copy nears its
+				// expiry: replace the keyring only (aptrepo.go).
+				if err := refreshRepoKey(ctx, rc, r, repo); err != nil {
+					return err
+				}
 				continue
 			}
 		}

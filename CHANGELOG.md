@@ -18,6 +18,19 @@ Notable changes to berth. Older releases are documented on the
   whole configuration on disk. A plain reload berth did not make, a stopped
   service, and an interrupted provision still read as pending.
 
+- **Repository signing keys are refreshed before they expire.** berth fetched
+  each upstream key once and afterwards only compared its fingerprint, so a
+  host kept that first copy forever. Upstreams extend a key's validity under
+  the same fingerprint; the copy of the Surý key that hosts hold today expires
+  on 2028-02-04, and from that day apt would have rejected the repository on
+  every host provisioned before the extension. A provision now fetches the
+  key again (still verified against the pinned fingerprint) once the copy on
+  the host is within 180 days of its expiry, at most once every 7 days. The
+  refresh replaces the keyring only and never unregisters the repository: if
+  the upstream cannot be reached, or has not published an extended key yet,
+  the run continues and warns with the expiry date. This covers berth's own repositories and the ones declared
+  under `apt.repos`. Keys without an expiry date are left alone.
+
 ### Changed
 
 - **`provision --dry-run -v` says why a step is planned.** A planned step's
