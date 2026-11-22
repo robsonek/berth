@@ -215,7 +215,12 @@ func restartNotes(others []string, reboot bool) []string {
 		notes = append(notes, "these services still run a library or binary that was replaced on disk and berth does not restart them: "+strings.Join(restartable, ", ")+" — restart them with: sudo systemctl restart -- "+strings.Join(args, " "))
 	}
 	if len(rebootOnly) > 0 {
-		notes = append(notes, "also on a replaced library, but left for a reboot: "+strings.Join(rebootOnly, ", ")+" — restarting these on a live host can break systemd's own services or cut your connection, so they are not in the command above; berth never reboots the host")
+		note := "also on a replaced library, but left for a reboot: " + strings.Join(rebootOnly, ", ") + " — restarting these on a live host can break systemd's own services or cut your connection"
+		// Refer to the command only when the note before this one printed it.
+		if len(restartable) > 0 {
+			note += ", so they are not in the command above"
+		}
+		notes = append(notes, note+"; berth never reboots the host")
 	}
 	if reboot {
 		notes = append(notes, "a reboot is pending (/run/reboot-required): a new kernel only takes effect after it; berth never reboots the host")

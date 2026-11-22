@@ -676,12 +676,14 @@ func TestRestartNotesGiveACommandAndSetDbusApart(t *testing.T) {
 		{"nothing", nil, false, nil, nil},
 		{"restartable only", []string{"ssh.service", "exim4.service", "getty@tty1.service"}, false,
 			[]string{"restart them: ssh, exim4, getty@tty1 — restart them with: sudo systemctl restart -- ssh.service exim4.service getty@tty1.service"}, []string{"reboot"}},
+		// With nothing to restart by hand there is no command, so the note
+		// must not refer to one.
 		{"dbus only", []string{"dbus.service"}, false,
-			[]string{"left for a reboot: dbus"}, []string{"systemctl restart"}},
+			[]string{"left for a reboot: dbus"}, []string{"systemctl restart", "command"}},
 		{"dbus-broker and the network managers count too", []string{"dbus-broker.service", "systemd-networkd.service", "NetworkManager.service", "networking.service"}, false,
 			[]string{"left for a reboot: dbus-broker, systemd-networkd, NetworkManager, networking"}, []string{"systemctl restart"}},
 		{"both, and a pending reboot", []string{"dbus.service", "ssh.service", "systemd-networkd.service"}, true,
-			[]string{"sudo systemctl restart -- ssh.service", "left for a reboot: dbus, systemd-networkd", "a reboot is pending"}, []string{"ssh.service dbus", "-- dbus", "ssh.service systemd-networkd"}},
+			[]string{"sudo systemctl restart -- ssh.service", "so they are not in the command above", "a reboot is pending"}, []string{"ssh.service dbus", "-- dbus", "ssh.service systemd-networkd"}},
 		{"a name the shell would mangle is quoted", []string{`systemd-fsck@dev-disk-by\x2duuid-1.service`}, false,
 			[]string{`sudo systemctl restart -- 'systemd-fsck@dev-disk-by\x2duuid-1.service'`}, nil},
 		// The command names the unit in full: `restart custom.socket` would

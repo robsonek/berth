@@ -3,6 +3,16 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Fixed
+
+- **The "left for a reboot" warning no longer points at a command that is not
+  there.** When dbus (or a network manager) was the only service still on a
+  replaced library, the warning said it was "not in the command above"
+  although no command had been printed. That part now appears only next to
+  the restart command.
+
 ## [1.2.2] — 2026-11-22
 
 ### Changed
