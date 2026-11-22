@@ -3,6 +3,28 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Fixed
+
+- **`restarts` no longer restarts the database or Valkey under running
+  workers.** The step restarted Supervisor last, so queue workers were still
+  running while their database and Valkey went away and their jobs failed
+  mid-flight (`RedisException: No such file or directory` for the seconds of
+  the restart). The step now stops the running Supervisor programs first,
+  restarts the dependencies, waits until the database accepts connections
+  and the Valkey sockets exist, and only then starts the same programs again.
+  Workers get five minutes to finish their current job; a program still busy
+  after that is named in a warning and the restarts go ahead. The scheduler
+  cron and HTTP requests are not held back.
+
+### Changed
+
+- **README: changing `php.version` starts with maintenance mode.** Installing
+  the new version's CLI package switches the system `php` immediately, so the
+  recipe now begins by putting the applications into maintenance mode and
+  stopping the Supervisor programs, and ends by bringing them back.
+
 ## [1.2.0] — 2026-11-22
 
 ### Added
