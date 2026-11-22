@@ -16,6 +16,13 @@ type CheckResult struct {
 	Reason    string
 	Changes   []string
 	Sensitive bool
+	// Warnings are operator-visible notes that are NOT drift: something the
+	// operator must hear although the step has nothing to change (a pending
+	// reboot, a service berth does not manage). The engine attaches them to
+	// the Satisfied event, and to the Planned one in a dry run; when Apply
+	// runs it reports for itself through RunCtx.Warn and these are dropped.
+	// Like every warning they never affect the exit code.
+	Warnings []string
 }
 
 // RunCtx carries run-time flags steps need beyond the static config.

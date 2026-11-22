@@ -154,3 +154,19 @@ func TestPlainRendererVerbosePrintsPlannedReason(t *testing.T) {
 		t.Errorf("non-verbose output changed:\ngot  %q\nwant %q", got, wantQuiet)
 	}
 }
+
+// Warnings attached to a satisfied or planned step are printed like any
+// other: a step may have something to say although nothing is drift.
+func TestPlainRendererPrintsWarningsOfSatisfiedAndPlannedSteps(t *testing.T) {
+	var buf bytes.Buffer
+	if err := NewPlainRenderer(&buf, false).Render(feed(
+		provision.Event{Step: "restarts", Kind: provision.EventSatisfied, Warnings: []string{"a reboot is pending"}},
+		provision.Event{Step: "site", Kind: provision.EventPlanned, Changes: []string{"write vhost"}, Warnings: []string{"heads up"}},
+	)); err != nil {
+		t.Fatal(err)
+	}
+	want := "ok    restarts (already)\nwarn  restarts: a reboot is pending\nplan  site: [write vhost]\nwarn  site: heads up\n"
+	if got := buf.String(); got != want {
+		t.Errorf("output:\ngot  %q\nwant %q", got, want)
+	}
+}

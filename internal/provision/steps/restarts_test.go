@@ -2,6 +2,11 @@ package steps
 
 import (
 	"context"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -35,13 +40,18 @@ func TestParseStaleUnits(t *testing.T) {
 	}
 }
 
+// Services berth does not manage and a pending reboot are never drift — a
+// host waiting for a reboot would otherwise never converge — but the
+// operator must still hear about them, so they ride on the result as
+// warnings even though nothing is planned.
 func TestRestartsCheckSatisfiedWhenNothingManagedIsStale(t *testing.T) {
 	cases := []struct {
-		name, out  string
-		wantReason []string
+		name, out string
+		wantWarn  []string
 	}{
 		{"clean host", "", nil},
-		{"only an unmanaged service and a pending reboot", staleLine("ssh.service") + "reboot-required\n", []string{"ssh", "reboot"}},
+		{"only an unmanaged service", staleLine("ssh.service"), []string{"ssh"}},
+		{"an unmanaged service and a pending reboot", staleLine("ssh.service") + "reboot-required\n", []string{"ssh", "reboot is pending"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -54,9 +64,12 @@ func TestRestartsCheckSatisfiedWhenNothingManagedIsStale(t *testing.T) {
 			if !cr.Satisfied {
 				t.Fatalf("want satisfied; got %+v", cr)
 			}
-			for _, w := range c.wantReason {
-				if !strings.Contains(cr.Reason, w) {
-					t.Errorf("Reason %q must mention %q", cr.Reason, w)
+			if len(cr.Warnings) != len(c.wantWarn) {
+				t.Fatalf("want %d warning(s), got %q", len(c.wantWarn), cr.Warnings)
+			}
+			for i, w := range c.wantWarn {
+				if !strings.Contains(cr.Warnings[i], w) {
+					t.Errorf("warning %q must mention %q", cr.Warnings[i], w)
 				}
 			}
 			if len(f.Calls()) != 1 {
@@ -87,6 +100,9 @@ func TestRestartsCheckPlansEveryStaleManagedUnit(t *testing.T) {
 	}
 	if len(cr.Changes) != 3 {
 		t.Errorf("want 3 planned restarts, got %d: %v", len(cr.Changes), cr.Changes)
+	}
+	if len(cr.Warnings) != 1 || !strings.Contains(cr.Warnings[0], "ssh") {
+		t.Errorf("the unmanaged service must be reported as a warning in the plan too; got %q", cr.Warnings)
 	}
 }
 
@@ -148,16 +164,35 @@ func TestRestartsApplyWarnsAboutUnmanagedServicesAndReboot(t *testing.T) {
 	}
 }
 
+const (
+	workerA    = "berth-app_example_com:berth-app_example_com_00"
+	workerB    = "berth-other:berth-other_00"
+	statusBoth = "supervisorctl status '" + workerA + "' '" + workerB + "'"
+	startBoth  = "supervisorctl start '" + workerA + "' '" + workerB + "'"
+)
+
+// statusLines is `supervisorctl status` for the two workers: workerA in the
+// given state, workerB running.
+func statusLines(a string) string {
+	return workerA + "   " + a + "   x\n" + workerB + "   RUNNING   x\n"
+}
+
 // Restarting supervisord stops every program; the ones that were running and
 // do not autostart (a dormant-mode host whose deploy started them) must be
-// started again, or a library update would silently stop the workers.
+// started again, or a library update would silently stop the workers. The
+// step waits for the restarted supervisord to answer and then for every
+// saved process to reach RUNNING — STARTING is not success yet.
 func TestRestartsApplyBringsRunningSupervisorProgramsBack(t *testing.T) {
+	stubNoSettleSleep(t)
 	f := bssh.NewFakeRunner()
 	f.On(staleUnitsCmd, bssh.Result{Stdout: staleLine("supervisor.service")})
-	f.On("supervisorctl status", bssh.Result{ExitCode: 3, Stdout: "berth-app_example_com:berth-app_example_com_00   RUNNING   pid 10, uptime 1:00:00\nberth-app_example_com:berth-app_example_com_01   STOPPED   Not started\nberth-other:berth-other_00   RUNNING   pid 11, uptime 0:10:00\n"})
+	f.On("supervisorctl status", bssh.Result{ExitCode: 3, Stdout: workerA + "   RUNNING   pid 10, uptime 1:00:00\nberth-app_example_com:berth-app_example_com_01   STOPPED   Not started\n" + workerB + "   RUNNING   pid 11, uptime 0:10:00\n"})
 	f.On("systemctl restart supervisor.service", bssh.Result{})
-	start := supervisorStartAfterRestartCmd([]string{"berth-app_example_com:berth-app_example_com_00", "berth-other:berth-other_00"})
-	f.On(start, bssh.Result{})
+	f.OnSeq("supervisorctl pid", bssh.Result{ExitCode: 4, Stderr: "unix:///var/run/supervisor.sock no such file"}, bssh.Result{Stdout: "123\n"})
+	f.On(startBoth, bssh.Result{ExitCode: 1, Stdout: workerB + ": ERROR (already started)\n"})
+	f.OnSeq(statusBoth,
+		bssh.Result{ExitCode: 3, Stdout: statusLines("STARTING")},
+		bssh.Result{Stdout: statusLines("RUNNING")})
 	if err := Restarts().Apply(context.Background(), provision.RunCtx{}, restartsServer(), f); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
@@ -165,11 +200,134 @@ func TestRestartsApplyBringsRunningSupervisorProgramsBack(t *testing.T) {
 	for _, c := range f.Calls()[1:] {
 		ran = append(ran, c.Cmd)
 	}
-	if got, want := strings.Join(ran, "|"), "supervisorctl status|systemctl restart supervisor.service|"+start; got != want {
+	want := strings.Join([]string{"supervisorctl status", "systemctl restart supervisor.service", "supervisorctl pid", "supervisorctl pid", startBoth, statusBoth, statusBoth}, "|")
+	if got := strings.Join(ran, "|"); got != want {
 		t.Errorf("commands:\n got %s\nwant %s", got, want)
 	}
-	if !strings.Contains(start, "'berth-app_example_com:berth-app_example_com_00'") || strings.Contains(start, "_01") {
-		t.Errorf("only the previously RUNNING programs are started again; got %q", start)
+}
+
+// A process that goes STARTING and then ends in FATAL has not come back: the
+// step fails and quotes supervisorctl's own status.
+func TestRestartsApplyFailsWhenASavedProcessDoesNotReachRunning(t *testing.T) {
+	stubNoSettleSleep(t)
+	f := bssh.NewFakeRunner()
+	f.On(staleUnitsCmd, bssh.Result{Stdout: staleLine("supervisor.service")})
+	f.On("supervisorctl status", bssh.Result{Stdout: workerA + "   RUNNING   pid 10\n" + workerB + "   RUNNING   pid 11\n"})
+	f.On("systemctl restart supervisor.service", bssh.Result{})
+	f.On("supervisorctl pid", bssh.Result{Stdout: "123\n"})
+	f.On(startBoth, bssh.Result{})
+	f.OnSeq(statusBoth,
+		bssh.Result{ExitCode: 3, Stdout: statusLines("STARTING")},
+		bssh.Result{ExitCode: 3, Stdout: statusLines("FATAL")})
+	err := Restarts().Apply(context.Background(), provision.RunCtx{}, restartsServer(), f)
+	if err == nil || !strings.Contains(err.Error(), "FATAL") || !strings.Contains(err.Error(), workerA) {
+		t.Fatalf("want a failure quoting the FATAL process; got %v", err)
+	}
+}
+
+// An unreadable snapshot would read as "nothing was running": the restart
+// would stop the workers and nothing would bring them back. Refuse instead.
+func TestRestartsApplyRefusesSupervisorRestartWithoutASnapshot(t *testing.T) {
+	cases := []struct {
+		name string
+		res  bssh.Result
+	}{
+		{"supervisord unreachable", bssh.Result{ExitCode: 4, Stdout: "unix:///var/run/supervisor.sock refused connection\n"}},
+		{"output that is not a status table", bssh.Result{ExitCode: 3, Stdout: "error: something else entirely\n"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := bssh.NewFakeRunner()
+			f.On(staleUnitsCmd, bssh.Result{Stdout: staleLine("supervisor.service")})
+			f.On("supervisorctl status", c.res)
+			err := Restarts().Apply(context.Background(), provision.RunCtx{}, restartsServer(), f)
+			if err == nil || !strings.Contains(err.Error(), "refusing to restart supervisor") {
+				t.Fatalf("want a refusal; got %v", err)
+			}
+			if cmd := ranAny(f, "systemctl restart"); cmd != "" {
+				t.Errorf("supervisor must not be restarted without a snapshot; ran %q", cmd)
+			}
+		})
+	}
+}
+
+// A Supervisor on a host whose config gives berth no worker or daemon is the
+// operator's: it is reported, never restarted.
+func TestRestartsLeavesAnUnmanagedSupervisorAlone(t *testing.T) {
+	s := restartsServer()
+	s.Queue = false
+	if s.NeedsSupervisor() {
+		t.Fatal("fixture must not need supervisor")
+	}
+	f := bssh.NewFakeRunner()
+	f.On(staleUnitsCmd, bssh.Result{Stdout: staleLine("supervisor.service")})
+	cr, err := Restarts().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Satisfied || len(cr.Warnings) != 1 || !strings.Contains(cr.Warnings[0], "supervisor") {
+		t.Errorf("an unmanaged supervisor is a warning, not a planned restart; got %+v", cr)
+	}
+}
+
+// PostgreSQL's processes live in the cluster units, not in the umbrella
+// postgresql.service config.DatabaseUnit names.
+func TestRestartsRestartsPostgresClusterUnits(t *testing.T) {
+	s := restartsServer()
+	s.Database.Engine = "postgres"
+	f := bssh.NewFakeRunner()
+	f.On(staleUnitsCmd, bssh.Result{Stdout: staleLine("nginx.service") + staleLine("postgresql@18-main.service")})
+	f.On("nginx -t", bssh.Result{})
+	f.On("systemctl restart postgresql@18-main.service", bssh.Result{})
+	f.On("systemctl restart nginx.service", bssh.Result{})
+	cr, err := Restarts().Check(context.Background(), provision.RunCtx{}, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Satisfied || len(cr.Changes) != 2 || !strings.Contains(cr.Changes[0], "postgresql@18-main") || len(cr.Warnings) != 0 {
+		t.Fatalf("the cluster unit must be planned first and not reported as unmanaged; got %+v", cr)
+	}
+	if err := Restarts().Apply(context.Background(), provision.RunCtx{}, s, f); err != nil {
+		t.Fatal(err)
+	}
+	var ran []string
+	for _, c := range f.Calls()[2:] {
+		ran = append(ran, c.Cmd)
+	}
+	if got, want := strings.Join(ran, "|"), "nginx -t|systemctl restart postgresql@18-main.service|systemctl restart nginx.service"; got != want {
+		t.Errorf("commands:\n got %s\nwant %s", got, want)
+	}
+}
+
+// The probe's own shell must fail when systemd cannot be asked: a
+// `for u in $(failing command)` loop simply does not run, and without the
+// explicit exit the script would end 0 with no output — a clean host.
+func TestStaleUnitsProbeFailsWhenSystemctlFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a POSIX shell")
+	}
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh on PATH")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "systemctl"), []byte("#!/bin/sh\necho 'Failed to connect to bus' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", "-c", staleUnitsCmd)
+	cmd.Env = []string{"PATH=" + dir + string(os.PathListSeparator) + os.Getenv("PATH")}
+	out, err := cmd.Output()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() == 0 {
+		t.Fatalf("a failing systemctl must fail the probe; err=%v stdout=%q", err, out)
+	}
+	// And a systemd that lists nothing is a clean host, exit 0.
+	if err := os.WriteFile(filepath.Join(dir, "systemctl"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command("sh", "-c", staleUnitsCmd)
+	cmd.Env = []string{"PATH=" + dir + string(os.PathListSeparator) + os.Getenv("PATH")}
+	if out, err := cmd.Output(); err != nil || strings.Contains(string(out), "\t") {
+		t.Fatalf("an empty unit list must be a clean, successful probe; err=%v stdout=%q", err, out)
 	}
 }
 

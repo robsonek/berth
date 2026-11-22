@@ -16,8 +16,10 @@ Notable changes to berth. Older releases are documented on the
   database server, the per-site Valkey instances, PHP-FPM, nginx, Supervisor,
   cron and fail2ban, in that order. nginx and PHP-FPM are restarted only after
   their config checks pass, and Supervisor programs that were running come
-  back. Services berth does not manage (sshd, system services) and a pending
-  reboot are reported as warnings; berth never reboots the host.
+  back. Services berth does not manage (sshd, system services, a Supervisor
+  or Valkey the config does not make berth run) and a pending reboot are
+  reported as warnings on every run, also when nothing is restarted; berth
+  never reboots the host.
   `provision --dry-run` and `status --drift` show the pending restarts, so
   the rule is: after packages were upgraded, run `berth provision` (README,
   "After a package upgrade"). **A provision of a host with pending restarts

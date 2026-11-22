@@ -155,11 +155,11 @@ func (e *Engine) Run(ctx context.Context, s *config.Server, r bssh.Runner, opt O
 				return
 			}
 			if cr.Satisfied {
-				emit(Event{Step: step.Name(), Kind: EventSatisfied, Reason: cr.Reason})
+				emit(Event{Step: step.Name(), Kind: EventSatisfied, Reason: cr.Reason, Warnings: cr.Warnings})
 				continue
 			}
 			if opt.DryRun {
-				emit(Event{Step: step.Name(), Kind: EventPlanned, Reason: cr.Reason, Changes: cr.Changes, Sensitive: cr.Sensitive})
+				emit(Event{Step: step.Name(), Kind: EventPlanned, Reason: cr.Reason, Changes: cr.Changes, Sensitive: cr.Sensitive, Warnings: cr.Warnings})
 				continue
 			}
 			// Warnings ride on the step's terminal event instead of being sent

@@ -905,12 +905,14 @@ Supervisor, cron and fail2ban, in that order.
   pass; a failing check stops the step before anything is restarted.
 - A database restart drops every connection and a Supervisor restart stops
   the workers, so pick the moment. Supervisor programs that were running come
-  back, including ones that do not autostart.
-- sshd and system services (journald, dbus, …) are never restarted by berth.
-  The run names the ones still on a replaced library in a warning; restart
+  back, including ones that do not autostart; the step waits until each of
+  them is running again and fails if one is not.
+- sshd and system services (journald, dbus, …) are never restarted by berth,
+  and neither is a Supervisor or Valkey the config does not make berth run.
+  Every run names the ones still on a replaced library in a warning; restart
   them yourself or reboot.
-- berth never reboots the host. When a reboot is pending (a new kernel only
-  takes effect after one) the run says so in a warning.
+- berth never reboots the host. While a reboot is pending (a new kernel only
+  takes effect after one) every run says so in a warning.
 
 ### Firewall rules (`firewall:`)
 

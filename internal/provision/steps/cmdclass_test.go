@@ -779,8 +779,10 @@ var auditedScripts = map[string]string{
 	// Audited: `systemctl list-units` and `systemctl show -p ControlGroup`
 	// read unit state; `cut` filters; `cat` reads the cgroup's process list;
 	// `awk` reads /proc/<pid>/maps and prints one field; `[ -n ]`, `[ -e ]`
-	// test; `printf`/`echo` write to stdout only; both `2>/dev/null`
-	// discard diagnostics into the null device. No file is created, no
+	// test; `printf`/`echo` write to stdout only (one printf feeds the unit
+	// list into `cut` through a pipe); both `2>/dev/null` discard
+	// diagnostics into the null device; `exit 3` ends the script when a
+	// systemctl query fails; the two assignments set shell variables. No file is created, no
 	// service is touched — the restart lives in Apply.
 	staleUnitsProbePasted: "probeStaleUnits (restarts.go): list running services, read each one's cgroup process list and /proc/<pid>/maps for replaced executable mappings, test /run/reboot-required — reads only",
 
@@ -908,7 +910,7 @@ const aptUserListsPasted = `find /etc/apt/sources.list.d -maxdepth 1 -name 'bert
 // staleUnitsProbePasted is the EXACT text of the production const
 // staleUnitsCmd (restarts.go), pasted as a literal (see aptUserListsPasted
 // for why never the production const).
-const staleUnitsProbePasted = `for u in $(systemctl list-units --type=service --state=running --no-legend --plain | cut -d' ' -f1); do cg="$(systemctl show -p ControlGroup --value "$u")"; [ -n "$cg" ] || continue; for p in $(cat "/sys/fs/cgroup$cg/cgroup.procs" 2>/dev/null); do f="$(awk '$2 ~ /x/ && $7 == "(deleted)" && $6 ~ "^/(usr/)?(lib|lib64|bin|sbin|libexec)/" {print $6; exit}' "/proc/$p/maps" 2>/dev/null)"; if [ -n "$f" ]; then printf '%s\t%s\n' "$u" "$f"; break; fi; done; done; if [ -e /run/reboot-required ]; then echo reboot-required; fi`
+const staleUnitsProbePasted = `units="$(systemctl list-units --type=service --state=running --no-legend --plain)" || exit 3; for u in $(printf '%s\n' "$units" | cut -d' ' -f1); do cg="$(systemctl show -p ControlGroup --value "$u")" || exit 3; [ -n "$cg" ] || continue; for p in $(cat "/sys/fs/cgroup$cg/cgroup.procs" 2>/dev/null); do f="$(awk '$2 ~ /x/ && $7 == "(deleted)" && $6 ~ "^/(usr/)?(lib|lib64|bin|sbin|libexec)/" {print $6; exit}' "/proc/$p/maps" 2>/dev/null)"; if [ -n "$f" ]; then printf '%s\t%s\n' "$u" "$f"; break; fi; done; done; if [ -e /run/reboot-required ]; then echo reboot-required; fi`
 
 // swapfileSizeProbePasted is the EXACT text swapfileSize (system.go) issues —
 // a const composition over the const swapfile path, pasted as a literal (see
