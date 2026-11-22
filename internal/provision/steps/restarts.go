@@ -146,7 +146,7 @@ type plannedRestart struct {
 }
 
 // splitStale sorts the probed services into the ones berth restarts (in
-// restart order) and the names of the rest.
+// restart order) and the full unit names of the rest.
 func splitStale(s *config.Server, stale []staleUnit) (plan []plannedRestart, others []string) {
 	taken := make(map[string]bool, len(stale))
 	for _, ru := range restartableUnits(s) {
@@ -159,7 +159,7 @@ func splitStale(s *config.Server, stale []staleUnit) (plan []plannedRestart, oth
 	}
 	for _, st := range stale {
 		if !taken[st.unit] {
-			others = append(others, unitLabel(st.unit))
+			others = append(others, st.unit)
 		}
 	}
 	return plan, others
@@ -188,26 +188,31 @@ var plainUnitName = regexp.MustCompile(`^[A-Za-z0-9@._:-]+$`)
 // in every outcome — satisfied, planned or applied — and never drift: a host
 // waiting for a reboot would otherwise never converge.
 //
-// The services the operator can restart come with the command that does it,
-// ready to paste; the leftForReboot ones get their own note and are never in
-// that command.
+// others are full unit names. The services the operator can restart come
+// with the command that does it, ready to paste — full unit names after
+// `--`, because a legal unit name may start with a dash and option parsing
+// must end before it; the leftForReboot ones get their own note and are
+// never in that command.
 func restartNotes(others []string, reboot bool) []string {
 	var restartable, rebootOnly, args []string
-	for _, name := range others {
+	for _, unit := range others {
+		name := unitLabel(unit)
 		if leftForReboot[name] {
 			rebootOnly = append(rebootOnly, name)
 			continue
 		}
 		restartable = append(restartable, name)
-		if plainUnitName.MatchString(name) {
-			args = append(args, name)
+		// The command names each unit IN FULL: `restart custom.socket` would
+		// restart the socket unit, not custom.socket.service.
+		if plainUnitName.MatchString(unit) {
+			args = append(args, unit)
 		} else {
-			args = append(args, shQuote(name))
+			args = append(args, shQuote(unit))
 		}
 	}
 	var notes []string
 	if len(restartable) > 0 {
-		notes = append(notes, "these services still run a library or binary that was replaced on disk and berth does not restart them: "+strings.Join(restartable, ", ")+" — restart them with: sudo systemctl restart "+strings.Join(args, " "))
+		notes = append(notes, "these services still run a library or binary that was replaced on disk and berth does not restart them: "+strings.Join(restartable, ", ")+" — restart them with: sudo systemctl restart -- "+strings.Join(args, " "))
 	}
 	if len(rebootOnly) > 0 {
 		notes = append(notes, "also on a replaced library, but left for a reboot: "+strings.Join(rebootOnly, ", ")+" — restarting these on a live host can break systemd's own services or cut your connection, so they are not in the command above; berth never reboots the host")
