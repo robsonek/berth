@@ -3,6 +3,18 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Added
+
+- **`berth status --drift` shows step warnings.** A step can be converged and
+  still have something to report — a pending reboot, or services that still
+  run a replaced library and that berth does not restart. Those warnings were
+  visible only in `provision` and `--dry-run`; the fleet view now lists each
+  as a `! <step>: …` line under the host, the drill-down shows them, and
+  `--json` carries them as a `warnings` list on the step. They are not drift
+  and do not change the exit code.
+
 ## [1.2.3] — 2026-11-22
 
 ### Changed

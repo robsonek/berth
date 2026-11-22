@@ -66,6 +66,13 @@ packages, services or certificates change. A drift scan also takes the host's
 session lock, so it does not run while another berth session holds the host —
 see [One berth session per host](#one-berth-session-per-host).
 
+A drift scan also shows what a step has to say although nothing is drift: a
+pending reboot, or services still running a library that a package upgrade
+replaced and that berth does not restart (see
+[After a package upgrade](#after-a-package-upgrade)). Each such warning is a
+`! <step>: …` line under the host and a `warnings` list on the step in
+`--json`. They never count as drift and never change the exit code.
+
 Host-key verification is strict: only a pinned `ssh.fingerprint` or an existing
 `known_hosts` entry is accepted. There is no trust-on-first-use prompt, because
 hosts are probed concurrently and a routine read-only command is the wrong

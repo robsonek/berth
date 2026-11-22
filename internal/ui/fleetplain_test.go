@@ -396,3 +396,27 @@ func TestFleetTableContinuationRowsDoNotWidenColumns(t *testing.T) {
 		}
 	}
 }
+
+// Warnings from a converged scan (a pending reboot, services berth does not
+// restart) are shown under the host even though the DRIFT cell says clean:
+// status --drift is where a fleet is checked, so that is where they must be.
+func TestFleetTableShowsDriftWarnings(t *testing.T) {
+	h := hostFixture()
+	h.Drift = &status.DriftReport{Steps: []status.StepState{
+		{Step: "site", Satisfied: true},
+		{Step: "restarts", Satisfied: true, Warnings: []string{"a reboot is pending", "left for a reboot: dbus"}},
+	}}
+	var buf bytes.Buffer
+	if err := WriteFleetTable(&buf, []status.HostStatus{h}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{"  ! restarts: a reboot is pending", "  ! restarts: left for a reboot: dbus"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, "clean") {
+		t.Errorf("warnings must not change the drift verdict:\n%s", out)
+	}
+}

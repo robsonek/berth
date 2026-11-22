@@ -47,6 +47,13 @@
           {
             "step": "site",
             "satisfied": true
+          },
+          {
+            "step": "restarts",
+            "satisfied": true,
+            "warnings": [
+              "a reboot is pending (/run/reboot-required)"
+            ]
           }
         ],
         "drifted": 0

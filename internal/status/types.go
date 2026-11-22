@@ -80,6 +80,11 @@ type StepState struct {
 	Step      string   `json:"step"`
 	Satisfied bool     `json:"satisfied"`
 	Changes   []string `json:"changes,omitempty"`
+	// Warnings are the step's Check notes that are NOT drift (a pending
+	// reboot, a service berth does not restart): present on satisfied and
+	// unsatisfied steps alike, never counted in Drifted, never part of the
+	// exit code.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // DriftReport is the outcome of the read-only Check sweep. StoppedAt is set
