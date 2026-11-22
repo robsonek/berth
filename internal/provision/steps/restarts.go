@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -270,11 +271,13 @@ func (restarts) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server
 		}
 	}
 	for i, p := range plan {
+		// A failure here must not swallow a worker error recorded earlier:
+		// errors.Join keeps both (and is the plain error when there is none).
 		if err := runOK(ctx, r, "systemctl restart "+p.unit); err != nil {
-			return err
+			return errors.Join(err, workersErr)
 		}
 		if err := waitReady(ctx, r, p); err != nil {
-			return err
+			return errors.Join(err, workersErr)
 		}
 		if i == restoreAfter && len(workers) > 0 {
 			// A worker that cannot be started again fails the step — at

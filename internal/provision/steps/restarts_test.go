@@ -636,3 +636,26 @@ func TestRestartsApplyFinishesUnrelatedRestartsBeforeReportingAWorker(t *testing
 		t.Errorf("the closing notes must still be delivered; got %q", warnings)
 	}
 }
+
+// Two things went wrong: a worker could not be started again AND a later
+// restart failed. The operator must hear both — the worker's name lives only
+// in this run, so an error that mentions just nginx would lose it for good.
+func TestRestartsApplyReportsTheWorkerAlongsideALaterFailure(t *testing.T) {
+	stubNoSettleSleep(t)
+	f := bssh.NewFakeRunner()
+	f.On(staleUnitsCmd, bssh.Result{Stdout: staleLine("mariadb.service") + staleLine("nginx.service")})
+	f.On("nginx -t", bssh.Result{})
+	f.On("supervisorctl status", bssh.Result{Stdout: bothRunning})
+	f.On(stopBoth, bssh.Result{ExitCode: 124})
+	f.On(statusBoth, bssh.Result{ExitCode: 3, Stdout: oneStillBusy})
+	f.On(restartMaria, bssh.Result{})
+	f.On(mariadbReady, bssh.Result{})
+	f.On("supervisorctl pid", bssh.Result{Stdout: "1\n"})
+	f.On("supervisorctl start '"+workerB+"'", bssh.Result{})
+	f.On("supervisorctl status '"+workerB+"'", bssh.Result{Stdout: workerB + "   RUNNING   pid 12\n"})
+	f.On("systemctl restart nginx.service", bssh.Result{ExitCode: 1, Stderr: "Job for nginx.service failed"})
+	err := Restarts().Apply(context.Background(), provision.RunCtx{Warn: func(string) {}}, restartsServer(), f)
+	if err == nil || !strings.Contains(err.Error(), "nginx.service failed") || !strings.Contains(err.Error(), workerA) {
+		t.Fatalf("want both the nginx failure and the worker that was not started; got %v", err)
+	}
+}
