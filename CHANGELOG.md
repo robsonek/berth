@@ -15,6 +15,15 @@ Notable changes to berth. Older releases are documented on the
   `--json` carries them as a `warnings` list on the step. They are not drift
   and do not change the exit code.
 
+### Fixed
+
+- **A Composer berth did not install is no longer reported as kept current.**
+  When the `composer` on the host's `PATH` is not `/usr/local/bin/composer`
+  (the Debian package, say), berth leaves it alone and its self-update cron
+  does nothing for it — yet the step reported "daily self-update cron in
+  place" and nothing else. Each run now warns, naming both paths. It is a
+  warning, not drift.
+
 ## [1.2.3] — 2026-11-22
 
 ### Changed
