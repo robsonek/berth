@@ -126,3 +126,31 @@ func TestPlainRendererPrintsWarnings(t *testing.T) {
 		t.Errorf("verbose mode must print warnings too; got %q", buf2.String())
 	}
 }
+
+// A planned step's change list is often the step's whole repertoire (site
+// lists everything it may do), so the WHY is what tells the operator what
+// actually differs. Verbose prints it; non-verbose stays byte-stable.
+func TestPlainRendererVerbosePrintsPlannedReason(t *testing.T) {
+	events := func() <-chan provision.Event {
+		return feed(
+			provision.Event{Step: "site", Kind: provision.EventPlanned, Reason: "running php-fpm predates a managed pool (reload pending)", Changes: []string{"write per-site FPM pool"}},
+			provision.Event{Step: "composer", Kind: provision.EventPlanned, Changes: []string{"install composer"}},
+			provision.Event{Step: "database", Kind: provision.EventPlanned, Sensitive: true, Reason: "secret-bearing reason", Changes: []string{"seed shared/.env"}},
+		)
+	}
+	var verbose, quiet bytes.Buffer
+	if err := NewPlainRenderer(&verbose, true).Render(events()); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewPlainRenderer(&quiet, false).Render(events()); err != nil {
+		t.Fatal(err)
+	}
+	wantVerbose := "plan  site: [write per-site FPM pool]\n      why: running php-fpm predates a managed pool (reload pending)\nplan  composer: [install composer]\nplan  database: [[redacted]]\n"
+	if got := verbose.String(); got != wantVerbose {
+		t.Errorf("verbose output:\ngot  %q\nwant %q", got, wantVerbose)
+	}
+	wantQuiet := "plan  site: [write per-site FPM pool]\nplan  composer: [install composer]\nplan  database: [[redacted]]\n"
+	if got := quiet.String(); got != wantQuiet {
+		t.Errorf("non-verbose output changed:\ngot  %q\nwant %q", got, wantQuiet)
+	}
+}

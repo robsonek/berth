@@ -744,7 +744,7 @@ func TestHardeningCheckUnsatisfiedWhenJailNewerThanStamp(t *testing.T) {
 	stubCheckGreenBase(f)
 	stubSshdEffectiveGood(f)
 	stubStampsGreen(f)
-	f.On(reloadedSinceCmd("fail2ban", fail2banJailPath), bssh.Result{ExitCode: 1})
+	stubNotReloaded(f, "fail2ban", fail2banJailPath)
 
 	res, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
 	if err != nil {
@@ -762,7 +762,7 @@ func TestHardeningCheckUnsatisfiedWhenSSHDropInNewerThanStamp(t *testing.T) {
 	stubCheckGreenBase(f)
 	stubSshdEffectiveGood(f)
 	stubStampsGreen(f)
-	f.On(reloadedSinceCmd("ssh", sshdDropInPath), bssh.Result{ExitCode: 1})
+	stubNotReloaded(f, "ssh", sshdDropInPath)
 
 	res, err := Hardening().Check(context.Background(), provision.RunCtx{}, hardeningServer(), f)
 	if err != nil {

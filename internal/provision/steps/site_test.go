@@ -1648,7 +1648,7 @@ func TestSiteCheckUnsatisfiedWhenVhostNewerThanNginxStamp(t *testing.T) {
 	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
 	stubSiteConvergedProbes(s, f)
 	vhosts, _ := siteStampFileLists(s)
-	f.On(reloadedSinceCmd("nginx", vhosts...), bssh.Result{ExitCode: 1})
+	stubNotReloaded(f, "nginx", vhosts...)
 	// (FPM stamp probe not reached — Check returns at the first failed probe.)
 
 	cr, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
@@ -1668,7 +1668,7 @@ func TestSiteCheckUnsatisfiedWhenPoolNewerThanFPMStamp(t *testing.T) {
 	f.On("php-fpm"+s.PHP.Version+" -t", bssh.Result{ExitCode: 0})
 	stubSiteConvergedProbes(s, f)
 	_, pools := siteStampFileLists(s)
-	f.On(reloadedSinceCmd(fpmService(s), pools...), bssh.Result{ExitCode: 1})
+	stubNotReloaded(f, fpmService(s), pools...)
 
 	cr, err := Site().Check(context.Background(), provision.RunCtx{}, s, f)
 	if err != nil {

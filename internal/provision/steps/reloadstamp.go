@@ -54,23 +54,56 @@ func invalidateReloaded(ctx context.Context, r bssh.Runner, unit string) error {
 	return nil
 }
 
-// reloadedSince reports whether a successful reload of unit happened after the
-// last write of every given path: true iff the stamp exists and no path is
-// newer than it (`[ file -nt stamp ]`, exit-code only — no timestamp parsing,
-// no timezone pitfalls; -nt is not POSIX but a dash/bash extension, and
-// Debian's /bin/sh is dash). A missing stamp reads as "not reloaded"
-// (first run after introducing stamps performs one reconciling reload). A
-// reboot keeps the answer truthful: systemd starts the unit with the config
-// on disk and no mtime changes, so an up-to-date state stays satisfied. An
-// out-of-band `touch` of a managed file triggers one reconciling reload —
-// intentional, mirroring serviceConfigLoaded's conservative mtime semantics.
-// Callers must pair this with a liveness probe (serviceUp/serviceActive): a
-// stopped unit keeps its old stamp, so the stamp alone would falsely pass.
+// reloadedSince reports whether the running unit has loaded every given path:
+// either a successful berth reload happened after the last write of each one,
+// or the unit itself was (re)started after it.
+//
+// The stamp test comes first: true iff the stamp exists and no path is newer
+// than it (`[ file -nt stamp ]`, exit-code only — -nt is not POSIX but a
+// dash/bash extension, and Debian's /bin/sh is dash). A reboot keeps the
+// answer truthful: systemd starts the unit with the config on disk and no
+// mtime changes, so an up-to-date state stays satisfied.
+//
+// When the stamp test fails, restartedSince is the second opinion. A package
+// upgrade (unattended-upgrades included) bumps the mtime of a config
+// directory berth watches and restarts the unit: the stamp is then older
+// than the path although nothing is pending, which used to read as drift on
+// a healthy host until the next provision.
+//
+// A missing stamp always reads as "not reloaded": an Apply in flight has
+// invalidated it, and only its own final reload may bless the unit again. An
+// out-of-band `touch` of a managed file still triggers one reconciling
+// reload — intentional, mirroring serviceConfigLoaded's conservative mtime
+// semantics. Callers pair this with a liveness probe (serviceUp/
+// serviceActive); the fallback also checks is-active itself, because a
+// stopped unit keeps its old start time.
 func reloadedSince(ctx context.Context, r bssh.Runner, unit string, paths ...string) (bool, error) {
 	stamp := shQuote(stampPath(unit))
 	cmd := "[ -e " + stamp + " ]"
 	for _, p := range paths {
 		cmd += " && [ ! " + shQuote(p) + " -nt " + stamp + " ]"
+	}
+	res, err := r.Run(ctx, cmd, nil)
+	if err != nil {
+		return false, err
+	}
+	if res.ExitCode == 0 {
+		return true, nil
+	}
+	return restartedSince(ctx, r, unit, paths...)
+}
+
+// restartedSince reports whether unit is active, its stamp exists, and its
+// last (re)start is not older than the mtime of any given path — a start
+// loads all of the unit's config on disk at that moment. A reload does not
+// move ActiveEnterTimestamp, so this never blesses a reload berth did not
+// make. Same integer comparison as serviceConfigLoaded (`--timestamp=unix`,
+// whole seconds; see its comment for the accepted same-second case); a path
+// that cannot be stat'ed, or an empty start time, reads as "not loaded".
+func restartedSince(ctx context.Context, r bssh.Runner, unit string, paths ...string) (bool, error) {
+	cmd := `s="$(systemctl show -p ActiveEnterTimestamp --value --timestamp=unix ` + unit + ` 2>/dev/null | tr -d @)"; [ -n "$s" ] && [ -e ` + shQuote(stampPath(unit)) + ` ] && systemctl is-active --quiet ` + unit
+	for _, p := range paths {
+		cmd += ` && [ "$(stat -c %Y ` + shQuote(p) + ` 2>/dev/null)" -le "$s" ]`
 	}
 	res, err := r.Run(ctx, cmd, nil)
 	if err != nil {

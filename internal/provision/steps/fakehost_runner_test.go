@@ -799,6 +799,28 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 		}
 		return bssh.Result{Stdout: strings.Join(lines, "\n") + "\n"}, true
 
+	// restartedSince (reloadstamp.go), reloadedSince's fallback: reads ONLY
+	// the exit code. Recognized by strict parse-and-reconstruct and evaluated
+	// from the model — an empty or unparsable start time, a missing stamp, an
+	// inactive unit, or a path that is absent or newer than the unit's start
+	// all read as "not loaded".
+	case strings.HasPrefix(cmd, restartedSincePrefix):
+		unit, paths, ok := parseRestartedSince(cmd)
+		if !ok {
+			return bssh.Result{}, false
+		}
+		u, uok := r.h.unit(unit)
+		ts, terr := strconv.ParseInt(strings.TrimPrefix(u.props["ActiveEnterTimestamp"], "@"), 10, 64)
+		if _, present := r.h.files[stampPath(unit)]; !uok || terr != nil || !present || !u.active {
+			return bssh.Result{ExitCode: 1}, true
+		}
+		for _, p := range paths {
+			if file, ok := r.h.files[p]; !ok || file.mtimeUnix > ts {
+				return bssh.Result{ExitCode: 1}, true
+			}
+		}
+		return bssh.Result{}, true
+
 	// reloadedSince (reloadstamp.go) reads ONLY the exit code of its stamp
 	// existence + mtime chain. Recognized by strict parse-and-reconstruct, so
 	// only the production shape is ever answered; evaluated from the model's
@@ -1651,6 +1673,41 @@ func (r *recordingRunner) answerEnvLineInSet(path, key string, stdin []byte) bss
 		}
 		rest = tail
 	}
+}
+
+// restartedSincePrefix opens reloadstamp.go's fallback probe.
+const restartedSincePrefix = `s="$(systemctl show -p ActiveEnterTimestamp --value --timestamp=unix `
+
+// parseRestartedSince recognizes reloadstamp.go's fallback probe shape. A
+// loose scan extracts the candidate unit and paths, then the command is
+// RECONSTRUCTED via restartedSinceCmd and compared byte-for-byte, so only the
+// exact production shape is ever recognized.
+func parseRestartedSince(cmd string) (unit string, paths []string, ok bool) {
+	rest, found := strings.CutPrefix(cmd, restartedSincePrefix)
+	if !found {
+		return "", nil, false
+	}
+	unit, rest, found = strings.Cut(rest, " 2>/dev/null")
+	if !found || strings.ContainsAny(unit, " '\"$") {
+		return "", nil, false
+	}
+	const open, closeSeg = ` && [ "$(stat -c %Y '`, `' 2>/dev/null)" -le "$s" ]`
+	for {
+		_, tail, found := strings.Cut(rest, open)
+		if !found {
+			break
+		}
+		p, after, found := strings.Cut(tail, closeSeg)
+		if !found || strings.Contains(p, "'") {
+			return "", nil, false
+		}
+		paths = append(paths, p)
+		rest = after
+	}
+	if restartedSinceCmd(unit, paths...) != cmd {
+		return "", nil, false
+	}
+	return unit, paths, true
 }
 
 // parseReloadedSince recognizes reloadstamp.go's probe shape:

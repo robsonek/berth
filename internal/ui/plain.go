@@ -54,6 +54,13 @@ func (p *PlainRenderer) Render(events <-chan provision.Event) error {
 				changes = []string{"[redacted]"}
 			}
 			_, _ = fmt.Fprintf(p.w, "plan  %s: %v\n", e.Step, sanitizeAll(changes))
+			// The change list is often the step's whole repertoire; the
+			// reason says what actually differs. Verbose only (the
+			// non-verbose lines are a byte-stable contract), and never for
+			// a sensitive step.
+			if p.verbose && !e.Sensitive && e.Reason != "" {
+				_, _ = fmt.Fprintf(p.w, "      why: %s\n", SanitizeCell(e.Reason))
+			}
 		case provision.EventFailed:
 			// Errors keep their deliberate newlines (multi-line remedies).
 			_, _ = fmt.Fprintf(p.w, "FAIL  %s: %s\n", e.Step, sanitizeErr(e.Err))

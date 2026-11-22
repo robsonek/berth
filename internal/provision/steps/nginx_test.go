@@ -109,7 +109,7 @@ func TestNginxCheckUnsatisfiedWhenConfNewerThanStamp(t *testing.T) {
 	f.On("systemctl is-enabled nginx", bssh.Result{ExitCode: 0})
 	stubDefaultsAbsent(f)
 	stubNginxRepoAbsent(f)
-	f.On(reloadedSinceCmd("nginx", nginxConfPath, nginxGzipPath), bssh.Result{ExitCode: 1})
+	stubNotReloaded(f, "nginx", nginxConfPath, nginxGzipPath)
 	cr, err := Nginx().Check(context.Background(), provision.RunCtx{}, &config.Server{}, f)
 	if err != nil {
 		t.Fatal(err)
