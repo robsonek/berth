@@ -3,6 +3,17 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
+## [Unreleased]
+
+### Changed
+
+- **The `restarts` warning says how to restart, and what not to.** The
+  warning naming the services berth does not restart now ends with the
+  `sudo systemctl restart …` command for them, ready to paste. dbus and the
+  network managers are no longer in that list: restarting them on a live host
+  can break systemd's own services or cut the operator's connection, so they
+  get a warning of their own and are left for a reboot.
+
 ## [1.2.1] — 2026-11-22
 
 ### Fixed

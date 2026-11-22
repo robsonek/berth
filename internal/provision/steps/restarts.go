@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/robsonek/berth/internal/config"
@@ -145,7 +146,7 @@ type plannedRestart struct {
 }
 
 // splitStale sorts the probed services into the ones berth restarts (in
-// restart order) and the names of the rest.
+// restart order) and the full unit names of the rest.
 func splitStale(s *config.Server, stale []staleUnit) (plan []plannedRestart, others []string) {
 	taken := make(map[string]bool, len(stale))
 	for _, ru := range restartableUnits(s) {
@@ -158,20 +159,63 @@ func splitStale(s *config.Server, stale []staleUnit) (plan []plannedRestart, oth
 	}
 	for _, st := range stale {
 		if !taken[st.unit] {
-			others = append(others, unitLabel(st.unit))
+			others = append(others, st.unit)
 		}
 	}
 	return plan, others
 }
 
+// leftForReboot are the services berth never tells the operator to restart
+// by hand, because the command is pasted into an SSH session on a live host:
+//
+//   - dbus carries systemd's own conversations with its services (logind,
+//     resolved, …); restarting it breaks them, which is why Debian never
+//     restarts it on an upgrade either.
+//   - the network managers may take the operator's own connection with them.
+//
+// They pick up the new library at the next reboot and get a note of their
+// own, so they never appear in the "restart these" command.
+var leftForReboot = map[string]bool{
+	"dbus": true, "dbus-broker": true,
+	"systemd-networkd": true, "networking": true, "NetworkManager": true, "wpa_supplicant": true,
+}
+
+// plainUnitName matches the names that need no quoting in a shell command.
+var plainUnitName = regexp.MustCompile(`^[A-Za-z0-9@._:-]+$`)
+
 // restartNotes are the things the operator must hear that berth does not act
 // on: services it does not manage, and a pending reboot. They are warnings
 // in every outcome — satisfied, planned or applied — and never drift: a host
 // waiting for a reboot would otherwise never converge.
+//
+// others are full unit names. The services the operator can restart come
+// with the command that does it, ready to paste — full unit names after
+// `--`, because a legal unit name may start with a dash and option parsing
+// must end before it; the leftForReboot ones get their own note and are
+// never in that command.
 func restartNotes(others []string, reboot bool) []string {
+	var restartable, rebootOnly, args []string
+	for _, unit := range others {
+		name := unitLabel(unit)
+		if leftForReboot[name] {
+			rebootOnly = append(rebootOnly, name)
+			continue
+		}
+		restartable = append(restartable, name)
+		// The command names each unit IN FULL: `restart custom.socket` would
+		// restart the socket unit, not custom.socket.service.
+		if plainUnitName.MatchString(unit) {
+			args = append(args, unit)
+		} else {
+			args = append(args, shQuote(unit))
+		}
+	}
 	var notes []string
-	if len(others) > 0 {
-		notes = append(notes, "these services still run a library or binary that was replaced on disk and berth does not restart them: "+strings.Join(others, ", ")+" — restart them yourself or reboot")
+	if len(restartable) > 0 {
+		notes = append(notes, "these services still run a library or binary that was replaced on disk and berth does not restart them: "+strings.Join(restartable, ", ")+" — restart them with: sudo systemctl restart -- "+strings.Join(args, " "))
+	}
+	if len(rebootOnly) > 0 {
+		notes = append(notes, "also on a replaced library, but left for a reboot: "+strings.Join(rebootOnly, ", ")+" — restarting these on a live host can break systemd's own services or cut your connection, so they are not in the command above; berth never reboots the host")
 	}
 	if reboot {
 		notes = append(notes, "a reboot is pending (/run/reboot-required): a new kernel only takes effect after it; berth never reboots the host")

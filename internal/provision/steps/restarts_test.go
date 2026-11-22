@@ -659,3 +659,55 @@ func TestRestartsApplyReportsTheWorkerAlongsideALaterFailure(t *testing.T) {
 		t.Fatalf("want both the nginx failure and the worker that was not started; got %v", err)
 	}
 }
+
+// The warning about services berth does not restart ends with the command
+// that restarts them — and keeps out of it what must not be restarted from an
+// SSH session: dbus (restarting it on a live system breaks systemd's own
+// services) and the network managers (the operator's own connection may go
+// with them). Those get a warning of their own that leaves them to a reboot.
+func TestRestartNotesGiveACommandAndSetDbusApart(t *testing.T) {
+	cases := []struct {
+		name   string
+		others []string // full unit names, as the probe reports them
+		reboot bool
+		want   []string // one substring per expected note, in order
+		absent []string // must appear in no note
+	}{
+		{"nothing", nil, false, nil, nil},
+		{"restartable only", []string{"ssh.service", "exim4.service", "getty@tty1.service"}, false,
+			[]string{"restart them: ssh, exim4, getty@tty1 — restart them with: sudo systemctl restart -- ssh.service exim4.service getty@tty1.service"}, []string{"reboot"}},
+		{"dbus only", []string{"dbus.service"}, false,
+			[]string{"left for a reboot: dbus"}, []string{"systemctl restart"}},
+		{"dbus-broker and the network managers count too", []string{"dbus-broker.service", "systemd-networkd.service", "NetworkManager.service", "networking.service"}, false,
+			[]string{"left for a reboot: dbus-broker, systemd-networkd, NetworkManager, networking"}, []string{"systemctl restart"}},
+		{"both, and a pending reboot", []string{"dbus.service", "ssh.service", "systemd-networkd.service"}, true,
+			[]string{"sudo systemctl restart -- ssh.service", "left for a reboot: dbus, systemd-networkd", "a reboot is pending"}, []string{"ssh.service dbus", "-- dbus", "ssh.service systemd-networkd"}},
+		{"a name the shell would mangle is quoted", []string{`systemd-fsck@dev-disk-by\x2duuid-1.service`}, false,
+			[]string{`sudo systemctl restart -- 'systemd-fsck@dev-disk-by\x2duuid-1.service'`}, nil},
+		// The command names the unit in full: `restart custom.socket` would
+		// hit the SOCKET unit, not custom.socket.service.
+		{"a service whose name ends like another unit type", []string{"custom.socket.service"}, false,
+			[]string{"sudo systemctl restart -- custom.socket.service"}, nil},
+		// `--` ends option parsing: a unit named -custom.service is legal.
+		{"a name that starts with a dash", []string{"-custom.service"}, false,
+			[]string{"sudo systemctl restart -- -custom.service"}, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			notes := restartNotes(c.others, c.reboot)
+			if len(notes) != len(c.want) {
+				t.Fatalf("want %d note(s), got %q", len(c.want), notes)
+			}
+			for i, w := range c.want {
+				if !strings.Contains(notes[i], w) {
+					t.Errorf("note %d = %q, want it to contain %q", i, notes[i], w)
+				}
+			}
+			for _, a := range c.absent {
+				if strings.Contains(strings.Join(notes, "\n"), a) {
+					t.Errorf("notes must not contain %q; got %q", a, notes)
+				}
+			}
+		})
+	}
+}
