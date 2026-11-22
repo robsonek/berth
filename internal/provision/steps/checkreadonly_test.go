@@ -162,7 +162,8 @@ func wantStepsFor(variant string) []string {
 	steps := []string{
 		"identity", "preflight", "base", "system", "apt", "php", "nginx",
 		"composer", "valkey", "supervisor", "accounts", "hardening", "appdirs",
-		"database", "site", "tls", "tuning", "backups", "offsite", "manifest",
+		"database", "site", "tls", "tuning", "backups", "offsite", "restarts",
+		"manifest",
 	}
 	if variant == "postgres" {
 		steps = slices.DeleteFunc(steps, func(s string) bool { return s == "tuning" })

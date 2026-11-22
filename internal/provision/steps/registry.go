@@ -48,6 +48,12 @@ func Pipeline(s *config.Server, red *secret.Redactor, skipSSL bool) []provision.
 	if !skipSSL {
 		steps = append(steps, TLS())
 	}
+	// restarts runs after every step that may itself restart or reload a
+	// service (tls reloads nginx last): what is still running a replaced
+	// library at this point is what a package upgrade left behind, and it
+	// is restarted once. Always registered, --skip-ssl included — it owns
+	// no TLS state.
+	steps = append(steps, Restarts())
 	// manifest LAST: it attests that the FULL pipeline for this config
 	// completed on this binary's version, so nothing may run after it — and
 	// it is NOT registered under --skip-ssl at all: tls is an always-run

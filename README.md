@@ -883,6 +883,35 @@ a maintenance window you choose:
 
    or, with `workers: running`, run `berth provision`, which starts them.
 
+5. Run `berth provision` (see [After a package upgrade](#after-a-package-upgrade)).
+
+### After a package upgrade
+
+A package upgrade — yours with `apt-get upgrade`, or the nightly
+unattended-upgrades run — restarts the service whose own package changed and
+nothing else. Everything that only *uses* an upgraded library (an OpenSSL or
+libc update, for one) keeps running the old copy until it is restarted, and
+berth's per-site Valkey instances keep the old `valkey-server` binary. So:
+
+**After packages were upgraded, run `berth provision`.** `provision --dry-run`
+and `berth status --drift` show whether it has anything to do.
+
+The last step of a provision, `restarts`, finds the services that still run a
+library or binary which was replaced on disk and restarts the ones berth
+manages: the database server, the per-site Valkey instances, PHP-FPM, nginx,
+Supervisor, cron and fail2ban, in that order.
+
+- nginx and PHP-FPM are restarted only after `nginx -t` and `php-fpm<ver> -t`
+  pass; a failing check stops the step before anything is restarted.
+- A database restart drops every connection and a Supervisor restart stops
+  the workers, so pick the moment. Supervisor programs that were running come
+  back, including ones that do not autostart.
+- sshd and system services (journald, dbus, …) are never restarted by berth.
+  The run names the ones still on a replaced library in a warning; restart
+  them yourself or reboot.
+- berth never reboots the host. When a reboot is pending (a new kernel only
+  takes effect after one) the run says so in a warning.
+
 ### Firewall rules (`firewall:`)
 
 Every provision enables `ufw` with the built-in rules — your SSH port, `80,443/tcp`

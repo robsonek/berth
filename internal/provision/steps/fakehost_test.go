@@ -156,6 +156,9 @@ type fakeUnit struct {
 	active  bool
 	enabled bool
 	props   map[string]string
+	// stalePath, when set, is a replaced library the unit's processes still
+	// map — what the restarts step's probe reports for it.
+	stalePath string
 }
 
 // fakeHost is an in-memory host state. It knows nothing about commands — the
@@ -172,6 +175,8 @@ type fakeHost struct {
 	swapRows string
 	dfRows   string
 	gpgKeys  map[string]string // keyring path -> `gpg --show-keys --with-colons` colon output
+	// rebootRequired models /run/reboot-required (the restarts probe).
+	rebootRequired bool
 	// firewall is the config's owned ufw rules, which the `ufw show added`
 	// answer renders with the production builder (converged) or as the
 	// operator's uncommented twin (drifted).
@@ -619,6 +624,18 @@ func populateInstalled(h *fakeHost, s *config.Server, profile string) {
 			"MainPID":              "1234",
 			"FragmentPath":         "/lib/systemd/system/" + u,
 		}}
+	}
+	// runtime-stale also models what a library upgrade leaves behind: nginx
+	// (berth-managed) and ssh (not restarted by berth) still map a replaced
+	// libcrypto, and the host flags a pending reboot — the state the
+	// restarts step exists for.
+	if profile == "runtime-stale" {
+		for _, name := range []string{"nginx", "ssh"} {
+			u := h.units[name]
+			u.stalePath = "/usr/lib/x86_64-linux-gnu/libcrypto.so.3"
+			h.units[name] = u
+		}
+		h.rebootRequired = true
 	}
 	// The stock shared valkey-server.service exists on any host with the
 	// package but is disabled AND stopped — the unauthenticated 6379 listener
