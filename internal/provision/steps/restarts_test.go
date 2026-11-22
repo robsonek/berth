@@ -113,7 +113,7 @@ func TestRestartsCheckPlansEveryStaleManagedUnit(t *testing.T) {
 func TestRestartsApplyRestartsInDependencyOrderAfterValidating(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On(staleUnitsCmd, bssh.Result{Stdout: staleLine("nginx.service") + staleLine("php8.5-fpm.service") + staleLine("mariadb.service") + staleLine("cron.service")})
-	for _, cmd := range []string{"systemctl restart mariadb.service", "php-fpm8.5 -t", "systemctl restart php8.5-fpm.service", "nginx -t", "systemctl restart nginx.service", "systemctl restart cron.service"} {
+	for _, cmd := range []string{"supervisorctl status", "systemctl restart mariadb.service", mariadbReady, "php-fpm8.5 -t", "systemctl restart php8.5-fpm.service", "nginx -t", "systemctl restart nginx.service", "systemctl restart cron.service"} {
 		f.On(cmd, bssh.Result{})
 	}
 	if err := Restarts().Apply(context.Background(), provision.RunCtx{}, restartsServer(), f); err != nil {
@@ -123,7 +123,9 @@ func TestRestartsApplyRestartsInDependencyOrderAfterValidating(t *testing.T) {
 	for _, c := range f.Calls()[1:] {
 		ran = append(ran, c.Cmd)
 	}
-	want := "php-fpm8.5 -t|nginx -t|systemctl restart mariadb.service|systemctl restart php8.5-fpm.service|systemctl restart nginx.service|systemctl restart cron.service"
+	// No worker is running, so nothing is stopped or started around the
+	// database restart — but the snapshot is still read to know that.
+	want := "php-fpm8.5 -t|nginx -t|supervisorctl status|systemctl restart mariadb.service|" + mariadbReady + "|systemctl restart php8.5-fpm.service|systemctl restart nginx.service|systemctl restart cron.service"
 	if got := strings.Join(ran, "|"); got != want {
 		t.Errorf("commands:\n got %s\nwant %s", got, want)
 	}
@@ -191,6 +193,7 @@ func TestRestartsApplyBringsRunningSupervisorProgramsBack(t *testing.T) {
 	f.OnSeq("supervisorctl pid", bssh.Result{ExitCode: 4, Stderr: "unix:///var/run/supervisor.sock no such file"}, bssh.Result{Stdout: "123\n"})
 	f.On(startBoth, bssh.Result{ExitCode: 1, Stdout: workerB + ": ERROR (already started)\n"})
 	f.OnSeq(statusBoth,
+		bssh.Result{ExitCode: 3, Stdout: bothStopped}, // nothing is still stopping
 		bssh.Result{ExitCode: 3, Stdout: statusLines("STARTING")},
 		bssh.Result{Stdout: statusLines("RUNNING")})
 	if err := Restarts().Apply(context.Background(), provision.RunCtx{}, restartsServer(), f); err != nil {
@@ -200,7 +203,7 @@ func TestRestartsApplyBringsRunningSupervisorProgramsBack(t *testing.T) {
 	for _, c := range f.Calls()[1:] {
 		ran = append(ran, c.Cmd)
 	}
-	want := strings.Join([]string{"supervisorctl status", "systemctl restart supervisor.service", "supervisorctl pid", "supervisorctl pid", startBoth, statusBoth, statusBoth}, "|")
+	want := strings.Join([]string{"supervisorctl status", "systemctl restart supervisor.service", "supervisorctl pid", "supervisorctl pid", statusBoth, startBoth, statusBoth, statusBoth}, "|")
 	if got := strings.Join(ran, "|"); got != want {
 		t.Errorf("commands:\n got %s\nwant %s", got, want)
 	}
@@ -217,6 +220,7 @@ func TestRestartsApplyFailsWhenASavedProcessDoesNotReachRunning(t *testing.T) {
 	f.On("supervisorctl pid", bssh.Result{Stdout: "123\n"})
 	f.On(startBoth, bssh.Result{})
 	f.OnSeq(statusBoth,
+		bssh.Result{ExitCode: 3, Stdout: bothStopped},
 		bssh.Result{ExitCode: 3, Stdout: statusLines("STARTING")},
 		bssh.Result{ExitCode: 3, Stdout: statusLines("FATAL")})
 	err := Restarts().Apply(context.Background(), provision.RunCtx{}, restartsServer(), f)
@@ -278,6 +282,8 @@ func TestRestartsRestartsPostgresClusterUnits(t *testing.T) {
 	f := bssh.NewFakeRunner()
 	f.On(staleUnitsCmd, bssh.Result{Stdout: staleLine("nginx.service") + staleLine("postgresql@18-main.service")})
 	f.On("nginx -t", bssh.Result{})
+	f.On("supervisorctl status", bssh.Result{})
+	f.On("pg_isready -q", bssh.Result{})
 	f.On("systemctl restart postgresql@18-main.service", bssh.Result{})
 	f.On("systemctl restart nginx.service", bssh.Result{})
 	cr, err := Restarts().Check(context.Background(), provision.RunCtx{}, s, f)
@@ -294,7 +300,7 @@ func TestRestartsRestartsPostgresClusterUnits(t *testing.T) {
 	for _, c := range f.Calls()[2:] {
 		ran = append(ran, c.Cmd)
 	}
-	if got, want := strings.Join(ran, "|"), "nginx -t|systemctl restart postgresql@18-main.service|systemctl restart nginx.service"; got != want {
+	if got, want := strings.Join(ran, "|"), "nginx -t|supervisorctl status|systemctl restart postgresql@18-main.service|pg_isready -q|systemctl restart nginx.service"; got != want {
 		t.Errorf("commands:\n got %s\nwant %s", got, want)
 	}
 }
@@ -386,5 +392,270 @@ func TestRestartsRefusesSupervisorRestartWhileProgramsKeepStarting(t *testing.T)
 	}
 	if cmd := ranAny(f, "systemctl restart"); cmd != "" {
 		t.Errorf("supervisor must not be restarted on an unsettled snapshot; ran %q", cmd)
+	}
+}
+
+const (
+	mariadbReady = "mariadb -e 'SELECT 1'"
+	cacheUnit    = "berth-valkey-app_example_com.service"
+	valkeyReady  = "test -S '/run/berth-valkey/app_example_com/valkey.sock'"
+	// Every process gets its own `supervisorctl stop`, all at once: one
+	// client stops its arguments one after another, so a single busy worker
+	// would keep the others from being asked at all (seen live).
+	stopBoth     = `timeout 300 sh -c 'for p in "$@"; do supervisorctl stop "$p" >/dev/null 2>&1 & done; wait' berth-stop '` + workerA + `' '` + workerB + `'`
+	bothRunning  = workerA + "   RUNNING   pid 10\n" + workerB + "   RUNNING   pid 11\n"
+	bothStopped  = workerA + "   STOPPED   x\n" + workerB + "   STOPPED   x\n"
+	oneStillBusy = workerA + "   STOPPING   x\n" + workerB + "   STOPPED   x\n"
+	restartMaria = "systemctl restart mariadb.service"
+	restartCache = "systemctl restart " + cacheUnit
+)
+
+func ranCommands(f *bssh.FakeRunner) string {
+	var ran []string
+	for _, c := range f.Calls()[1:] {
+		ran = append(ran, c.Cmd)
+	}
+	return strings.Join(ran, "|")
+}
+
+// Workers talk to the database and to Valkey: restarting those under a
+// running worker fails its job mid-flight (production, 2026-11-22: 13
+// RedisException "No such file or directory" in the minute of the restart).
+// The running programs are stopped first, the dependencies restarted and
+// probed for readiness, and only then are the same programs started again.
+func TestRestartsApplyQuiescesWorkersAroundDependencyRestarts(t *testing.T) {
+	stubNoSettleSleep(t)
+	f := bssh.NewFakeRunner()
+	f.On(staleUnitsCmd, bssh.Result{Stdout: staleLine("mariadb.service") + staleLine(cacheUnit) + staleLine("nginx.service")})
+	f.On("nginx -t", bssh.Result{})
+	f.On("supervisorctl status", bssh.Result{Stdout: bothRunning})
+	f.On(stopBoth, bssh.Result{})
+	f.OnSeq(statusBoth, bssh.Result{ExitCode: 3, Stdout: bothStopped}, bssh.Result{ExitCode: 3, Stdout: bothStopped}, bssh.Result{Stdout: statusLines("RUNNING")})
+	f.On(restartMaria, bssh.Result{})
+	f.OnSeq(mariadbReady, bssh.Result{ExitCode: 1, Stderr: "ERROR 2002: Can't connect"}, bssh.Result{})
+	f.On(restartCache, bssh.Result{})
+	f.On(valkeyReady, bssh.Result{})
+	f.On("systemctl restart nginx.service", bssh.Result{})
+	f.On("supervisorctl pid", bssh.Result{Stdout: "1\n"})
+	f.On(startBoth, bssh.Result{})
+	var warnings []string
+	rc := provision.RunCtx{Warn: func(m string) { warnings = append(warnings, m) }}
+	if err := Restarts().Apply(context.Background(), rc, restartsServer(), f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	want := strings.Join([]string{
+		"nginx -t", "supervisorctl status", stopBoth, statusBoth,
+		restartMaria, mariadbReady, mariadbReady, restartCache, valkeyReady,
+		"supervisorctl pid", statusBoth, startBoth, statusBoth,
+		"systemctl restart nginx.service",
+	}, "|")
+	if got := ranCommands(f); got != want {
+		t.Errorf("commands:\n got %s\nwant %s", got, want)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("a clean quiesce warns about nothing; got %q", warnings)
+	}
+}
+
+// A worker deep in a long job may not stop in time (supervisor would wait an
+// hour). After the limit the restarts go ahead anyway, the operator is told
+// which program was still busy, and every worker is started again at the end.
+func TestRestartsApplyGoesAheadWhenAWorkerDoesNotStopInTime(t *testing.T) {
+	stubNoSettleSleep(t)
+	f := bssh.NewFakeRunner()
+	f.On(staleUnitsCmd, bssh.Result{Stdout: staleLine("mariadb.service")})
+	f.On("supervisorctl status", bssh.Result{Stdout: bothRunning})
+	f.On(stopBoth, bssh.Result{ExitCode: 124})
+	f.OnSeq(statusBoth,
+		bssh.Result{ExitCode: 3, Stdout: oneStillBusy}, // after the stop timed out
+		bssh.Result{ExitCode: 3, Stdout: oneStillBusy}, // before the start: still stopping
+		bssh.Result{ExitCode: 3, Stdout: bothStopped},  // its job failed on the lost connection
+		bssh.Result{Stdout: statusLines("RUNNING")})
+	f.On(restartMaria, bssh.Result{})
+	f.On(mariadbReady, bssh.Result{})
+	f.On("supervisorctl pid", bssh.Result{Stdout: "1\n"})
+	f.On(startBoth, bssh.Result{})
+	var warnings []string
+	rc := provision.RunCtx{Warn: func(m string) { warnings = append(warnings, m) }}
+	if err := Restarts().Apply(context.Background(), rc, restartsServer(), f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if !strings.Contains(ranCommands(f), restartMaria+"|"+mariadbReady) || !strings.HasSuffix(ranCommands(f), startBoth+"|"+statusBoth) {
+		t.Errorf("the restart must go ahead and the workers be started at the end; ran %s", ranCommands(f))
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], workerA) || strings.Contains(warnings[0], workerB) || !strings.Contains(warnings[0], "5 minutes") {
+		t.Errorf("want one warning naming only the program that was still busy; got %q", warnings)
+	}
+}
+
+// Nothing a worker depends on is restarted: the workers are left alone.
+func TestRestartsApplyDoesNotTouchWorkersForUnrelatedRestarts(t *testing.T) {
+	f := bssh.NewFakeRunner()
+	f.On(staleUnitsCmd, bssh.Result{Stdout: staleLine("nginx.service") + staleLine("cron.service")})
+	f.On("nginx -t", bssh.Result{})
+	f.On("systemctl restart nginx.service", bssh.Result{})
+	f.On("systemctl restart cron.service", bssh.Result{})
+	if err := Restarts().Apply(context.Background(), provision.RunCtx{}, restartsServer(), f); err != nil {
+		t.Fatal(err)
+	}
+	if cmd := ranAny(f, "supervisorctl", "timeout"); cmd != "" {
+		t.Errorf("workers must not be touched when no dependency restarts; ran %q", cmd)
+	}
+}
+
+// A dependency that does not come back is an error, and the workers are not
+// started into it.
+func TestRestartsApplyFailsWhenADependencyDoesNotBecomeReady(t *testing.T) {
+	stubNoSettleSleep(t)
+	f := bssh.NewFakeRunner()
+	f.On(staleUnitsCmd, bssh.Result{Stdout: staleLine("mariadb.service")})
+	f.On("supervisorctl status", bssh.Result{Stdout: bothRunning})
+	f.On(stopBoth, bssh.Result{})
+	f.On(statusBoth, bssh.Result{ExitCode: 3, Stdout: bothStopped})
+	f.On(restartMaria, bssh.Result{})
+	f.On(mariadbReady, bssh.Result{ExitCode: 1, Stderr: "ERROR 2002 (HY000): Can't connect to local server"})
+	err := Restarts().Apply(context.Background(), provision.RunCtx{}, restartsServer(), f)
+	if err == nil || !strings.Contains(err.Error(), "mariadb") || !strings.Contains(err.Error(), "ERROR 2002") {
+		t.Fatalf("want an error naming the dependency and its probe output; got %v", err)
+	}
+	if cmd := ranAny(f, "supervisorctl start"); cmd != "" {
+		t.Errorf("workers must not be started into a dependency that is not ready; ran %q", cmd)
+	}
+}
+
+// The workers are started as soon as what they depend on is back — before
+// the unrelated restarts. A later failure (nginx here) must not leave them
+// stopped: their names live only in this run, and a retry would no longer
+// see them as running.
+func TestRestartsApplyRestoresWorkersBeforeUnrelatedRestarts(t *testing.T) {
+	stubNoSettleSleep(t)
+	f := bssh.NewFakeRunner()
+	f.On(staleUnitsCmd, bssh.Result{Stdout: staleLine("mariadb.service") + staleLine("nginx.service")})
+	f.On("nginx -t", bssh.Result{})
+	f.On("supervisorctl status", bssh.Result{Stdout: bothRunning})
+	f.On(stopBoth, bssh.Result{})
+	f.OnSeq(statusBoth, bssh.Result{ExitCode: 3, Stdout: bothStopped}, bssh.Result{ExitCode: 3, Stdout: bothStopped}, bssh.Result{Stdout: statusLines("RUNNING")})
+	f.On(restartMaria, bssh.Result{})
+	f.On(mariadbReady, bssh.Result{})
+	f.On("supervisorctl pid", bssh.Result{Stdout: "1\n"})
+	f.On(startBoth, bssh.Result{})
+	f.On("systemctl restart nginx.service", bssh.Result{ExitCode: 1, Stderr: "Job for nginx.service failed"})
+	err := Restarts().Apply(context.Background(), provision.RunCtx{}, restartsServer(), f)
+	if err == nil || !strings.Contains(err.Error(), "nginx") {
+		t.Fatalf("want the nginx failure; got %v", err)
+	}
+	ran := ranCommands(f)
+	if !strings.Contains(ran, startBoth+"|"+statusBoth+"|systemctl restart nginx.service") {
+		t.Errorf("the workers must be running again before the unrelated restart is attempted; ran %s", ran)
+	}
+}
+
+// One program is still finishing its job when the others are ready to come
+// back: the stopped ones are started and proven running, and the busy one is
+// reported on its own — it must not hold the rest down.
+func TestRestartsApplyStartsStoppedWorkersWhileOneIsStillStopping(t *testing.T) {
+	stubNoSettleSleep(t)
+	f := bssh.NewFakeRunner()
+	f.On(staleUnitsCmd, bssh.Result{Stdout: staleLine("mariadb.service")})
+	f.On("supervisorctl status", bssh.Result{Stdout: bothRunning})
+	f.On(stopBoth, bssh.Result{ExitCode: 124})
+	f.On(statusBoth, bssh.Result{ExitCode: 3, Stdout: oneStillBusy}) // workerA never stops
+	f.On(restartMaria, bssh.Result{})
+	f.On(mariadbReady, bssh.Result{})
+	f.On("supervisorctl pid", bssh.Result{Stdout: "1\n"})
+	startB := "supervisorctl start '" + workerB + "'"
+	statusB := "supervisorctl status '" + workerB + "'"
+	f.On(startB, bssh.Result{})
+	f.On(statusB, bssh.Result{Stdout: workerB + "   RUNNING   pid 12\n"})
+	err := Restarts().Apply(context.Background(), provision.RunCtx{Warn: func(string) {}}, restartsServer(), f)
+	if err == nil || !strings.Contains(err.Error(), workerA) || strings.Contains(err.Error(), workerB) || !strings.Contains(err.Error(), "supervisorctl start") {
+		t.Fatalf("want an error naming only the program that is still stopping, with the command to start it; got %v", err)
+	}
+	if !strings.HasSuffix(ranCommands(f), startB+"|"+statusB) {
+		t.Errorf("the stopped worker must be started and verified; ran %s", ranCommands(f))
+	}
+}
+
+// After the stop, the states decide who is still busy — so an unreadable
+// status must not read as "everyone stopped".
+func TestRestartsApplyFailsWhenTheStatusAfterTheStopCannotBeRead(t *testing.T) {
+	cases := []struct {
+		name string
+		res  bssh.Result
+	}{
+		{"supervisord unreachable", bssh.Result{ExitCode: 4, Stdout: "unix:///var/run/supervisor.sock refused connection\n"}},
+		{"a requested program is missing from the answer", bssh.Result{ExitCode: 3, Stdout: workerB + "   STOPPED   x\n"}},
+		{"not a status table", bssh.Result{ExitCode: 3, Stdout: "error: something else\n"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := bssh.NewFakeRunner()
+			f.On(staleUnitsCmd, bssh.Result{Stdout: staleLine("mariadb.service")})
+			f.On("supervisorctl status", bssh.Result{Stdout: bothRunning})
+			f.On(stopBoth, bssh.Result{})
+			f.On(statusBoth, c.res)
+			err := Restarts().Apply(context.Background(), provision.RunCtx{}, restartsServer(), f)
+			if err == nil || !strings.Contains(err.Error(), "supervisorctl status") {
+				t.Fatalf("want an error about the unreadable status; got %v", err)
+			}
+			if cmd := ranAny(f, "systemctl restart"); cmd != "" {
+				t.Errorf("nothing may be restarted on an unreadable status; ran %q", cmd)
+			}
+		})
+	}
+}
+
+// A worker that could not be started again is reported — but at the END: the
+// restarts that have nothing to do with the workers still happen in this
+// run instead of waiting for the next one (seen live: nginx was left on the
+// replaced library because the step stopped at the worker error).
+func TestRestartsApplyFinishesUnrelatedRestartsBeforeReportingAWorker(t *testing.T) {
+	stubNoSettleSleep(t)
+	f := bssh.NewFakeRunner()
+	f.On(staleUnitsCmd, bssh.Result{Stdout: staleLine("mariadb.service") + staleLine("nginx.service") + "reboot-required\n"})
+	f.On("nginx -t", bssh.Result{})
+	f.On("supervisorctl status", bssh.Result{Stdout: bothRunning})
+	f.On(stopBoth, bssh.Result{ExitCode: 124})
+	f.On(statusBoth, bssh.Result{ExitCode: 3, Stdout: oneStillBusy})
+	f.On(restartMaria, bssh.Result{})
+	f.On(mariadbReady, bssh.Result{})
+	f.On("supervisorctl pid", bssh.Result{Stdout: "1\n"})
+	f.On("supervisorctl start '"+workerB+"'", bssh.Result{})
+	f.On("supervisorctl status '"+workerB+"'", bssh.Result{Stdout: workerB + "   RUNNING   pid 12\n"})
+	f.On("systemctl restart nginx.service", bssh.Result{})
+	var warnings []string
+	rc := provision.RunCtx{Warn: func(m string) { warnings = append(warnings, m) }}
+	err := Restarts().Apply(context.Background(), rc, restartsServer(), f)
+	if err == nil || !strings.Contains(err.Error(), workerA) {
+		t.Fatalf("the worker that could not be started must still fail the step; got %v", err)
+	}
+	if !strings.HasSuffix(ranCommands(f), "systemctl restart nginx.service") {
+		t.Errorf("nginx must still be restarted in this run; ran %s", ranCommands(f))
+	}
+	if len(warnings) != 2 || !strings.Contains(warnings[1], "reboot") {
+		t.Errorf("the closing notes must still be delivered; got %q", warnings)
+	}
+}
+
+// Two things went wrong: a worker could not be started again AND a later
+// restart failed. The operator must hear both — the worker's name lives only
+// in this run, so an error that mentions just nginx would lose it for good.
+func TestRestartsApplyReportsTheWorkerAlongsideALaterFailure(t *testing.T) {
+	stubNoSettleSleep(t)
+	f := bssh.NewFakeRunner()
+	f.On(staleUnitsCmd, bssh.Result{Stdout: staleLine("mariadb.service") + staleLine("nginx.service")})
+	f.On("nginx -t", bssh.Result{})
+	f.On("supervisorctl status", bssh.Result{Stdout: bothRunning})
+	f.On(stopBoth, bssh.Result{ExitCode: 124})
+	f.On(statusBoth, bssh.Result{ExitCode: 3, Stdout: oneStillBusy})
+	f.On(restartMaria, bssh.Result{})
+	f.On(mariadbReady, bssh.Result{})
+	f.On("supervisorctl pid", bssh.Result{Stdout: "1\n"})
+	f.On("supervisorctl start '"+workerB+"'", bssh.Result{})
+	f.On("supervisorctl status '"+workerB+"'", bssh.Result{Stdout: workerB + "   RUNNING   pid 12\n"})
+	f.On("systemctl restart nginx.service", bssh.Result{ExitCode: 1, Stderr: "Job for nginx.service failed"})
+	err := Restarts().Apply(context.Background(), provision.RunCtx{Warn: func(string) {}}, restartsServer(), f)
+	if err == nil || !strings.Contains(err.Error(), "nginx.service failed") || !strings.Contains(err.Error(), workerA) {
+		t.Fatalf("want both the nginx failure and the worker that was not started; got %v", err)
 	}
 }

@@ -475,11 +475,17 @@ per-site FPM sockets (`/run/php/berth-<pool>.sock`) are shared between PHP
 versions, so an old master left running would fight the new one over them.
 berth refuses loudly (in both the `accounts` and `php` steps, `--force`
 included) while pools of another version remain. To migrate, in a maintenance
-window: (1) inventory `/etc/php/<old>/fpm/pool.d/*.conf` — berth's pools carry
+window: (0) put every application into maintenance mode (`php artisan down`,
+which also pauses its scheduler) and stop berth's Supervisor programs —
+installing the new version's CLI package switches the system `php` at once,
+so a cron run or a worker started in between would already execute on the
+new version; (1) inventory `/etc/php/<old>/fpm/pool.d/*.conf` — berth's pools carry
 the exact first line `; managed by berth`; move anything else off that master
 first; (2) `systemctl disable --now php<old>-fpm`; (3) remove only the
 confirmed berth pool files; (4) re-run a full `berth provision`; (5) verify
-only the new `php<ver>-fpm` holds the `/run/php/berth-*.sock` sockets.
+only the new `php<ver>-fpm` holds the `/run/php/berth-*.sock` sockets;
+(6) start the Supervisor programs again and bring the applications back up
+(`php artisan up`).
 
 Each defaults to `debian`. `database.source` accepts `debian` or the chosen
 engine's producer repo (`mariadb` for MariaDB, `pgdg` for PostgreSQL). An
@@ -903,10 +909,22 @@ Supervisor, cron and fail2ban, in that order.
 
 - nginx and PHP-FPM are restarted only after `nginx -t` and `php-fpm<ver> -t`
   pass; a failing check stops the step before anything is restarted.
-- A database restart drops every connection and a Supervisor restart stops
-  the workers, so pick the moment. Supervisor programs that were running come
-  back, including ones that do not autostart; the step waits until each of
-  them is running again and fails if one is not.
+- A database or Valkey restart drops every connection, so pick the moment.
+  Before restarting either, the step stops the Supervisor programs that are
+  running, so a worker finishes its current job instead of losing its
+  connection halfway; it then waits until the database accepts connections
+  and the Valkey sockets exist, and only then starts the same programs again
+  (including ones that do not autostart) and waits until each is running.
+- Workers get five minutes to finish. A program still busy after that is
+  named in a warning and the restarts go ahead; its job may fail on the lost
+  connection. The programs come back as soon as the database and Valkey are
+  ready, before the remaining restarts. One that is still stopping at that
+  point does not hold the others down: they are started, the run finishes
+  its restarts, and then fails naming that program with the
+  `supervisorctl start` command to run once it has stopped.
+- The scheduler cron and HTTP requests are not held back: a `schedule:run` or
+  a request that lands in the seconds of a restart fails. Put the application
+  into maintenance mode first if that matters.
 - sshd and system services (journald, dbus, …) are never restarted by berth,
   and neither is a Supervisor or Valkey the config does not make berth run.
   Every run names the ones still on a replaced library in a warning; restart
