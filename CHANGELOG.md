@@ -5,6 +5,14 @@ Notable changes to berth. Older releases are documented on the
 
 ## [Unreleased]
 
+### Changed
+
+- **Dependencies refreshed to their newest minor and patch releases.**
+  Bubble Tea 2.1.2, Lip Gloss 2.1.1, `golang.org/x/crypto` 0.59.0,
+  `golang.org/x/term` 0.48.0 and the indirect modules they pull in
+  (`x/sys`, `x/text`, `x/sync`, `pflag` 1.1.0, …). No behaviour change is
+  intended.
+
 ### Fixed
 
 - **The "left for a reboot" warning no longer points at a command that is not
