@@ -11,6 +11,7 @@ import (
 	"github.com/robsonek/berth/internal/config"
 	"github.com/robsonek/berth/internal/provision"
 	bssh "github.com/robsonek/berth/internal/ssh"
+	"github.com/robsonek/berth/internal/templates"
 )
 
 // composerInstallerURL is the canonical Composer installer download.
@@ -48,6 +49,85 @@ var fetchComposerSig = func(ctx context.Context) (string, error) {
 	return sig, nil
 }
 
+// composerBin is where berth's installer puts Composer. The self-update cron
+// names it by absolute path, so a Composer berth did not install (a distro
+// package in /usr/bin, say) is never touched by it.
+const composerBin = "/usr/local/bin/composer"
+
+// composerUpdateCronPath is the managed daily self-update cron the composer
+// step owns while composer.auto_update is on (the default): it keeps the host
+// on the newest stable Composer between provisions. Written under the
+// managed-marker drift policy, drift-removed when the knob is off (guarded: a
+// foreign file at this path is never deleted).
+const composerUpdateCronPath = "/etc/cron.d/berth-composer-update"
+
+// renderComposerUpdateCron renders the cron file. It takes no data: the
+// schedule, the binary path and the stable channel are fixed.
+func renderComposerUpdateCron() ([]byte, error) {
+	return templates.Render("composer_update.cron.tmpl", nil)
+}
+
+// checkComposerCron classifies the cron against the knob. On: the rendered
+// content must be present (a foreign file refuses unless --force — the
+// standard managed-file policy). Off: a lingering berth-managed file is drift
+// for Apply to remove; a foreign file or none is converged.
+func checkComposerCron(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (bool, error) {
+	if !s.Composer.AutoUpdateEnabled() {
+		present, err := managedFilePresent(ctx, r, composerUpdateCronPath)
+		if err != nil {
+			return false, err
+		}
+		return !present, nil
+	}
+	want, err := renderComposerUpdateCron()
+	if err != nil {
+		return false, err
+	}
+	state, err := checkManagedFile(ctx, r, composerUpdateCronPath, want)
+	if err != nil {
+		return false, err
+	}
+	return managedFileSatisfied(state, composerUpdateCronPath, rc.Force)
+}
+
+// ensureComposerCron is checkComposerCron's write path: render-and-write
+// under the drift policy when the knob is on, guarded removal of a
+// berth-managed file when it is off.
+func ensureComposerCron(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
+	if !s.Composer.AutoUpdateEnabled() {
+		present, err := managedFilePresent(ctx, r, composerUpdateCronPath)
+		if err != nil {
+			return err
+		}
+		if !present {
+			return nil
+		}
+		if res, err := r.Run(ctx, "rm -f "+shQuote(composerUpdateCronPath), nil); err != nil {
+			return err
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("remove %s: %s", composerUpdateCronPath, res.Stderr)
+		}
+		return nil
+	}
+	// A cron.d file is inert without the daemon, and no other step
+	// guarantees one here (site ensures it only for scheduler crons, backups
+	// only when enabled): ensure it before writing the file that needs it.
+	if err := ensureCron(ctx, r); err != nil {
+		return err
+	}
+	want, err := renderComposerUpdateCron()
+	if err != nil {
+		return err
+	}
+	if err := writeManagedFile(ctx, r, rc.Force, bssh.FileSpec{
+		Path: composerUpdateCronPath, Content: want,
+		Owner: "root", Group: "root", Mode: 0o644, Sudo: true,
+	}); err != nil {
+		return fmt.Errorf("write composer self-update cron: %w", err)
+	}
+	return nil
+}
+
 type composer struct{}
 
 func Composer() provision.Step { return composer{} }
@@ -55,18 +135,82 @@ func Composer() provision.Step { return composer{} }
 func (composer) Name() string       { return "composer" }
 func (composer) Requires() []string { return []string{"php"} }
 
-func (composer) Check(ctx context.Context, _ provision.RunCtx, _ *config.Server, r bssh.Runner) (provision.CheckResult, error) {
+// composerOnPath reports whether a composer binary resolves on PATH.
+func composerOnPath(ctx context.Context, r bssh.Runner) (bool, error) {
 	res, err := r.Run(ctx, "command -v composer", nil)
+	if err != nil {
+		return false, err
+	}
+	return res.ExitCode == 0, nil
+}
+
+func (composer) Check(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) (provision.CheckResult, error) {
+	// The cron is classified FIRST and unconditionally — ahead of the
+	// install probe — so a foreign file at its path refuses on a fresh host
+	// too instead of surfacing only after the install (the nginx gzip
+	// drop-in's order). Check stays local: no network, so a new Composer
+	// release is never drift.
+	cronOK, err := checkComposerCron(ctx, rc, s, r)
 	if err != nil {
 		return provision.CheckResult{}, err
 	}
-	if res.ExitCode == 0 {
-		return provision.CheckResult{Satisfied: true, Reason: "composer installed"}, nil
+	installed, err := composerOnPath(ctx, r)
+	if err != nil {
+		return provision.CheckResult{}, err
 	}
-	return provision.CheckResult{Satisfied: false, Changes: []string{"install composer (verified by SHA-384)"}}, nil
+	// The cron is inert without a running cron daemon; the auto-update
+	// promise depends on it, so probe it (Apply heals via ensureCron).
+	daemonOK := true
+	if s.Composer.AutoUpdateEnabled() {
+		if daemonOK, err = serviceUp(ctx, r, "cron"); err != nil {
+			return provision.CheckResult{}, err
+		}
+	}
+	if installed && cronOK && daemonOK {
+		reason := "composer installed; daily self-update cron in place"
+		if !s.Composer.AutoUpdateEnabled() {
+			reason = "composer installed; auto-update not managed (composer.auto_update: false)"
+		}
+		return provision.CheckResult{Satisfied: true, Reason: reason}, nil
+	}
+	var changes []string
+	if !installed {
+		changes = append(changes, "install composer (verified by SHA-384)")
+	}
+	if !cronOK {
+		if s.Composer.AutoUpdateEnabled() {
+			changes = append(changes, "write "+composerUpdateCronPath+" (daily composer self-update)")
+		} else {
+			changes = append(changes, "remove "+composerUpdateCronPath+" (composer.auto_update: false)")
+		}
+	}
+	if !daemonOK {
+		changes = append(changes, "install and enable the cron daemon (the self-update cron is inert without it)")
+	}
+	return provision.CheckResult{Satisfied: false, Changes: changes}, nil
 }
 
-func (composer) Apply(ctx context.Context, _ provision.RunCtx, _ *config.Server, r bssh.Runner) error {
+func (composer) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server, r bssh.Runner) error {
+	// Apply also runs for the cron alone (every host provisioned before the
+	// cron existed), so the install is gated on its own probe: an installed
+	// Composer is never re-installed — updating it is the cron's job.
+	installed, err := composerOnPath(ctx, r)
+	if err != nil {
+		return err
+	}
+	if !installed {
+		if err := installComposer(ctx, r); err != nil {
+			return err
+		}
+	}
+	// After the install, never before: no cron for a Composer that failed
+	// to install.
+	return ensureComposerCron(ctx, rc, s, r)
+}
+
+// installComposer downloads the official installer, verifies it against the
+// live SHA-384 signature and installs Composer system-wide.
+func installComposer(ctx context.Context, r bssh.Runner) error {
 	// Download, verify and run the installer from a private, unpredictable
 	// root-only directory rather than a fixed world-writable /tmp path —
 	// closing the predictable-path + hash-check→exec TOCTOU window.

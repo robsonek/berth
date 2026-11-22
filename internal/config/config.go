@@ -40,6 +40,23 @@ type Nginx struct {
 // means on.
 func (n Nginx) GzipEnabled() bool { return n.Gzip == nil || *n.Gzip }
 
+// Composer holds the knobs for the system-wide Composer berth installs into
+// /usr/local/bin.
+type Composer struct {
+	// AutoUpdate gates the managed /etc/cron.d/berth-composer-update that
+	// runs `composer self-update --stable` daily, keeping the host on the
+	// newest stable Composer between provisions. nil = on (the default lives
+	// in AutoUpdateEnabled, NOT in Load() via SetDefault — the Nginx.Gzip
+	// precedent — so wizard ToServer() and literal Server callers see the
+	// same default); false = berth does not manage Composer updates (the
+	// cron is removed, the installed binary is left as it is).
+	AutoUpdate *bool `mapstructure:"auto_update" yaml:"auto_update,omitempty"`
+}
+
+// AutoUpdateEnabled reports whether berth writes its daily self-update cron:
+// unset means on.
+func (c Composer) AutoUpdateEnabled() bool { return c.AutoUpdate == nil || *c.AutoUpdate }
+
 // Fail2ban holds the tunable knobs for berth's managed jail.d drop-in.
 // bantime and findtime are a number optionally suffixed s/m/h/d/w (e.g. "1h",
 // "10m"); compound forms like "1h30m" are not supported. Zero/empty values
@@ -1023,6 +1040,7 @@ type Server struct {
 	SSH            SSH      `mapstructure:"ssh" yaml:"ssh"`
 	PHP            PHP      `mapstructure:"php" yaml:"php"`
 	Nginx          Nginx    `mapstructure:"nginx" yaml:"nginx"`
+	Composer       Composer `mapstructure:"composer" yaml:"composer,omitempty"`
 	Database       Database `mapstructure:"database" yaml:"database"`
 	Valkey         bool     `mapstructure:"valkey" yaml:"valkey"`
 	ValkeyQueue    bool     `mapstructure:"valkey_queue" yaml:"valkey_queue,omitempty"` // second per-site instance for the app queue (requires valkey)

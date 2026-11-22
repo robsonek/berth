@@ -137,6 +137,10 @@ php:
   version: "8.5"               # 8.2 | 8.3 | 8.4 | 8.5
   source: auto                 # auto | sury | debian  (Debian ships 8.4; Surý → 8.5)
 
+composer:
+  auto_update: true            # a daily cron keeps Composer on the newest stable release;
+                               # false = berth removes its cron and never updates Composer
+
 nginx:
   source: debian               # debian | nginx  (nginx.org mainline; needed for HTTP/3)
   gzip: true                   # compress HTML/JSON/CSS/JS responses, dynamic PHP output included;
@@ -428,6 +432,31 @@ database:
   source: mariadb     # mariadb engine: debian | mariadb (mariadb.org 12.3 LTS)
                       # postgres engine: debian | pgdg   (apt.postgresql.org / PGDG)
 ```
+
+### Composer
+
+Composer is not an apt package: berth downloads the official installer,
+verifies it against Composer's published SHA-384 and installs
+`/usr/local/bin/composer`. Debian's own `composer` package is frozen at the
+release's version and tested against Debian's PHP only, which does not fit a
+host running a newer PHP from Surý.
+
+Updates are the host's own job. While `composer.auto_update` is on (the
+default), berth manages `/etc/cron.d/berth-composer-update`, which runs
+`composer self-update --stable` every day at 04:17 as root. The host therefore
+follows Composer's stable channel — a future major release included — without
+anyone logging in.
+
+- `berth provision` installs Composer when it is missing and never updates an
+  installed one; a new Composer release is not drift.
+- The cron only ever runs `/usr/local/bin/composer`. A Composer berth did not
+  install (the Debian package in `/usr/bin`, say) is never touched.
+- Each run logs to the journal: `journalctl -t berth-composer`.
+- To undo an update: `sudo composer self-update --rollback` (one previous
+  version is kept). The next nightly run updates again, so also set
+  `composer.auto_update: false` and provision if the rollback should hold.
+- `composer.auto_update: false` removes berth's cron and leaves the installed
+  binary as it is; updating Composer is then yours (`sudo composer self-update`).
 
 ### Changing `php.version` on a provisioned host
 

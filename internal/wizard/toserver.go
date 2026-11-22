@@ -21,7 +21,8 @@ func (a Answers) ToServer() *config.Server {
 		Host:          a.Host,
 		SSH:           config.SSH{User: a.SSHUser, Port: a.Port, Key: a.Key, Fingerprint: a.Fingerprint},
 		PHP:           config.PHP{Version: a.PHPVersion, Source: a.PHPSource},
-		Nginx:         config.Nginx{Source: a.NginxSource, Gzip: gzipKnob(a.Gzip)},
+		Nginx:         config.Nginx{Source: a.NginxSource, Gzip: onByDefaultKnob(a.Gzip)},
+		Composer:      config.Composer{AutoUpdate: onByDefaultKnob(a.ComposerAutoUpdate)},
 		Database:      config.Database{Engine: a.DBEngine, Source: a.DBSource}, // no top-level name/user
 		Valkey:        a.Valkey, Queue: a.Queue, Scheduler: a.Scheduler,
 		// The queue instance needs the cache one (Validate refuses it
@@ -147,10 +148,11 @@ func requiresBerthForThisBuild() string {
 	return bin.Base()
 }
 
-// gzipKnob maps the wizard's gzip answer onto the tri-state config field:
-// the default (on) stays unset so the YAML carries no gzip: line and keeps
-// following berth's default; an explicit no is pinned as gzip: false.
-func gzipKnob(on bool) *bool {
+// onByDefaultKnob maps a wizard yes/no answer onto a tri-state config field
+// whose unset value means ON (nginx.gzip, composer.auto_update): yes stays
+// unset so the YAML carries no line for it and keeps following berth's
+// default; an explicit no is pinned as false.
+func onByDefaultKnob(on bool) *bool {
 	if on {
 		return nil
 	}

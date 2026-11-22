@@ -604,3 +604,7 @@ func TestRenderNginxGzipStockOnGolden(t *testing.T) {
 func TestRenderNginxGzipTypesOnlyGolden(t *testing.T) {
 	checkGolden(t, "nginx_gzip.conf.tmpl", "nginx_gzip_types_only.golden", nginxGzipData{})
 }
+
+func TestRenderComposerUpdateCronGolden(t *testing.T) {
+	checkGolden(t, "composer_update.cron.tmpl", "composer_update_cron.golden", nil)
+}

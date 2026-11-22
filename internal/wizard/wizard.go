@@ -46,10 +46,12 @@ type Answers struct {
 	DBSource    string // debian | mariadb | pgdg (paired with engine)
 	NginxSource string // debian | nginx
 	Gzip        bool   // nginx.gzip: the conf.d gzip drop-in (dynamic responses too); true = berth's default, written as unset
-	Valkey      bool
-	ValkeyQueue bool // valkey_queue: a second per-site instance for the app queue (asked only with Valkey; dropped without it)
-	Queue       bool // server-wide default worker
-	Scheduler   bool // server-wide default
+	// composer.auto_update: the daily self-update cron; true = berth's default, written as unset
+	ComposerAutoUpdate bool
+	Valkey             bool
+	ValkeyQueue        bool // valkey_queue: a second per-site instance for the app queue (asked only with Valkey; dropped without it)
+	Queue              bool // server-wide default worker
+	Scheduler          bool // server-wide default
 
 	// server advanced (zero unless the gate is taken)
 	Fail2ban Fail2banAnswers
@@ -185,9 +187,10 @@ func defaults() Answers {
 		SSHUser: "root", Port: 22, Key: "~/.ssh/id_ed25519",
 		PHPVersion: "8.5", PHPSource: "auto",
 		DBEngine: "mariadb", DBSource: "debian",
-		NginxSource: "debian",
-		Gzip:        true,
-		Scheduler:   true,
+		NginxSource:        "debian",
+		Gzip:               true,
+		ComposerAutoUpdate: true,
+		Scheduler:          true,
 	}
 }
 

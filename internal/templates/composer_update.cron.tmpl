@@ -1,0 +1,1 @@
+17 4 * * * root [ -x /usr/local/bin/composer ] && COMPOSER_ALLOW_SUPERUSER=1 HOME=/root /usr/local/bin/composer self-update --stable --clean-backups --no-interaction --no-progress 2>&1 | logger -t berth-composer

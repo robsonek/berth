@@ -40,6 +40,11 @@ var expectedRefusals = map[string]string{
 	// Guard order verified: the drop-in's cat is the step's second command,
 	// right after the nginx.conf shape probe, which only reads.
 	"nginx": "not managed by berth",
+	// composer: a foreign file at the self-update cron path aborts unless
+	// --force (composer.go: checkComposerCron runs FIRST and unconditionally,
+	// ahead of the install probe, so the refusal lands on a fresh host too).
+	// Guard order verified: the cron's cat is the step's first command.
+	"composer": "not managed by berth",
 	// preflight: the foreign apt lock-timeout drop-in aborts unless --force —
 	// deliberate (preflight.go: without this gate even `--only identity` would
 	// clobber a foreign file, preflight being always-run).

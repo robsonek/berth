@@ -15,7 +15,7 @@ import (
 // the pointed-to answers in place so a re-prompt (passing the same struct) shows
 // the user's prior entries.
 type prompter interface {
-	ServerCore(a *Answers) error     // host, ssh, php, db (combined), nginx + gzip, valkey, queue, scheduler
+	ServerCore(a *Answers) error     // host, ssh, php + composer auto-update, db (combined), nginx + gzip, valkey, queue, scheduler
 	ServerAdvanced(a *Answers) error // fail2ban + tuning
 	ServerOps(a *Answers) error      // swap/sysctl, cloudflare-only, apt packages + upstream updates, workers, backups
 	SiteCore(index int, sa *SiteAnswers) error
@@ -63,6 +63,7 @@ func (h *huhPrompter) ServerCore(a *Answers) error {
 		huh.NewGroup(
 			huh.NewSelect[string]().Title("PHP version").Options(huh.NewOptions("8.5", "8.4", "8.3", "8.2")...).Value(&a.PHPVersion),
 			huh.NewSelect[string]().Title("PHP source").Options(huh.NewOptions("auto", "sury", "debian")...).Value(&a.PHPSource),
+			huh.NewConfirm().Title("Keep Composer updated automatically (daily self-update)?").Value(&a.ComposerAutoUpdate),
 			huh.NewSelect[config.DatabaseChoice]().Title("Database engine + source").Options(dbOpts...).Value(&choice),
 			huh.NewSelect[string]().Title("nginx source").Options(huh.NewOptions("debian", "nginx")...).Value(&a.NginxSource),
 			huh.NewConfirm().Title("gzip responses (HTML/JSON/CSS/JS, dynamic PHP output included)?").Value(&a.Gzip),

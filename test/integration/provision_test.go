@@ -145,6 +145,7 @@ func TestProvisionFreshDebian13(t *testing.T) {
 		assertSiteServesOwnContent(invCtx, t, client, srv, site, useHTTPS, insecureTLS)
 	}
 	assertGzipResponses(invCtx, t, client, srv, sslExplicit)
+	assertComposerAutoUpdate(invCtx, t, client, srv)
 
 	assertMultiSiteIsolation(invCtx, t, client, srv)
 	assertDBAuth(invCtx, t, client, srv)
