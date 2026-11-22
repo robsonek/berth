@@ -15,8 +15,11 @@ Notable changes to berth. Older releases are documented on the
   restarts the dependencies, waits until the database accepts connections
   and the Valkey sockets exist, and only then starts the same programs again.
   Workers get five minutes to finish their current job; a program still busy
-  after that is named in a warning and the restarts go ahead. The scheduler
-  cron and HTTP requests are not held back.
+  after that is named in a warning and the restarts go ahead. The programs
+  come back before the restarts they do not depend on, so a later failure
+  cannot leave them stopped, and one program that is still stopping never
+  keeps the others down. The scheduler cron and HTTP requests are not held
+  back.
 
 ### Changed
 

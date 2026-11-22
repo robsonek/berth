@@ -109,9 +109,11 @@ func databaseRestartable(engine string) restartable {
 }
 
 // restartableUnits returns the services berth restarts when they run a
-// replaced library, in restart order: the database and the caches first,
-// then PHP-FPM, then nginx, then the workers, so nothing comes back into a
-// dependency that is about to go away. Only what this config makes berth
+// replaced library, in restart order: first what the workers depend on (the
+// database, the caches), then supervisord, and only then the services the
+// workers do not need (PHP-FPM, nginx, cron, fail2ban). The workers come
+// back as soon as the first group is done (see Apply), so a failure further
+// down the list never leaves them stopped. Only what this config makes berth
 // manage is listed: a Supervisor on a host whose config has no worker or
 // daemon is the operator's, and so is a Valkey without valkey: true. sshd is
 // deliberately absent — berth never restarts the daemon its own connection
@@ -123,14 +125,15 @@ func restartableUnits(s *config.Server) []restartable {
 			out = append(out, restartable{unit: in.unit, ready: "test -S " + shQuote(in.socket)})
 		}
 	}
-	out = append(out,
-		restartable{unit: fpmService(s) + ".service", validate: "php-fpm" + s.PHP.Version + " -t"},
-		restartable{unit: "nginx.service", validate: "nginx -t"},
-	)
 	if s.NeedsSupervisor() {
 		out = append(out, restartable{unit: supervisorUnit})
 	}
-	return append(out, restartable{unit: "cron.service"}, restartable{unit: "fail2ban.service"})
+	return append(out,
+		restartable{unit: fpmService(s) + ".service", validate: "php-fpm" + s.PHP.Version + " -t"},
+		restartable{unit: "nginx.service", validate: "nginx -t"},
+		restartable{unit: "cron.service"},
+		restartable{unit: "fail2ban.service"},
+	)
 }
 
 // plannedRestart is one stale unit berth will restart.
@@ -254,23 +257,39 @@ func (restarts) Apply(ctx context.Context, rc provision.RunCtx, s *config.Server
 			return err
 		}
 	}
-	for _, p := range plan {
+	// The workers come back the moment everything they need is back: after
+	// the last dependency and after supervisord itself, BEFORE the unrelated
+	// restarts. Their names live only in this run — a later failure (nginx,
+	// say) that returned with them still stopped would leave them down for
+	// good, because a retry would no longer see them as running.
+	restoreAfter := -1
+	var workersErr error
+	for i, p := range plan {
+		if p.ready != "" || p.unit == supervisorUnit {
+			restoreAfter = i
+		}
+	}
+	for i, p := range plan {
 		if err := runOK(ctx, r, "systemctl restart "+p.unit); err != nil {
 			return err
 		}
 		if err := waitReady(ctx, r, p); err != nil {
 			return err
 		}
-	}
-	if len(workers) > 0 {
-		if err := startSupervisorProcesses(ctx, r, workers); err != nil {
-			return err
+		if i == restoreAfter && len(workers) > 0 {
+			// A worker that cannot be started again fails the step — at
+			// the end. The restarts below have nothing to do with the
+			// workers and must not wait for another run because of it.
+			workersErr = startSupervisorProcesses(ctx, r, workers)
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 		}
 	}
 	for _, note := range restartNotes(others, reboot) {
 		rc.Warnf("%s", note)
 	}
-	return nil
+	return workersErr
 }
 
 // waitReady waits until a restarted dependency accepts connections, so the
@@ -324,14 +343,14 @@ func stopSupervisorProcesses(ctx context.Context, rc provision.RunCtx, r bssh.Ru
 	if _, err := r.Run(ctx, stop, nil); err != nil {
 		return err
 	}
-	res, err := r.Run(ctx, "supervisorctl status "+list, nil)
+	procs, err := supervisorStatusOf(ctx, r, names)
 	if err != nil {
 		return err
 	}
 	var busy []string
-	for _, line := range strings.Split(res.Stdout, "\n") {
-		if f := strings.Fields(line); len(f) >= 2 && (f[1] == "STOPPING" || f[1] == "RUNNING") {
-			busy = append(busy, f[0])
+	for _, p := range procs {
+		if p.state == "STOPPING" || p.state == "RUNNING" {
+			busy = append(busy, p.name)
 		}
 	}
 	if len(busy) > 0 {
@@ -406,19 +425,55 @@ func runningSupervisorProcesses(ctx context.Context, r bssh.Runner) ([]string, e
 	}
 }
 
-// startSupervisorProcesses brings the given processes back and proves it:
-// every one of them must reach RUNNING.
+// procState is one line of `supervisorctl status`.
+type procState struct{ name, state string }
+
+// supervisorStatusOf reads the state of exactly the given processes. The
+// answer must be complete and readable or it is an error: exit 0, or 3 when
+// some process is not running (any other code — 4 when supervisord cannot be
+// reached — is a failure), every line a status line, one line per requested
+// process. An unreadable answer must never read as "nothing is busy".
+func supervisorStatusOf(ctx context.Context, r bssh.Runner, names []string) ([]procState, error) {
+	res, err := r.Run(ctx, "supervisorctl status "+quoteAll(names), nil)
+	if err != nil {
+		return nil, err
+	}
+	out := strings.TrimSpace(res.Stdout + res.Stderr)
+	if res.ExitCode != 0 && res.ExitCode != 3 {
+		return nil, fmt.Errorf("supervisorctl status exited %d: %s", res.ExitCode, out)
+	}
+	var procs []procState
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		f := strings.Fields(line)
+		if len(f) == 0 {
+			continue
+		}
+		if len(f) < 2 || !supervisorStates[f[1]] {
+			return nil, fmt.Errorf("unexpected supervisorctl status output: %s", out)
+		}
+		procs = append(procs, procState{name: f[0], state: f[1]})
+	}
+	if len(procs) != len(names) {
+		return nil, fmt.Errorf("supervisorctl status answered for %d of %d programs: %s", len(procs), len(names), out)
+	}
+	return procs, nil
+}
+
+// startSupervisorProcesses brings the given processes back and proves it.
 //
 //   - A just-restarted supervisord answers a moment after systemd reports it
 //     started, so its socket is waited for first.
 //   - A process still STOPPING (it outlived the stop limit and is finishing,
-//     or failing, its job) cannot be started yet: it is waited out, under
-//     the usual bound, and reported if it never stops.
+//     or failing, its job) cannot be started yet. It is waited for under the
+//     usual bound — and then set aside: the processes that HAVE stopped are
+//     started regardless, because one busy worker must not keep the idle
+//     ones down. The ones left stopping are reported at the end, with the
+//     command that starts them (berth's programs may take up to an hour).
 //   - `supervisorctl start` skips processes already STARTING (the autostart
 //     ones) and its exit code is not the verdict; the states are re-read
 //     until they leave STARTING/BACKOFF — a program that is still STARTING
 //     may yet end in FATAL (the same settle rule as site's
-//     ensureProgramRunning).
+//     ensureProgramRunning). Every started process must reach RUNNING.
 func startSupervisorProcesses(ctx context.Context, r bssh.Runner, names []string) error {
 	for i := 0; ; i++ {
 		res, err := r.Run(ctx, "supervisorctl pid", nil)
@@ -433,48 +488,54 @@ func startSupervisorProcesses(ctx context.Context, r bssh.Runner, names []string
 		}
 		programSettleSleep()
 	}
-	list := quoteAll(names)
-	status := func() (string, []string, error) {
-		res, err := r.Run(ctx, "supervisorctl status "+list, nil)
-		if err != nil {
-			return "", nil, err
-		}
-		return res.Stdout, parseProgramStates(res.Stdout), nil
-	}
+	var startable, stopping []string
 	for i := 0; ; i++ {
-		out, states, err := status()
+		procs, err := supervisorStatusOf(ctx, r, names)
 		if err != nil {
 			return err
 		}
-		stopping := false
-		for _, st := range states {
-			stopping = stopping || st == "STOPPING"
+		startable, stopping = nil, nil
+		for _, p := range procs {
+			if p.state == "STOPPING" {
+				stopping = append(stopping, p.name)
+			} else {
+				startable = append(startable, p.name)
+			}
 		}
-		if !stopping {
-			break
-		}
-		if i >= programSettleAttempts {
-			return fmt.Errorf("still stopping, so it cannot be started again yet — start it with `supervisorctl start` once it has stopped: %s", strings.TrimSpace(out))
-		}
-		programSettleSleep()
-	}
-	if _, err := r.Run(ctx, "supervisorctl start "+list, nil); err != nil {
-		return err
-	}
-	var out string
-	for i := 0; ; i++ {
-		var states []string
-		var err error
-		if out, states, err = status(); err != nil {
-			return err
-		}
-		if len(states) == len(names) && allRunning(states) {
-			return nil
-		}
-		if i >= programSettleAttempts || !inTransition(states) {
+		if len(stopping) == 0 || i >= programSettleAttempts {
 			break
 		}
 		programSettleSleep()
 	}
-	return fmt.Errorf("not running again after the restart: %s", strings.TrimSpace(out))
+	if len(startable) > 0 {
+		if _, err := r.Run(ctx, "supervisorctl start "+quoteAll(startable), nil); err != nil {
+			return err
+		}
+		for i := 0; ; i++ {
+			procs, err := supervisorStatusOf(ctx, r, startable)
+			if err != nil {
+				return err
+			}
+			var notRunning []string
+			settling := false
+			for _, p := range procs {
+				if p.state != "RUNNING" {
+					notRunning = append(notRunning, p.name+" ("+p.state+")")
+				}
+				settling = settling || p.state == "STARTING" || p.state == "BACKOFF"
+			}
+			if len(notRunning) == 0 {
+				break
+			}
+			if i >= programSettleAttempts || !settling {
+				return fmt.Errorf("not running again after the restart: %s", strings.Join(notRunning, ", "))
+			}
+			programSettleSleep()
+		}
+	}
+	if len(stopping) > 0 {
+		list := quoteAll(stopping)
+		return fmt.Errorf("still finishing their job, so berth could not start them again: %s — once they have stopped, run: supervisorctl start %s", strings.Join(stopping, ", "), list)
+	}
+	return nil
 }

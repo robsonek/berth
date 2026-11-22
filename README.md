@@ -917,7 +917,11 @@ Supervisor, cron and fail2ban, in that order.
   (including ones that do not autostart) and waits until each is running.
 - Workers get five minutes to finish. A program still busy after that is
   named in a warning and the restarts go ahead; its job may fail on the lost
-  connection. All programs are started again at the end either way.
+  connection. The programs come back as soon as the database and Valkey are
+  ready, before the remaining restarts. One that is still stopping at that
+  point does not hold the others down: they are started, the run finishes
+  its restarts, and then fails naming that program with the
+  `supervisorctl start` command to run once it has stopped.
 - The scheduler cron and HTTP requests are not held back: a `schedule:run` or
   a request that lands in the seconds of a restart fails. Put the application
   into maintenance mode first if that matters.
