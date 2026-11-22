@@ -349,3 +349,42 @@ func TestRestartsProbeFailureIsAnError(t *testing.T) {
 		t.Fatal("a failed probe must not read as a clean host")
 	}
 }
+
+// A worker caught mid-start (its hourly --max-time restart, say) is one
+// supervisord is bringing up: the snapshot waits for it to settle instead of
+// skipping it, or the restart would leave a non-autostart worker stopped.
+func TestRestartsSnapshotWaitsForStartingProgramsToSettle(t *testing.T) {
+	stubNoSettleSleep(t)
+	f := bssh.NewFakeRunner()
+	f.On(staleUnitsCmd, bssh.Result{Stdout: staleLine("supervisor.service")})
+	f.OnSeq("supervisorctl status",
+		bssh.Result{ExitCode: 3, Stdout: statusLines("STARTING")},
+		bssh.Result{ExitCode: 3, Stdout: statusLines("BACKOFF")},
+		bssh.Result{Stdout: statusLines("RUNNING")})
+	f.On("systemctl restart supervisor.service", bssh.Result{})
+	f.On("supervisorctl pid", bssh.Result{Stdout: "123\n"})
+	f.On(startBoth, bssh.Result{})
+	f.On(statusBoth, bssh.Result{Stdout: statusLines("RUNNING")})
+	if err := Restarts().Apply(context.Background(), provision.RunCtx{}, restartsServer(), f); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if ranAny(f, startBoth) == "" {
+		t.Errorf("the worker that was starting must be restored with the running one; ran %v", f.Calls())
+	}
+}
+
+// Programs that never leave STARTING/BACKOFF give no trustworthy snapshot:
+// the restart is refused rather than guessed.
+func TestRestartsRefusesSupervisorRestartWhileProgramsKeepStarting(t *testing.T) {
+	stubNoSettleSleep(t)
+	f := bssh.NewFakeRunner()
+	f.On(staleUnitsCmd, bssh.Result{Stdout: staleLine("supervisor.service")})
+	f.On("supervisorctl status", bssh.Result{ExitCode: 3, Stdout: statusLines("BACKOFF")})
+	err := Restarts().Apply(context.Background(), provision.RunCtx{}, restartsServer(), f)
+	if err == nil || !strings.Contains(err.Error(), "refusing to restart supervisor") || !strings.Contains(err.Error(), "BACKOFF") {
+		t.Fatalf("want a refusal quoting the unsettled program; got %v", err)
+	}
+	if cmd := ranAny(f, "systemctl restart"); cmd != "" {
+		t.Errorf("supervisor must not be restarted on an unsettled snapshot; ran %q", cmd)
+	}
+}

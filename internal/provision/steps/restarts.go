@@ -269,31 +269,47 @@ var supervisorStates = map[string]bool{
 // back. `supervisorctl status` exits 0, or 3 when some process is not
 // running; any other code (4 when supervisord cannot be reached), or a line
 // that is not a status line, refuses the restart.
+//
+// A process in STARTING or BACKOFF is one supervisord is bringing up right
+// now (a worker in its hourly --max-time restart, say): taking the snapshot
+// at that instant would drop it. The status is therefore re-read until
+// nothing is in transition, under the same bound the site step uses; a
+// program that settles in FATAL was already broken and is not restored, and
+// programs that never settle refuse the restart.
 func runningSupervisorProcesses(ctx context.Context, r bssh.Runner) ([]string, error) {
-	res, err := r.Run(ctx, "supervisorctl status", nil)
-	if err != nil {
-		return nil, err
-	}
-	refuse := func(why string) error {
-		return fmt.Errorf("refusing to restart supervisor: cannot tell which programs are running (%s): %s", why, strings.TrimSpace(res.Stdout+res.Stderr))
-	}
-	if res.ExitCode != 0 && res.ExitCode != 3 {
-		return nil, refuse(fmt.Sprintf("supervisorctl status exited %d", res.ExitCode))
-	}
-	var names []string
-	for _, line := range strings.Split(res.Stdout, "\n") {
-		f := strings.Fields(line)
-		if len(f) == 0 {
-			continue
+	for i := 0; ; i++ {
+		res, err := r.Run(ctx, "supervisorctl status", nil)
+		if err != nil {
+			return nil, err
 		}
-		if len(f) < 2 || !supervisorStates[f[1]] {
-			return nil, refuse("unexpected supervisorctl status output")
+		refuse := func(why string) error {
+			return fmt.Errorf("refusing to restart supervisor: cannot tell which programs are running (%s): %s", why, strings.TrimSpace(res.Stdout+res.Stderr))
 		}
-		if f[1] == "RUNNING" {
-			names = append(names, f[0])
+		if res.ExitCode != 0 && res.ExitCode != 3 {
+			return nil, refuse(fmt.Sprintf("supervisorctl status exited %d", res.ExitCode))
 		}
+		var names, states []string
+		for _, line := range strings.Split(res.Stdout, "\n") {
+			f := strings.Fields(line)
+			if len(f) == 0 {
+				continue
+			}
+			if len(f) < 2 || !supervisorStates[f[1]] {
+				return nil, refuse("unexpected supervisorctl status output")
+			}
+			states = append(states, f[1])
+			if f[1] == "RUNNING" {
+				names = append(names, f[0])
+			}
+		}
+		if !inTransition(states) {
+			return names, nil
+		}
+		if i >= programSettleAttempts {
+			return nil, refuse("programs are still starting")
+		}
+		programSettleSleep()
 	}
-	return names, nil
 }
 
 // startSupervisorProcesses brings the given processes back after a
