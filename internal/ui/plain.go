@@ -36,6 +36,7 @@ func (p *PlainRenderer) Render(events <-chan provision.Event) error {
 			} else {
 				_, _ = fmt.Fprintf(p.w, "ok    %s (already)\n", e.Step)
 			}
+			p.printWarnings(e)
 		case provision.EventApplied:
 			_, _ = fmt.Fprintf(p.w, "apply %s\n", e.Step)
 			if p.verbose {
@@ -61,6 +62,7 @@ func (p *PlainRenderer) Render(events <-chan provision.Event) error {
 			if p.verbose && !e.Sensitive && e.Reason != "" {
 				_, _ = fmt.Fprintf(p.w, "      why: %s\n", SanitizeCell(e.Reason))
 			}
+			p.printWarnings(e)
 		case provision.EventFailed:
 			// Errors keep their deliberate newlines (multi-line remedies).
 			_, _ = fmt.Fprintf(p.w, "FAIL  %s: %s\n", e.Step, sanitizeErr(e.Err))
@@ -72,7 +74,8 @@ func (p *PlainRenderer) Render(events <-chan provision.Event) error {
 }
 
 // printWarnings emits one stable `warn  ` line per warning attached to a
-// terminal event, in both verbose modes: a warning is operator-facing signal
+// step's event (applied and failed steps; satisfied and planned ones when
+// their Check had a note that is not drift), in both verbose modes: a warning is operator-facing signal
 // (e.g. a unit validation deferred to the site step), not verbose detail.
 // Warnf normalizes messages to a single line, keeping the prefix contract.
 func (p *PlainRenderer) printWarnings(e provision.Event) {

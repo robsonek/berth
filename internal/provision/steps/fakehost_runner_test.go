@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -520,6 +521,34 @@ func (r *recordingRunner) answer(cmd string, stdin []byte) (bssh.Result, bool) {
 	// diagnostic already discarded by the probe's own 2>/dev/null. This case
 	// must sit ABOVE the generic stat case: the Fields-parse there would
 	// take "2>/dev/null" for the path and answer from the wrong entry.
+	// restarts.Check's probe, keyed to the pasted production text and
+	// answered from the model: one `<unit>.service\t<path>` line per ACTIVE
+	// service carrying a stalePath (sorted, as list-units prints), then the
+	// reboot flag. Timers and other non-service units are never listed.
+	case cmd == staleUnitsProbePasted:
+		var names []string
+		for name, u := range r.h.units {
+			if !u.active || u.stalePath == "" {
+				continue
+			}
+			if base, isService := strings.CutSuffix(name, ".service"); isService {
+				name = base
+			} else if strings.Contains(name, ".") {
+				continue
+			}
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		var b strings.Builder
+		for _, name := range names {
+			u, _ := r.h.unit(name)
+			b.WriteString(name + ".service\t" + u.stalePath + "\n")
+		}
+		if r.h.rebootRequired {
+			b.WriteString("reboot-required\n")
+		}
+		return bssh.Result{Stdout: b.String()}, true
+
 	case cmd == swapfileSizeProbePasted:
 		file, ok := r.h.files[swapfilePath]
 		if !ok {

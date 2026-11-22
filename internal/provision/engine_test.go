@@ -664,3 +664,61 @@ func TestEngineNilRedactIsNoop(t *testing.T) {
 		t.Fatal("pipeline must run unchanged without a redactor")
 	}
 }
+
+// noteStub is a step whose Check carries operator notes that are not drift.
+type noteStub struct {
+	name      string
+	satisfied bool
+	notes     []string
+	applyNote string
+}
+
+func (s *noteStub) Name() string       { return s.name }
+func (s *noteStub) Requires() []string { return nil }
+func (s *noteStub) Check(context.Context, RunCtx, *config.Server, bssh.Runner) (CheckResult, error) {
+	return CheckResult{Satisfied: s.satisfied, Warnings: s.notes, Changes: []string{"do it"}}, nil
+}
+func (s *noteStub) Apply(_ context.Context, rc RunCtx, _ *config.Server, _ bssh.Runner) error {
+	rc.Warnf("%s", s.applyNote)
+	return nil
+}
+
+// A Check may report something the operator must hear although nothing is
+// drift (a pending reboot): its warnings ride on the Satisfied event, and on
+// the Planned one in a dry run. When Apply runs it speaks for itself, so the
+// Check's warnings are not repeated beside Apply's.
+func TestEngineDeliversCheckWarnings(t *testing.T) {
+	red := fakeRedactor{secret: "hunter2"}
+	find := func(evs []Event, step string, kind EventKind) Event {
+		for _, e := range evs {
+			if e.Step == step && e.Kind == kind {
+				return e
+			}
+		}
+		t.Fatalf("no %v event for %s in %+v", kind, step, evs)
+		return Event{}
+	}
+	run := func(opt Options) []Event {
+		eng := New(
+			&noteStub{name: "sat", satisfied: true, notes: []string{"reboot pending hunter2"}},
+			&noteStub{name: "unsat", notes: []string{"from check"}, applyNote: "from apply"},
+		)
+		opt.Redact = red
+		events, err := eng.Run(context.Background(), &config.Server{}, bssh.NewFakeRunner(), opt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return collect(events)
+	}
+	evs := run(Options{})
+	if w := find(evs, "sat", EventSatisfied).Warnings; len(w) != 1 || strings.Contains(w[0], "hunter2") || !strings.Contains(w[0], "reboot pending") {
+		t.Errorf("satisfied event must carry the redacted check warning; got %q", w)
+	}
+	if w := find(evs, "unsat", EventApplied).Warnings; len(w) != 1 || w[0] != "from apply" {
+		t.Errorf("an applied step reports Apply's warnings only; got %q", w)
+	}
+	evs = run(Options{DryRun: true})
+	if w := find(evs, "unsat", EventPlanned).Warnings; len(w) != 1 || w[0] != "from check" {
+		t.Errorf("a planned step must carry the check warnings; got %q", w)
+	}
+}

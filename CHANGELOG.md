@@ -5,6 +5,26 @@ Notable changes to berth. Older releases are documented on the
 
 ## [Unreleased]
 
+### Added
+
+- **A provision restarts services that still run a replaced library.** A
+  package upgrade restarts the service whose own package changed; everything
+  that only uses an upgraded library (OpenSSL, libc, …) kept running the old
+  copy until someone restarted it, with nothing to say so. The new last step,
+  `restarts`, finds the running services that still execute a library or
+  binary which was replaced on disk and restarts the ones berth manages — the
+  database server, the per-site Valkey instances, PHP-FPM, nginx, Supervisor,
+  cron and fail2ban, in that order. nginx and PHP-FPM are restarted only after
+  their config checks pass, and Supervisor programs that were running come
+  back. Services berth does not manage (sshd, system services, a Supervisor
+  or Valkey the config does not make berth run) and a pending reboot are
+  reported as warnings on every run, also when nothing is restarted; berth
+  never reboots the host.
+  `provision --dry-run` and `status --drift` show the pending restarts, so
+  the rule is: after packages were upgraded, run `berth provision` (README,
+  "After a package upgrade"). **A provision of a host with pending restarts
+  now restarts those services, the database included.**
+
 ### Fixed
 
 - **A package upgrade no longer reads as a pending reload.** When
