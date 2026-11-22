@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/robsonek/berth/internal/config"
@@ -164,14 +165,44 @@ func splitStale(s *config.Server, stale []staleUnit) (plan []plannedRestart, oth
 	return plan, others
 }
 
+// rebootOnlyServices are the services that cannot be restarted on a live
+// system: dbus carries systemd's own conversations with its services
+// (logind, resolved, …) and restarting it breaks them, which is why Debian
+// never restarts it on an upgrade either. Only a reboot gives it the new
+// library, so it must not appear in a "restart these" command.
+var rebootOnlyServices = map[string]bool{"dbus": true, "dbus-broker": true}
+
+// plainUnitName matches the names that need no quoting in a shell command.
+var plainUnitName = regexp.MustCompile(`^[A-Za-z0-9@._:-]+$`)
+
 // restartNotes are the things the operator must hear that berth does not act
 // on: services it does not manage, and a pending reboot. They are warnings
 // in every outcome — satisfied, planned or applied — and never drift: a host
 // waiting for a reboot would otherwise never converge.
+//
+// The services the operator can restart come with the command that does it,
+// ready to paste; the reboot-only ones get their own note, so that command
+// is always safe to run as printed.
 func restartNotes(others []string, reboot bool) []string {
+	var restartable, rebootOnly, args []string
+	for _, name := range others {
+		if rebootOnlyServices[name] {
+			rebootOnly = append(rebootOnly, name)
+			continue
+		}
+		restartable = append(restartable, name)
+		if plainUnitName.MatchString(name) {
+			args = append(args, name)
+		} else {
+			args = append(args, shQuote(name))
+		}
+	}
 	var notes []string
-	if len(others) > 0 {
-		notes = append(notes, "these services still run a library or binary that was replaced on disk and berth does not restart them: "+strings.Join(others, ", ")+" — restart them yourself or reboot")
+	if len(restartable) > 0 {
+		notes = append(notes, "these services still run a library or binary that was replaced on disk and berth does not restart them: "+strings.Join(restartable, ", ")+" — restart them with: sudo systemctl restart "+strings.Join(args, " "))
+	}
+	if len(rebootOnly) > 0 {
+		notes = append(notes, strings.Join(rebootOnly, ", ")+" still runs a replaced library; only a reboot gives it the new one (restarting it on a live system breaks systemd's own services, so do not), and berth never reboots the host")
 	}
 	if reboot {
 		notes = append(notes, "a reboot is pending (/run/reboot-required): a new kernel only takes effect after it; berth never reboots the host")

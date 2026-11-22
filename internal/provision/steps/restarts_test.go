@@ -659,3 +659,47 @@ func TestRestartsApplyReportsTheWorkerAlongsideALaterFailure(t *testing.T) {
 		t.Fatalf("want both the nginx failure and the worker that was not started; got %v", err)
 	}
 }
+
+// The warning about services berth does not restart ends with the command
+// that restarts them — and keeps dbus out of it: restarting dbus on a live
+// system breaks systemd's own services, so only a reboot gives it the new
+// library and it gets a warning of its own that says so.
+func TestRestartNotesGiveACommandAndSetDbusApart(t *testing.T) {
+	cases := []struct {
+		name   string
+		others []string
+		reboot bool
+		want   []string // one substring per expected note, in order
+		absent []string // must appear in no note
+	}{
+		{"nothing", nil, false, nil, nil},
+		{"restartable only", []string{"ssh", "exim4", "getty@tty1"}, false,
+			[]string{"restart them with: sudo systemctl restart ssh exim4 getty@tty1"}, []string{"reboot"}},
+		{"dbus only", []string{"dbus"}, false,
+			[]string{"dbus still runs a replaced library; only a reboot"}, []string{"systemctl restart"}},
+		{"dbus-broker counts too", []string{"dbus-broker"}, false,
+			[]string{"dbus-broker still runs"}, []string{"systemctl restart"}},
+		{"both, and a pending reboot", []string{"dbus", "ssh"}, true,
+			[]string{"sudo systemctl restart ssh", "dbus still runs", "a reboot is pending"}, []string{"restart ssh dbus", "restart dbus"}},
+		{"a name the shell would mangle is quoted", []string{`systemd-fsck@dev-disk-by\x2duuid-1`}, false,
+			[]string{`sudo systemctl restart 'systemd-fsck@dev-disk-by\x2duuid-1'`}, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			notes := restartNotes(c.others, c.reboot)
+			if len(notes) != len(c.want) {
+				t.Fatalf("want %d note(s), got %q", len(c.want), notes)
+			}
+			for i, w := range c.want {
+				if !strings.Contains(notes[i], w) {
+					t.Errorf("note %d = %q, want it to contain %q", i, notes[i], w)
+				}
+			}
+			for _, a := range c.absent {
+				if strings.Contains(strings.Join(notes, "\n"), a) {
+					t.Errorf("notes must not contain %q; got %q", a, notes)
+				}
+			}
+		})
+	}
+}
