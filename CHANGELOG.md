@@ -3,7 +3,11 @@
 Notable changes to berth. Older releases are documented on the
 [GitHub Releases](https://github.com/robsonek/berth/releases) page.
 
-## [Unreleased]
+## [1.1.0] — 2026-11-22
+
+A config that sets `composer.auto_update` or `php.version: "8.6"` should raise
+its `requires_berth` to `v1.1.0`, so an older berth names the version it needs
+instead of rejecting the key or the value.
 
 ### Added
 
